@@ -4,10 +4,9 @@ import { constructWebhookEvent } from '@/lib/stripe'
 import { prisma } from '@/lib/db'
 import { emailQueue, discordQueue, scheduledQueue, marketingQueue, smsQueue } from '@/lib/queues'
 import { webhookLogger } from '@/lib/logger'
-import { findAvailableSlots } from '@/lib/scheduling'
 import { t, BIZ_PHONE } from '@/lib/i18n'
 
-// ── Disable Next.js body parser — we need raw bytes for Stripe ─
+// ── Force Node.js runtime (not Edge) — needed for Prisma, BullMQ, Buffer ─
 export const runtime = 'nodejs'
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
@@ -16,48 +15,47 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ error: 'Missing signature' }, { status: 400 })
   }
 
+  // ── Read raw body BEFORE any JSON parsing ──────────────────────
+  // Stripe signature verification needs the exact bytes that were
+  // sent.  req.text() returns the untouched UTF-8 string — this is
+  // what constructEvent() expects.  Using req.json() first would
+  // re-serialize the body and break the signature.
   let event: Stripe.Event
-  let rawBody: Buffer
 
   try {
-    const chunks: Uint8Array[] = []
-    const reader = req.body?.getReader()
-    if (!reader) return NextResponse.json({ error: 'No body' }, { status: 400 })
-    while (true) {
-      const { done, value } = await reader.read()
-      if (done) break
-      chunks.push(value)
-    }
-    rawBody = Buffer.concat(chunks)
+    const rawBody = await req.text()
     event = constructWebhookEvent(rawBody, sig)
   } catch (err) {
     webhookLogger.error({ err }, 'Stripe webhook signature verification failed')
     return NextResponse.json({ error: 'Invalid signature' }, { status: 400 })
   }
 
-  // ── Idempotency check ─────────────────────────────────────────
-  const existing = await prisma.webhookLog.findUnique({
-    where: { eventId: event.id },
-  })
-  if (existing && existing.status === 'processed') {
-    webhookLogger.info({ eventId: event.id }, 'Duplicate webhook — skipping')
-    return NextResponse.json({ ok: true })
-  }
-
-  // ── Log the webhook ───────────────────────────────────────────
-  const log = await prisma.webhookLog.upsert({
-    where: { eventId: event.id },
-    update: {},
-    create: {
-      source: 'stripe',
-      eventType: event.type,
-      eventId: event.id,
-      payload: event as any,
-      status: 'pending',
-    },
-  })
-
+  // ── Idempotency + logging + processing (single try/catch) ─────
+  // The upsert on webhookLog can throw a unique-constraint race when
+  // Stripe delivers the same event concurrently (common with
+  // price.created, charge.updated bursts).  Wrapping everything in
+  // one try/catch ensures that race returns 200, not 500.
   try {
+    const existing = await prisma.webhookLog.findUnique({
+      where: { eventId: event.id },
+    })
+    if (existing && existing.status === 'processed') {
+      webhookLogger.info({ eventId: event.id }, 'Duplicate webhook — skipping')
+      return NextResponse.json({ ok: true })
+    }
+
+    const log = await prisma.webhookLog.upsert({
+      where: { eventId: event.id },
+      update: {},
+      create: {
+        source: 'stripe',
+        eventType: event.type,
+        eventId: event.id,
+        payload: event as any,
+        status: 'pending',
+      },
+    })
+
     await handleStripeEvent(event)
     await prisma.webhookLog.update({
       where: { id: log.id },
@@ -65,10 +63,6 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     })
   } catch (err) {
     const errMsg = err instanceof Error ? err.message : String(err)
-    await prisma.webhookLog.update({
-      where: { id: log.id },
-      data: { status: 'failed', error: errMsg },
-    })
     webhookLogger.error({ eventId: event.id, eventType: event.type, err: errMsg }, 'Webhook processing failed')
     // Return 200 to prevent Stripe from retrying — we handle retries ourselves
     return NextResponse.json({ ok: true })

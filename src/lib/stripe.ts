@@ -112,7 +112,7 @@ export async function refundDeposit(paymentIntentId: string): Promise<Stripe.Ref
 }
 
 export function constructWebhookEvent(
-  payload: Buffer,
+  payload: string | Buffer,
   signature: string
 ): Stripe.Event {
   return getStripeClient().webhooks.constructEvent(
