@@ -1,0 +1,413 @@
+// ============================================================
+// PRISMA SCHEMA — We Move It. We Clear It.
+// Database: PostgreSQL
+// ============================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider          = "postgresql"
+  url               = env("DATABASE_URL")
+  shadowDatabaseUrl = env("SHADOW_DATABASE_URL")
+}
+
+// ── ENUMS ─────────────────────────────────────────────────────
+
+enum UserRole {
+  OWNER
+  MANAGER
+  CREW
+}
+
+enum BookingStatus {
+  DRAFT
+  PENDING_PAYMENT
+  PENDING_APPROVAL
+  CONFIRMED
+  SCHEDULED
+  IN_PROGRESS
+  COMPLETED
+  ARCHIVED
+  CANCELLED
+}
+
+enum DiscountType {
+  FIRST_TIME_AUTO     // 10% automatic for new customers
+  DOOR_HANGER_PENDING // 30% claimed, awaiting approval
+  DOOR_HANGER_APPROVED// 30% approved by owner
+  DOOR_HANGER_DENIED  // denied, fallback offered
+  MANUAL              // manually applied by staff
+}
+
+enum PaymentStatus {
+  PENDING
+  COMPLETED
+  FAILED
+  REFUNDED
+  PARTIALLY_REFUNDED
+}
+
+enum NotificationChannel {
+  EMAIL
+  SMS
+  DISCORD
+}
+
+enum NotificationStatus {
+  QUEUED
+  SENT
+  FAILED
+  SKIPPED
+}
+
+enum JobStatus {
+  SCHEDULED
+  IN_PROGRESS
+  COMPLETED
+  CANCELLED
+}
+
+enum FileType {
+  PHOTO_BEFORE
+  PHOTO_AFTER
+  PAPERWORK
+  RECEIPT
+  OTHER
+}
+
+enum AuditAction {
+  BOOKING_CREATED
+  BOOKING_STATE_CHANGED
+  PAYMENT_RECEIVED
+  PAYMENT_FAILED
+  DISCOUNT_APPLIED
+  DISCOUNT_APPROVED
+  DISCOUNT_DENIED
+  JOB_STARTED
+  JOB_COMPLETED
+  FILE_UPLOADED
+  FILE_DELETED
+  RECEIPT_SENT
+  USER_LOGIN
+  USER_LOGOUT
+  SCHEDULE_MODIFIED
+  AVAILABILITY_SET
+}
+
+// ── MODELS ────────────────────────────────────────────────────
+
+model User {
+  id           String    @id @default(cuid())
+  email        String    @unique
+  passwordHash String    @map("password_hash")
+  name         String
+  role         UserRole  @default(CREW)
+  discordId    String?   @map("discord_id")
+  phone        String?
+  active       Boolean   @default(true)
+  createdAt    DateTime  @default(now()) @map("created_at")
+  updatedAt    DateTime  @updatedAt @map("updated_at")
+
+  // Relations
+  availability  Availability[]
+  assignedJobs  JobCrew[]
+  auditLogs     AuditLog[]
+
+  @@map("users")
+}
+
+model Customer {
+  id           String    @id @default(cuid())
+  email        String    @unique
+  name         String
+  phone        String
+  isFirstTime  Boolean   @default(true) @map("is_first_time")
+  // Preferred language for all customer-facing email + SMS ("en" | "es").
+  // Captured from the marketing site's EN/ES toggle at booking time.
+  locale       String    @default("en")
+  createdAt    DateTime  @default(now()) @map("created_at")
+  updatedAt    DateTime  @updatedAt @map("updated_at")
+
+  // Relations
+  bookings     Booking[]
+
+  @@map("customers")
+}
+
+model Booking {
+  id              String        @id @default(cuid())
+  displayId       String        @unique @default(cuid()) @map("display_id") // human-friendly
+  status          BookingStatus @default(DRAFT)
+  customerId      String        @map("customer_id")
+
+  // Location
+  originAddress   String        @map("origin_address")
+  destAddress     String        @map("dest_address")
+  originFloor     Int?          @map("origin_floor")
+  destFloor       Int?          @map("dest_floor")
+  hasElevator     Boolean       @default(false) @map("has_elevator")
+
+  // Items
+  itemsDescription String?      @map("items_description")
+  estimatedHours   Float?       @map("estimated_hours")
+
+  // Schedule
+  requestedDate   DateTime?     @map("requested_date")
+  confirmedDate   DateTime?     @map("confirmed_date")
+  scheduledStart  DateTime?     @map("scheduled_start")
+  scheduledEnd    DateTime?     @map("scheduled_end")
+
+  // Pricing
+  depositAmount   Int           @default(4900) @map("deposit_amount") // cents — $49 booking fee
+  depositPaid     Boolean       @default(false) @map("deposit_paid")
+  truckAddonDueOnMoveDay Boolean @default(false) @map("truck_addon_due_on_move_day")
+  truckAddonAmount Int          @default(0) @map("truck_addon_amount") // cents
+  baseRate        Float?        @map("base_rate")
+  totalEstimate   Float?        @map("total_estimate")
+  finalAmount     Float?        @map("final_amount")
+
+  // Discount
+  discountCode    String?       @map("discount_code")
+  discountType    DiscountType? @map("discount_type")
+  discountPercent Float?        @map("discount_percent")
+  discountApprovedById String?  @map("discount_approved_by_id")
+
+  // Stripe
+  stripeCheckoutId  String?     @unique @map("stripe_checkout_id")
+  stripePaymentIntentId String? @unique @map("stripe_payment_intent_id")
+
+  // Discord
+  discordJobChannelId      String? @map("discord_job_channel_id")
+  discordPaperworkChannelId String? @map("discord_paperwork_channel_id")
+  discordPhotosChannelId   String? @map("discord_photos_channel_id")
+  discordApprovalMessageId String? @map("discord_approval_message_id")
+
+  // Self-service token for customer portal
+  customerToken   String        @unique @default(cuid()) @map("customer_token")
+  customerTokenExpiry DateTime  @map("customer_token_expiry")
+
+  // Notes
+  internalNotes   String?       @map("internal_notes")
+  customerNotes   String?       @map("customer_notes")
+
+  // Moving Service Agreement (legal acceptance record)
+  agreementAccepted   Boolean   @default(false) @map("agreement_accepted")
+  agreementVersion    String?   @map("agreement_version")
+  agreementAcceptedAt DateTime? @map("agreement_accepted_at")
+  agreementName       String?   @map("agreement_name")      // printed name typed by the customer
+  agreementSignature  String?   @map("agreement_signature") // optional typed signature
+
+  // Metadata
+  ipAddress       String?       @map("ip_address")
+  userAgent       String?       @map("user_agent")
+  referrer        String?
+
+  createdAt       DateTime      @default(now()) @map("created_at")
+  updatedAt       DateTime      @updatedAt @map("updated_at")
+
+  // Relations
+  customer        Customer      @relation(fields: [customerId], references: [id])
+  payments        Payment[]
+  job             Job?
+  files           File[]
+  notifications   Notification[]
+  receipt         Receipt?
+  auditLogs       AuditLog[]
+
+  @@index([status])
+  @@index([customerId])
+  @@index([confirmedDate])
+  @@index([customerToken])
+  @@map("bookings")
+}
+
+model Payment {
+  id                    String        @id @default(cuid())
+  bookingId             String        @map("booking_id")
+  stripePaymentIntentId String?       @unique @map("stripe_payment_intent_id")
+  stripeChargeId        String?       @unique @map("stripe_charge_id")
+  amount                Int           // in cents
+  currency              String        @default("usd")
+  status                PaymentStatus @default(PENDING)
+  description           String?
+  receiptUrl            String?       @map("receipt_url")
+  metadata              Json?
+  createdAt             DateTime      @default(now()) @map("created_at")
+  updatedAt             DateTime      @updatedAt @map("updated_at")
+
+  // Relations
+  booking               Booking       @relation(fields: [bookingId], references: [id])
+
+  @@index([bookingId])
+  @@index([status])
+  @@map("payments")
+}
+
+model Job {
+  id           String    @id @default(cuid())
+  bookingId    String    @unique @map("booking_id")
+  status       JobStatus @default(SCHEDULED)
+  startedAt    DateTime? @map("started_at")
+  completedAt  DateTime? @map("completed_at")
+  durationMins Int?      @map("duration_mins")
+  crewNotes    String?   @map("crew_notes")
+  createdAt    DateTime  @default(now()) @map("created_at")
+  updatedAt    DateTime  @updatedAt @map("updated_at")
+
+  // Relations
+  booking      Booking   @relation(fields: [bookingId], references: [id])
+  crew         JobCrew[]
+  files        File[]
+
+  @@index([status])
+  @@map("jobs")
+}
+
+model JobCrew {
+  id        String   @id @default(cuid())
+  jobId     String   @map("job_id")
+  userId    String   @map("user_id")
+  assignedAt DateTime @default(now()) @map("assigned_at")
+
+  job       Job      @relation(fields: [jobId], references: [id])
+  user      User     @relation(fields: [userId], references: [id])
+
+  @@unique([jobId, userId])
+  @@map("job_crew")
+}
+
+model Availability {
+  id         String   @id @default(cuid())
+  userId     String   @map("user_id")
+  date       DateTime @db.Date
+  isDayOff   Boolean  @default(false) @map("is_day_off")
+  startTime  String?  @map("start_time") // "08:00"
+  endTime    String?  @map("end_time")   // "18:00"
+  notes      String?
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  user       User     @relation(fields: [userId], references: [id])
+
+  @@unique([userId, date])
+  @@index([date])
+  @@map("availability")
+}
+
+/// Admin-controlled blocked dates — no jobs scheduled on these days.
+model DayBlock {
+  id        String   @id @default(cuid())
+  date      DateTime @unique @db.Date
+  blocked   Boolean  @default(true)
+  blockedBy String?  @map("blocked_by")
+  reason    String?
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([date])
+  @@map("day_blocks")
+}
+
+model File {
+  id            String    @id @default(cuid())
+  bookingId     String?   @map("booking_id")
+  jobId         String?   @map("job_id")
+  type          FileType
+  cloudinaryId  String    @unique @map("cloudinary_id")
+  cloudinaryUrl String    @map("cloudinary_url")
+  filename      String
+  mimeType      String    @map("mime_type")
+  sizeBytes     Int       @map("size_bytes")
+  uploadedBy    String?   @map("uploaded_by") // user ID or "customer"
+  createdAt     DateTime  @default(now()) @map("created_at")
+
+  booking       Booking?  @relation(fields: [bookingId], references: [id])
+  job           Job?      @relation(fields: [jobId], references: [id])
+
+  @@index([bookingId])
+  @@index([jobId])
+  @@map("files")
+}
+
+model Receipt {
+  id            String    @id @default(cuid())
+  bookingId     String    @unique @map("booking_id")
+  cloudinaryId  String?   @map("cloudinary_id")
+  cloudinaryUrl String?   @map("cloudinary_url")
+  sentAt        DateTime? @map("sent_at")
+  sentTo        String?   @map("sent_to")
+  createdAt     DateTime  @default(now()) @map("created_at")
+
+  booking       Booking   @relation(fields: [bookingId], references: [id])
+
+  @@map("receipts")
+}
+
+model Notification {
+  id         String              @id @default(cuid())
+  bookingId  String?             @map("booking_id")
+  channel    NotificationChannel
+  status     NotificationStatus  @default(QUEUED)
+  recipient  String              // email / phone / discord channel
+  subject    String?
+  template   String              // template name
+  payload    Json                // template data
+  bullJobId  String?             @map("bull_job_id")
+  sentAt     DateTime?           @map("sent_at")
+  error      String?
+  retries    Int                 @default(0)
+  createdAt  DateTime            @default(now()) @map("created_at")
+
+  booking    Booking?            @relation(fields: [bookingId], references: [id])
+
+  @@index([bookingId])
+  @@index([status])
+  @@map("notifications")
+}
+
+model WebhookLog {
+  id          String    @id @default(cuid())
+  source      String    // "stripe" | "discord"
+  eventType   String    @map("event_type")
+  eventId     String?   @unique @map("event_id") // idempotency key
+  payload     Json
+  status      String    // "processed" | "failed" | "duplicate"
+  error       String?
+  processedAt DateTime? @map("processed_at")
+  createdAt   DateTime  @default(now()) @map("created_at")
+
+  @@index([source])
+  @@index([eventType])
+  @@index([createdAt])
+  @@map("webhook_logs")
+}
+
+model AuditLog {
+  id        String      @id @default(cuid())
+  action    AuditAction
+  userId    String?     @map("user_id") // null = system
+  bookingId String?     @map("booking_id")
+  details   Json?
+  ipAddress String?     @map("ip_address")
+  createdAt DateTime    @default(now()) @map("created_at")
+
+  user      User?       @relation(fields: [userId], references: [id])
+  booking   Booking?    @relation(fields: [bookingId], references: [id])
+
+  @@index([userId])
+  @@index([bookingId])
+  @@index([action])
+  @@index([createdAt])
+  @@map("audit_logs")
+}
+
+model IdempotencyKey {
+  id        String   @id @default(cuid())
+  key       String   @unique
+  result    Json?
+  expiresAt DateTime @map("expires_at")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([expiresAt])
+  @@map("idempotency_keys")
+}

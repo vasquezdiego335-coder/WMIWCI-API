@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#0F1F35"/>
+      <stop offset="100%" stop-color="#0A1628"/>
+    </linearGradient>
+    <linearGradient id="chevron" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#FF6B33"/>
+      <stop offset="100%" stop-color="#FF5A1F"/>
+    </linearGradient>
+  </defs>
+  <!-- Rounded square background -->
+  <rect width="512" height="512" rx="96" ry="96" fill="url(#bg)"/>
+  <!-- Orange chevron arrow -->
+  <path d="M 175 108 L 355 256 L 175 404" fill="none" stroke="url(#chevron)" stroke-width="72" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
