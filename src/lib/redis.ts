@@ -71,7 +71,13 @@ export function getRedis(): Redis {
   return redisClient
 }
 
-export const redis: Redis = getRedis()
+// Lazy getter — no connection created at import time.
+// Workers and direct callers should use `getRedis()` or this proxy.
+export const redis = new Proxy({} as Redis, {
+  get(_target, prop, receiver) {
+    return Reflect.get(getRedis(), prop, receiver)
+  },
+})
 
 // ── 2. BullMQ connection config (NOT a shared instance) ──────────────────
 //
@@ -119,5 +125,18 @@ export function getBullConnection(): ConnectionOptions {
   return opts as unknown as ConnectionOptions
 }
 
-// Pre-built config — import this in queues and workers.
+// Lazy getter — config parsed on first access, not at import time.
+// getBullConnection() only parses a URL (no network call), so the
+// lazy wrapper is lightweight insurance against edge-case build failures.
+let _bullConnection: ConnectionOptions | undefined
+export function getLazyBullConnection(): ConnectionOptions {
+  if (!_bullConnection) _bullConnection = getBullConnection()
+  return _bullConnection
+}
+
+// Pre-built config — safe to call eagerly because getBullConnection()
+// only parses the REDIS_URL string into host/port/password; it opens
+// NO network connections.  Workers (persistent processes) import this
+// directly; serverless routes go through the lazy Queue proxies in
+// @/lib/queues which call getLazyBullConnection() on first use.
 export const bullConnection: ConnectionOptions = getBullConnection()
