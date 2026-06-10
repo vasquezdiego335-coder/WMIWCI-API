@@ -239,6 +239,7 @@ async function handleStripeEvent(event: Stripe.Event): Promise<void> {
       break
     }
 
+
     case 'checkout.session.expired': {
       const session = event.data.object as Stripe.Checkout.Session
       const bookingId = session.metadata?.bookingId
