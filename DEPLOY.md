@@ -10,7 +10,7 @@
 
 ---
 
-## Pre-Deployment Checklist
+## Pre-Deployment Checklist     
 
 ### 1. Generate secrets
 ```bash
