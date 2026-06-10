@@ -316,8 +316,4 @@ async function handleBooking(req: NextRequest): Promise<NextResponse> {
     },
   })
 }
-/ /  
- r e b u i l d  
- % d a t e %  
- % t i m e %  
- 
+ 
