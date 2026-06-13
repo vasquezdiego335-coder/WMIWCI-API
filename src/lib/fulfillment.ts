@@ -141,6 +141,7 @@ export async function fulfillPaidCheckout(params: {
         customerName: booking.customer.name,
         customerEmail: booking.customer.email,
         requestedDate: booking.requestedDate?.toISOString() ?? null,
+        items: booking.itemsDescription ?? undefined,
       }).then(() => undefined)
     )
   } else {
@@ -245,6 +246,8 @@ export async function fulfillPaidCheckout(params: {
           bookingId,
           displayId: booking.displayId,
           customerName: booking.customer.name,
+          originAddress: booking.originAddress,
+          items: booking.itemsDescription ?? undefined,
         },
       })
     )

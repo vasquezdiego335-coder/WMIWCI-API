@@ -27,6 +27,7 @@ export async function handleApprove(params: {
   customerName: string
   customerEmail: string
   requestedDate: string | null // ISO
+  items?: string
 }): Promise<ApproveResult> {
   return prisma.$transaction(async (tx) => {
     const current = await readBookingOutboxState(tx, params.bookingId)
@@ -53,6 +54,7 @@ export async function handleApprove(params: {
       customerEmail: params.customerEmail,
       requestedDate: params.requestedDate,
       approvedBy: params.approvedBy,
+      items: params.items,
     }
     const { inserted } = await saveEmailJob(tx, {
       bookingId: params.bookingId,

@@ -210,6 +210,7 @@ async function handleApprove(bookingId: string | undefined, messageId: string | 
             customerName: booking.customer.name,
             customerEmail: booking.customer.email,
             requestedDate: when?.toISOString() ?? null,
+            items: booking.itemsDescription ?? undefined,
           });
         } else {
           apiLogger.info({ bookingId: booking.id, to: booking.customer.email }, "[messaging] queueing PRE-APPROVAL email");

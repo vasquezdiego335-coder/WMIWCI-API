@@ -23,6 +23,7 @@ export async function POST(_req: NextRequest, { params }: { params: { id: string
       customerName: booking.customer.name,
       completedAt: booking.updatedAt.toISOString(),
       portalUrl: `${process.env.APP_URL}/my-booking/${booking.customerToken}`,
+      items: booking.itemsDescription ?? undefined,
     },
   })
 

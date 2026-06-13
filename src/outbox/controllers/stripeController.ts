@@ -22,6 +22,7 @@ export async function handlePaymentCompleted(params: {
   customerName: string
   customerEmail: string
   requestedDate: string | null // ISO
+  items?: string
 }): Promise<PaymentCompletedResult> {
   return prisma.$transaction(async (tx) => {
     const current = await readBookingOutboxState(tx, params.bookingId)
@@ -34,6 +35,7 @@ export async function handlePaymentCompleted(params: {
       customerEmail: params.customerEmail,
       requestedDate: params.requestedDate,
       amountPaid: params.amountPaid,
+      items: params.items,
     }
 
     // Already moved past payment (duplicate trigger): just ensure the event

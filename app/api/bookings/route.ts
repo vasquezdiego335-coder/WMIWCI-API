@@ -144,11 +144,15 @@ function buildDescription(
   if (truckOption === 'truck-pickup-return') {
     lines.push('Truck add-on due on move day: $100 (not charged in Stripe)')
   }
-  const flags: string[] = []
-  if (access?.stairs) flags.push('Stairs')
-  if (access?.longWalk) flags.push('Long walk')
-  if (access?.heavyItems) flags.push('Heavy items')
-  if (flags.length) lines.push(`Access: ${flags.join(', ')}`)
+  // Access difficulty — verbose lines + fee note, only when something is selected.
+  const accessLines: string[] = []
+  if (access?.stairs) accessLines.push('Stairs: No elevator / flights to carry up or down')
+  if (access?.longWalk) accessLines.push('Long walk: Far from the door to the truck or parking')
+  if (access?.heavyItems) accessLines.push('Heavy items: Piano, safe, appliances, dense furniture')
+  if (accessLines.length) {
+    lines.push(...accessLines)
+    lines.push('Note: Stairs, long walks, and heavy items may add an extra fee.')
+  }
   if (jobDetails?.trim()) lines.push(`Notes: ${jobDetails.trim()}`)
   return lines.join('\n')
 }

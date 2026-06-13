@@ -20,6 +20,7 @@ export interface BookingSnapshot {
   customerName: string
   customerEmail: string
   requestedDate: string | null // ISO
+  items?: string // job details incl. access difficulty (stairs/long walk/heavy items)
 }
 
 export interface PaymentCompletedPayload extends BookingSnapshot {

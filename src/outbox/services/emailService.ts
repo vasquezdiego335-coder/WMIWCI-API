@@ -37,6 +37,12 @@ async function deliverEmail(message: {
   return { id: data?.id ?? 'unknown' }
 }
 
+const itemsBlock = (items?: string): string =>
+  items
+    ? `<p style="font-size:12px;color:#6b7280;font-weight:700;text-transform:uppercase;margin:16px 0 4px">Job Details</p>
+       <p style="font-size:13px;color:#0a1628;line-height:1.7;white-space:pre-line;margin:0">${items}</p>`
+    : ''
+
 const fmtDate = (iso: string | null): string =>
   iso
     ? new Date(iso).toLocaleString('en-US', {
@@ -53,7 +59,8 @@ export async function sendPreApprovalEmail(p: PaymentCompletedPayload): Promise<
     subject: 'Your booking is pending approval',
     html: `<p>Hi ${p.customerName},</p>
            <p>We received your $${p.amountPaid} hold for ${fmtDate(p.requestedDate)}.
-           Your booking is now pending final approval — we'll confirm shortly.</p>`,
+           Your booking is now pending final approval — we'll confirm shortly.</p>
+           ${itemsBlock(p.items)}`,
   })
 }
 
@@ -63,7 +70,8 @@ export async function sendFinalConfirmationEmail(p: ApprovedPayload): Promise<{ 
     to: p.customerEmail,
     subject: 'Booking confirmed ✅',
     html: `<p>Hi ${p.customerName},</p>
-           <p>Your booking for ${fmtDate(p.requestedDate)} is confirmed. See you then!</p>`,
+           <p>Your booking for ${fmtDate(p.requestedDate)} is confirmed. See you then!</p>
+           ${itemsBlock(p.items)}`,
   })
 }
 

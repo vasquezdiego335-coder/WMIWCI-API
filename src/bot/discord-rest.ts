@@ -265,6 +265,9 @@ export async function createJobChannels(bookingId: string, payload: Record<strin
     .setDescription('Track the job on move day. Mark **Start** when the crew departs, **Complete** when done.')
     .setFooter({ text: `Booking ID: ${bookingId}` })
 
+  // Job details (service, truck, access difficulty, customer notes).
+  if (payload.items) embed.addFields({ name: '📝 Job Details', value: String(payload.items).slice(0, 1024) })
+
   const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
     new ButtonBuilder().setCustomId(`job_start:${bookingId}`).setLabel('▶️ Start Job').setStyle(ButtonStyle.Primary),
     new ButtonBuilder().setCustomId(`job_complete:${bookingId}`).setLabel('✅ Complete').setStyle(ButtonStyle.Success),

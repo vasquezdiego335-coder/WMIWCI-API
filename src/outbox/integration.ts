@@ -35,6 +35,7 @@ export async function emitPaymentCompleted(p: {
   customerName: string
   customerEmail: string
   requestedDate: string | null
+  items?: string
 }): Promise<boolean> {
   if (!outboxEnabled()) return false
   return safe('emitPaymentCompleted', () => handlePaymentCompleted(p))
@@ -46,6 +47,7 @@ export async function emitApproved(p: {
   customerName: string
   customerEmail: string
   requestedDate: string | null
+  items?: string
 }): Promise<boolean> {
   if (!outboxEnabled()) return false
   return safe('emitApproved', () => handleApprove(p))
