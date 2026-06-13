@@ -3,6 +3,8 @@ import { prisma } from '@/lib/db'
 import { z } from 'zod'
 import { discordQueue } from '@/lib/queues'
 import { apiLogger } from '@/lib/logger'
+import { isDayAvailable, formatEastern } from '@/lib/scheduling'
+import { BIZ_PHONE } from '@/lib/i18n'
 
 export async function GET(_req: NextRequest, { params }: { params: { token: string } }): Promise<NextResponse> {
   const booking = await prisma.booking.findFirst({
@@ -34,12 +36,15 @@ const RescheduleSchema = z.object({
   notes: z.string().max(500).optional(),
 })
 
+const MAX_RESCHEDULES = parseInt(process.env.MAX_RESCHEDULES ?? '2', 10)
+
 export async function PATCH(req: NextRequest, { params }: { params: { token: string } }): Promise<NextResponse> {
   const booking = await prisma.booking.findFirst({
     where: {
       customerToken: params.token,
       customerTokenExpiry: { gte: new Date() },
     },
+    include: { customer: true },
   })
 
   if (!booking) {
@@ -53,6 +58,14 @@ export async function PATCH(req: NextRequest, { params }: { params: { token: str
     return NextResponse.json({ error: 'Booking cannot be rescheduled at this stage' }, { status: 422 })
   }
 
+  // Cap reschedules to curb abuse — past the limit, route them to a human.
+  if (booking.rescheduleCount >= MAX_RESCHEDULES) {
+    return NextResponse.json(
+      { error: `You've reached the reschedule limit. Please call us at ${BIZ_PHONE} and we'll help.` },
+      { status: 409 }
+    )
+  }
+
   const body = await req.json()
   const parsed = RescheduleSchema.safeParse(body)
   if (!parsed.success) {
@@ -60,18 +73,31 @@ export async function PATCH(req: NextRequest, { params }: { params: { token: str
   }
 
   const { requestedDate, notes } = parsed.data
-
-  // Minimum 72h notice
   const newDate = new Date(requestedDate)
+
+  // Minimum 72h notice.
   const hoursDiff = (newDate.getTime() - Date.now()) / (1000 * 60 * 60)
   if (hoursDiff < 72) {
     return NextResponse.json({ error: 'Reschedule requires at least 72 hours notice' }, { status: 422 })
   }
 
+  // Validate the chosen day still has capacity (no admin block, under MAX_JOBS).
+  // Prevents a customer grabbing a slot that filled up since /slots was loaded.
+  const dayOk = await isDayAvailable(newDate)
+  if (!dayOk) {
+    return NextResponse.json(
+      { error: 'That date just filled up — please pick another from your available options.' },
+      { status: 409 }
+    )
+  }
+
   await prisma.booking.update({
     where: { id: booking.id },
     data: {
+      previousRequestedDate: booking.requestedDate,
       requestedDate: newDate,
+      rescheduledAt: new Date(),
+      rescheduleCount: { increment: 1 },
       status: 'PENDING_APPROVAL', // requires (re-)approval for the new date
       customerNotes: notes ?? booking.customerNotes,
     },
@@ -79,46 +105,56 @@ export async function PATCH(req: NextRequest, { params }: { params: { token: str
 
   await prisma.auditLog.create({
     data: {
-      action: 'BOOKING_STATE_CHANGED',
+      action: 'SCHEDULE_MODIFIED',
       bookingId: booking.id,
-      details: { action: 'customer_reschedule_request', newDate: requestedDate, fromStatus: booking.status },
+      details: {
+        action: 'customer_reschedule',
+        from: booking.requestedDate?.toISOString(),
+        to: newDate.toISOString(),
+        fromStatus: booking.status,
+        rescheduleCount: booking.rescheduleCount + 1,
+      },
     },
   })
 
-  // Re-fetch with customer so we can post a FRESH Discord approval card for the
-  // newly chosen date (closes the reschedule loop: pick → new card → approve).
-  const full = await prisma.booking.findUnique({
-    where: { id: booking.id },
-    include: { customer: true },
-  })
+  const whenDisplay = formatEastern(newDate)
 
-  if (full) {
-    try {
-      await discordQueue.add('reschedule-offer', {
-        type: 'reschedule-offer',
-        bookingId: full.id,
-        payload: {
-          bookingId: full.id,
-          displayId: full.displayId,
-          customerName: full.customer.name,
-          customerEmail: full.customer.email,
-          customerPhone: full.customer.phone,
-          originAddress: full.originAddress,
-          destAddress: full.destAddress,
-          requestedDate: full.requestedDate?.toISOString(),
-          items: `🔁 RESCHEDULED by customer\n${full.itemsDescription ?? ''}`.trim(),
-          amountPaid: ((full.depositAmount ?? 4900) / 100).toFixed(2),
-          agreementAccepted: full.agreementAccepted,
-          agreementVersion: full.agreementVersion,
-          agreementName: full.agreementName,
-          agreementAcceptedAt: full.agreementAcceptedAt?.toISOString(),
-        },
-      })
-      apiLogger.info({ bookingId: full.id }, 'Reschedule → fresh Discord approval card queued')
-    } catch (err) {
-      apiLogger.error({ err, bookingId: full.id }, 'Reschedule card queue failed (non-fatal)')
-    }
+  // Re-post a fresh Discord approval card for the new date so an admin can
+  // approve it. MESSAGING POLICY: no customer email/SMS is sent here — the
+  // system sends exactly four customer messages (pre-approval + final-
+  // confirmation). When the admin approves the re-posted card, the customer
+  // gets the PRE-APPROVAL pair as usual. (Re-enable by adding 'booking-
+  // rescheduled' to ALLOWED_TEMPLATES and restoring the smsQueue.add.)
+  try {
+    await discordQueue.add('reschedule-offer', {
+      type: 'reschedule-offer',
+      bookingId: booking.id,
+      payload: {
+        bookingId: booking.id,
+        displayId: booking.displayId,
+        customerName: booking.customer.name,
+        customerEmail: booking.customer.email,
+        customerPhone: booking.customer.phone,
+        originAddress: booking.originAddress,
+        destAddress: booking.destAddress,
+        requestedDate: newDate.toISOString(),
+        items: `🔁 RESCHEDULED by customer\n${booking.itemsDescription ?? ''}`.trim(),
+        amountPaid: ((booking.depositAmount ?? 4900) / 100).toFixed(2),
+        agreementAccepted: booking.agreementAccepted,
+        agreementVersion: booking.agreementVersion,
+        agreementName: booking.agreementName,
+        agreementAcceptedAt: booking.agreementAcceptedAt?.toISOString(),
+      },
+    })
+
+    apiLogger.info({ bookingId: booking.id }, 'Reschedule → Discord card re-posted (no customer email/SMS per messaging policy)')
+  } catch (err) {
+    apiLogger.error({ err, bookingId: booking.id }, 'Reschedule Discord card failed (non-fatal)')
   }
 
-  return NextResponse.json({ ok: true, message: 'New date submitted. We will confirm shortly — your $49 hold stays attached.' })
+  return NextResponse.json({
+    ok: true,
+    message: 'New date submitted. We will confirm shortly — your $49 hold stays attached.',
+    newDate: whenDisplay,
+  })
 }

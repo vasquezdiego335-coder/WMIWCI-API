@@ -8,6 +8,8 @@ import type { EmailJobData } from '../lib/queues'
 
 // ── Email template imports ─────────────────────────────────────
 // Each template is a React component
+import PreApprovalEmail from '../emails/pre-approval'
+import FinalConfirmationEmail from '../emails/final-confirmation'
 import BookingConfirmationEmail from '../emails/booking-confirmation'
 import PaymentReceiptEmail from '../emails/payment-receipt'
 import PendingApprovalEmail from '../emails/pending-approval'
@@ -19,12 +21,29 @@ import ReviewRequestEmail from '../emails/review-request'
 import AbandonedCheckoutEmail from '../emails/abandoned-checkout'
 import ContactAckEmail from '../emails/contact-ack'
 import RescheduleOfferEmail from '../emails/reschedule-offer'
+import BookingRescheduledEmail from '../emails/booking-rescheduled'
 import { emailSubject } from '../lib/i18n'
+
+// ════════════════════════════════════════════════════════════════════════
+//  MESSAGING POLICY — exactly TWO customer emails exist in this system:
+//    • 'pre-approval'       → queued by the Discord approval handler
+//    • 'final-confirmation' → queued by fulfillPaidCheckout()
+//  ALLOWED_TEMPLATES is the single hard guarantee: any other template (legacy
+//  booking-confirmation, contact-ack, booking-denied, reschedule-offer, the
+//  scheduled digests, …) is DROPPED at this choke point with a clear log, so a
+//  stray enqueue anywhere in the codebase can never send a third kind of email.
+// ════════════════════════════════════════════════════════════════════════
+const ALLOWED_TEMPLATES = new Set<EmailJobData['template']>([
+  'pre-approval',
+  'final-confirmation',
+])
 
 const TEMPLATES: Record<
   EmailJobData['template'],
   (payload: Record<string, unknown>) => React.ReactElement
 > = {
+  'pre-approval': (p) => PreApprovalEmail(p as any),
+  'final-confirmation': (p) => FinalConfirmationEmail(p as any),
   'booking-confirmation': (p) => BookingConfirmationEmail(p as any),
   'payment-receipt': (p) => PaymentReceiptEmail(p as any),
   'pending-approval': (p) => PendingApprovalEmail(p as any),
@@ -36,11 +55,14 @@ const TEMPLATES: Record<
   'abandoned-checkout': (p) => AbandonedCheckoutEmail(p as any),
   'contact-ack': (p) => ContactAckEmail(p as any),
   'reschedule-offer': (p) => RescheduleOfferEmail(p as any),
+  'booking-rescheduled': (p) => BookingRescheduledEmail(p as any),
 }
 
 // English fallbacks. Bilingual subjects come from emailSubject(template, locale)
 // when the job payload carries a `locale`.
 const SUBJECTS: Record<EmailJobData['template'], string> = {
+  'pre-approval': 'Your booking is approved — pending final confirmation',
+  'final-confirmation': 'Booking confirmed — payment & next steps',
   'booking-confirmation': 'Your booking request has been received',
   'payment-receipt': 'Payment confirmed — We Move It. We Clear It.',
   'pending-approval': "We're reviewing your booking",
@@ -52,13 +74,30 @@ const SUBJECTS: Record<EmailJobData['template'], string> = {
   'abandoned-checkout': 'Your booking is waiting — complete your deposit',
   'contact-ack': 'We got your message',
   'reschedule-offer': 'Pick a new date for your move',
+  'booking-rescheduled': 'Your move has been rescheduled',
 }
 
 async function processEmailJob(job: Job<EmailJobData>): Promise<void> {
   const { template, to, bookingId, notificationId, payload } = job.data
-  const log = queueLogger.child({ jobId: job.id, template, to })
+  const log = queueLogger.child({ jobId: job.id, template, to, bookingId })
 
-  log.info('Processing email job')
+  log.info('📧 Email job received')
+
+  // ── MESSAGING POLICY GUARD ──────────────────────────────────────────────
+  // Only the 2 allowed customer emails are ever sent. Anything else is dropped
+  // here (not an error — a deliberate, logged skip) so retries don't pile up.
+  if (!ALLOWED_TEMPLATES.has(template)) {
+    log.warn(
+      { template, allowed: Array.from(ALLOWED_TEMPLATES) },
+      '🚫 Email template not in allowlist — skipping (messaging is limited to pre-approval + final-confirmation)'
+    )
+    if (notificationId) {
+      await prisma.notification
+        .update({ where: { id: notificationId }, data: { status: 'FAILED', error: 'template not in allowlist' } })
+        .catch(() => undefined)
+    }
+    return
+  }
 
   // Mark notification as in-progress
   if (notificationId) {
@@ -80,7 +119,8 @@ async function processEmailJob(job: Job<EmailJobData>): Promise<void> {
     (payload.subject as string) ||
     (payload.locale ? emailSubject(template, payload.locale as string) : SUBJECTS[template])
 
-  const { error } = await resend.emails.send({
+  log.info({ subject }, '📤 Sending email via Resend…')
+  const { data, error } = await resend.emails.send({
     from: EMAIL_FROM,
     to,
     reply_to: EMAIL_REPLY_TO,
@@ -108,7 +148,7 @@ async function processEmailJob(job: Job<EmailJobData>): Promise<void> {
     })
   }
 
-  log.info('Email sent successfully')
+  log.info({ resendId: data?.id }, '✅ Email sent successfully')
 }
 
 // ── Start the worker ──────────────────────────────────────────

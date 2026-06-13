@@ -44,6 +44,18 @@ const STRINGS = {
     en: `Hi {name}! Your move with ${BIZ_NAME} is confirmed for {date}. Questions? Reply or call ${BIZ_PHONE}.`,
     es: `¡Hola {name}! Tu mudanza con ${BIZ_NAME} está confirmada para el {date}. ¿Preguntas? Responde o llama al ${BIZ_PHONE}.`,
   },
+  // ── PRE-APPROVAL SMS (1 of the 2 allowed texts) — sent when an admin clicks
+  //    ✅ Approve in Discord. Short approval confirmation.
+  preApproval: {
+    en: `Hi {name}! Booking {displayId} is approved — pending final confirmation for {date}. We'll be in touch. — ${BIZ_PHONE}`,
+    es: `¡Hola {name}! La reserva {displayId} está aprobada — pendiente de confirmación final para {date}. Te contactaremos. — ${BIZ_PHONE}`,
+  },
+  // ── FINAL CONFIRMATION SMS (1 of the 2 allowed texts) — sent by
+  //    fulfillPaidCheckout() once payment completes.
+  finalConfirmation: {
+    en: `Hi {name}! Booking {displayId} confirmed. $49 hold recorded. Next: we finalize your move for {date}. Questions? ${BIZ_PHONE}`,
+    es: `¡Hola {name}! Reserva {displayId} confirmada. Retención de $49 registrada. Siguiente: finalizamos tu mudanza para {date}. ¿Preguntas? ${BIZ_PHONE}`,
+  },
   // Booking declined — generic rebook (terminal deny).
   bookingDenied: {
     en: `Hi {name}, we're sorry — we can't take this move. {refundLine} Rebook anytime: {url} — If anything fails we'll call or email you to confirm manually. ${BIZ_PHONE}`,
@@ -61,6 +73,11 @@ const STRINGS = {
   rescheduleOffer: {
     en: `Hi {name}, that date/time isn't available, but your $49 hold stays attached. Pick a new date here: {url} — or call ${BIZ_PHONE}. Options: {dates}`,
     es: `Hola {name}, esa fecha/hora no está disponible, pero tu retención de $49 se mantiene. Elige una nueva fecha aquí: {url} — o llama al ${BIZ_PHONE}. Opciones: {dates}`,
+  },
+  // Reschedule confirmed — customer picked a new date (hold stays attached).
+  bookingRescheduled: {
+    en: `Hi {name}! Your move is now set for {date}. Your $49 hold stays attached — no new charge. We'll confirm shortly. Questions? ${BIZ_PHONE}`,
+    es: `¡Hola {name}! Tu mudanza ahora es el {date}. Tu retención de $49 se mantiene — sin cargo nuevo. Confirmaremos pronto. ¿Preguntas? ${BIZ_PHONE}`,
   },
   // Job started (crew en route).
   jobStarted: {
@@ -91,10 +108,13 @@ export function t(locale: Locale | string | undefined, key: StringKey, vars: Var
 
 // ── Email subjects (bilingual) ────────────────────────────────────────────
 const EMAIL_SUBJECTS: Record<string, { en: string; es: string }> = {
+  'pre-approval':      { en: 'Your booking is approved — pending final confirmation', es: 'Tu reserva está aprobada — pendiente de confirmación final' },
+  'final-confirmation':{ en: 'Booking confirmed — payment & next steps',            es: 'Reserva confirmada — pago y próximos pasos' },
   'pending-approval':  { en: 'We received your booking — pending approval', es: 'Recibimos tu reserva — pendiente de aprobación' },
   'booking-confirmed': { en: 'Your move is confirmed ✅',                    es: 'Tu mudanza está confirmada ✅' },
   'booking-denied':    { en: 'About your booking request',                  es: 'Sobre tu solicitud de reserva' },
   'reschedule-offer':  { en: 'Pick a new date for your move',               es: 'Elige una nueva fecha para tu mudanza' },
+  'booking-rescheduled': { en: 'Your move has been rescheduled',             es: 'Tu mudanza ha sido reprogramada' },
   'job-completion':    { en: 'Your move is complete — receipt enclosed',    es: 'Tu mudanza está completa — recibo adjunto' },
   'contact-ack':       { en: 'We got your message',                         es: 'Recibimos tu mensaje' },
 }

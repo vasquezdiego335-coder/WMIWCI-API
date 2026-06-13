@@ -2,9 +2,9 @@ import { NextRequest, NextResponse } from 'next/server'
 import Stripe from 'stripe'
 import { constructWebhookEvent } from '@/lib/stripe'
 import { prisma } from '@/lib/db'
-import { emailQueue, discordQueue, scheduledQueue, marketingQueue, smsQueue } from '@/lib/queues'
+import { discordQueue } from '@/lib/queues'
+import { fulfillPaidCheckout } from '@/lib/fulfillment'
 import { webhookLogger } from '@/lib/logger'
-import { t, BIZ_PHONE } from '@/lib/i18n'
 
 // ── Force Node.js runtime (not Edge) — needed for Prisma, BullMQ, Buffer ─
 export const runtime = 'nodejs'
@@ -76,129 +76,20 @@ async function handleStripeEvent(event: Stripe.Event): Promise<void> {
     case 'checkout.session.completed': {
       const session = event.data.object as Stripe.Checkout.Session
       const bookingId = session.metadata?.bookingId
-      if (!bookingId) return
-
-      const booking = await prisma.booking.findUnique({
-        where: { id: bookingId },
-        include: { customer: true },
-      })
-      if (!booking) return
-
-      // AUTHORIZE-ONLY: the $49 is HELD (PaymentIntent requires_capture), not
-      // captured. Store the PI id and move to PENDING_APPROVAL. The Payment row
-      // and depositPaid=true are written later, on capture (admin approval).
-      await prisma.booking.update({
-        where: { id: bookingId },
-        data: {
-          status: 'PENDING_APPROVAL',
-          depositPaid: false, // authorized, not captured yet
-          stripePaymentIntentId: session.payment_intent as string,
-        },
-      })
-
-      await prisma.auditLog.create({
-        data: {
-          action: 'PAYMENT_RECEIVED',
-          bookingId,
-          details: { authorized: true, amount: session.amount_total, stripeSessionId: session.id },
-        },
-      })
-
-      // (No payment-receipt email — nothing has been charged yet; the $49 is
-      //  only authorized. The pending-approval email below explains the hold.)
-
-      // Queue: send pending approval email (bilingual via customer.locale)
-      await emailQueue.add('pending-approval', {
-        template: 'pending-approval',
-        to: booking.customer.email,
-        bookingId,
-        payload: {
-          customerName: booking.customer.name,
-          requestedDate: booking.requestedDate?.toISOString(),
-          locale: booking.customer.locale,
-        },
-      })
-
-      // Queue: confirmation SMS (Twilio) — bilingual, includes the hold + fallback line
-      if (booking.customer.phone) {
-        await smsQueue.add('deposit-confirmation-sms', {
-          to: booking.customer.phone,
-          message: t(booking.customer.locale, 'depositHold', { displayId: booking.displayId, phone: BIZ_PHONE }),
-          bookingId,
-        })
+      if (!bookingId) {
+        webhookLogger.warn({ sessionId: session.id }, 'checkout.session.completed without metadata.bookingId — ignoring')
+        return
       }
 
-      // Queue: Discord booking approval card
-      await discordQueue.add('booking-created', {
-        type: 'booking-created',
+      // All fulfillment (status flip + email/SMS/Discord/marketing jobs) lives
+      // in the shared, idempotent helper so the browser success redirect can
+      // run the exact same path as a backup when the webhook never arrives.
+      await fulfillPaidCheckout({
         bookingId,
-        payload: {
-          bookingId,
-          displayId: booking.displayId,
-          customerName: booking.customer.name,
-          customerEmail: booking.customer.email,
-          customerPhone: booking.customer.phone,
-          originAddress: booking.originAddress,
-          destAddress: booking.destAddress,
-          requestedDate: booking.requestedDate?.toISOString(),
-          discountType: booking.discountType,
-          discountCode: booking.discountCode,
-          estimatedHours: booking.estimatedHours,
-          items: booking.itemsDescription,
-          amountPaid: ((session.amount_total ?? 4900) / 100).toFixed(2),
-          // ── Payment / balance breakdown (shown on the card) ──
-          moveTotal: booking.totalEstimate,
-          balanceAfterJob:
-            booking.totalEstimate != null ? booking.totalEstimate - 49 : null,
-          truckAddonDueOnMoveDay: booking.truckAddonDueOnMoveDay,
-          truckAddonAmount: booking.truckAddonAmount,
-          // ── Moving Service Agreement status (shown on the card) ──
-          agreementAccepted: booking.agreementAccepted,
-          agreementVersion: booking.agreementVersion,
-          agreementName: booking.agreementName,
-          agreementAcceptedAt: booking.agreementAcceptedAt?.toISOString(),
-        },
+        paymentIntentId: (session.payment_intent as string) ?? null,
+        amountTotalCents: session.amount_total,
+        source: 'webhook',
       })
-
-      // Queue: marketing automation enrollment (external tool — env-gated stub)
-      await marketingQueue.add('booking-paid', {
-        type: 'enroll-customer',
-        bookingId,
-        payload: {
-          email: booking.customer.email,
-          name: booking.customer.name,
-          phone: booking.customer.phone,
-          displayId: booking.displayId,
-          requestedDate: booking.requestedDate?.toISOString(),
-        },
-      })
-
-      // Queue: create Discord job channels
-      await discordQueue.add('create-job-channels', {
-        type: 'create-job-channels',
-        bookingId,
-        payload: {
-          bookingId,
-          displayId: booking.displayId,
-          customerName: booking.customer.name,
-        },
-      })
-
-      // If door hanger discount pending, queue approval card
-      if (booking.discountType === 'DOOR_HANGER_PENDING') {
-        await discordQueue.add('discount-request', {
-          type: 'discount-request',
-          bookingId,
-          payload: {
-            bookingId,
-            displayId: booking.displayId,
-            customerName: booking.customer.name,
-            discountCode: booking.discountCode,
-          },
-        })
-      }
-
-      webhookLogger.info({ bookingId }, 'Payment processed — booking moved to pending_approval')
       break
     }
 

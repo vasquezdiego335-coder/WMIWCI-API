@@ -95,8 +95,16 @@ async function main() {
 }
 
 // Surface anything that would otherwise crash the process silently.
+// Log the STACK, not just the message — the stack names the exact file/library
+// frame, which is the only reliable way to tell which worker/connection threw.
 process.on('unhandledRejection', (reason) =>
-  logger.error({ reason: reason instanceof Error ? reason.message : String(reason) }, 'unhandledRejection in worker process')
+  logger.error(
+    {
+      reason: reason instanceof Error ? reason.message : String(reason),
+      stack: reason instanceof Error ? reason.stack : undefined,
+    },
+    'unhandledRejection in worker process'
+  )
 )
 process.on('uncaughtException', (err) =>
   logger.error({ err: err.message, stack: err.stack }, 'uncaughtException in worker process')

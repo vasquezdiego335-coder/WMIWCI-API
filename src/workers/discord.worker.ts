@@ -10,7 +10,7 @@ import {
   createJobChannels,
   postDailySchedule,
   postContactMessage,
-} from '../bot/discord-actions'
+} from '../bot/discord-rest'
 
 async function processDiscordJob(job: Job<DiscordJobData>): Promise<void> {
   const { type, bookingId, payload } = job.data

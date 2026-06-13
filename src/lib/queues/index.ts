@@ -104,18 +104,43 @@ export function getMarketingQueue(): Queue {
 }
 
 // ── Backward-compatible named exports (lazy proxies) ────────────────
-// Existing code like `emailQueue.add(...)` keeps working unchanged.
-// The Queue instance is created on first property access, not import.
-export const emailQueue = new Proxy({} as Queue, { get(_, p, r) { return Reflect.get(getEmailQueue(), p, r) } })
-export const smsQueue = new Proxy({} as Queue, { get(_, p, r) { return Reflect.get(getSmsQueue(), p, r) } })
-export const discordQueue = new Proxy({} as Queue, { get(_, p, r) { return Reflect.get(getDiscordQueue(), p, r) } })
-export const webhookRetryQueue = new Proxy({} as Queue, { get(_, p, r) { return Reflect.get(getWebhookRetryQueue(), p, r) } })
-export const scheduledQueue = new Proxy({} as Queue, { get(_, p, r) { return Reflect.get(getScheduledQueue(), p, r) } })
-export const marketingQueue = new Proxy({} as Queue, { get(_, p, r) { return Reflect.get(getMarketingQueue(), p, r) } })
+// Existing code like `emailQueue.add(...)` keeps working unchanged; the Queue
+// instance is created on first property access, not at import (so `next build`
+// never opens Redis connections).
+//
+// ⚠️ The proxy MUST forward BOTH reads and writes to the real Queue, and run
+// accessors with the real Queue as the receiver. A get-only proxy (the previous
+// version) ran BullMQ's internal getters with `this` = the proxy. BullMQ 5.77's
+// `get repeat()` does `this._repeat = new Repeat(); this._repeat.on('error', …)`
+// — with no `set` trap that write landed on the empty proxy target and vanished,
+// so the very next line read `this._repeat` back as undefined →
+// "Cannot read properties of undefined (reading 'on')" the instant the scheduled
+// worker registered a repeatable (cron) job. Forwarding `set` and using the real
+// Queue as the receiver makes the proxy behave exactly like the instance.
+function lazyQueue(getQueue: () => Queue): Queue {
+  return new Proxy({} as Queue, {
+    get(_t, p) { const q = getQueue(); return Reflect.get(q, p, q) },
+    set(_t, p, v) { const q = getQueue(); return Reflect.set(q, p, v, q) },
+    has(_t, p) { return Reflect.has(getQueue(), p) },
+  })
+}
+
+export const emailQueue = lazyQueue(getEmailQueue)
+export const smsQueue = lazyQueue(getSmsQueue)
+export const discordQueue = lazyQueue(getDiscordQueue)
+export const webhookRetryQueue = lazyQueue(getWebhookRetryQueue)
+export const scheduledQueue = lazyQueue(getScheduledQueue)
+export const marketingQueue = lazyQueue(getMarketingQueue)
 
 // ── Job type definitions ──────────────────────────────────────
 export type EmailJobData = {
   template:
+    // ── The ONLY 2 customer emails the system sends (enforced by the
+    //    allowlist in src/workers/email.worker.ts) ──
+    | 'pre-approval'        // admin clicked ✅ Approve in Discord
+    | 'final-confirmation'  // payment completed (fulfillPaidCheckout)
+    // ── Legacy templates: still defined so existing call sites typecheck, but
+    //    the email-worker allowlist drops them at runtime (logged, never sent). ──
     | 'booking-confirmation'
     | 'payment-receipt'
     | 'pending-approval'
@@ -127,6 +152,7 @@ export type EmailJobData = {
     | 'abandoned-checkout'
     | 'contact-ack'        // auto-reply to a customer who used the contact form
     | 'reschedule-offer'   // declined booking → here are alternate dates
+    | 'booking-rescheduled'// customer picked a new date → confirmation
   to: string
   bookingId?: string
   notificationId?: string

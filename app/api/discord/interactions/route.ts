@@ -1,622 +1,384 @@
-import { NextRequest, NextResponse } from 'next/server'
-import nacl from 'tweetnacl'
-import { prisma } from '@/lib/db'
-import { emailQueue, discordQueue, smsQueue } from '@/lib/queues'
-import { findAvailableSlots, formatEastern } from '@/lib/scheduling'
-import { webhookLogger } from '@/lib/logger'
-import { captureDeposit, cancelDeposit, refundDeposit, BOOKING_FEE_CENTS } from '@/lib/stripe'
-import { t } from '@/lib/i18n'
+import { NextResponse } from "next/server";
+import nacl from "tweetnacl";
+import { prisma } from "@/lib/db";
+import { captureDeposit, cancelDeposit } from "@/lib/stripe";
+import { emailQueue, smsQueue } from "@/lib/queues";
+import { offerRescheduleToCustomer } from "@/lib/reschedule";
+import { t } from "@/lib/i18n";
+import { formatEastern } from "@/lib/scheduling";
+import { apiLogger } from "@/lib/logger";
 
-export const runtime = 'nodejs'
+export const runtime = "nodejs";
 
-// ── Verify Ed25519 signature from Discord ─────────────────────
+// ── Discord interaction type / response constants ──────────────────────────
+const TYPE_PING = 1;
+const TYPE_MESSAGE_COMPONENT = 3; // a button / select press
+const RES_PONG = 1;
+const RES_REPLY = 4; // CHANNEL_MESSAGE_WITH_SOURCE
+const RES_UPDATE_MESSAGE = 7; // edit the component message in place
+const FLAG_EPHEMERAL = 64;
+
+// ── Ed25519 signature verification (tweetnacl; replaces discord-interactions) ─
 function verifyDiscordSignature(
-  body: string,
+  rawBody: string,
   signature: string,
-  timestamp: string
+  timestamp: string,
+  publicKey: string
 ): boolean {
   try {
-    const publicKey = process.env.DISCORD_PUBLIC_KEY
-    if (!publicKey || publicKey === 'placeholder_public_key') return false
-
-    const message = Buffer.from(timestamp + body)
-    const sig = Buffer.from(signature, 'hex')
-    const key = Buffer.from(publicKey, 'hex')
-
-    return nacl.sign.detached.verify(message, sig, key)
+    return nacl.sign.detached.verify(
+      Buffer.from(timestamp + rawBody),
+      Buffer.from(signature, "hex"),
+      Buffer.from(publicKey, "hex")
+    );
   } catch {
-    return false
+    return false;
   }
 }
 
-// ── Interaction types ─────────────────────────────────────────
-const PING = 1
-const APPLICATION_COMMAND = 2
-const MESSAGE_COMPONENT = 3
+const ephemeral = (content: string) =>
+  NextResponse.json({ type: RES_REPLY, data: { content, flags: FLAG_EPHEMERAL } });
 
-export async function POST(req: NextRequest): Promise<NextResponse> {
-  const signature = req.headers.get('x-signature-ed25519') ?? ''
-  const timestamp = req.headers.get('x-signature-timestamp') ?? ''
-  const rawBody = await req.text()
-
-  // ── Replay attack prevention (reject if >5 seconds old) ──────
-  const ts = parseInt(timestamp, 10)
-  if (isNaN(ts) || Date.now() / 1000 - ts > 5) {
-    return NextResponse.json({ error: 'Request too old' }, { status: 401 })
-  }
-
-  // ── Verify signature ──────────────────────────────────────────
-  if (!verifyDiscordSignature(rawBody, signature, timestamp)) {
-    webhookLogger.warn('Discord signature verification failed')
-    return NextResponse.json({ error: 'Invalid signature' }, { status: 401 })
-  }
-
-  let interaction: any
-  try {
-    interaction = JSON.parse(rawBody)
-  } catch {
-    return NextResponse.json({ error: 'Invalid JSON' }, { status: 400 })
-  }
-
-  // ── Handle PING (Discord requires this) ───────────────────────
-  if (interaction.type === PING) {
-    return NextResponse.json({ type: 1 })
-  }
-
-  // ── Handle button interactions ────────────────────────────────
-  if (interaction.type === MESSAGE_COMPONENT) {
-    const customId: string = interaction.data?.custom_id ?? ''
-    const userId: string = interaction.member?.user?.id ?? ''
-    const username: string = interaction.member?.user?.username ?? 'Unknown'
-
-    webhookLogger.info({ customId, userId }, 'Discord button interaction')
-
-    // Log interaction to webhook_logs
-    await prisma.webhookLog.create({
-      data: {
-        source: 'discord',
-        eventType: 'button_interaction',
-        payload: interaction,
-        status: 'processing',
-      },
-    })
-
-    return await handleButtonInteraction(customId, userId, username, interaction)
-  }
-
-  return NextResponse.json({ type: 1 })
+// Don't let a Redis stall blow Discord's 3-second interaction deadline.
+function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
+  return Promise.race([
+    p,
+    new Promise<T>((_, reject) => setTimeout(() => reject(new Error(`timeout after ${ms}ms`)), ms)),
+  ]);
 }
 
-async function handleButtonInteraction(
-  customId: string,
-  discordUserId: string,
-  username: string,
-  interaction: any
-): Promise<NextResponse> {
-  // custom_id format: "action:bookingId"
-  const [action, bookingId] = customId.split(':')
+type CardBooking = {
+  displayId: string;
+  requestedDate: Date | null;
+  confirmedDate: Date | null;
+  depositAmount: number;
+  customer?: { name: string } | null;
+};
 
-  if (!bookingId) {
-    return NextResponse.json({
-      type: 4,
-      data: { content: '❌ Invalid interaction data.', flags: 64 },
-    })
-  }
-
-  // Fetch staff user by Discord ID
-  const staffUser = await prisma.user.findFirst({
-    where: { discordId: discordUserId },
-  })
-
-  const booking = await prisma.booking.findUnique({
-    where: { id: bookingId },
-    include: { customer: true },
-  })
-
-  if (!booking) {
-    return NextResponse.json({
-      type: 4,
-      data: { content: `❌ Booking \`${bookingId}\` not found.`, flags: 64 },
-    })
-  }
-
-  switch (action) {
-    // ── APPROVE BOOKING ─────────────────────────────────────────
-    case 'approve_booking': {
-      if (!staffUser || !['OWNER', 'MANAGER'].includes(staffUser.role)) {
-        return NextResponse.json({
-          type: 4,
-          data: { content: '❌ You do not have permission to approve bookings.', flags: 64 },
-        })
-      }
-
-      if (booking.status !== 'PENDING_APPROVAL') {
-        return NextResponse.json({
-          type: 4,
-          data: { content: `⚠️ Booking is already **${booking.status}**.`, flags: 64 },
-        })
-      }
-
-      // Capture the held $49 now that we're approving (authorize-only -> capture).
-      let captured = false
-      if (booking.stripePaymentIntentId) {
-        try {
-          await captureDeposit(booking.stripePaymentIntentId)
-          await prisma.payment.create({
-            data: {
-              bookingId,
-              stripePaymentIntentId: booking.stripePaymentIntentId,
-              amount: BOOKING_FEE_CENTS,
-              currency: 'usd',
-              status: 'COMPLETED',
-              description: 'Booking deposit (captured on approval)',
-            },
-          })
-          captured = true
-        } catch (err) {
-          webhookLogger.error({ err, bookingId }, 'Deposit capture failed on approve (hold may have expired)')
-        }
-      }
-
-      // Find next available slot
-      const slots = await findAvailableSlots(
-        booking.requestedDate ?? new Date(),
-        1
-      )
-      const confirmedDate = slots[0] ?? booking.requestedDate ?? new Date()
-
-      await prisma.booking.update({
-        where: { id: bookingId },
-        data: {
-          status: 'CONFIRMED',
-          confirmedDate,
-          scheduledStart: confirmedDate,
-          depositPaid: captured,
-        },
-      })
-
-      await prisma.auditLog.create({
-        data: {
-          action: 'BOOKING_STATE_CHANGED',
-          userId: staffUser?.id,
-          bookingId,
-          details: { from: 'PENDING_APPROVAL', to: 'CONFIRMED', approvedBy: username, captured },
-        },
-      })
-
-      // Email customer confirmation (bilingual via customer.locale)
-      await emailQueue.add('booking-confirmed', {
-        template: 'booking-confirmed',
-        to: booking.customer.email,
-        bookingId,
-        payload: {
-          customerName: booking.customer.name,
-          confirmedDate: formatEastern(confirmedDate),
-          originAddress: booking.originAddress,
-          destAddress: booking.destAddress,
-          discountPercent: booking.discountPercent,
-          discountType: booking.discountType,
-          portalUrl: `${process.env.APP_URL}/my-booking/${booking.customerToken}`,
-          locale: booking.customer.locale,
-        },
-      })
-
-      // SMS (bilingual)
-      await smsQueue.add('booking-confirmed-sms', {
-        to: booking.customer.phone,
-        message: t(booking.customer.locale, 'bookingConfirmed', {
-          name: booking.customer.name,
-          date: formatEastern(confirmedDate),
-        }),
-        bookingId,
-      })
-
-      // Schedule 24h reminder
-      const reminderTime = new Date(confirmedDate)
-      reminderTime.setHours(reminderTime.getHours() - 24)
-      if (reminderTime > new Date()) {
-        await discordQueue.add(
-          'job-reminder',
-          { type: 'job-reminder-24h', bookingId },
-          { delay: reminderTime.getTime() - Date.now() }
-        )
-      }
-
-      // type: 7 = UPDATE_MESSAGE — edits the original booking card in-place
-      const approvedEmbed = {
-        title: `✅ APPROVED — ${booking.displayId}`,
+// The "✅ Approved" card that replaces the approval card in place (no buttons).
+function confirmedCard(booking: CardBooking, approverName: string, capturedCents?: number) {
+  const when = booking.confirmedDate ?? booking.requestedDate;
+  const dateStr = when ? formatEastern(when) : "—";
+  const cents = capturedCents ?? booking.depositAmount ?? 4900;
+  return {
+    embeds: [
+      {
+        title: `✅ Approved — ${booking.displayId}`,
         color: 0x22c55e,
+        description: "Deposit captured · booking **CONFIRMED**.",
         fields: [
-          { name: '👤 Customer', value: `${booking.customer.name}\n${booking.customer.phone ?? '—'}\n${booking.customer.email}`, inline: true },
-          { name: '📅 Confirmed', value: formatEastern(confirmedDate), inline: true },
-          { name: '👷 Crew', value: 'Diego & Sebastian', inline: true },
-          { name: '📍 From → To', value: `${booking.originAddress} → ${booking.destAddress}`, inline: false },
-          { name: '💳 Deposit', value: captured ? '$49 captured' : '⚠️ capture failed — re-collect', inline: true },
-          { name: '👮 Approved By', value: username, inline: true },
+          { name: "👤 Customer", value: booking.customer?.name ?? "—", inline: true },
+          { name: "📅 Move date", value: dateStr, inline: true },
+          { name: "💳 Captured", value: `$${(cents / 100).toFixed(2)}`, inline: true },
         ],
+        footer: { text: `Approved by ${approverName}` },
         timestamp: new Date().toISOString(),
-        footer: { text: `Booking ID: ${bookingId}` },
-      }
-      return NextResponse.json({
-        type: 7,
-        data: { embeds: [approvedEmbed], components: [] },
-      })
-    }
+      },
+    ],
+    components: [], // strip the Approve / Offer / Deny buttons
+  };
+}
 
-    // ── DENY BOOKING (release the $49 hold) ─────────────────────
-    case 'deny_booking': {
-      if (!staffUser || !['OWNER', 'MANAGER'].includes(staffUser.role)) {
-        return NextResponse.json({
-          type: 4,
-          data: { content: '❌ Permission denied.', flags: 64 },
-        })
-      }
-
-      // Release the $49: cancel the authorization (no charge) if still held,
-      // or refund it if it had already been captured.
-      let released = false
-      if (booking.stripePaymentIntentId) {
-        try {
-          if (booking.depositPaid) {
-            await refundDeposit(booking.stripePaymentIntentId)
-            await prisma.payment.updateMany({
-              where: { bookingId, stripePaymentIntentId: booking.stripePaymentIntentId },
-              data: { status: 'REFUNDED' },
-            })
-          } else {
-            await cancelDeposit(booking.stripePaymentIntentId)
-          }
-          released = true
-        } catch (err) {
-          webhookLogger.error({ err, bookingId }, 'Deposit release failed on deny')
-        }
-      }
-
-      // CANCELLED is the terminal "denied" state (no separate DENIED enum value).
-      await prisma.booking.update({
-        where: { id: bookingId },
-        data: { status: 'CANCELLED' },
-      })
-
-      const rescheduleUrl = `${process.env.FRONTEND_URL ?? process.env.MARKETING_SITE_URL ?? 'https://moveitclearit.com'}/booking-form.html`
-      const fallbackMessage =
-        'If we cannot process your booking automatically, we will call you or send you an email to confirm your move manually.'
-
-      // Apology email with refund note + reschedule link (bilingual)
-      await emailQueue.add('booking-denied', {
-        template: 'booking-denied',
-        to: booking.customer.email,
-        bookingId,
-        payload: {
-          customerName: booking.customer.name,
-          released,
-          depositAmount: (BOOKING_FEE_CENTS / 100).toFixed(2),
-          rescheduleUrl,
-          fallbackMessage,
-          locale: booking.customer.locale,
-        },
-      })
-
-      // Apology SMS — hold released (not charged) + reschedule link + fallback (bilingual)
-      if (booking.customer.phone) {
-        const refundLine = t(booking.customer.locale, released ? 'refundReleased' : 'refundPending')
-        await smsQueue.add('booking-denied-sms', {
-          to: booking.customer.phone,
-          message: t(booking.customer.locale, 'bookingDenied', {
-            name: booking.customer.name,
-            refundLine,
-            url: rescheduleUrl,
-          }),
-          bookingId,
-        })
-      }
-
-      await prisma.auditLog.create({
-        data: {
-          action: 'BOOKING_STATE_CHANGED',
-          userId: staffUser?.id,
-          bookingId,
-          details: { action: 'denied', released, by: username },
-        },
-      })
-
-      // type: 7 = UPDATE_MESSAGE — edits the original booking card in-place
-      const deniedEmbed = {
-        title: `❌ DENIED — ${booking.displayId}`,
+// The "❌ Denied" card (authorization released, no charge).
+function deniedCard(booking: { displayId: string; customer?: { name: string } | null }, approverName: string) {
+  return {
+    embeds: [
+      {
+        title: `❌ Denied — ${booking.displayId}`,
         color: 0xef4444,
+        description: "Authorization released (no charge) · booking **CANCELLED**.",
         fields: [
-          { name: '👤 Customer', value: booking.customer.name, inline: true },
-          { name: '👮 Denied By', value: username, inline: true },
-          { name: '💸 Deposit', value: released ? '$49 hold released (not charged)' : 'Release pending', inline: true },
+          { name: "👤 Customer", value: booking.customer?.name ?? "—", inline: true },
+          { name: "💳 Hold", value: "Released — not charged", inline: true },
         ],
+        footer: { text: `Denied by ${approverName}` },
         timestamp: new Date().toISOString(),
-        footer: { text: `Booking ID: ${bookingId}` },
-      }
-      return NextResponse.json({
-        type: 7,
-        data: { embeds: [deniedEmbed], components: [] },
-      })
-    }
+      },
+    ],
+    components: [],
+  };
+}
 
-    // ── OFFER NEW DATES (reschedule, KEEP the $49 hold) ─────────
-    case 'offer_reschedule': {
-      if (!staffUser || !['OWNER', 'MANAGER'].includes(staffUser.role)) {
-        return NextResponse.json({
-          type: 4,
-          data: { content: '❌ Permission denied.', flags: 64 },
-        })
-      }
-
-      // Find 3 open dates starting from the day after the requested date.
-      const from = new Date(booking.requestedDate ?? new Date())
-      from.setDate(from.getDate() + 1)
-      const slots = await findAvailableSlots(from, 3)
-      const formatted = slots.map((s) => formatEastern(s))
-
-      // Tokenized self-service link — customer picks without re-entering info.
-      // NOTE: the $49 authorization hold and the customer token both live ~7
-      // days; if the customer picks after the hold expires, capture-on-approve
-      // fails gracefully (card shows "capture failed — re-collect").
-      const portalBase =
-        process.env.FRONTEND_URL ?? process.env.MARKETING_SITE_URL ?? 'https://www.wemoveitweclearit.com'
-      const rescheduleUrl = `${portalBase}/booking-form.html?reschedule=${booking.customerToken}`
-
-      // Booking stays PENDING_APPROVAL (alive, hold intact) awaiting the pick.
-      await prisma.auditLog.create({
-        data: {
-          action: 'BOOKING_STATE_CHANGED',
-          userId: staffUser?.id,
-          bookingId,
-          details: { action: 'reschedule_offered', by: username, offeredDates: formatted },
-        },
-      })
-
-      // Email the customer the alternate dates (bilingual template + locale).
-      await emailQueue.add('reschedule-offer', {
-        template: 'reschedule-offer',
-        to: booking.customer.email,
-        bookingId,
-        payload: {
-          customerName: booking.customer.name,
-          alternateDates: formatted,
-          rescheduleUrl,
-          locale: booking.customer.locale,
-        },
-      })
-
-      // SMS the customer (bilingual; Twilio-gated).
-      if (booking.customer.phone) {
-        await smsQueue.add('reschedule-offer-sms', {
-          to: booking.customer.phone,
-          message: t(booking.customer.locale, 'rescheduleOffer', {
-            name: booking.customer.name,
-            url: rescheduleUrl,
-            dates: formatted.slice(0, 3).join(' / '),
-          }),
-          bookingId,
-        })
-      }
-
-      // Edit the card to show dates were offered — KEEP buttons so staff can
-      // still Approve/Deny later (e.g., if the customer calls instead).
-      const offeredEmbed = {
-        title: `📅 RESCHEDULE OFFERED — ${booking.displayId}`,
+// The "📅 New dates offered" card (link sent; a fresh card posts when they pick).
+function offeredCard(
+  booking: { displayId: string; customer?: { name: string } | null },
+  approverName: string,
+  offeredDates: string[]
+) {
+  const list = offeredDates.length
+    ? offeredDates.map((d, i) => `${i + 1}. ${d}`).join("\n")
+    : "Customer will call to pick a date.";
+  return {
+    embeds: [
+      {
+        title: `📅 New dates offered — ${booking.displayId}`,
         color: 0x3b82f6,
+        description: "Reschedule link sent to the customer. A fresh approval card posts when they pick a date.",
         fields: [
-          { name: '👤 Customer', value: `${booking.customer.name}\n${booking.customer.phone ?? '—'}\n${booking.customer.email}`, inline: true },
-          { name: '💳 Deposit', value: '$49 hold KEPT (not released)', inline: true },
-          { name: '👮 Offered By', value: username, inline: true },
-          { name: '🗓️ Dates Offered', value: formatted.length ? formatted.map((d, i) => `${i + 1}. ${d}`).join('\n') : 'None available — customer will call', inline: false },
-          { name: 'ℹ️ Status', value: 'Awaiting customer date pick → a fresh approval card posts when they choose.', inline: false },
+          { name: "👤 Customer", value: booking.customer?.name ?? "—", inline: true },
+          { name: "🗓️ Offered", value: list, inline: false },
         ],
+        footer: { text: `Offered by ${approverName}` },
         timestamp: new Date().toISOString(),
-        footer: { text: `Booking ID: ${bookingId}` },
-      }
-      // type 7 = UPDATE_MESSAGE; keep the original action row (components) intact.
-      return NextResponse.json({
-        type: 7,
-        data: { embeds: [offeredEmbed], components: interaction.message?.components ?? [] },
-      })
-    }
+      },
+    ],
+    components: [],
+  };
+}
 
-    // ── APPROVE 30% DOOR HANGER DISCOUNT ────────────────────────
-    case 'approve_discount': {
-      const diegoId = process.env.DISCORD_USER_DIEGO
-      if (discordUserId !== diegoId && staffUser?.role !== 'OWNER') {
-        return NextResponse.json({
-          type: 4,
-          data: { content: '❌ Only the owner can approve 30% discounts.', flags: 64 },
-        })
-      }
+// ── approve_booking:<id> → capture the $49 hold → CONFIRMED → notify ───────
+async function handleApprove(bookingId: string | undefined, messageId: string | undefined, approverName: string) {
+  // Load by the clicked card's message id (canonical), falling back to the id
+  // carried in the button's custom_id.
+  const booking = await prisma.booking.findFirst({
+    where: {
+      OR: [
+        ...(messageId ? [{ discordApprovalMessageId: messageId }] : []),
+        ...(bookingId ? [{ id: bookingId }] : []),
+      ],
+    },
+    include: { customer: true },
+  });
 
-      await prisma.booking.update({
-        where: { id: bookingId },
-        data: {
-          discountType: 'DOOR_HANGER_APPROVED',
-          discountPercent: 30,
-          discountApprovedById: staffUser?.id,
-        },
-      })
+  if (!booking) return ephemeral("⚠️ Booking not found for this card.");
 
-      await prisma.auditLog.create({
-        data: {
-          action: 'DISCOUNT_APPROVED',
-          userId: staffUser?.id,
-          bookingId,
-          details: { percent: 30, code: booking.discountCode },
-        },
-      })
-
-      await emailQueue.add('discount-approved', {
-        template: 'booking-confirmed',
-        to: booking.customer.email,
-        bookingId,
-        payload: {
-          customerName: booking.customer.name,
-          discountPercent: 30,
-          message: '🎉 Great news! Your 30% door hanger discount has been approved.',
-          portalUrl: `${process.env.APP_URL}/my-booking/${booking.customerToken}`,
-        },
-      })
-
-      return NextResponse.json({
-        type: 4,
-        data: { content: `✅ 30% discount approved for booking **${booking.displayId}** by ${username}.` },
-      })
-    }
-
-    // ── DENY 30% — OFFER 10% INSTEAD ────────────────────────────
-    case 'deny_discount': {
-      const diegoId = process.env.DISCORD_USER_DIEGO
-      if (discordUserId !== diegoId && staffUser?.role !== 'OWNER') {
-        return NextResponse.json({
-          type: 4,
-          data: { content: '❌ Only the owner can deny discounts.', flags: 64 },
-        })
-      }
-
-      await prisma.booking.update({
-        where: { id: bookingId },
-        data: {
-          discountType: 'DOOR_HANGER_DENIED',
-          discountPercent: 10, // fallback
-        },
-      })
-
-      await prisma.auditLog.create({
-        data: {
-          action: 'DISCOUNT_DENIED',
-          userId: staffUser?.id,
-          bookingId,
-          details: { code: booking.discountCode, fallback: '10%' },
-        },
-      })
-
-      await emailQueue.add('discount-denied', {
-        template: 'booking-confirmed',
-        to: booking.customer.email,
-        bookingId,
-        payload: {
-          customerName: booking.customer.name,
-          discountPercent: 10,
-          message: "We couldn't verify your door hanger code, but we're giving you 10% off as a first-time customer.",
-          portalUrl: `${process.env.APP_URL}/my-booking/${booking.customerToken}`,
-        },
-      })
-
-      return NextResponse.json({
-        type: 4,
-        data: { content: `🔄 30% denied for **${booking.displayId}** — 10% fallback applied. Customer notified.` },
-      })
-    }
-
-    // ── MARK JOB IN PROGRESS ─────────────────────────────────────
-    case 'job_start': {
-      await prisma.booking.update({
-        where: { id: bookingId },
-        data: { status: 'IN_PROGRESS' },
-      })
-      await prisma.job.updateMany({
-        where: { bookingId },
-        data: { status: 'IN_PROGRESS', startedAt: new Date() },
-      })
-
-      await smsQueue.add('job-started-sms', {
-        to: booking.customer.phone,
-        message: t(booking.customer.locale, 'jobStarted'),
-        bookingId,
-      })
-
-      await prisma.auditLog.create({
-        data: { action: 'JOB_STARTED', bookingId, details: { by: username } },
-      })
-
-      return NextResponse.json({
-        type: 4,
-        data: { content: `🚛 Job **${booking.displayId}** marked IN PROGRESS by ${username}.` },
-      })
-    }
-
-    // ── MARK JOB COMPLETED ───────────────────────────────────────
-    case 'job_complete': {
-      const now = new Date()
-      await prisma.booking.update({
-        where: { id: bookingId },
-        data: { status: 'COMPLETED' },
-      })
-      await prisma.job.updateMany({
-        where: { bookingId },
-        data: { status: 'COMPLETED', completedAt: now },
-      })
-
-      // Create receipt record
-      await prisma.receipt.upsert({
-        where: { bookingId },
-        update: { sentAt: now, sentTo: booking.customer.email },
-        create: { bookingId, sentAt: now, sentTo: booking.customer.email },
-      })
-
-      await emailQueue.add('job-completion', {
-        template: 'job-completion',
-        to: booking.customer.email,
-        bookingId,
-        payload: {
-          customerName: booking.customer.name,
-          completedAt: now.toISOString(),
-          portalUrl: `${process.env.APP_URL}/my-booking/${booking.customerToken}`,
-          locale: booking.customer.locale,
-        },
-      })
-
-      // SMS completion (bilingual)
-      await smsQueue.add('job-completed-sms', {
-        to: booking.customer.phone,
-        message: t(booking.customer.locale, 'jobCompleted', { email: booking.customer.email }),
-        bookingId,
-      })
-
-      // Schedule review request (48 hours)
-      await discordQueue.add(
-        'review-request',
-        { type: 'review-request-48h', bookingId },
-        { delay: 48 * 60 * 60 * 1000 }
-      )
-
-      await prisma.auditLog.create({
-        data: { action: 'JOB_COMPLETED', bookingId, details: { by: username } },
-      })
-
-      return NextResponse.json({
-        type: 4,
-        data: { content: `✅ Job **${booking.displayId}** COMPLETED by ${username}. Receipt + review request queued.` },
-      })
-    }
-
-    // ── ARCHIVE JOB ──────────────────────────────────────────────
-    case 'archive_job': {
-      if (!staffUser || !['OWNER', 'MANAGER'].includes(staffUser.role)) {
-        return NextResponse.json({
-          type: 4,
-          data: { content: '❌ Permission denied.', flags: 64 },
-        })
-      }
-
-      await prisma.booking.update({
-        where: { id: bookingId },
-        data: { status: 'ARCHIVED' },
-      })
-
-      await prisma.auditLog.create({
-        data: { action: 'BOOKING_STATE_CHANGED', userId: staffUser?.id, bookingId, details: { to: 'ARCHIVED', by: username } },
-      })
-
-      return NextResponse.json({
-        type: 4,
-        data: { content: `🗃️ Booking **${booking.displayId}** archived by ${username}.` },
-      })
-    }
-
-    default:
-      return NextResponse.json({ type: 1 })
+  // Idempotent: a second click just re-shows the confirmed card.
+  if (booking.status === "CONFIRMED") {
+    return NextResponse.json({ type: RES_UPDATE_MESSAGE, data: confirmedCard(booking, approverName) });
   }
+  if (booking.status !== "PENDING_APPROVAL") {
+    return ephemeral(`⚠️ Can't approve a booking in ${booking.status}.`);
+  }
+  if (!booking.stripePaymentIntentId) {
+    return ephemeral("⚠️ No payment hold attached — nothing to capture.");
+  }
+
+  // 1) Capture the manual-capture PaymentIntent (the held $49 → charged).
+  let pi;
+  try {
+    pi = await captureDeposit(booking.stripePaymentIntentId);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    apiLogger.error({ bookingId: booking.id, err: msg }, "captureDeposit failed");
+    return ephemeral(`⚠️ Stripe capture failed: ${msg}. The hold was NOT captured.`);
+  }
+  const capturedCents = pi.amount_received ?? pi.amount ?? booking.depositAmount;
+
+  // 2) Confirm the booking + record the payment (atomic).
+  await prisma.$transaction([
+    prisma.booking.update({
+      where: { id: booking.id },
+      data: { status: "CONFIRMED", depositPaid: true, confirmedDate: booking.requestedDate },
+    }),
+    prisma.payment.create({
+      data: {
+        bookingId: booking.id,
+        stripePaymentIntentId: pi.id,
+        amount: capturedCents,
+        status: "COMPLETED",
+        description: "Booking deposit captured on approval",
+      },
+    }),
+    prisma.auditLog.create({
+      data: {
+        action: "PAYMENT_RECEIVED",
+        bookingId: booking.id,
+        details: { captured: capturedCents, paymentIntentId: pi.id, approvedBy: approverName },
+      },
+    }),
+  ]);
+
+  // 3) Queue the PRE-APPROVAL customer messages (email + SMS) — the ONLY pair
+  //    sent from the approval handler. Non-fatal + timeout-guarded so a Redis
+  //    stall can't blow Discord's 3s interaction window.
+  const locale = booking.customer.locale;
+  const when = booking.requestedDate;
+  const dateStr = when ? formatEastern(when) : "your move date";
+  const appUrl = process.env.APP_URL ?? "https://wmiwci-api.vercel.app";
+  const portalUrl = `${appUrl}/my-booking/${booking.customerToken}`;
+  try {
+    await withTimeout(
+      (async () => {
+        apiLogger.info({ bookingId: booking.id, to: booking.customer.email }, "[messaging] queueing PRE-APPROVAL email");
+        await emailQueue.add("pre-approval", {
+          template: "pre-approval",
+          to: booking.customer.email,
+          bookingId: booking.id,
+          payload: {
+            customerName: booking.customer.name,
+            displayId: booking.displayId,
+            requestedDate: when?.toISOString(),
+            items: booking.itemsDescription ?? undefined,
+            originAddress: booking.originAddress ?? undefined,
+            destAddress: booking.destAddress ?? undefined,
+            portalUrl,
+            locale,
+          },
+        });
+        if (booking.customer.phone) {
+          apiLogger.info({ bookingId: booking.id }, "[messaging] queueing PRE-APPROVAL sms");
+          await smsQueue.add("pre-approval-sms", {
+            to: booking.customer.phone,
+            message: t(locale, "preApproval", {
+              name: booking.customer.name,
+              displayId: booking.displayId,
+              date: dateStr,
+            }),
+            bookingId: booking.id,
+          });
+        }
+      })(),
+      2500
+    );
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    apiLogger.error({ bookingId: booking.id, err: msg }, "pre-approval notifications failed/timeout (non-fatal)");
+  }
+
+  apiLogger.info(
+    { bookingId: booking.id, captured: capturedCents, approvedBy: approverName },
+    "Booking approved → $49 captured → CONFIRMED"
+  );
+
+  // 4) Edit the Discord card in place.
+  return NextResponse.json({ type: RES_UPDATE_MESSAGE, data: confirmedCard(booking, approverName, capturedCents) });
+}
+
+// ── deny_booking:<id> → release the hold → CANCELLED → notify ──────────────
+async function handleDeny(bookingId: string | undefined, messageId: string | undefined, approverName: string) {
+  const booking = await prisma.booking.findFirst({
+    where: {
+      OR: [
+        ...(messageId ? [{ discordApprovalMessageId: messageId }] : []),
+        ...(bookingId ? [{ id: bookingId }] : []),
+      ],
+    },
+    include: { customer: true },
+  });
+
+  if (!booking) return ephemeral("⚠️ Booking not found for this card.");
+
+  // Idempotent: a second click just re-shows the denied card.
+  if (booking.status === "CANCELLED") {
+    return NextResponse.json({ type: RES_UPDATE_MESSAGE, data: deniedCard(booking, approverName) });
+  }
+  if (booking.status === "CONFIRMED") {
+    return ephemeral("⚠️ Already approved & captured — issue a refund instead of denying.");
+  }
+  if (!["PENDING_APPROVAL", "PENDING_PAYMENT", "DRAFT"].includes(booking.status)) {
+    return ephemeral(`⚠️ Can't deny a booking in ${booking.status}.`);
+  }
+
+  // Release the authorization (no money moves). Tolerate an already-void PI.
+  if (booking.stripePaymentIntentId) {
+    try {
+      await cancelDeposit(booking.stripePaymentIntentId);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      apiLogger.warn({ bookingId: booking.id, err: msg }, "cancelDeposit failed (continuing — hold may already be void)");
+    }
+  }
+
+  await prisma.$transaction([
+    prisma.booking.update({ where: { id: booking.id }, data: { status: "CANCELLED" } }),
+    prisma.auditLog.create({
+      data: {
+        action: "BOOKING_STATE_CHANGED",
+        bookingId: booking.id,
+        details: { action: "deny_booking", from: booking.status, deniedBy: approverName },
+      },
+    }),
+  ]);
+
+  // MESSAGING POLICY: deny does NOT send a customer email/SMS. The system sends
+  // exactly four customer messages (pre-approval + final-confirmation, each as
+  // email + SMS); a denial is not one of them. The hold is released above and
+  // the Discord card is updated below, but the customer is not auto-notified.
+  apiLogger.info(
+    { bookingId: booking.id, deniedBy: approverName },
+    "Booking denied → hold released → CANCELLED (no customer email/SMS per messaging policy)"
+  );
+  return NextResponse.json({ type: RES_UPDATE_MESSAGE, data: deniedCard(booking, approverName) });
+}
+
+// ── offer_reschedule:<id> → reuse the shared offer logic → update card ─────
+async function handleOffer(bookingId: string | undefined, messageId: string | undefined, approverName: string) {
+  const booking = await prisma.booking.findFirst({
+    where: {
+      OR: [
+        ...(messageId ? [{ discordApprovalMessageId: messageId }] : []),
+        ...(bookingId ? [{ id: bookingId }] : []),
+      ],
+    },
+    include: { customer: true },
+  });
+
+  if (!booking) return ephemeral("⚠️ Booking not found for this card.");
+  if (["CANCELLED", "COMPLETED", "ARCHIVED"].includes(booking.status)) {
+    return ephemeral(`⚠️ Can't offer a reschedule for a ${booking.status} booking.`);
+  }
+
+  // Reuse the SAME helper the admin route uses (its queue adds are already
+  // timeout-guarded, so this can't hang past Discord's 3s window).
+  const result = await offerRescheduleToCustomer(booking.id, { offeredBy: approverName }).catch((err) => {
+    apiLogger.error(
+      { bookingId: booking.id, err: err instanceof Error ? err.message : String(err) },
+      "offer_reschedule failed"
+    );
+    return undefined;
+  });
+  if (!result) return ephemeral("⚠️ Couldn't send the reschedule link — please try again.");
+
+  apiLogger.info({ bookingId: booking.id, offeredBy: approverName }, "Offer reschedule → link sent to customer");
+  // Idempotent: removing the buttons (UPDATE_MESSAGE) prevents a second offer
+  // from this card; a fresh approval card posts when the customer picks a date.
+  return NextResponse.json({ type: RES_UPDATE_MESSAGE, data: offeredCard(booking, approverName, result.offeredDates) });
+}
+
+export async function POST(req: Request) {
+  const signature = req.headers.get("x-signature-ed25519");
+  const timestamp = req.headers.get("x-signature-timestamp");
+  const rawBody = await req.text();
+
+  if (!signature || !timestamp) {
+    return new NextResponse("missing signature", { status: 401 });
+  }
+  const publicKey = process.env.DISCORD_PUBLIC_KEY;
+  if (!publicKey) {
+    return new NextResponse("server misconfigured: DISCORD_PUBLIC_KEY", { status: 500 });
+  }
+  if (!verifyDiscordSignature(rawBody, signature, timestamp, publicKey)) {
+    return new NextResponse("invalid request signature", { status: 401 });
+  }
+
+  const interaction = JSON.parse(rawBody);
+
+  // Endpoint-verification handshake.
+  if (interaction.type === TYPE_PING) {
+    return NextResponse.json({ type: RES_PONG });
+  }
+
+  // Button presses.
+  if (interaction.type === TYPE_MESSAGE_COMPONENT) {
+    const customId: string = interaction.data?.custom_id ?? "";
+    const [action, id] = customId.split(":");
+    const messageId: string | undefined = interaction.message?.id;
+    const user = interaction.member?.user ?? interaction.user;
+    const approver: string = user?.global_name ?? user?.username ?? "admin";
+
+    if (action === "approve_booking") {
+      return handleApprove(id, messageId, approver);
+    }
+    if (action === "deny_booking") {
+      return handleDeny(id, messageId, approver);
+    }
+    if (action === "offer_reschedule") {
+      return handleOffer(id, messageId, approver);
+    }
+
+    // Unknown component (discount buttons, job buttons, …) — acknowledge.
+    return ephemeral("Received — that action isn't handled by this endpoint yet.");
+  }
+
+  return NextResponse.json({ type: RES_REPLY, data: { content: "Interaction received", flags: FLAG_EPHEMERAL } });
 }

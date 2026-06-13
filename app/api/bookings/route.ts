@@ -2,7 +2,6 @@ import { NextRequest, NextResponse } from 'next/server'
 import { z } from 'zod'
 import { prisma } from '@/lib/db'
 import { BOOKING_FEE_CENTS, createBookingCheckout } from '@/lib/stripe'
-import { emailQueue, scheduledQueue } from '@/lib/queues'
 import { apiLogger } from '@/lib/logger'
 import { AGREEMENT_VERSION } from '@/lib/agreement'
 
@@ -157,8 +156,11 @@ function buildDescription(
 async function handleBooking(req: NextRequest): Promise<NextResponse> {
   const ip = req.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ?? 'unknown'
   const ua = req.headers.get('user-agent') ?? ''
-  const appUrl = process.env.APP_URL ?? 'https://wmiwci-backend.vercel.app'
-  const marketingUrl = process.env.MARKETING_SITE_URL ?? 'https://www.wemoveitweclearit.com'
+  // APP_URL must point at THIS backend (where /api/stripe/checkout/success lives).
+  // Default to the live API domain — NOT the dead wmiwci-backend.vercel.app, which
+  // 404s and breaks the post-payment redirect + success-route fulfillment fallback.
+  const appUrl = process.env.APP_URL ?? 'https://wmiwci-api.vercel.app'
+  const marketingUrl = process.env.MARKETING_SITE_URL ?? 'https://www.moveitclearit.com'
 
   let body: unknown
   try {
@@ -266,39 +268,13 @@ async function handleBooking(req: NextRequest): Promise<NextResponse> {
     },
   })
 
-  // Queue side-effects (email + abandoned-checkout recovery). A queue/Redis
-  // outage must NEVER block returning the Stripe URL — the booking + checkout
-  // session already exist, so swallow + log and still return checkoutUrl.
-  // (Previously an unguarded reject here caused a 500 → the "confirm manually"
-  //  fallback even though Stripe Checkout was ready.)
-  try {
-    await scheduledQueue.add(
-      'abandoned-checkout-recovery',
-      { type: 'abandoned-checkout-recovery', bookingId: booking.id },
-      { delay: 2 * 60 * 60 * 1000 }
-    )
-
-    await emailQueue.add('booking-confirmation', {
-      template: 'booking-confirmation',
-      to: customer.email,
-      bookingId: booking.id,
-      payload: {
-        customerName: customer.name,
-        bookingId: booking.displayId,
-        checkoutUrl: checkoutSession.url,
-        serviceType: svc?.label ?? data.serviceType,
-        requestedDate: requestedDate.toISOString(),
-        bookingFeeToday: BOOKING_FEE_CENTS / 100,
-        truckAddonDueOnMoveDay,
-        truckAddonAmount: truckAddonDueOnMoveDay ? TRUCK_PICKUP_RETURN_AMOUNT_CENTS / 100 : 0,
-      },
-    })
-  } catch (err) {
-    apiLogger.error(
-      { err, bookingId: booking.id },
-      'Booking queues failed (non-fatal) — returning Stripe checkout URL anyway'
-    )
-  }
+  // MESSAGING POLICY: no email/SMS is sent at booking creation. The system sends
+  // exactly four customer messages downstream — FINAL CONFIRMATION (email + SMS)
+  // when payment completes (fulfillPaidCheckout), and PRE-APPROVAL (email + SMS)
+  // when an admin approves in Discord. The Stripe Checkout URL is returned in the
+  // response below and the customer is redirected straight to it, so the old
+  // pre-payment "booking-confirmation" email (and the abandoned-checkout recovery
+  // email) were both removed.
 
   apiLogger.info({ bookingId: booking.id, customerId: customer.id, serviceType: data.serviceType }, 'Booking created')
 

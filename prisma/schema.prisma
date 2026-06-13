@@ -159,6 +159,11 @@ model Booking {
   scheduledStart  DateTime?     @map("scheduled_start")
   scheduledEnd    DateTime?     @map("scheduled_end")
 
+  // Reschedule tracking — the $49 hold stays attached across reschedules.
+  previousRequestedDate DateTime? @map("previous_requested_date")
+  rescheduleCount       Int       @default(0) @map("reschedule_count")
+  rescheduledAt         DateTime? @map("rescheduled_at")
+
   // Pricing
   depositAmount   Int           @default(4900) @map("deposit_amount") // cents — $49 booking fee
   depositPaid     Boolean       @default(false) @map("deposit_paid")

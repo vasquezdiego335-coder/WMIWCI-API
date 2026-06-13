@@ -150,17 +150,29 @@ export function getDiscordClient(): Client {
   // ── the global interaction entrypoint (wrapped in try/catch below) ──
   client.on(Events.InteractionCreate, onInteractionCreate)
 
-  // ── log in (guarded so a placeholder token never crash-loops) ──
+  // ── log in (guarded so a missing/malformed token never crash-loops) ──
+  // NOTE: this gateway client lives ONLY in the bot process. The worker posts
+  // approval cards over REST (src/bot/discord-rest.ts), so a bad token HERE does
+  // NOT block cards — it only disables slash commands / gateway interactions.
   const token = process.env.DISCORD_BOT_TOKEN
   if (!isConfigured(token)) {
-    botLogger.warn(
-      'DISCORD_BOT_TOKEN missing or placeholder — client created but NOT logged in. ' +
-        'Slash commands and card posting are disabled until a real token is set.'
+    botLogger.error(
+      '✖ DISCORD_BOT_TOKEN is missing/placeholder — gateway login SKIPPED. ' +
+        'Set a real bot token to enable slash commands (cards still post via REST).'
+    )
+  } else if ((token as string).split('.').length !== 3) {
+    // A real bot token is "<appId>.<timestamp>.<hmac>" — exactly 3 dot-separated
+    // parts. A wrong value (client secret, public key, or a truncated paste)
+    // makes discord.js throw "Cannot read properties of undefined (reading 'on')"
+    // deep in the WebSocket layer. Fail loudly here instead of crash-looping.
+    botLogger.error(
+      `✖ DISCORD_BOT_TOKEN looks malformed — expected 3 dot-separated parts, got ${(token as string).split('.').length}. ` +
+        'Copy the BOT TOKEN (not the client secret / public key) from Discord Developer Portal → Bot. Gateway login SKIPPED.'
     )
   } else {
     botLogger.info('Logging in to Discord gateway…')
     client.login(token).catch((err) =>
-      botLogger.error({ err: errMsg(err) }, 'Discord login failed — check DISCORD_BOT_TOKEN')
+      botLogger.error({ err: errMsg(err) }, '✖ Discord login failed — check DISCORD_BOT_TOKEN (regenerate it if needed)')
     )
   }
 
