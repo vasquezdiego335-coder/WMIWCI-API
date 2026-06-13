@@ -1,0 +1,7 @@
+# Railway (worker host) build config.
+# These services run TypeScript directly via tsx and do NOT serve the Next.js
+# app, so they must NOT run `next build`. Replace the default build with just
+# `prisma generate` (Prisma client is needed by the workers).
+# Vercel ignores this file (it uses vercel.json), so the API build is unaffected.
+[phases.build]
+cmds = ["npx prisma generate"]
