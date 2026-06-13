@@ -7,6 +7,7 @@ import { offerRescheduleToCustomer } from "@/lib/reschedule";
 import { t } from "@/lib/i18n";
 import { formatEastern } from "@/lib/scheduling";
 import { apiLogger } from "@/lib/logger";
+import { outboxEnabled, emitApproved, emitRescheduleRequested } from "@/outbox/integration";
 
 export const runtime = "nodejs";
 
@@ -199,22 +200,35 @@ async function handleApprove(bookingId: string | undefined, messageId: string | 
   try {
     await withTimeout(
       (async () => {
-        apiLogger.info({ bookingId: booking.id, to: booking.customer.email }, "[messaging] queueing PRE-APPROVAL email");
-        await emailQueue.add("pre-approval", {
-          template: "pre-approval",
-          to: booking.customer.email,
-          bookingId: booking.id,
-          payload: {
+        // OUTBOX_ENABLED → emit APPROVED to the outbox (which sends the email)
+        // and SKIP the legacy email here, so the customer never gets both.
+        if (outboxEnabled()) {
+          apiLogger.info({ bookingId: booking.id, to: booking.customer.email }, "[outbox] emitting APPROVED (legacy approval email skipped)");
+          await emitApproved({
+            bookingId: booking.id,
+            approvedBy: approverName,
             customerName: booking.customer.name,
-            displayId: booking.displayId,
-            requestedDate: when?.toISOString(),
-            items: booking.itemsDescription ?? undefined,
-            originAddress: booking.originAddress ?? undefined,
-            destAddress: booking.destAddress ?? undefined,
-            portalUrl,
-            locale,
-          },
-        });
+            customerEmail: booking.customer.email,
+            requestedDate: when?.toISOString() ?? null,
+          });
+        } else {
+          apiLogger.info({ bookingId: booking.id, to: booking.customer.email }, "[messaging] queueing PRE-APPROVAL email");
+          await emailQueue.add("pre-approval", {
+            template: "pre-approval",
+            to: booking.customer.email,
+            bookingId: booking.id,
+            payload: {
+              customerName: booking.customer.name,
+              displayId: booking.displayId,
+              requestedDate: when?.toISOString(),
+              items: booking.itemsDescription ?? undefined,
+              originAddress: booking.originAddress ?? undefined,
+              destAddress: booking.destAddress ?? undefined,
+              portalUrl,
+              locale,
+            },
+          });
+        }
         if (booking.customer.phone) {
           apiLogger.info({ bookingId: booking.id }, "[messaging] queueing PRE-APPROVAL sms");
           await smsQueue.add("pre-approval-sms", {
@@ -328,6 +342,19 @@ async function handleOffer(bookingId: string | undefined, messageId: string | un
     return undefined;
   });
   if (!result) return ephemeral("⚠️ Couldn't send the reschedule link — please try again.");
+
+  // OUTBOX_ENABLED → record RESCHEDULE_REQUESTED (sends the reschedule email via
+  // the outbox). No-op + swallowed when the flag is off.
+  if (outboxEnabled()) {
+    await emitRescheduleRequested({
+      bookingId: booking.id,
+      offeredDates: result.offeredDates,
+      rescheduleUrl: result.rescheduleUrl,
+      customerName: booking.customer.name,
+      customerEmail: booking.customer.email,
+      requestedDate: booking.requestedDate?.toISOString() ?? null,
+    });
+  }
 
   apiLogger.info({ bookingId: booking.id, offeredBy: approverName }, "Offer reschedule → link sent to customer");
   // Idempotent: removing the buttons (UPDATE_MESSAGE) prevents a second offer

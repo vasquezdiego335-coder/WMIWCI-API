@@ -2,6 +2,7 @@ import { prisma } from './db'
 import { emailQueue, smsQueue, discordQueue, marketingQueue } from './queues'
 import { webhookLogger } from './logger'
 import { t } from './i18n'
+import { outboxEnabled, emitPaymentCompleted } from '../outbox/integration'
 
 // ════════════════════════════════════════════════════════════════════════
 //  Checkout fulfillment — the single source of truth for "a $49 hold was
@@ -128,26 +129,41 @@ export async function fulfillPaidCheckout(params: {
   //  Discord approval handler. No other customer email/SMS is queued here.
   // ════════════════════════════════════════════════════════════════════════
 
-  // 1) FINAL CONFIRMATION email (1 of 2 allowed emails)
-  log.info({ to: booking.customer.email }, '[messaging] queueing FINAL CONFIRMATION email')
-  tasks.push(
-    enqueue('email:final-confirmation', () =>
-      emailQueue.add('final-confirmation', {
-        template: 'final-confirmation',
-        to: booking.customer.email,
+  // 1) Payment-step EMAIL.
+  //    OUTBOX_ENABLED → emit PAYMENT_COMPLETED to the outbox (which sends the
+  //    email) and SKIP the legacy email here, so the customer never gets both.
+  if (outboxEnabled()) {
+    log.info({ to: booking.customer.email }, '[outbox] emitting PAYMENT_COMPLETED (legacy payment email skipped)')
+    tasks.push(
+      emitPaymentCompleted({
         bookingId,
-        payload: {
-          customerName: booking.customer.name,
-          displayId: booking.displayId,
-          date: booking.requestedDate?.toISOString(),
-          amountPaid,
-          items: booking.itemsDescription ?? undefined,
-          portalUrl,
-          locale,
-        },
-      })
+        amountPaid,
+        customerName: booking.customer.name,
+        customerEmail: booking.customer.email,
+        requestedDate: booking.requestedDate?.toISOString() ?? null,
+      }).then(() => undefined)
     )
-  )
+  } else {
+    log.info({ to: booking.customer.email }, '[messaging] queueing FINAL CONFIRMATION email')
+    tasks.push(
+      enqueue('email:final-confirmation', () =>
+        emailQueue.add('final-confirmation', {
+          template: 'final-confirmation',
+          to: booking.customer.email,
+          bookingId,
+          payload: {
+            customerName: booking.customer.name,
+            displayId: booking.displayId,
+            date: booking.requestedDate?.toISOString(),
+            amountPaid,
+            items: booking.itemsDescription ?? undefined,
+            portalUrl,
+            locale,
+          },
+        })
+      )
+    )
+  }
 
   // 2) FINAL CONFIRMATION SMS (1 of 2 allowed texts) — bilingual
   if (booking.customer.phone) {

@@ -5,6 +5,7 @@ import { discordQueue } from '@/lib/queues'
 import { apiLogger } from '@/lib/logger'
 import { isDayAvailable, formatEastern } from '@/lib/scheduling'
 import { BIZ_PHONE } from '@/lib/i18n'
+import { outboxEnabled, emitNewDatePicked } from '@/outbox/integration'
 
 export async function GET(_req: NextRequest, { params }: { params: { token: string } }): Promise<NextResponse> {
   const booking = await prisma.booking.findFirst({
@@ -150,6 +151,17 @@ export async function PATCH(req: NextRequest, { params }: { params: { token: str
     apiLogger.info({ bookingId: booking.id }, 'Reschedule → Discord card re-posted (no customer email/SMS per messaging policy)')
   } catch (err) {
     apiLogger.error({ err, bookingId: booking.id }, 'Reschedule Discord card failed (non-fatal)')
+  }
+
+  // OUTBOX_ENABLED → record NEW_DATE_PICKED (state → PENDING_APPROVAL). No-op +
+  // swallowed when the flag is off.
+  if (outboxEnabled()) {
+    await emitNewDatePicked({
+      bookingId: booking.id,
+      newDate: newDate.toISOString(),
+      customerName: booking.customer.name,
+      customerEmail: booking.customer.email,
+    })
   }
 
   return NextResponse.json({

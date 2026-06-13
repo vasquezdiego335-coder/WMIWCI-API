@@ -123,6 +123,22 @@ export async function markJobFailed(job: EmailJob, error: string): Promise<void>
   `
 }
 
+/**
+ * Requeue jobs stuck in 'processing' — a worker that claimed a job and then
+ * crashed before marking it sent/failed would otherwise orphan it forever
+ * (fetchPendingJobs only claims 'pending'). Run this on a timer and at startup.
+ * Returns how many rows were requeued.
+ */
+export async function reapStaleProcessingJobs(staleMs = 5 * 60 * 1000): Promise<number> {
+  const cutoff = new Date(Date.now() - staleMs)
+  const n = await prisma.$executeRaw`
+    UPDATE email_jobs
+       SET status = 'pending', updated_at = now()
+     WHERE status = 'processing' AND updated_at < ${cutoff}
+  `
+  return n
+}
+
 /** True if the (booking, event) pair was already recorded in the outbox. */
 export async function isEventAlreadyProcessed(
   bookingId: string,

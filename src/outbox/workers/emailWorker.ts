@@ -1,5 +1,5 @@
 import 'dotenv/config'
-import { fetchPendingJobs, markJobSent, markJobFailed } from '../db/emailJobsRepo'
+import { fetchPendingJobs, markJobSent, markJobFailed, reapStaleProcessingJobs } from '../db/emailJobsRepo'
 import { EmailJob, EventType } from '../domain/events'
 import {
   sendPreApprovalEmail,
@@ -17,9 +17,13 @@ import {
 const POLL_INTERVAL_MS = Number(process.env.OUTBOX_POLL_MS ?? 3000)
 const BATCH = Number(process.env.OUTBOX_BATCH ?? 20)
 const SEND_DATE_PICKED_EMAIL = process.env.OUTBOX_SEND_DATE_PICKED === 'true'
+// A job stuck in 'processing' longer than this (a crashed worker) is requeued.
+const STALE_PROCESSING_MS = Number(process.env.OUTBOX_STALE_PROCESSING_MS ?? 5 * 60 * 1000)
+const REAP_INTERVAL_MS = Math.max(30_000, Math.floor(STALE_PROCESSING_MS / 2))
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms))
 let running = true
+let lastReapAt = 0
 
 /** Map an event to its email. NEW_DATE_PICKED is optional (the controller
  *  already posts a fresh approval card). */
@@ -61,10 +65,26 @@ export async function processOnce(): Promise<number> {
   return jobs.length
 }
 
+/** Requeue stale 'processing' jobs, throttled to REAP_INTERVAL_MS. */
+async function maybeReap(): Promise<void> {
+  if (Date.now() - lastReapAt < REAP_INTERVAL_MS) return
+  lastReapAt = Date.now()
+  try {
+    const reaped = await reapStaleProcessingJobs(STALE_PROCESSING_MS)
+    if (reaped > 0) console.warn(`[outbox] reaped ${reaped} stale 'processing' job(s) → requeued`)
+  } catch (err) {
+    console.error('[outbox] reaper error:', err)
+  }
+}
+
 async function loop(): Promise<void> {
-  console.log(`[outbox] worker started (poll=${POLL_INTERVAL_MS}ms batch=${BATCH})`)
+  console.log(
+    `[outbox] worker started (poll=${POLL_INTERVAL_MS}ms batch=${BATCH} staleReap=${STALE_PROCESSING_MS}ms)`
+  )
+  await maybeReap() // reap once at startup before claiming anything
   while (running) {
     try {
+      await maybeReap()
       const processed = await processOnce()
       if (processed === 0) await sleep(POLL_INTERVAL_MS) // idle backoff
     } catch (err) {
