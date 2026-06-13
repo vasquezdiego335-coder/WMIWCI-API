@@ -33,6 +33,16 @@ enum BookingStatus {
   CANCELLED
 }
 
+// ── Outbox state machine (src/outbox). Independent of BookingStatus above;
+//    stored in bookings.outbox_state and drives the email-outbox transitions. ──
+enum BookingState {
+  PAYMENT_PENDING
+  PENDING_APPROVAL
+  APPROVED
+  CONFIRMED
+  RESCHEDULE_REQUESTED
+}
+
 enum DiscountType {
   FIRST_TIME_AUTO     // 10% automatic for new customers
   DOOR_HANGER_PENDING // 30% claimed, awaiting approval
@@ -140,6 +150,7 @@ model Booking {
   id              String        @id @default(cuid())
   displayId       String        @unique @default(cuid()) @map("display_id") // human-friendly
   status          BookingStatus @default(DRAFT)
+  outboxState     BookingState? @map("outbox_state") // src/outbox email state machine (additive, nullable)
   customerId      String        @map("customer_id")
 
   // Location
@@ -226,6 +237,29 @@ model Booking {
   @@index([confirmedDate])
   @@index([customerToken])
   @@map("bookings")
+}
+
+// ── Email outbox (src/outbox). Self-contained: bookingId is a plain reference
+//    (no FK) so this table is decoupled from the Booking model. The unique
+//    idempotency_key (bookingId::EVENT) + ON CONFLICT DO NOTHING is what makes
+//    event creation exactly-once. ──
+model EmailJob {
+  id             String   @id @default(uuid())
+  bookingId      String   @map("booking_id")
+  eventType      String   @map("event_type")
+  idempotencyKey String   @unique @map("idempotency_key") // `${bookingId}::${EVENT}`
+  payload        Json
+  status         String   @default("pending") // pending | processing | sent | failed
+  attempts       Int      @default(0)
+  maxAttempts    Int      @default(5) @map("max_attempts")
+  lastError      String?  @map("last_error")
+  nextAttemptAt  DateTime @default(now()) @map("next_attempt_at")
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  @@index([status, nextAttemptAt])
+  @@index([bookingId])
+  @@map("email_jobs")
 }
 
 model Payment {
