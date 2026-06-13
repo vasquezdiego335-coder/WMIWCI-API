@@ -12,8 +12,19 @@ function requiredEnv(name: string): string {
 
 function stripeSecretKey(): string {
   const key = requiredEnv('STRIPE_SECRET_KEY')
-  if (process.env.NODE_ENV === 'production' && key.startsWith('sk_test_')) {
-    throw new Error('Production must use a live Stripe secret key')
+  // Guard against shipping a test key to real production by accident. For a
+  // deliberate TEST-MODE launch on prod infra, set STRIPE_ALLOW_TEST=true
+  // (Vercel forces NODE_ENV=production, so test mode needs this opt-in). Remove
+  // the flag and switch to an sk_live_ key when you go live.
+  if (
+    process.env.NODE_ENV === 'production' &&
+    key.startsWith('sk_test_') &&
+    process.env.STRIPE_ALLOW_TEST !== 'true'
+  ) {
+    throw new Error(
+      'STRIPE_SECRET_KEY is a test key under NODE_ENV=production. ' +
+        'Set STRIPE_ALLOW_TEST=true for a deliberate test-mode launch, or use an sk_live_ key.'
+    )
   }
   return key
 }
