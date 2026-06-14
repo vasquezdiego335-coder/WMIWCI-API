@@ -1,0 +1,38 @@
+FILE SCORE: 92/100
+
+CRITICAL ISSUES
+None.
+
+HIGH PRIORITY ISSUES
+- **Potential database connection pooling hazard on serverless (Neon)**  
+  The PrismaClient is instantiated with no explicit `connection_limit` or `datasource` configuration. When deployed on Vercel serverless functions against Neon (a connection-limited Postgres offering), the default Prisma pool size can quickly exhaust the database’s connection allowance, leading to `too many connections` errors and request failures. This is a well‑known Prisma‑serverless risk that requires client‑side tuning (for example, the `DATABASE_URL` must often include `?pgbouncer=true&connection_limit=1`). Because the architecture map states **Neon** and **Vercel**, the absence of this safeguard is a high‑impact reliability concern.
+
+MEDIUM PRIORITY ISSUES
+- **Production log level excludes warnings**  
+  The PrismaClient `log` array for `production` only contains `['error']`; warnings are suppressed. Prisma warnings (e.g., slow‑query thresholds, connection hiccups, or schema mismatches) could go unnoticed, delaying detection of subtle database problems. This reduces observability without meaningful cost.
+
+LOW PRIORITY ISSUES
+- **No explicit query timeout / error‑handling options**  
+  The PrismaClient uses all defaults. While not a direct bug, edge‑case network stalls or long‑running queries could block request handlers without a deadline; adding a timeout or an engine‑level `connection_timeout` can improve resilience under load, but current code does not require it. This is a low‑severity operational refinement.
+
+SECURITY CONCERNS
+None. The file does not handle secrets; it relies on environment variables consumed by Prisma, which is the responsibility of the deployment environment.
+
+SCALABILITY CONCERNS
+- **Connection pool exhaustion in serverless model** (see HIGH PRIORITY).  
+- The singleton pattern only caches the client in development (`NODE_ENV !== 'production'`). This is safe, but in production it means each cold start creates a fresh PrismaClient and connection pool; with careful URL pooling (as noted) this is acceptable. No other scaling red flags are present.
+
+DEPLOYMENT RISKS
+None specific to this file. The client will work on both Vercel and Railway as long as the environment variables are set. No architectural coupling to Next.js or framework‑specific modules.
+
+ARCHITECTURAL VIOLATIONS
+None. The file resides in the correct location (`src/lib/`) and is importable by workers and routes without violating the rule that workers must not import Next.js code.
+
+TECHNICAL DEBT
+None. The hot‑reload pattern is standard and minimal.
+
+DEAD CODE
+None.
+
+FINAL VERDICT
+The file is clean, well‑structured, and follows the recommended Prisma single‑instance pattern. The only meaningful risk is the absence of explicit serverless‑friendly connection pooling for Neon, which aligns with a well‑known Vercel+Neon pitfall. Adding that configuration (through the datasource URL or Prisma options) would eliminate the only high‑priority concern.

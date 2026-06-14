@@ -1,0 +1,59 @@
+FILE SCORE: 65/100
+
+CRITICAL ISSUES
+(none)
+
+HIGH PRIORITY ISSUES
+1. **Unsafe type cast – `payload as unknown as MarketingContact`**  
+   The worker blindly casts `job.data.payload` to `MarketingContact` without any runtime validation. If the payload shape does not match the expected interface (e.g., missing required fields, wrong types), `enrollCustomer()` will receive malformed data and likely throw an unexpected error. This will cause job failures with opaque diagnostics. When the marketing stub is replaced by a real integration, this becomes a ticking time bomb.
+
+2. **No idempotency guarantee for `enroll-customer`**  
+   The job does not include any deduplication mechanism (e.g., idempotency key, upsert, or check-before-create). If the same job is executed more than once (redelivery after worker crash, duplicate enqueue, or automatic retries configured elsewhere), the customer will be enrolled multiple times in the marketing CRM. This risks duplicate contacts, spam, and data pollution.
+
+HIGH PRIORITY ISSUES (continue)
+3. **Lack of job data validation**  
+   The handler destructures `job.data` assuming `type`, `bookingId`, and `payload` always exist. There is no guard against missing or falsy values before entering the `switch`. If the queue receives a malformed job, `enrollCustomer` may be called with `undefined` payload, causing a runtime error that is only caught generically by the failed handler. The `default` case does handle unknown `type`, but does not protect the `enroll-customer` path from missing `payload`.
+
+MEDIUM PRIORITY ISSUES
+1. **No explicit job retry strategy**  
+   The worker does not set `attempts` or `backoff` options (BullMQ defaults to no retries unless the job itself specifies them). If the marketing integration encounters a transient failure (network timeout, rate limit), the job will be moved directly to the failed queue and never retried – silently losing the enrollment. The decision to retry is left entirely to the queue producer, which is not visible here and may be inconsistent.
+
+2. **Inadequate error logging**  
+   The `failed` event handler logs only `err.message`, discarding the full stack trace. This makes root-cause analysis difficult when the `enrollCustomer` call fails with an unexpected exception. The worker also does not log any details about the failed job’s data (redacting PII where necessary), further hindering debugging.
+
+3. **No timeout on job processing**  
+   If `enrollCustomer()` hangs (e.g., due to a stuck external API call when the stub is replaced), the worker will hold a concurrency slot indefinitely, eventually blocking all marketing jobs. BullMQ’s default stalled-job detection can catch this, but it relies on the `lockDuration` setting which is not explicitly configured here.
+
+LOW PRIORITY ISSUES
+1. **Concurrency set to 2**  
+   The value is safe for a low-volume non-critical worker, but no justification or configuration via environment variable is provided. If the marketing API has tight rate limits, 2 might be too high; if it scales up, 2 might bottleneck. It works for the stub, but the magic number is a minor smell.
+
+2. **Success log lacks context beyond the child logger**  
+   The `log.info('Marketing enrollment processed')` message does not include the `bookingId` or other identifiers in its message string (they are only in the child logger’s bindings). That is still useful, but could be improved for log aggregation.
+
+3. **`bookingId` is destructured and logged but not used**  
+   The variable is only written to the child logger. This is harmless, but indicates the handler has no per-booking logic; it could be removed if never intended for use.
+
+SECURITY CONCERNS
+- **Unvalidated payload injection**  
+  Although the Redis queue is internal and secured by Upstash credentials, any ability to inject a job (a compromised internal service, a misconfigured queue producer) would allow arbitrary data to be passed directly to `enrollCustomer`. When the stub is replaced by a real CRM integration, this could become an injection vector (e.g., HTML in marketing fields, SSRF if the CRM uses URLs from the payload). Proper validation and sanitisation are absent.
+
+SCALABILITY CONCERNS
+- None at this stage. The worker uses a BullMQ `Worker` with `concurrency: 2` and can be scaled horizontally as a standard Redis-backed consumer. No shared state is held; it is ready for production scaling when the underlying integration supports it.
+
+DEPLOYMENT RISKS
+- No deployment-specific risks beyond the generic requirement that the worker process must run outside Vercel (on Railway/Render/VPS).  
+- If the `marketing` module is updated to connect to an external API, missing connection timeouts and retry policies could cause the worker to stall during network outages, potentially requiring a restart. This risk is not inherent to the worker’s code but to the underlying `enrollCustomer` implementation.
+
+ARCHITECTURAL VIOLATIONS
+- None. The worker correctly imports only `src/lib` modules (`redis`, `logger`, `queues`, `marketing`). It does not import Next.js code, Discord gateway modules, or any forbidden folder.
+
+TECHNICAL DEBT
+- **Unsafe type assertion (`as unknown as MarketingContact`)** indicates a disconnect between the queue job type and the expected payload. This should be resolved either by tightening the `MarketingJobData` type to be strongly typed for each job type, or by introducing a runtime validation layer (e.g., Zod) instead of a blind cast.
+- **No structured job payload validation** – a validation schema should be added before invoking the marketing logic.
+
+DEAD CODE
+- None. The `default` switch case is reachable if an unknown `type` is queued; the worker itself is registered and active.
+
+FINAL VERDICT
+The worker is safe and functional as a stub for a not-yet-integrated marketing flow. However, the two high-priority issues – the unsafe type cast and the lack of idempotency – must be addressed before the real marketing integration is activated. Additional hardening (input validation, retry strategy, improved error logging) is strongly recommended. In its current placeholder form, the code is acceptable but carries unnecessary technical debt.

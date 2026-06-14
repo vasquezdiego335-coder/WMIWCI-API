@@ -1,0 +1,66 @@
+FILE SCORE: 35/100
+
+CRITICAL ISSUES
+
+1. **Timezone‑oblivious day boundary calculations**  
+   `isDayAvailable` and `isCrewAvailable` create `start`/`end`/`dateOnly` by setting local‑time hours to midnight, but the server (Vercel/Railway) runs in UTC. The `scheduledStart` and `dayBlock.date` fields in the database are stored in UTC. This means the query window `[start, end]` will almost certainly be wrong for Eastern time (e.g., midnight UTC is 8 PM Eastern, not midnight). A booking that starts at 11 PM Eastern Tuesday may be counted on the wrong day, and day‑blocks may be compared against an offset window. **Every scheduling decision is unreliable until this is fixed.**
+
+2. **No error handling on database calls**  
+   All Prisma queries (`findFirst`, `count`, `findMany`, `findUnique`) can throw (e.g., connection timeout, conflict, auth failure). None are wrapped in try/catch. An unhandled rejection propagates to the caller (route handler or worker) and risks a 500 response or worker crash. The functions must return safe fallbacks (e.g., `isDayAvailable` → `false`, `isCrewAvailable` → `{available:false, unavailableUsers:["error"]}`) or log and re‑throw after context.
+
+HIGH PRIORITY ISSUES
+
+3. **`findAvailableSlots` may return slots in the past**  
+   The function sets the candidate date’s hours to `9` (AM) but never compares it with the current wall‑clock time. If `fromDate` is today (and it’s already past 9 AM Eastern), the first returned `Date` represents a 9 AM that has already elapsed. Callers that use this slot for booking or display will present an impossible time. The iterator should skip a candidate if the resulting `Date` is before `new Date()`.
+
+4. **Excessive database round‑trips in `findAvailableSlots`**  
+   For each day (up to 60), the function calls `isDayAvailable` (2 queries) and `isCrewAvailable` (1 + N queries where N is number of active staff). In the worst case this can fire hundreds of queries in a single call. There is no caching layer for staff availability, day‑blocks, or booking counts. This will cause high latency and overload the database under moderate concurrency (e.g., a customer repeatedly hitting the “reschedule” view).
+
+MEDIUM PRIORITY ISSUES
+
+5. **Race condition on daily capacity**  
+   `isDayAvailable` reads the current booking count and then returns `count < MAX_JOBS`. Between that read and the subsequent booking insertion (in another request), another request could insert a booking and exceed the limit. There is no serializable transaction or atomic counter, so overbooking is possible. The severity depends on whether the downstream booking handler re‑verifies capacity atomically; this function alone provides no guarantee.
+
+6. **Missing logging**  
+   None of the functions emit any log events, even at debug level. When a day is blocked, a staff member is unavailable, or a DB error occurs, no trace is recorded. This makes diagnosing scheduling problems (especially timezone‑related) extremely difficult in production.
+
+7. **No retry or circuit‑breaker on transient database failures**  
+   Temporary connection loss or a cold Neon instance waking up will immediately fail the function. A simple exponential‑backoff retry (or letting the worker handle it) is absent.
+
+LOW PRIORITY ISSUES
+
+8. **`calculateEndTime` adds a travel buffer but capacity logic ignores duration**  
+   A booking that starts late in one day and extends into the next (due to estimated hours + buffer) may block the following morning’s crew, yet `isDayAvailable` only counts the start date. This can lead to overlapping commitments, especially for multi‑hour jobs near the day boundary.
+
+9. **`isCrewAvailable` does not check if an availability record is missing**  
+   If a staff member has never had an availability record created, the code treats them as available (because `findUnique` returns `null`). This might be intentional but should be explicitly decided and documented; otherwise it can mask missing data that should have been set.
+
+SECURITY CONCERNS
+
+- None directly. The file does not handle input sanitisation or authentication, but that is the caller’s responsibility.
+
+SCALABILITY CONCERNS
+
+- Already covered by the N+1 query problem and unbounded loop in `findAvailableSlots`. This will degrade linearly with staff count and search window size. In a production deployment with many concurrent look‑ups, database connection pools may be exhausted.
+
+DEPLOYMENT RISKS
+
+- The timezone bug is silent and will surface only after deployment to Vercel/Railway where `TZ` is UTC. Local development on a machine set to Eastern time may hide the problem entirely, giving false confidence.
+
+ARCHITECTURAL VIOLATIONS
+
+- None. The file correctly lives in `src/lib` and uses only the Prisma client (no Next.js imports).
+
+TECHNICAL DEBT
+
+- The hard‑coded 9 AM start time and 60‑day search limit should be configurable.
+- The “skip weekends” rule (day 0 and 6) is hard‑coded; a configurable workdays list would be more flexible.
+- No unit tests are referenced; the logic around date arithmetic is notoriously error‑prone and should have automated test coverage.
+
+DEAD CODE
+
+- None observed. All exported functions appear to be used by scheduling‑aware routes or workers.
+
+FINAL VERDICT
+
+**Unsuitable for production** – the core date‑range calculations are fundamentally broken in any deployment where the process timezone differs from America/New_York. Combined with missing error handling and the race condition, the module will generate incorrect availability windows and fail silently under load. Fix the timezone handling first, then add defensive error logic and a basic caching layer to address the N+1 queries.

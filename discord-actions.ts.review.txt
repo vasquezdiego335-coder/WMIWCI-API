@@ -1,0 +1,84 @@
+```json
+{
+  "FILE_SCORE": 40,
+  "CRITICAL_ISSUES": [
+    {
+      "title": "Worker imports gateway module, violating architecture and risking crashes",
+      "description": "The file `src/bot/discord-actions.ts` is designed as a gateway bot module (creates a Discord.js `Client`, logs in, listens to interactions). However, its exports — `getDiscordClient`, `postBookingApprovalCard`, `postDiscountApprovalCard`, `postPaymentAlert`, `postFailureAlert`, `createJobChannels`, `postDailySchedule` — are intended to be imported by the BullMQ worker (`src/workers/discord.worker.ts`) as stated in the code comment. The architecture map explicitly forbids workers from importing `discord-actions.ts` because it boots a gateway client, causing a second login, potential crashes, and conflict with the separate bot process. The worker should use `discord-rest.ts` for REST-based card posting without a gateway connection. This is a direct violation of the deployment topology and will cause runtime instability.",
+      "classification": "CRITICAL"
+    }
+  ],
+  "HIGH_PRIORITY_ISSUES": [
+    {
+      "title": "No idempotency for card posting functions",
+      "description": "Functions like `postBookingApprovalCard` do not check if a card for the same `bookingId` has already been posted. If the queue job is retried (e.g., due to a transient failure) or somehow executed multiple times, duplicate approval cards will appear in Discord. The architecture relies on queue-level deduplication, but a defensive check (e.g., DB flag or message existence) would prevent spam in edge cases.",
+      "classification": "HIGH"
+    },
+    {
+      "title": "Card posting functions require a logged‑in gateway client",
+      "description": "`postBookingApprovalCard` and similar functions use `getChannel` → `client.channels.fetch` and `channel.send`, which depend on the gateway client being logged in. This means the worker, if it imports this module, must endure the full gateway lifecycle (login, heartbeats, sharding). The architecture requires workers to use REST only. The current implementation cannot work reliably in a worker process without full gateway integration.",
+      "classification": "HIGH"
+    }
+  ],
+  "MEDIUM_PRIORITY_ISSUES": [
+    {
+      "title": "Lack of input validation on payload fields",
+      "description": "Payload fields like `requestedDate`, `agreementAcceptedAt`, `amountPaid`, `moveTotal` are used directly without validation. An invalid date string will result in 'Invalid Date' in the embed. Non‑numeric values for monetary fields will produce unexpected formatting or empty fields. This could confuse operators and degrade trust.",
+      "classification": "MEDIUM"
+    },
+    {
+      "title": "No graceful shutdown of Discord client",
+      "description": "`getDiscordClient` creates a long‑lived client but never registers a shutdown handler (`client.destroy()`). If the process exits, the bot may stay online until the gateway timeout, leaving stale presence.",
+      "classification": "MEDIUM"
+    },
+    {
+      "title": "Inefficient channel fetching on every card send",
+      "description": "`getChannel` calls `client.channels.fetch(channelId)` for every message (e.g., `postBookingApprovalCard`). Channel IDs are static; caching the fetched channel object after first success would reduce API calls and latency. The overhead is minor but unnecessary.",
+      "classification": "MEDIUM"
+    },
+    {
+      "title": "Button interaction fallback may leak internal configuration",
+      "description": "When a button interaction arrives via the gateway (instead of the HTTP endpoint), the handler replies: 'if nothing happens, confirm the Interactions Endpoint URL is set…'. This exposes that the system expects an interactions URL, which an attacker could use to probe for misconfiguration. The message should be more generic.",
+      "classification": "MEDIUM"
+    }
+  ],
+  "LOW_PRIORITY_ISSUES": [
+    {
+      "title": "Missing handling for modal submit interactions",
+      "description": "The `onInteractionCreate` handler does not account for `ModalSubmitInteraction`. If a modal is ever used, it will be silently ignored (logged as unhandled). Not a current bug, but indicates incomplete interaction routing.",
+      "classification": "LOW"
+    },
+    {
+      "title": "No rate‑limit awareness for bulk channel messages",
+      "description": "None of the card‑posting functions implement backoff or queueing when Discord rate limits are encountered. The worker’s serial job processing might be safe, but if multiple jobs finish simultaneously, they could flood a channel. Relying on discord.js internal ratelimit handling is acceptable only with a gateway client; REST‑based workers would need explicit handling.",
+      "classification": "LOW"
+    }
+  ],
+  "SECURITY_CONCERNS": [
+    "Token validation checks for 3‑part format, which reduces risk of using a wrong secret, but a short token could still be syntactically valid and fail at login. The placeholder check guards against 'REPLACE_ME' values.",
+    "The `buildEnvSummary` function logs environment key names but not values — acceptable for debug banners.",
+    "No input sanitization on embed fields from user‑supplied data (e.g., `customerName`, `items`). Discord.js escapes text, but very long strings may be truncated or cause rendering issues, not a direct injection risk."
+  ],
+  "SCALABILITY_CONCERNS": [
+    "All card posting goes through a single channel per category (scheduling, jobs, alerts). With high booking volume, a single channel could become noisy and hit message rate limits. Sharding or per‑customer threads are not considered."
+  ],
+  "DEPLOYMENT_RISKS": [
+    "If the worker process runs this module, it must run as a persistent service with gateway access. The architecture intends the bot and worker to be separate processes; combining them forces a single point of failure and violates the split deployment model.",
+    "Railway/VPS hosting for the bot must ensure `DISCORD_BOT_TOKEN` is valid, or the worker (if it imports this) would fail silently and no approval cards would be sent — the fallback REST path would be missing."
+  ],
+  "ARCHITECTURAL_VIOLATIONS": [
+    "Worker imports `src/bot/discord-actions.ts` instead of using `src/bot/discord-rest.ts` for card posting. This contradicts the documented rule: 'Workers post Discord via discord-rest.ts (REST), never discord-actions.ts (gateway)'.",
+    "Mixing gateway interaction handling and REST‑style card posting in a single module breaks the principle of separation of concerns; it makes it impossible to run the worker without also running a bot client."
+  ],
+  "TECHNICAL_DEBT": [
+    "The file is ~400 lines and combines environment validation, client setup, interaction routing, and multiple business‑logic functions. It should be split into gateway‑only and REST‑only modules.",
+    "Hard‑coded fallback messages like 'Button received. Approvals/denials are processed through the web interactions endpoint…' are not translatable and may become stale.",
+    "The `EmbedBuilder` instantiation patterns are repeated across functions; a helper factory could reduce duplication."
+  ],
+  "DEAD_CODE": [
+    "None identified as completely dead; the exported functions are likely used by the worker (which itself is a mistake). If the worker were correctly implemented, these exports would become dead code and should be removed from this file.",
+    "The button and select‑menu interaction handlers are effectively dead if the Discord application has a configured Interactions Endpoint URL, because Discord will not deliver them over the gateway. They serve only as a fallback."
+  ],
+  "FINAL_VERDICT": "The file contains a critical architectural flaw: it is designed to be imported by the worker but boots a full Discord gateway client. This contradicts the project’s architecture and will cause instability if deployed as‑is. The card‑posting logic must be extracted to `discord-rest.ts` and the worker must use that instead. Without that fix, the system fails to meet its own design goals."
+}
+```

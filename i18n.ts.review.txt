@@ -1,0 +1,47 @@
+FILE SCORE: 85/100
+
+CRITICAL ISSUES
+None.
+
+HIGH PRIORITY ISSUES
+1. **Missing placeholder validation in `t()` → unreplaced placeholders can slip into customer messages.**
+   The `fill()` helper silently leaves `{key}` when the caller omits a required variable.  A forgotten `displayId`, `name`, `date`, or `phone` will result in a literal `{…}` sent to the customer via SMS/email, which is a visible defect.  The translation utility should either throw or return an error when a template placeholder has no matching value.
+
+MEDIUM PRIORITY ISSUES
+1. **Hardcoded `BIZ_PHONE` and `BIZ_NAME` — no environment-configurable fallback.**
+   The business phone `862-640-0625` and name are hardwired.  While they rarely change, making them environment variables (`BUSINESS_PHONE`, `BUSINESS_NAME`) would simplify testing across staging/production and avoid future code edits for such changes.
+2. **`emailSubject()` lacks type‑safety on the template parameter.**
+   The function accepts any `string`, falling back to `BIZ_NAME` for unknown templates.  A typo like `"pre-approval"` vs `"preApproval"` will silently produce a generic subject, risking inconsistent customer experience.  Using a union type or a const‑asserted key would catch mistakes at compile time.
+3. **Unused translation strings clutter the catalog.**
+   Keys like `jobStarted`, `jobCompleted`, `bookingConfirmed`, `bookingRescheduled`, `rescheduleOffer`, `bookingDenied`, `refundReleased`, `refundPending`, and `contactAck` are defined but never consumed by the active messaging pipeline (only `preApproval` and `finalConfirmation` are allowed).  Their presence increases confusion and maintenance burden.
+
+LOW PRIORITY ISSUES
+1. **`normalizeLocale` may match unexpected inputs.**
+   Any language tag that begins with `es` (e.g., `estonian`, `es-419`) is treated as Spanish.  While harmless in practice, a slightly stricter regex (e.g., `^es(?:-[A-Z]{2})?$`) would prevent accidental mismatches.
+2. **`emailSubject` provides no default for nonexistent locale values.**
+   If a future `es` string is missing from a subject entry, it silently returns `BIZ_NAME`.  Logging a warning when a key is missing would help catch incomplete translations.
+3. **`fill()` regex works only for alphanumeric/underscore placeholders.**
+   The pattern `\{(\w+)\}` is safe for current keys, but if a key ever contains dots or hyphens (e.g., `{full.name}`) the interpolation would silently fail.
+
+SECURITY CONCERNS
+- None.  The utility only concatenates constant strings and developer‑supplied variables; there is no direct exposure of user input that could lead to injection.  (SMS/email contents are treated as plain text, so XSS is not applicable.)
+
+SCALABILITY CONCERNS
+- None.  The catalog is static and in‑memory; it will perform identically regardless of load.
+
+DEPLOYMENT RISKS
+- None directly.  The hardcoded phone/number may differ between environments (e.g., a test number), but this is a configuration concern, not a runtime deployment failure.
+
+ARCHITECTURAL VIOLATIONS
+- None.  The file sits in `src/lib/`, does not import anything from Next.js, workers, or bot layers, and matches the architecture map’s expectation of a core utility.
+
+TECHNICAL DEBT
+- The lack of placeholder validation forces callers to be 100% careful, which is fragile.
+- The hardcoded business details make the module less portable.
+- The `emailSubject` fallback to `BIZ_NAME` hides typos and suppresses the awareness of missing translations.
+
+DEAD CODE
+- The translation keys `jobStarted`, `jobCompleted`, `bookingConfirmed`, `bookingRescheduled`, `rescheduleOffer`, `bookingDenied`, `refundReleased`, `refundPending`, and `contactAck` are defined but never triggered by the current messaging policy (only `preApproval` and `finalConfirmation` are allowed).  They are marked as “non‑critical / not yet triggered” in the architecture guide and should be removed or explicitly guarded.
+
+FINAL VERDICT
+The file is well‑structured and correctly implements bilingual string look-up.  The single real risk is the missing validation that could allow unreplaced placeholders to reach the customer.  Aside from that, it’s a clean utility with minor points about configuration and type‑safety.  With the high‑priority validation added and the dead code pruned, it would be a very solid module.

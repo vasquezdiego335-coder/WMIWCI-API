@@ -2,10 +2,17 @@ import { SignJWT, jwtVerify } from 'jose'
 import { cookies } from 'next/headers'
 import { NextRequest, NextResponse } from 'next/server'
 import { UserRole } from '@prisma/client'
+import { apiLogger } from './logger'
 
-const JWT_SECRET = new TextEncoder().encode(
-  process.env.JWT_SECRET ?? 'dev_secret_minimum_32_chars_long!!'
-)
+function getJwtSecret(): Uint8Array {
+  const raw = process.env.JWT_SECRET
+  if (!raw && process.env.NODE_ENV === 'production') {
+    throw new Error('JWT_SECRET must be set in production')
+  }
+  return new TextEncoder().encode(raw || 'dev_secret_minimum_32_chars_long!!')
+}
+
+const JWT_SECRET = getJwtSecret()
 
 const COOKIE_NAME = 'moveit_session'
 
@@ -17,13 +24,17 @@ export interface SessionPayload {
 }
 
 // ── Sign a new JWT ─────────────────────────────────────────────
+const JWT_ISSUER = process.env.JWT_ISSUER || 'moveitclearit.com'
+const JWT_AUDIENCE = process.env.JWT_AUDIENCE || 'wmiwci-api.vercel.app'
+const JWT_EXPIRY = process.env.JWT_EXPIRY?.trim() || '7d'
+
 export async function signToken(payload: SessionPayload): Promise<string> {
   return new SignJWT({ ...payload })
     .setProtectedHeader({ alg: 'HS256' })
     .setIssuedAt()
-    .setExpirationTime(process.env.JWT_EXPIRY ?? '7d')
-    .setIssuer('moveitclearit.com')
-    .setAudience('wmiwci-backend.vercel.app')
+    .setExpirationTime(JWT_EXPIRY)
+    .setIssuer(JWT_ISSUER)
+    .setAudience(JWT_AUDIENCE)
     .sign(JWT_SECRET)
 }
 
@@ -31,11 +42,13 @@ export async function signToken(payload: SessionPayload): Promise<string> {
 export async function verifyToken(token: string): Promise<SessionPayload | null> {
   try {
     const { payload } = await jwtVerify(token, JWT_SECRET, {
-      issuer: 'moveitclearit.com',
-      audience: 'wmiwci-backend.vercel.app',
+      issuer: JWT_ISSUER,
+      audience: JWT_AUDIENCE,
     })
     return payload as unknown as SessionPayload
-  } catch {
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err)
+    apiLogger.debug({ reason }, 'JWT verification failed')
     return null
   }
 }

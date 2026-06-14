@@ -45,7 +45,7 @@ We are not responsible for: pre-existing damage to furniture or property; damage
 After the job is completed: no refunds will be issued; no additional trips are included; extra work requires a new agreement and new price.
 
 6. PAYMENT TERMS
-A $49 booking fee is authorized today via Stripe — this is a hold, not a charge. We capture the $49 only when we approve your booking; if we deny it, the hold is released and you are never charged. The remaining balance for the move is due before or immediately after completion. If you add the Truck Pickup & Return option, the +$50 add-on is due on move day and is not charged today. [RECONCILED — confirm accepted balance payment methods, e.g. Cash · Zelle · Cash App · Venmo.]
+A $49 booking fee is authorized today via Stripe — this is a hold, not a charge. We capture the $49 only when we approve your booking; if we deny it, the hold is released and you are never charged. The remaining balance for the move is due before or immediately after completion. If you add the Truck Pickup & Return option, the +$50 add-on is due on move day and is not charged today. Accepted balance payment methods: Cash, Zelle, Cash App, or Venmo.
 
 By checking the agreement box and submitting your booking, you acknowledge that you have read and agree to all terms above. We Move It, We Clear It. is a labor-only service and is NOT a licensed moving carrier or DOT-regulated transportation company.`
 

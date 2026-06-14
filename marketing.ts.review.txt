@@ -1,0 +1,36 @@
+FILE SCORE: 85/100
+
+CRITICAL ISSUES
+- None.
+
+HIGH PRIORITY ISSUES
+- The marketing queue/worker (marketing.worker.ts) is running on the persistent host and draining jobs, but enrollCustomer() is a permanent no‑op. This wastes CPU, memory, and Redis job processing resources for no functional gain. If the integration is not going live soon, the queue and worker should be removed or disabled to keep the deployment clean and economical.
+
+MEDIUM PRIORITY ISSUES
+- Log spam risk: When MARKETING_API_KEY and MARKETING_LIST_ID are set (i.e., “configured”) but the provider call is still unimplemented, every booking will emit a warning-level log (“enrollCustomer(): configured but no provider call implemented yet”). Over time this can flood logs with noise; the log level should be reduced to info/verbose or the condition should be handled differently (e.g., a one‑time startup warning instead of per‑call).
+
+LOW PRIORITY ISSUES
+- No validation of the contact email before logging or future use. If email is empty or undefined, the log entry will show `email: undefined` with no observable failure, but when the implementation is added a missing email could break an external API call. Adding a guard (`if (!contact.email) return`) would make the stub more robust.
+- The TODO comment shows a sample API call lacking error handling, retries, or idempotency. While not an issue now, the real implementation must include those protections to avoid silent failures or duplicate enrollments.
+
+SECURITY CONCERNS
+- None. No secrets are exposed, and the file does not handle sensitive data beyond logging an email address (which is standard for a marketing integration).
+
+SCALABILITY CONCERNS
+- None inherent to this file. However, the sibling marketing worker processes jobs that do nothing; removing it would free up worker capacity.
+
+DEPLOYMENT RISKS
+- None. The module is a plain TypeScript helper with no platform‑specific constraints. Both Vercel and Railway workers can safely import it.
+
+ARCHITECTURAL VIOLATIONS
+- None. The file resides in src/lib, does not import any Next.js or Discord gateway code, and uses only the shared logger. It follows the established pattern of a safe‑by‑default stub.
+
+TECHNICAL DEBT
+- The entire marketing pipeline (queue, worker, and this stub) represents an incomplete feature. It adds code, configuration, and runtime overhead without delivering value. Until the integration is completed, it is dead weight in the codebase.
+- The warning log inside enrollCustomer is a “fill in the TODO” prompt that will persist in production logs if anyone accidentally sets the env vars early. This is a minor maintenance smell.
+
+DEAD CODE
+- Not strictly dead (the function is called), but the code path is permanently a no‑op. The commented‑out provider code is placeholder documentation, not executable dead code.
+
+FINAL VERDICT
+The file is a well‑structured placeholder that follows the project’s safety conventions (early no‑op, clear logging). It poses no immediate risk and its design is sound. The largest real‑world concern is that the corresponding marketing worker runs uselessly, consuming resources on the persistent host; disabling that worker until the integration is implemented would be the highest‑impact improvement.

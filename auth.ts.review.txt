@@ -1,0 +1,85 @@
+FILE SCORE: 62/100
+
+CRITICAL ISSUES
+
+1. **Hardcoded fallback JWT secret**
+   - If `JWT_SECRET` environment variable is unset, the fallback string `'dev_secret_minimum_32_chars_long!!'` is used in production.  
+   - Anyone who knows or discovers this well‑known secret can forge valid admin sessions, granting full access to admin endpoints and internal tools.  
+   - **CRITICAL**
+
+2. **Hardcoded issuer and audience break on dynamic deployments**
+   - `issuer: 'moveitclearit.com'` and `audience: 'wmiwci-backend.vercel.app'` are baked into every token.  
+   - If the backend is deployed to Vercel preview URLs, staging domains, or a different production domain, the audience/issuer will not match. Token verification fails for *all* requests, locking out administration entirely.  
+   - Even a production URL change (e.g., custom domain different from `wmiwci-backend.vercel.app`) invalidates every existing session.  
+   - **CRITICAL**
+
+HIGH PRIORITY ISSUES
+
+3. **Unvalidated `JWT_EXPIRY` env leads to immediate expiry**
+   - `process.env.JWT_EXPIRY ?? '7d'` falls back only on `undefined`/`null`. If the variable is set to an empty string (`JWT_EXPIRY=`), the token expiry will be empty, causing tokens to expire immediately and all logins to silently fail.  
+   - **HIGH**
+
+MEDIUM PRIORITY ISSUES
+
+4. **No logging on authentication failures**
+   - `verifyToken` silently returns `null` on any error (expired, tampered, wrong issuer/audience). No logging indicates *why* a session was rejected, making it impossible to monitor attacks, misconfigurations, or unusual failure patterns.  
+   - CSRF verification also fails silently without any audit trail.  
+   - **MEDIUM**
+
+5. **Missing CSRF token rotation**
+   - The double-submit cookie token is static across multiple requests. If the same token is accepted indefinitely, an attacker can reuse a stolen CSRF cookie indefinitely (within the session lifetime). Tokens should be rotated after each validation (or bound to a server‑side session value).  
+   - Currently the code only generates and verifies; it never rotates or expires the server‑recognised token.  
+   - **MEDIUM**
+
+6. **No session inactivity timeout**
+   - JWT expiry is absolute (e.g., 7d). There is no rolling window or server‑side invalidation for prolonged inactivity. If an admin leaves a browser open, the session remains usable for the full 7‑day window.  
+   - **MEDIUM**
+
+LOW PRIORITY ISSUES
+
+7. **`crypto.getRandomValues` usage without explicit import**
+   - Relying on the global `crypto` object works in Node.js and Next.js Edge, but some polyfillless environments may lack it. In the context of this codebase it is unlikely to fail, but it’s a minor fragility.  
+   - **LOW**
+
+8. **CSRF cookie attributes not managed in this file**
+   - The file only verifies the CSRF token; it does not set the `moveit_csrf` cookie with appropriate `httpOnly`, `secure`, and `sameSite` flags. While the login endpoint likely handles this, the separation makes it easy to forget to synchronise attributes, potentially allowing a less‑secure cookie.  
+   - **LOW**
+
+9. **`sameSite: 'strict'` may break legitimate cross‑origin navigation**
+   - Used for the session cookie. If an admin authentication flow involves a redirect from a third‑party or payment gateway with a same‑site boundary, the session cookie may not be sent, causing a broken user experience. This is acceptable for an admin panel but worth noting.  
+   - **LOW**
+
+SECURITY CONCERNS
+
+- Critical fallback JWT secret is the most immediate threat.  
+- No token version or server‑side revocation ability means a leaked session cannot be invalidated short of rotating the entire JWT secret (which also invalidates all other active sessions).  
+- CSRF token is not bound to the session (e.g., stored server‑side), so a stolen CSRF cookie allows an attacker to craft malicious state‑changing requests as long as the admin’s session is open.
+
+SCALABILITY CONCERNS
+
+- None introduced by this file. The JWT verification is stateless, so it scales horizontally without issues.  
+
+DEPLOYMENT RISKS
+
+- Hardcoded issuer/audience will break on any hostname change, including preview branches, staging, and even a production domain change. Every deployment to a non‑matching environment will render admin panels unusable.  
+- Fallback secret means a simple misconfiguration in production silently opens a severe vulnerability.  
+
+ARCHITECTURAL VIOLATIONS
+
+- The file depends on `cookies()` from `next/headers`, which is a Next.js‑specific API. This is acceptable within the `src/lib` folder as it is used in middleware and API routes (both Next.js runtime). No worker or bot code imports this module, so the boundary is respected.  
+- No violation of the rule that `app/api` files cannot be moved.
+
+TECHNICAL DEBT
+
+- Lack of logging/tracing for authentication decisions will slow down incident response.  
+- Static CSRF token without rotation is a fragile web security practice that should be modernised.  
+- The `JWT_EXPIRY` empty‑string gap is a latent bug waiting to be triggered by a common misconfiguration.  
+- The use of `crypto` without explicit import introduces a hidden dependency that future bundler updates could break.
+
+DEAD CODE
+
+- No dead code detected in this file. All exported functions are referenced by middleware (`requireRole`, `getSessionFromRequest`, `verifyCsrfToken`) or API login/logout endpoints (`signToken`, `verifyToken`, `setSessionCookie`, `clearSessionCookie`).
+
+FINAL VERDICT
+
+The authentication module contains two critical flaws that can compromise the entire admin security in production. The hardcoded JWT secret and static issuer/audience must be addressed immediately. The high‑risk `JWT_EXPIRY` empty‑string problem will cause silent login failures and should be fixed as a top priority. Without these corrections, the system is insecure and potentially non‑functional in deployment environments beyond the initial production URL.

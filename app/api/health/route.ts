@@ -19,6 +19,19 @@ export async function GET(): Promise<NextResponse> {
     db = 'unreachable'
   }
 
+  // Temporary Redis diagnostic — shows the host (never the password) so you
+  // can confirm which REDIS_URL the running deployment actually loaded.
+  const redisUrl = process.env.REDIS_URL
+  let redisDiag: { set: boolean; host?: string; protocol?: string } = { set: false }
+  if (redisUrl) {
+    try {
+      const u = new URL(redisUrl)
+      redisDiag = { set: true, host: u.hostname, protocol: u.protocol }
+    } catch {
+      redisDiag = { set: true, host: '(unparseable URL)' }
+    }
+  }
+
   const ok = db === 'connected' && env.ok
   return NextResponse.json(
     {
@@ -29,6 +42,7 @@ export async function GET(): Promise<NextResponse> {
         missingRequired: env.missingRequired,
         groups: env.groups,
       },
+      redisDiag,
       timestamp,
     },
     { status: ok ? 200 : 503 }

@@ -1,0 +1,60 @@
+FILE SCORE: 40/100
+
+CRITICAL ISSUES
+- **Email reminders are blocked by the email worker’s allowlist.**  
+  The `abandoned-checkout`, `job-reminder`, and `review-request` templates are *not* in `ALLOWED_TEMPLATES` in `src/workers/email.worker.ts`. The scheduled worker will successfully push these jobs to the email queue, but the email worker will refuse to send them. All three reminder/notification types are silently dead.
+- **Abandoned‑checkout recovery links to a non‑existent route.**  
+  The URL built is `${process.env.APP_URL}/api/stripe/checkout?resume=${bookingId}`. There is no route handler at `/api/stripe/checkout` that processes a `resume` query parameter; the existing checkout route is `POST /api/bookings` and the success redirect is at `.../checkout/success`. The link will 404, making the recovery email useless (even if the email worker allowed it).
+
+HIGH PRIORITY ISSUES
+- **Abandoned‑checkout‑recovery job type is never scheduled.**  
+  No cron registration or delay‑based producer is shown for `abandoned-checkout-recovery`. The job would never be added unless triggered by an external (currently non‑existent) process. This is unreachable dead code.
+- **Review‑request‑48h sends without status filtering.**  
+  The job fetches *any* booking by ID. If a booking is `CANCELLED`, `PENDING_PAYMENT`, or `PENDING_APPROVAL`, it will still send a review request. The filter should likely require `COMPLETED` (or equivalent) to avoid confusing customers.
+- **No retries for cron jobs.**  
+  The daily schedule jobs are registered without `attempts` or `backoff`. A transient database error will cause the job to fail once, and that day’s digest will be lost permanently.
+
+MEDIUM PRIORITY ISSUES
+- **Misleading log message for missing booking.**  
+  In `abandoned-checkout-recovery` and similar cases, when `!booking` the code logs “Booking already paid or cancelled — skipping recovery”, but the booking may simply not exist (invalid ID). A separate log for “booking not found” would be clearer.
+- **File‑cleanup job has no cron registration.**  
+  The `file-cleanup` type is handled in the switch, but `registerCronJobs` never creates a repeatable job for it. Unless manually added, orphan files will never be cleaned. This is dead operational code.
+- **Daily schedule evening digest omits `IN_PROGRESS` jobs, unlike morning.**  
+  While this may be intentional, the inconsistency could lead to tomorrow’s jobs missing an “in‑progress” status for jobs that span midnight. Not a bug in isolation, but worth documenting.
+
+LOW PRIORITY ISSUES
+- **Cron registration error only logged.**  
+  The `catch` in `registerCronJobs` logs but doesn’t trigger any alert. If registration fails silently, the digests stop appearing without notice.
+- **Worker failure handler only logs.**  
+  No external monitoring or dead‑letter queue is configured; repeated failures may go unnoticed.
+- **`googleReviewUrl` is a placeholder.**  
+  `REPLACE_WITH_GOOGLE_REVIEW_LINK` will produce a broken link until it is updated. This is a known TODO, but low impact until the feature is enabled.
+- **Potential missing index for orphan file query.**  
+  `WHERE bookingId IS NULL AND jobId IS NULL AND createdAt < …` may perform poorly if the `file` table grows large and lacks a composite index.
+
+SECURITY CONCERNS
+- None directly introduced. The dead email link is a functionality issue, not a security vulnerability.
+
+SCALABILITY CONCERNS
+- The daily schedule queries filter by date range without date‑truncation in Prisma; index usage on `scheduledStart` should be fine at current volumes.
+- File cleanup scans on `createdAt` with `NULL` conditions may degrade with many files; monitoring is advised.
+
+DEPLOYMENT RISKS
+- The worker must run on a persistent host (Railway/etc.). If the worker process goes down, the daily digests, reminders, and file cleanup will not execute. The architecture already acknowledges this.
+- The email worker’s allowlist must be updated before any of the reminders can function; otherwise this entire scheduled worker’s value is nil.
+
+ARCHITECTURAL VIOLATIONS
+- None. The worker does not import Next.js code or `discord-actions.ts`.
+
+TECHNICAL DEBT
+- Large switch statement with deep Prisma queries could be refactored into separate handler functions, but this is acceptable for now.
+- Hard‑coded timezone and localised formatting strings are scattered; they work for the current US‑Eastern business but would require changes for expansion.
+- `process.env.APP_URL` is used directly; if the variable is missing the URL will be `undefined`.
+
+DEAD CODE
+- `abandoned-checkout-recovery`, `job-reminder-24h`, `review-request-48h` → effectively dead because allowed templates block them.
+- `file-cleanup` → dead because no cron registration or caller.
+- All email sending log lines for the above templates are misleading, logging that an email was queued when it will never be delivered.
+
+FINAL VERDICT
+The scheduled worker is architecturally sound but functionally broken for nearly all its intended jobs. The email allowlist friction is the single most impactful flaw – it neuters every reminder and recovery feature. Combined with the broken abandoned‑checkout URL and the lack of retries for critical daily digests, the worker in its current state cannot be relied upon in production. **Fix the allowlist and the recovery URL, add status filtering for review requests, register the file‑cleanup cron, and apply retry configurations before using this code.**

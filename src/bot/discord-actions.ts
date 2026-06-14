@@ -348,7 +348,7 @@ export async function postBookingApprovalCard(
     money(payload.moveTotal) ? `Move total: ${money(payload.moveTotal)}` : '',
     money(payload.balanceAfterJob) ? `Balance after job: ${money(payload.balanceAfterJob)}` : '',
     payload.truckAddonDueOnMoveDay
-      ? `🚚 Truck add-on (move day): ${money(((payload.truckAddonAmount as number) ?? 10000) / 100)}`
+      ? `🚚 Truck add-on (move day): ${money(((payload.truckAddonAmount as number) ?? 5000) / 100)}`
       : '',
   ]
     .filter(Boolean)

@@ -1,0 +1,40 @@
+FILE SCORE: 72/100
+
+CRITICAL ISSUES
+- None
+
+HIGH PRIORITY ISSUES
+- **Stale commands are never cleaned up.** If a command is removed from the `commands` array and the script is re‑run, the old command remains active on Discord (no delete/overwrite-only logic). Users will see a broken command with “Application did not respond” once the handler is removed.  
+  *Classification:* HIGH – directly leads to user-facing failures after a deploy change.
+
+MEDIUM PRIORITY ISSUES
+- **No retry or backoff on registration failure.** Discord’s API may return `429 Rate Limit` or transient network errors. The script does not retry; a single failure cancels the entire registration and exits with code 1. This makes automated deployment scripts fragile.  
+- **Missing scope/permission pre‑flight.** The script does not verify that the bot token has the `applications.commands` scope or that the application is authorized in the target guild. A `403` response is logged as a generic error without distinguishing authorization failures from other issues.
+
+LOW PRIORITY ISSUES
+- **Logging is minimal.** A single `console.error` prints the raw error; it does not include the HTTP status code, response body, or which environment variables were used (masked). Troubleshooting registration failures requires manual debugging.  
+- **Environment variable `DISCORD_GUILD_ID` treated as optional true/false.** If the variable is present but empty string or whitespace, `if (guildId)` will be `false` and global registration will occur – potentially unintended in development. A more explicit check (`guildId?.length > 0`) would prevent this edge case.  
+- **No option to register to multiple guilds simultaneously** (e.g., dev guild + production guild) – this is a feature request, not a bug.
+
+SECURITY CONCERNS
+- None beyond the inherent risk of leaking `DISCORD_BOT_TOKEN` (same as any bot script). Token is only used for the REST call; no additional validation or scoping is applied.
+
+SCALABILITY CONCERNS
+- Not applicable – script is a one‑off manual step.
+
+DEPLOYMENT RISKS
+- **Global command propagation is irreversible for up to 1 hour.** If the script is accidentally run with a production token and `DISCORD_GUILD_ID` unset, all existing guild commands are replaced globally. Rollback requires another global PUT which also takes up to 1 hour.  
+- **No guard against running the script in an unintended environment.** A developer could mistakenly run it against production Discord with a local `.env` misconfiguration. A simple prompt or `NODE_ENV` check would reduce this risk.
+
+ARCHITECTURAL VIOLATIONS
+- None. The file correctly resides in `src/bot/`, does not import `discord-actions.ts` or any Next.js/worker modules, and is executed separately (`npx tsx`). It respects the architecture map.
+
+TECHNICAL DEBT
+- **Command definitions and their handlers are decoupled with only a comment as enforcement.** Adding a new `SlashCommandBuilder` to this file without a corresponding entry in `command-handler.ts` will compile without error but produce a broken command. No automated test or lint rule guards against this.  
+- The script hard‑codes the list of commands; there is no import‑driven synchronization between the registration script and the handler map.
+
+DEAD CODE
+- None.
+
+FINAL VERDICT
+The script is functional and correctly uses Discord’s REST API to register slash commands. However, it lacks a command cleanup strategy, retry logic, and permission validation, making it less robust for production automation. The most impactful gap is the silent persistence of removed commands, which can confuse users. Recommended to add explicit delete‑then‑put logic or a separate “unregister” step. No architectural violations; safe to use provided the noted deployment/operational risks are managed.

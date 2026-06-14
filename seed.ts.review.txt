@@ -1,0 +1,47 @@
+FILE SCORE: 60/100
+
+CRITICAL ISSUES
+(None)
+
+HIGH PRIORITY ISSUES
+1. **Missing `await` on `prisma.$disconnect()` in `finally` block**  
+   The `finally` clause does not await the promise returned by `prisma.$disconnect()`. This can cause the script to exit before the database connection is properly closed, potentially leaking connections and leaving database sessions hanging. If the seed is run in automated pipelines, repeated runs could exhaust connection pools.
+
+2. **Destructive update of Discord IDs on re‑seed**  
+   Both Diego’s and Sebastian’s `upsert` updates unconditionally set `discordId` to `process.env.DISCORD_USER_… ?? null`. If the environment variable is missing or becomes unset, running the seed again will **nullify** an already‑configured Discord ID. This silently breaks Discord approval buttons and permissions for the affected staff accounts, causing data loss in development/staging environments where the seed is re‑applied.
+
+3. **Hardcoded default passwords and console exposure**  
+   The passwords `change_me_diego_2024!` and `change_me_sebastian_2024!` are embedded in source code and printed to the console (stdout/stderr) during every run. Even with a production‑use warning, the passwords are visible in logs, CI outputs, or terminal histories. This is a security practice that should be avoided—credentials should be injected via environment variables and never printed.
+
+MEDIUM PRIORITY ISSUES
+1. **No environment‑variable fallback validation**  
+   The script assumes the `DISCORD_USER_*` variables are present. If they are missing, it silently sets Discord IDs to `null` (see HIGH issue above). Adding a warning or early check would improve resilience.
+
+LOW PRIORITY ISSUES
+None.
+
+SECURITY CONCERNS
+- Hardcoded, weak default credentials are stored in source control and logged.  
+- The script prints the plain‑text passwords to the console, exposing them in any persisted log.  
+- Reseed behaviour can silently remove Discord integration data (discordId) for admin users, potentially causing permission failures in internal tooling.
+
+SCALABILITY CONCERNS
+None. This is a one‑off seed script; performance characteristics are irrelevant.
+
+DEPLOYMENT RISKS
+- The script does not load `dotenv` or any environment file. It relies on the runtime to already have all necessary environment variables. If run outside `prisma db seed` (which automatically loads `.env`), the missing `DISCORD_USER_*` variables cause the destructive nullification mentioned above.  
+- Combined with the missing `disconnect` await, automated deployment pipelines may see connection‑leak warnings or test instabilities.
+
+ARCHITECTURAL VIOLATIONS
+None. The file is correctly located in `prisma/` and uses only framework‑agnostic libraries (`bcryptjs`, `@prisma/client`).
+
+TECHNICAL DEBT
+- No environment presence checks for critical variables (`DISCORD_USER_DIEGO`, `DISCORD_USER_SEBASTIAN`).  
+- Sensitive data (passwords, customer token) is emitted to the console without flagging it as non‑production output.  
+- The upsert logic assumes that re‑seeding should always overwrite fields; it could instead conditionally update only when the env var is defined.
+
+DEAD CODE
+None.
+
+FINAL VERDICT
+The seed file contains functional and security shortcomings that can lead to data corruption (nullified Discord IDs), resource leaks (unawaited disconnect), and credential exposure. While it serves its purpose in a strictly local development context, it should be hardened before being used in any shared or automated environment. Prioritise fixing the disconnect, making Discord ID updates non‑destructive, and removing the logging of passwords.

@@ -1,0 +1,57 @@
+FILE SCORE: 75/100
+
+CRITICAL ISSUES
+- (none)
+
+HIGH PRIORITY ISSUES
+1. **Missing runtime payload validation**  
+   The worker blindly passes `payload` and `bookingId!` to Discord REST functions without any type guard or structural check. If the job data is malformed (e.g., missing required `bookingId` for a type that needs it, or unexpected payload shape), the downstream functions may throw or produce broken messages. This can cause silent failures that are only logged as generic “Discord job failed” with no indication of the actual cause, potentially leading to lost internal notifications (approval cards, payment alerts).  
+   *Classified:* HIGH  
+   *Impact:* notification reliability, debuggability.
+
+MEDIUM PRIORITY ISSUES
+1. **Non‑specific error logging**  
+   The `failed` event handler logs only `err.message` and job ID, without identifying which Discord job type or which underlying REST call failed. Debugging requires cross‑referencing timestamps and external logs.  
+   *Classified:* MEDIUM  
+   *Impact:* operational visibility.
+
+2. **No job completion/failure lifecycle management**  
+   The worker does not set `removeOnComplete`, `removeOnFail`, or a maximum number of retained jobs. Over time, the BullMQ completed/failed sets can grow indefinitely in Redis, increasing memory usage and backpressure on queue inspection. This is a default configuration that may become problematic at scale.  
+   *Classified:* MEDIUM  
+   *Impact:* Redis storage and performance under sustained load.
+
+3. **Lack of explicit idempotency guards**  
+   The worker itself does not check whether a job has already been processed (e.g., via a deduplication key). If the same job is re‑delivered (e.g., after a crash or manual retry), the Discord REST functions may post duplicate messages unless they independently implement idempotency. The architecture relies on the REST layer for this, but the worker could add a safeguard.  
+   *Classified:* MEDIUM  
+   *Impact:* possible duplicate Discord posts.
+
+LOW PRIORITY ISSUES
+1. **Concurrency only 2**  
+   While appropriate for Discord rate limits, a hardcoded concurrency of 2 may become a bottleneck if many Discord notifications are enqueued simultaneously (e.g., after a batch operation). The worker offers no dynamic adjustment or back‑pressure monitoring.  
+   *Impact:* moderate – acceptable for current scale.
+
+2. **No TTL or timeout on job processing**  
+   If a Discord REST call hangs due to network issues, the worker process can block until BullMQ’s internal timeout or the process is restarted. There is no per‑job timeout configuration.  
+   *Impact:* worker health under network anomalies.
+
+SECURITY CONCERNS
+- None directly in this file. The worker does not handle authentication tokens; those are managed inside `discord-rest.ts`. The lack of payload validation could, in theory, allow a crafted payload to inject unintended content into a Discord message if the downstream functions do not sanitize inputs, but that would be a flaw in the REST layer, not here.
+
+SCALABILITY CONCERNS
+- Fixed concurrency (`2`). Under high load, the worker may fall behind. Monitoring the queue depth and scaling the worker horizontally would require coordinating the Discord rate limits, which this simple worker does not address.
+
+DEPLOYMENT RISKS
+- The worker must run on a persistent host (Railway). The file correctly imports only `discord-rest` and avoids gateway modules, satisfying the architectural constraint. No direct deployment risk in this file.
+
+ARCHITECTURAL VIOLATIONS
+- None. The worker uses only the permitted REST module and the shared Redis connection.
+
+TECHNICAL DEBT
+- The switch statement is straightforward but will grow with every new notification type. The mapping is implicit (function name from type) and could be moved to a registry, but this is minor.
+- The worker does not validate or log any information about the payloads that could aid debugging (e.g., truncated JSON). Such logging must be added cautiously to avoid leaking PII.
+
+DEAD CODE
+- None. All job types (`booking-created`, `payment-received`, `discount-request`, `create-job-channels`, `failure-alert`, `daily-schedule`, `contact-message`, `reschedule-offer`) are referenced in the architecture map and used.
+
+FINAL VERDICT
+The worker is functional and correctly positioned in the architecture. The highest risk is the absence of input validation, which could silently swallow important notifications if upstream data contracts break. Adding a lightweight schema check or at least a guard for required fields (especially `bookingId` where used) would significantly improve robustness. Otherwise, the file is clean and fits the intended pattern.

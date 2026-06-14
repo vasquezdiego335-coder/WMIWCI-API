@@ -1,0 +1,74 @@
+FILE SCORE: 65/100
+
+CRITICAL ISSUES
+- **1. Unhandled promise rejection from outbox emission leads to full failure of fulfillment.**  
+  `emitPaymentCompleted(…).then(() => undefined)` is pushed directly into the `tasks` array without any error handling or the `enqueue` timeout guard. If the outbox call throws (e.g., network failure, missing configuration, integration bug), the returned promise rejects, causing `Promise.all` to reject. This will throw an unhandled error in `fulfillPaidCheckout`, resulting in a 500 response from the calling route handler. The booking is already moved to `PENDING_APPROVAL` and audit logged, but:
+  - The Discord card, SMS, and other critical notifications may still be in-flight or already queued, but the webhook/success route will see a failure, potentially causing Stripe to retry (wastefully triggering idempotent no-ops).
+  - More importantly, **the email is permanently lost** because the outbox emission failed and there is no fallback to the legacy Resend queue (the code explicitly skips it when outbox is enabled).  
+  This is a **single point of failure for customer-facing payment emails** whenever outbox is enabled.
+
+HIGH PRIORITY ISSUES
+- **2. No fallback if outbox emission fails.**  
+  When `outboxEnabled()` returns true, the legacy email job is skipped. If the outbox later fails, no email is ever sent. There is no retry, no dead-letter, no re-queue to the backup system. A transient error permanently drops the final confirmation email.
+
+- **3. Missing null check on `booking.customer` crashes the function.**  
+  The code immediately accesses `booking.customer.email`, `.name`, etc., without verifying that the `customer` relation was loaded. Although the Prisma schema likely defines a required relation, a runtime inconsistency (e.g., manual DB change) could cause `booking.customer` to be `null`. The result is a thrown `TypeError`, crashing the entire fulfillment and again causing a 500 response with partial or no side effects.
+
+- **4. Unsafe locale value passed directly to `t()`.**  
+  `const locale = booking.customer.locale` might be `null` or `undefined` if the column allows NULL or if the record is malformed. Passing `undefined` to `t` could cause a runtime error inside the i18n helper. Always default to `'en'`.
+
+- **5. Hardcoded fallback of `4900` for `amountTotalCents` produces wrong display when the hold amount differs.**  
+  If Stripe holds a different amount (e.g., through a promotion or future price change), the Discord card, portal email, and SMS will show an incorrect value. While not a functional break, it misleads admins and customers. The actual amount should be fetched from the PaymentIntent or stored on the Booking record at creation time.
+
+- **6. The `enqueue` timeout guardian silently drops jobs when Redis is unreachable.**  
+  The design intentionally logs and ignores queue add failures to keep the webhook fast. However, the Discord approval card and SMS are considered critical for the business workflow. A temporary Redis outage means **no Slack/Discord card, no SMS, and no email** (if outbox disabled) without any alert. At minimum, a `pino` error log at `fatal` level and a monitoring metric should signal that a job was lost; ideally a dead‑letter queue would persist the failed job.
+
+MEDIUM PRIORITY ISSUES
+- **7. Outbox integration module (`../outbox/integration`) is undocumented and missing from the architecture map.**  
+  It is unclear whether the outbox is a stable, deployed feature or experimental code. The import could fail at runtime if the file is absent or not deployed, causing a crash.
+
+- **8. `booking.requestedDate?.toISOString()` yields `undefined` when the date is null, which is passed into several queue payloads.**  
+  While most downstream consumers (email templates, Discord embed) may handle `undefined`, it creates ambiguity and could cause silent rendering bugs. The date is already formatted for SMS; other payloads should either omit the key or use a sentinel value.
+
+- **9. No retry or circuit breaker for the outbox call.**  
+  Transient failures (e.g., a network blip to the outbox destination) permanently lose the email. A simple retry with exponential backoff should be added inside `emitPaymentCompleted` or the outbox integration itself.
+
+- **10. The `DRAFT` status is included in the claim-condition `where` clause.**  
+  The only documented path creates bookings with status `PENDING_PAYMENT`. Including `'DRAFT'` opens a loophole: if a booking somehow ends up in `DRAFT` and a fulfilment call is triggered for it (maliciously or by accident), it would be moved to `PENDING_APPROVAL` and notifications would be sent. While unlikely, it indicates a lack of strict gatekeeping.
+
+LOW PRIORITY ISSUES
+- **11. Audit log creation swallows errors with a simple `.catch()` + warn.**  
+  If the database is unavailable, the audit log write fails silently (logged only). This is intentional non‑critical behavior, but a failed audit log means no record of the payment receipt for that booking, which could complicate debugging or compliance.
+
+- **12. Hardcoded default `APP_URL` fallback.**  
+  The fallback `'https://wmiwci-api.vercel.app'` works for production, but if the environment variable is missing in other deployments (e.g., staging), the customer portal URL will point to production, potentially leaking data or confusing users.
+
+- **13. Locale string `'es-US'` is non‑standard.**  
+  Using `'es-US'` for `toLocaleString` may work but is technically a valid locale combination; it is functionally acceptable.
+
+- **14. Magic string `'DOOR_HANGER_PENDING'` may have case typos.**  
+  The comparison is exact; if the enum value is stored lowercase or with underscores differently, the branch will silently not execute.
+
+SECURITY CONCERNS
+- None directly introduced by this file. The customer token is sent in emails/SMS as designed; that is a business requirement, not a code vulnerability. The function assumes the caller (webhook/success route) is already authenticated externally.
+
+SCALABILITY CONCERNS
+- The 5‑second timeout per `queue.add` protects the serverless function from hanging when Redis is down, but when scaled to many concurrent bookings the overhead of many timeouts is minimal. The bigger concern is that a Redis outage causes a **silent mass loss of notifications**—no alerts and no automatic catch‑up when Redis recovers. This becomes a scalability risk if Redis instability occurs frequently.
+
+DEPLOYMENT RISKS
+- Enabling `OUTBOX_ENABLED` without deploying the outbox worker or its backing infrastructure will result in **no final‑confirmation emails** being sent, because the legacy path is completely skipped. This is a critical deployment coordination requirement that is not enforced by any startup check.
+- The `../outbox/integration` import will crash the Next.js application at runtime if the module file is missing (e.g., during a partial rollout). Must ensure that file exists in all environments or use a dynamic import with fallback.
+
+ARCHITECTURAL VIOLATIONS
+- The outbox integration resides outside the documented `src/lib` architectural boundaries (it’s in `../outbox`), creating an undocumented dependency and potential import path issues. The architecture map explicitly calls out known modules under `src/lib`, and this new module is not listed. This violates the mapping that serves as the guide for this repo.
+
+TECHNICAL DEBT
+- The dual‑path email logic (legacy queue vs outbox) adds complexity. Once the outbox pattern is stable, the legacy email path and the `outboxEnabled()` flag should be removed.
+- The hardcoded `4900` fallback should be replaced with a configuration constant or derived from the PaymentIntent amount on the booking.
+- The `enqueue` timeout helper is repeated in multiple workers; consider a shared utility.
+
+DEAD CODE
+- No fully dead code is present. The outbox branch is conditionally executed and therefore not dead, but it may be partially developed or unused in production depending on the flag.
+
+FINAL VERDICT
+The file’s idempotency design and concurrent fan‑out are well thought‑out, but the **critical missing error handling for the outbox emission** and the lack of null‑safety on the customer relation make the function fragile in production. The silent loss of emails when outbox is enabled is a severe reliability risk. High‑priority guards and a fallback mechanism must be added before enabling that feature. Overall, the foundation is solid, but immediate attention to the critical and high issues is required to avoid customer‑facing outages.

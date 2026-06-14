@@ -1,0 +1,75 @@
+**FILE SCORE: 92/100**
+
+---
+
+### CRITICAL ISSUES
+None.
+
+---
+
+### HIGH PRIORITY ISSUES
+None.
+
+---
+
+### MEDIUM PRIORITY ISSUES
+
+1. **Missing `import 'server-only'` guard**  
+   The module can be accidentally imported on the client side (e.g., in a React component using `use client`). While pino itself would fail to bundle for the browser, marking the file as server‑only would make the intent explicit and prevent build-time errors for new developers. This follows Next.js best practices for shared utilities meant only for Node.js APIs or workers.
+
+2. **Startup crash risk when `pino-pretty` is missing in development‑like environments**  
+   If a worker or bot process runs with `NODE_ENV=development` but `pino-pretty` is not installed (e.g., a production build that accidentally receives that env), the `transport` configuration will throw an uncaught error during module initialisation, killing the process before it starts. This is a deployment safety concern. Consider wrapping the logger creation in a try‑catch that falls back to a plain pino instance, or ensure the script validates the environment early.
+
+---
+
+### LOW PRIORITY ISSUES
+
+1. **Coupling to Next.js internal `NEXT_RUNTIME` env variable**  
+   The check `!!process.env.NEXT_RUNTIME` is effective but ties the logging configuration to Next.js internals. If the runtime name changes in a future Next.js version, the detection could break silently. A more generic approach (e.g., checking if `process.env.NEXT_RUNTIME` is set at all) is already used; the risk is low.
+
+2. **No structured log enrichment for error objects**  
+   Pino automatically serialises error objects passed as the first argument to `.error()`. However, if an error is passed inside a regular log object (e.g., `logger.error({ err: someError })`), it will not be unwrapped. This is a pino default behaviour and not a bug, but junior developers may not be aware of the convention.
+
+3. **Static `base.service` value**  
+   `service: 'moveit-app'` is hard‑coded. In a monorepo or multi‑service deployment (workers, bot, Next API) this might be intentional, but it could be more flexible if sourced from an environment variable.
+
+4. **Child loggers created at module scope**  
+   This is fine for a small app, but if dynamic child loggers are ever needed (e.g., per request), they would have to be created inside functions. The current design is intentional and not a flaw.
+
+---
+
+### SECURITY CONCERNS
+* **Logging of sensitive data** – The logger itself does not redact or filter fields. It is the responsibility of every call site to avoid logging secrets, personally identifiable information (PII), or Stripe tokens. This is acceptable as per the current architecture, but a future improvement could be a pino serializer that masks known sensitive keys.
+* **No log‑level enforcement in production** – In `production`, the level is `'info'`. Debugging information might be necessary for incident investigation; a runtime log‑level override (e.g., via an env var `LOG_LEVEL`) would improve operational security without exposing debug data permanently.
+
+---
+
+### SCALABILITY CONCERNS
+* Pino writes directly to `stdout`/`stderr`. In serverless environments (Vercel) this is standard and scales well. For the persistent worker host (Railway), stdout is captured by the platform; at very high throughput, a log‑draining agent might be needed. This is not a concern at the projected scale of the application.
+
+---
+
+### DEPLOYMENT RISKS
+* **`pino-pretty` missing in a development‑mode deployment** (see MEDIUM issue) is the primary operational risk.
+* **No startup log** – If the logger initialisation fails, the process exits with zero log output, making debugging difficult. A simple `console.error` before attempting to create the pino instance would aid rapid diagnosis.
+
+---
+
+### ARCHITECTURAL VIOLATIONS
+* **Minor violation of framework‑agnostic ideal** – The `NEXT_RUNTIME` check introduces explicit awareness of Next.js into a library intended to be framework‑agnostic. Given the deployment topology (Vercel + Railway), this is acceptable, but it would break if `src/lib/` were reused in a non‑Next.js server.
+* **Correct separation is maintained** – No worker imports Next.js code, no Next.js route imports discord‑actions. The logging module is shared safely.
+
+---
+
+### TECHNICAL DEBT
+* The pino‑pretty transport logic is well documented with inline comments. No significant debt.
+
+---
+
+### DEAD CODE
+* None. All variables are used.
+
+---
+
+### FINAL VERDICT
+The logging module is **well‑designed, correctly solves the pino/Next.js bundling issue, and follows the project’s layered architecture cleanly**. The primary improvements needed are a `server-only` guard to prevent client‑side misuse and a safety net for missing development dependencies. The minor coupling to Next.js internals is acceptable given the current stack. Score: **92/100**.

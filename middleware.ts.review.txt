@@ -1,0 +1,39 @@
+FILE SCORE: 45/100
+
+CRITICAL ISSUES
+- **Middleware matcher severely restricts execution, disabling critical protections.** The `config.matcher` is set to `['/admin/:path*', '/api/admin/:path*']` — this means the middleware runs **only** for admin routes. The code includes rate‑limiting for `/api/auth/login` and `/api/bookings`, and CSRF enforcement for any non‑admin API mutations that are not webhooks. Because those paths are outside the matcher, **these protections are never applied.** It leaves login and booking endpoints un‑rate‑limited, and leaves all non‑admin API mutating routes (e.g., `/api/bookings`, `/api/contact`, `/api/customer/…`) with no CSRF defence.  
+  *This is a configuration flaw that renders a substantial portion of the middleware inert and introduces serious security gaps.*
+
+HIGH PRIORITY ISSUES
+- **In‑memory rate limiter is unfit for Vercel edge/serverless deployment.** The global `Map` stored in a module variable is not shared across edge function isolates or across regions. Rate counters and IP tracking are per‑isolate and ephemeral, meaning an attacker can trivially bypass limits by distributing requests across different function invocations or regions.  
+- **No logging of security‑relevant events.** Failed authentication attempts, rate‑limit exceedances, CSRF violations, and access‑denied responses are not logged. Without logs, the team has no visibility into attacks, abuse, or misconfigurations, and cannot tune rate‑limits or investigate incidents retroactively.  
+- **Non‑admin API mutation endpoints lack CSRF protection entirely.** The CSRF check for `/api/` POST/PUT/DELETE runs only for admin‑scoped routes (due to the matcher). Public endpoints like `/api/bookings` (POST), `/api/contact` (POST), and customer portal mutations are exposed to cross‑site request forgery, even though the code inside the middleware intended to protect them.
+
+MEDIUM PRIORITY ISSUES
+- **Rate‑limit map can grow without bound.** Old IP entries are never evicted; the `resetAt` check only resets the counter, leaving the entry in the map. Under a sustained attack with many distinct IPs, memory usage increases monotonically, creating a potential DoS vector even in short‑lived edge functions.  
+- **Hardcoded `Retry‑After` header is never aligned with the actual rate window.** The 429 response always returns `Retry‑After: 60`, regardless of whether the window is 1 hour (bookings) or 15 minutes (login). This gives the client inaccurate backoff information.
+
+LOW PRIORITY ISSUES
+- **Redundant CSRF exemption after early webhook skip.** The `csrfExempt` list tries to whitelist `/api/stripe/` and `/api/discord/`, but those exact paths are already skipped completely before the CSRF check. The exemption code is dead and may confuse maintainers.  
+- **CSRF cookie is `httpOnly: false`.** This is necessary for the double‑submit pattern, but it means a successful XSS can read the token and forge requests. While acceptable when XSS is mitigated, it remains a softer point in the CSRF design.
+
+SCALABILITY CONCERNS
+- **The rate‑limiting mechanism does not scale horizontally.** Because the counter is purely in‑memory and local to each edge function instance, a global view of request rates cannot be achieved. Without a shared store (e.g., Redis), any effective rate‑limiting across a serverless fleet requires an externalised solution.
+
+DEPLOYMENT RISKS
+- **The middleware matcher mismatch means the deployed system does not enforce the protections the developers believe are in place.** An adversary who probes these endpoints can flood login or booking routes, or perform CSRF attacks on public mutation endpoints, without triggering limits or verification. This misconfiguration is a deployment oversight that exposes the production environment.
+
+ARCHITECTURAL VIOLATIONS
+- **The middleware’s internal logic assumes it guards a much wider set of routes than the `matcher` actually allows.** According to the architecture map, this middleware is intended to provide auth, CSRF, and rate‑limiting for critical paths. The current configuration violates that responsibility for the majority of the API surface, making the middleware an incomplete implementation of its declared purpose.
+
+TECHNICAL DEBT
+- **Dead code for login and booking rate‑limiting exists in the source but can never be reached.** The same applies to the CSRF enforcement block for non‑admin API routes. This code adds complexity and can mislead developers into assuming the protections are active, creating a maintenance hazard.  
+- **The dual early‑skip mechanism (exact webhook paths + CSRF exempt array) is redundant and suggests the logic was patched over time without cleanup.**
+
+DEAD CODE
+- Rate‑limit configuration and checking for `/api/auth/login` and `/api/bookings` — never executed because those routes are outside the matcher.  
+- CSRF check for non‑admin API mutations — never executed.  
+- The `csrfExempt` array’s check for `/api/stripe/` and `/api/discord/` — those paths are never reached by the middleware, and the exact webhook paths are already entirely skipped earlier.
+
+FINAL VERDICT
+The middleware suffers from a critical misconfiguration that disables the rate‑limiting and CSRF protections for the majority of the API. Until the matcher is expanded to cover the intended routes — or the logic is restructured so that a separate middleware instance runs on those routes — the application is unnecessarily exposed to brute force, spam, and cross‑site request forgery. The secondary issues (lack of logging, unreliable in‑memory rate limiting, memory accumulation) compound the risk and indicate that the middleware should be hardened and, for production, backed by a distributed store. **Addressing the matcher is the single most urgent remediation.**

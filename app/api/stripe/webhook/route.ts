@@ -14,6 +14,10 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   if (!sig) {
     return NextResponse.json({ error: 'Missing signature' }, { status: 400 })
   }
+  if (!process.env.STRIPE_WEBHOOK_SECRET) {
+    webhookLogger.error('STRIPE_WEBHOOK_SECRET is not set — rejecting webhook')
+    return NextResponse.json({ error: 'Server misconfigured' }, { status: 500 })
+  }
 
   // ── Read raw body BEFORE any JSON parsing ──────────────────────
   // Stripe signature verification needs the exact bytes that were
@@ -62,8 +66,16 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       data: { status: 'processed', processedAt: new Date() },
     })
   } catch (err) {
-    const errMsg = err instanceof Error ? err.message : String(err)
-    webhookLogger.error({ eventId: event.id, eventType: event.type, err: errMsg }, 'Webhook processing failed')
+    const errObj = err instanceof Error ? { message: err.message, stack: err.stack } : { message: String(err) }
+    webhookLogger.error({ eventId: event.id, eventType: event.type, err: errObj }, 'Webhook processing failed')
+
+    try {
+      await prisma.webhookLog.updateMany({
+        where: { eventId: event.id, status: 'pending' },
+        data: { status: 'failed' },
+      })
+    } catch { /* best-effort */ }
+
     // Return 200 to prevent Stripe from retrying — we handle retries ourselves
     return NextResponse.json({ ok: true })
   }

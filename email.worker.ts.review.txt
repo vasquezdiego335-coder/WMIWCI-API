@@ -1,0 +1,69 @@
+FILE SCORE: 75/100
+
+CRITICAL ISSUES
+None.
+
+HIGH PRIORITY ISSUES
+1. **Missing notification status update when React‑email rendering fails.**  
+   `render(component(payload))` can throw (buggy template, invalid props). No `try/catch` wraps the render; if it throws, the job fails but the `notification` row remains `QUEUED` with only `retries` incremented. After all BullMQ retries are exhausted the notification never transitions to `FAILED`, leaving wrong status in the DB.  
+   → **Impact:** data inconsistency, no alert that an email could never be built, and the booking may silently miss its customer message.
+
+2. **No error handling on successful‑send notification update.**  
+   After `resend.emails.send` succeeds, `prisma.notification.update(... { status: 'SENT', sentAt: ... })` is called without a `.catch()`. If the DB write fails the email was already sent but the notification record stays `QUEUED`.  
+   → **Impact:** transient DB errors cause a permanent mismatch between real‑world outcome and the notification log; no retry of the update.
+
+MEDIUM PRIORITY ISSUES
+1. **Dead code – unused email templates.**  
+   Only `pre-approval` and `final-confirmation` are allowed, yet all 14 templates are imported, registered in `TEMPLATES`, and have English fallback subjects. The imports and definitions for the other 12 templates are never executed; they clutter the bundle and increase maintenance surface. (The comment acknowledges they are kept for future use.)
+
+2. **No explicit retry / backoff configuration visible in the worker.**  
+   The worker reads from the `email` queue but does not declare `attempts` or `backoff`. If the queue’s default job options are not set, jobs will fail permanently on the first error, which may be too aggressive for transient Resend issues.
+
+3. **Missing input validation for `to` address.**  
+   The `to` field is passed directly to Resend without checking that it is a valid email format. A malformed address, though unlikely from trusted job producers, would cause a permanent job failure after all retries but could be caught early.
+
+4. **No global error/connection listener on the BullMQ `Worker`.**  
+   Only `failed` and `completed` events are handled. Redis disconnects or other worker‑level errors would only surface in `queueLogger`’s default text output; a dedicated `worker.on('error', …)` handler is recommended for production monitoring.
+
+LOW PRIORITY ISSUES
+1. **Subject line can contain arbitrary values from `payload.subject`.**  
+   The subject logic treats `payload.subject` as a plain string with a type assertion. If an unsanitised value were passed (e.g., an object), the rendered subject might break the Resend API call in a confusing way.  
+   (Risk is minimal because job creators are internal application code.)
+
+2. **No graceful shutdown logic in this file.**  
+   `startEmailWorker` returns the worker but never calls `worker.close()`. The shutdown is presumably managed by the parent `workers/index.ts`, but the omission here makes the module less self‑contained.
+
+3. **Concurrency fixed at 5, no environment‑based configuration.**  
+   Tuning the concurrency requires a code change. A configurable value (e.g., `EMAIL_WORKER_CONCURRENCY`) would improve operational flexibility.
+
+4. **No explicit timeout for Resend API calls.**  
+   If the Resend API hangs, the worker slot is occupied until BullMQ’s stall detection fires, which may be slow. A per‑job timeout would fail faster.
+
+SECURITY CONCERNS
+*No direct security vulnerabilities identified.*  
+The worker only sends to addresses and templates controlled by internal job data. No external input is parsed or interpolated unsafely. The Resend transport uses TLS, and secrets are read from environment variables.
+
+SCALABILITY CONCERNS
+*Low risk.*  
+With a concurrency of 5 and lightweight rendering, the worker can handle hundreds of jobs per minute. The main limit is the Resend API rate limit, which is not circumvented by the current design. Adding a local rate limiter (e.g., `bottleneck`) would be a future improvement if volume grows.
+
+DEPLOYMENT RISKS
+*None introduced by this file alone.*  
+The worker correctly avoids Next.js imports and uses only JSON‑serialisable job data. It depends on a persistent host and the Upstash/Redis connection; failure to start the worker process would mean no email is sent, but that is an ops concern, not a code defect.
+
+ARCHITECTURAL VIOLATIONS
+*None.*  
+The worker respects the architectural boundary: it imports from `src/lib/`, `src/emails/`, and `@react-email/render` — none of which depend on Next.js. It does not import `discord-actions.ts` (gateway) and does not reference API route modules.
+
+TECHNICAL DEBT
+- The 12 unused template imports and their mappings are kept intentionally “for future re‑enablement”. This adds clutter and could lead to confusion if an engineer mistakenly queues one of them, expecting it to be sent (only to see it silently dropped by the allowlist guard). Removing them or moving them to a separate file would reduce debt.
+- The `SUBJECTS` fallback map duplicates the template list; the subject selection logic is spread across three sources (`payload.subject`, `emailSubject()`, `SUBJECTS`). Consolidation would simplify reasoning.
+
+DEAD CODE
+- All lines related to templates **other than** `pre-approval` and `final-confirmation` are unreachable under the current policy but remain in the file:
+  - Imports: `BookingConfirmationEmail`, `PaymentReceiptEmail`, `PendingApprovalEmail`, `BookingConfirmedEmail`, `BookingDeniedEmail`, `JobReminderEmail`, `JobCompletionEmail`, `ReviewRequestEmail`, `AbandonedCheckoutEmail`, `ContactAckEmail`, `RescheduleOfferEmail`, `BookingRescheduledEmail`
+  - Entries in `TEMPLATES` for those templates
+  - Entries in `SUBJECTS` for those templates
+
+FINAL VERDICT
+The email worker enforces the two‑email messaging policy cleanly and is architecturally sound. The main area for improvement is error handling around React‑email rendering, which currently leaves notifications in a permanently stale `QUEUED` state when a template fails to render. Adding a `try/catch` that marks the notification `FAILED` on render errors, and also guarding the post‑send DB update, would make the job lifecycle fully consistent. Additionally, dead code for unused templates should be slimmed down to reduce maintenance burden.

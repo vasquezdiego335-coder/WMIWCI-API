@@ -1,0 +1,90 @@
+FILE SCORE: 72/100
+
+CRITICAL ISSUES
+----------------
+- **Missing unique constraint and index on `Booking.discordApprovalMessageId`**
+  The Discord interactions handler (`POST /api/discord/interactions`) must locate the booking using the message ID embedded in the approval card. Without an index, every lookup performs a sequential scan of the bookings table. As the booking volume grows, this will introduce unacceptable latency and may cause timeouts on the Discord interaction endpoint (Discord requires a fast response). Moreover, the lack of a unique constraint allows multiple bookings to accidentally share the same message ID, which could lead to approving or denying the wrong booking. This field should be declared `@unique` and indexed.
+
+HIGH PRIORITY ISSUES
+--------------------
+- **`Booking.discountApprovedById` is a plain String with no foreign key to `User`**
+  The field is meant to reference the staff member who approved a discount, but there is no `@relation` to the `User` model. This breaks referential integrity and permits any arbitrary string. Malicious or buggy input could set a non‑existent user ID, bypassing checks that the approver exists. Adding a proper relation protects data consistency and acts as a lightweight security gate at the database level.
+
+- **`User.discordId` lacks a unique constraint and index**
+  The Discord gateway bot and possibly internal tooling need to look up a `User` by their Discord snowflake. If multiple rows accidentally receive the same Discord ID, or if the column is simply not indexed, queries become full‑table scans and will degrade. The field should be `@unique` to prevent duplicates and to create the necessary index.
+
+- **Dual state‑machine fields on `Booking` (`status` vs `outboxState`)**
+  The schema maintains two independent status enumerations (`BookingStatus` for the overall lifecycle and `BookingState` for the outbox email state machine). They are not linked by any database constraint. Keeping them synchronised is entirely the responsibility of application code. A bug in the fulfillment or admin flow can easily cause `outboxState` to diverge from `status`, leading to incorrect email sequences (e.g., sending a “pre‑approval” email when the booking is already cancelled). This is a risky design that will become a source of subtle, hard‑to‑debug production incidents.
+
+- **Conflicting email delivery mechanisms: `EmailJob` outbox table vs BullMQ workers**
+  The schema defines a full outbox pattern (`EmailJob` with `idempotencyKey`, attempts, status) and the `Booking.outboxState` is described as driving an “email‑outbox transitions” (src/outbox). Meanwhile, the architecture map and codebase use BullMQ workers (`email.worker.ts`) that read jobs from Upstash Redis and send via Resend. Introducing a database‑backed outbox while the BullMQ path remains active creates a **dual delivery system** – the two can easily race, duplicate messages, or become out of sync. This is an architectural inconsistency that must be resolved: either commit fully to the outbox pattern and remove the Bull‑based email worker, or keep BullMQ and remove the `EmailJob`/`outboxState` machinery.
+
+MEDIUM PRIORITY ISSUES
+----------------------
+- **Missing indexes on other Discord channel columns**  
+  `Booking.discordJobChannelId`, `discordPaperworkChannelId`, `discordPhotosChannelId` are write‑only if they are never queried directly. However, any background reconciliation or admin tool that needs to find a booking by one of these IDs will suffer the same full‑scan problem. Evaluate actual usage and add indexes where needed.
+
+- **Denormalised `Booking.depositPaid` Boolean**  
+  The deposit payment status is already tracked in the `Payment` table. Maintaining a separate boolean on `Booking` can become inconsistent with the `Payment.status`. Prefer deriving “deposit paid” from the associated `Payment` record to avoid out‑of‑sync data.
+
+- **`Customer.isFirstTime` may go stale**  
+  The field defaults to `true` but is never updated when a customer books a second time. Any logic that depends on it (e.g., automatic first‑time discount) will eventually give incorrect results. Either compute this dynamically from the customer’s booking count or maintain it via a trigger/update on subsequent bookings.
+
+- **No retention/cleanup strategy for log tables**  
+  `WebhookLog`, `Notification`, `AuditLog`, `IdempotencyKey` will grow unbounded. Without a defined retention window and a cleanup job, these tables will eventually consume significant storage and degrade query performance. Plan for periodic pruning (e.g., deleting expired `IdempotencyKey` rows, archiving old audit logs).
+
+- **Booking.displayId uses `cuid()` but is labelled “human‑friendly”**  
+  CUIDs are long, non‑sequential strings that are not human‑friendly (e.g., for customer support). If a truly human‑readable display ID is desired, consider a short, sequential or date‑based identifier. This is low impact but misleading.
+
+LOW PRIORITY ISSUES
+-------------------
+- **`File.uploadedBy` is a free‑form string**  
+  It holds a user ID or the literal “customer”. Without a relation, the field can contain invalid references. Adding a polymorphic relation or a discriminant would improve integrity, but the risk is minimal given the table’s purpose.
+
+- **Inconsistent ID generation (`uuid()` in `EmailJob` vs `cuid()` elsewhere)**  
+  Minor inconsistency that does not affect functionality but may confuse developers.
+
+- **`Payment.amount` is `Int` (cents) but no non‑negative constraint**  
+  Prisma does not support column‑level check constraints. The application must enforce the value is ≥ 0; otherwise a negative payment could be inserted. This is a standard Prisma limitation, but worth noting for code reviews.
+
+SECURITY CONCERNS
+-----------------
+- **`Booking.discountApprovedById` missing FK** (see HIGH above) – allows injection of arbitrary user IDs, potentially bypassing authorisation checks if the discount‑approval logic relies solely on the caller’s identity without validating that the approver ID corresponds to a real, active user.
+
+- **`Booking.ipAddress` and `userAgent` stored without explicit privacy controls** – ensure privacy policy and data retention/access requirements are met (GDPR/CCPA). The schema itself cannot enforce this, but it should be flagged for compliance review.
+
+SCALABILITY CONCERNS
+--------------------
+- **Unindexed lookup columns on `Booking` (discordApprovalMessageId, User.discordId)** – as noted above, will cause full table scans under load.
+
+- **Growing log/audit/notification tables without archiving** – long‑term storage cost and query degradation.
+
+- **`EmailJob` dual‑system risk** – if both BullMQ and the outbox are active, duplicate sends multiplied by load can quickly exhaust email provider rate limits.
+
+DEPLOYMENT RISKS
+-----------------
+- **Shadow database requirement (`SHADOW_DATABASE_URL`)** – required for Prisma Migrate when using a cloud‑based development database. If the environment does not have a shadow database available, migrations will fail. Ensure the deployment pipeline supplies this variable.
+
+- **Enum changes require careful migration** – Prisma enums are implemented as native PostgreSQL enums. Adding or removing values requires a migration that may lock the table. Coordinate enum updates with maintenance windows and test on staging.
+
+ARCHITECTURAL VIOLATIONS
+-------------------------
+- **Email outbox vs BullMQ conflict** – already detailed as HIGH. The presence of both mechanisms suggests an incomplete migration or a forked design path. This must be unified.
+
+- **Two independent state fields on the core entity (`Booking`)** – violates the principle of a single source of truth for the entity’s state, increasing the chance of bugs and complicating all state‑transition logic.
+
+TECHNICAL DEBT
+--------------
+- Denormalised `depositPaid` flag.
+- Stale `isFirstTime` customer flag.
+- Multiple nullable fields that could be made non‑nullable with better defaults (e.g., `truckAddonAmount` default 0 already set).
+- Free‑text foreign‑key‑like columns (`discountApprovedById`, `file.uploadedBy`) that should be proper relations.
+- Absence of explicit `@@index` on frequently queried Discord IDs.
+
+DEAD CODE
+---------
+- **`EmailJob` table and the `Booking.outboxState` field** – if the current path still uses BullMQ for all email delivery and no code reads/writes these tables, they are dead. The comment references “src/outbox” but it is not mentioned in the architecture map. Confirm whether this is a planned migration or leftover; if unused, remove to avoid confusion and maintenance burden.
+
+FINAL VERDICT
+-------------
+The schema is well‑structured for the core business domain, with comprehensive enums, appropriate use of `@unique` on critical Stripe identifiers, and solid indexing on the most common access paths. However, the **missing index on the Discord approval message ID** is a critical operational risk that can break the admin approval flow under load. The **lack of foreign keys on discount approver and the ambiguous User.discordId** are high‑severity integrity and performance issues. The **coexistence of a database outbox and BullMQ workers** introduces dangerous duplication and must be resolved. Address the critical and high items before scaling the service, and create a plan to clean up the identified technical debt.

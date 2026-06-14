@@ -27,6 +27,9 @@ function verifyDiscordSignature(
   publicKey: string
 ): boolean {
   try {
+    const timestampSec = Number(timestamp);
+    if (Math.abs(Date.now() / 1000 - timestampSec) > 5) return false;
+
     return nacl.sign.detached.verify(
       Buffer.from(timestamp + rawBody),
       Buffer.from(signature, "hex"),

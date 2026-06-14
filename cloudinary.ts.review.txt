@@ -1,0 +1,41 @@
+FILE SCORE: 20/100
+
+CRITICAL ISSUES
+- **Cloudinary signed upload uses SHA256 instead of SHA1** — `generateSignedUploadParams` computes the signature with `crypto.createHash('sha256')`. Cloudinary's upload verification requires SHA1 of the parameter string + API secret. Every upload using this signature will be rejected by Cloudinary. The feature is completely broken.
+- **API secret may be `undefined` in signature string** — `generateSignedUploadParams` concatenates `process.env.CLOUDINARY_API_SECRET` without a fallback. If the env var is missing, the resulting string contains the literal `"undefined"`, producing an invalid signature and no clear error.
+- **`generateSignedUrl` uses API secret as token key** — It passes `CLOUDINARY_API_SECRET` as the `auth_token.key`. Cloudinary token-based authentication requires a separate token key defined in the account settings, not the API secret. The generated signed URL will never be valid.
+
+HIGH PRIORITY ISSUES
+- **`publicId` parameter is never signed** — `generateSignedUploadParams` omits `public_id` from the string that is signed. Any client-side attempt to supply a `public_id` will cause Cloudinary to reject the request because the signature won't cover that parameter. The parameter is effectively dead; if custom public IDs are intended, the signature must include it.
+- **No credential validation before API calls** — `cloudinary.config` defaults to placeholder values when environment variables are missing. Functions like `deleteFile`, `uploadBuffer`, and `generateSignedUrl` then call Cloudinary with invalid configuration, throwing opaque errors. The module should explicitly check for required credentials before allowing operations.
+- **Zero error handling or logging** — No function catches or logs failures. Cloudinary API errors propagate raw, providing no operational visibility. The file does not import the project's pino logger. This makes debugging impossible in production.
+- **`generateSignedUrl` mixes two incompatible signing methods** — It enables `sign_url: true` (API secret‑based SHA1 signature) *and* an `auth_token` block (token‑based authentication). The combination is non‑standard and likely leads to unpredictable behavior or failure.
+
+MEDIUM PRIORITY ISSUES
+- **`uploadBuffer` does not handle public‑id collisions** — With `overwrite: false`, a duplicate public ID causes Cloudinary to return an error (resource already exists). The caller receives only a rejected promise with no context.
+- **`deleteFiles` discards partial failure information** — The Cloudinary API may return per‑resource results; the function ignores them and cannot report which files succeeded or failed.
+- **Misleading placeholder configuration** — Falling back to `'placeholder'` in `cloudinary.config` masks missing environment variables. If Cloudinary is truly optional, the module should expose a readiness check; if it is required, missing configuration should halt startup with a clear log.
+
+SECURITY CONCERNS
+- **Signature algorithm mismatch (SHA256 vs SHA1)** — Uploads are effectively unsigned, but Cloudinary will reject them (fail‑secure). Until fixed, the upload feature is non‑functional.
+- **API secret exposure risk via `undefined`** — If the secret is missing, the signature becomes predictable and trivially forgeable if an attacker discovers the missing configuration.
+- **API secret used as token key** — Exposes the master API secret in a signed URL. If the URL is ever shared or leaked, the secret is compromised.
+
+SCALABILITY CONCERNS
+- None specific to this file.
+
+DEPLOYMENT RISKS
+- The file will not work in any environment because the SHA256 signature is incompatible with Cloudinary. All upload and signed‑URL features fail regardless of deployment target.
+
+ARCHITECTURAL VIOLATIONS
+- None. The module is in `src/lib/` and does not import Next.js or Vercel‑specific code.
+
+TECHNICAL DEBT
+- The entire signing logic for both upload and access URLs must be rewritten to match Cloudinary’s documented algorithms. The hybrid `sign_url` + `auth_token` approach should be simplified. Hard‑coded upload preset name should be configurable.
+
+DEAD CODE
+- The `publicId` parameter in `generateSignedUploadParams` is never used in the signature and cannot be used successfully by clients. It exists only in the function signature.
+- `generateSignedUrl` is implemented but will not work correctly; it may never have been exercised in production.
+
+FINAL VERDICT
+The file contains multiple critical bugs that render Cloudinary uploads and signed URLs completely non‑functional. The use of SHA256 instead of SHA1 breaks signed uploads, the handling of the API secret in signature generation is unsafe, and the signed‑URL logic misuses the API secret as a token key. Without fixes, none of the functions will operate correctly. The file needs a full security‑conscious rewrite, mandatory credential checks, and comprehensive error logging before it can be trusted in production.

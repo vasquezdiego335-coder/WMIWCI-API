@@ -5,7 +5,7 @@ import { BOOKING_FEE_CENTS, createBookingCheckout } from '@/lib/stripe'
 import { apiLogger } from '@/lib/logger'
 import { AGREEMENT_VERSION } from '@/lib/agreement'
 
-const TRUCK_PICKUP_RETURN_AMOUNT_CENTS = 10000 // $100 due on move day (truck pickup & return)
+const TRUCK_PICKUP_RETURN_AMOUNT_CENTS = 5000
 
 // ── CORS ──────────────────────────────────────────────────────
 // The marketing site (static HTML) is served from a different origin than this
@@ -119,7 +119,7 @@ const SERVICE_MAP: Record<string, { label: string; price: number }> = {
 
 const TRUCK_LABELS: Record<string, string> = {
   'own-truck': 'Customer provides truck ($0)',
-  'truck-pickup-return': 'Truck Pickup & Return (+$100 due on move day)',
+  'truck-pickup-return': 'Truck Pickup & Return (+$50 due on move day)',
 }
 
 function buildRequestedDate(date?: string, time?: string): Date {
@@ -142,7 +142,7 @@ function buildDescription(
   lines.push(`Service: ${svc ? svc.label : serviceType}`)
   if (truckOption) lines.push(`Truck: ${TRUCK_LABELS[truckOption] ?? truckOption}`)
   if (truckOption === 'truck-pickup-return') {
-    lines.push('Truck add-on due on move day: $100 (not charged in Stripe)')
+    lines.push('Truck add-on due on move day: $50 (not charged in Stripe)')
   }
   // Access difficulty — verbose lines + fee note, only when something is selected.
   const accessLines: string[] = []

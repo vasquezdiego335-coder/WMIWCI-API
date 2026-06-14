@@ -1,0 +1,60 @@
+**FILE SCORE:** 65/100
+
+**CRITICAL ISSUES**
+*(none)*
+
+**HIGH PRIORITY ISSUES**
+1. **Missing authentication / access control on Bull Board UI**  
+   The comment instructs to protect with reverse proxy + basic auth, but the code itself enforces nothing. If the `listen` address ever changes from `127.0.0.1` to `0.0.0.0` (necessary for containerized deployments), the queue management interface becomes publicly exposed without any barrier. The binding alone does not guarantee safety if deployment topologies change.
+
+2. **No graceful shutdown handling**  
+   The Express server does not attach a `SIGTERM`/`SIGINT` handler to close connections. If the process is killed (e.g., by an orchestrator), in‑flight requests may be dropped abruptly, and resources may not be released cleanly.
+
+3. **Uncaught server errors crash the process**  
+   `app.listen()` returns a server but no `'error'` event listener is attached. If the port is already in use or a fatal network error occurs, the error will propagate as an unhandled event, terminating the process without a proper log. The asynchronous `.catch()` only covers the initial promise, not long‑running server errors.
+
+**MEDIUM PRIORITY ISSUES**
+4. **Dead queue `webhook-retry` registered in board**  
+   `QUEUE_NAMES` includes `'webhook-retry'`, but architecture docs confirm this queue is never produced/consumed. Displaying it in the UI is misleading and adds noise.  
+   **→ Dead code**
+
+5. **No structured logging**  
+   Uses `console.log`/`console.error` instead of the project’s standard `pino` loggers defined in `src/lib/logger.ts`. This makes it invisible to log aggregation, misses request IDs, and prevents consistent monitoring.
+
+6. **Hard‑coded bind address `127.0.0.1`**  
+   Binds only to localhost, which is correct for local development but fails in containerised environments where the inspector needs to be reached from another container or a proxy. The port is also hard‑coded with a fallback, but the bind address is not configurable. If a team needs to access the UI remotely (e.g., via Railway’s port mapping), they must edit the source code.
+
+7. **No input validation on queue names**  
+   `QUEUE_NAMES` is a hard‑coded array, but no runtime check verifies that those queues actually exist. If a queue name is renamed or removed in the project, the board will attempt to create a `Queue` instance that may connect but never receive jobs — a silent no‑op that no one notices.
+
+8. **Type‑casting `as any` hides real type mismatches**  
+   The cast of `BullMQAdapter` arrays to `as any` hides a version skew between `@bull-board/api` and `@bull-board/api/bullMQAdapter`. If the APIs diverge further, the error will appear at runtime with no TypeScript warning.
+
+**LOW PRIORITY ISSUES**
+9. **No rate‑limiting on the UI or health endpoint**  
+   An attacker with access to localhost could flood the health endpoint or the Bull Board UI, causing resource waste. Acceptable given localhost-only binding, but worth noting.
+
+10. **Minimal health check output**  
+    The `/health` endpoint only reports `{ status: 'ok', queues: 5 }` — it does not verify that Redis is reachable or that queues are actually operational. A consumer might misinterpret a working process as a healthy queue system.
+
+**SECURITY CONCERNS**
+- The Bull Board UI gives full destructive control over queues (retry, remove, flush). The current `127.0.0.1` binding is insufficient as a sole defence; the design relies entirely on deployment orchestration for auth and network isolation. If this file is ever used in a different context (e.g., inside a Docker container with a port mapped to `0.0.0.0`), the risk escalates immediately.
+
+**SCALABILITY CONCERNS**
+- Each execution of `bull-board.ts` creates five new `bullmq` `Queue` instances. If multiple instances are inadvertently spun up (e.g., alongside workers in horizontally scaled persistent hosts), Redis connection counts multiply, potentially exhausting Upstash connection limits.
+
+**DEPLOYMENT RISKS**
+- The `127.0.0.1` bind makes the inspector inaccessible in typical container/cloud setups. Without an environment variable for the bind address, operators must either modify the source or run an additional sidecar reverse proxy inside the same network namespace — adding operational complexity.
+
+**ARCHITECTURAL VIOLATIONS**
+*(none)* – The file stays within the allowed worker boundaries; it imports only `@/lib/redis` (non‑Next.js) and runs Express, which is not prohibited.
+
+**TECHNICAL DEBT**
+- Missing graceful shutdown, structured logging, and error event handling.
+- The `as any` workaround should be resolved by aligning `@bull-board` dependency versions or contributing a fix.
+
+**DEAD CODE**
+- `'webhook-retry'` in `QUEUE_NAMES` actively references a queue that is never used, creating a phantom entry in the UI.
+
+**FINAL VERDICT**
+The Bull Board script is a useful internal tool but lacks production‑grade hardening. The biggest risks are its missing authentication controls (masked by localhost binding), the lack of error handling that can crash the container, and the inclusion of a dead queue. It should be hardened before being exposed in any shared or automated environment, especially in cloud deployments where `127.0.0.1` is not viable.

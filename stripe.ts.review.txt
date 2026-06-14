@@ -1,0 +1,52 @@
+FILE SCORE: 80/100
+
+CRITICAL ISSUES
+- None identified.
+
+HIGH PRIORITY ISSUES
+1. **Missing input truncation for Stripe metadata and product description**  
+   `createBookingCheckout` passes `customerName` directly into `payment_intent_data.metadata` and `params.description` into a product description. Stripe enforces a 500‑character limit on metadata values and a 1000‑character limit on `description`. A long customer name or description will cause the checkout session creation to fail with a Stripe API error, blocking the booking.  
+2. **No logging around Stripe API calls**  
+   The module makes critical Stripe calls (`createBookingCheckout`, `captureDeposit`, `cancelDeposit`, `refundDeposit`, `constructWebhookEvent`) without any logging of requests or errors. Debugging payment failures requires external monitoring; sensitive errors may go undetected.
+
+MEDIUM PRIORITY ISSUES
+1. **Missing idempotency key in checkout session creation**  
+   `createBookingCheckout` does not set an `idempotencyKey`. Retries of the same logical operation (e.g., network blips) could lead to duplicate holds if the creation route is retried without careful client‑side deduplication.  
+2. **`refundDeposit` does not check PaymentIntent state**  
+   Calling `refundDeposit` on an uncaptured PaymentIntent will throw a Stripe error. The function blindly attempts a refund; callers must guarantee the intent is captured, which is fragile.  
+3. **`captureDeposit` / `cancelDeposit` / `refundDeposit` lack input validation**  
+   A `paymentIntentId` of `undefined` or `null` would reach the Stripe API and throw an opaque error. Basic guard (`if (!paymentIntentId) throw …`) improves debuggability.  
+4. **`applyDiscount` accepts any value for `percentOff`**  
+   No check for non‑numeric or out‑of‑range values (e.g., negative, NaN). The `Math.max(0, …)` caps the final amount but does not prevent nonsensical inputs.
+
+LOW PRIORITY ISSUES
+1. **`requiredEnv` exposes environment variable names when it throws**  
+   If the error is not caught and surfaces in an API response, it reveals internal variable names (e.g., “STRIPE_SECRET_KEY is required”). The library function itself is safe, but callers must not leak these messages.  
+2. **Lazy `Stripe` client singleton is not thread‑safe**  
+   On multithreaded Node.js runtimes this could lead to double‑initialisation. Not an issue in Vercel’s single‑threaded per‑invocation model, but worth noting if the code is reused elsewhere.  
+3. **Hardcoded default for `BOOKING_FEE_CENTS`**  
+   Fallback of `4900` ($49.00) is hardcoded; a typo in the env variable would silently use this default. While documented, a stricter fallback or explicit warning could be safer.  
+4. **`expires_at` is fixed at 30 minutes**  
+   The checkout session expiration is not overridable via environment. Changing it requires a code modification.
+
+SECURITY CONCERNS
+- **Information leakage via error messages**: `requiredEnv` and `stripeSecretKey` throw errors that contain environment variable names (`STRIPE_SECRET_KEY`, `STRIPE_ALLOW_TEST`). If an unhandled error leaks these to an HTTP response, an attacker gains insight into the deployment’s secret‑management strategy.  
+- **Test‑mode guard misconfiguration risk**: The `STRIPE_ALLOW_TEST` flag is a safety net. If accidentally set to `'true'` in production, test keys are accepted silently, which could result in fake payments being treated as real.
+
+SCALABILITY CONCERNS
+- None specific to this module.
+
+DEPLOYMENT RISKS
+- **Vercel production environments (NODE_ENV=production) require `STRIPE_ALLOW_TEST=true` when using test keys.** Forgetting to set this flag will crash the app at startup, causing downtime. The guard prevents accidental test key usage but is a sharp edge during testing on production infra.
+
+ARCHITECTURAL VIOLATIONS
+- None. The file stays within `src/lib`, imports only the Stripe SDK, and does not import any Next.js‑specific or forbidden modules.
+
+TECHNICAL DEBT
+- The `stripe` proxy adds a level of indirection that could be simplified with a simple lazy‑getter or by calling `getStripeClient()` directly; the current proxy may interfere with reflection or `instanceof` checks, though no problems have arisen yet.
+
+DEAD CODE
+- None.
+
+FINAL VERDICT
+The module is functionally correct for the core Stripe operations it performs. The main improvements are **input sanitisation** to respect Stripe’s limits (preventing checkout failures), **logging** for observability, and **idempotency** for safety. With those addressed, the file would be production‑hardened.

@@ -1,0 +1,58 @@
+FILE SCORE: 55/100
+
+CRITICAL ISSUES
+1. **Discord posting functions silently swallow all errors — no retry possible.**  
+   All exported functions (`postBookingApprovalCard`, `postDiscountApprovalCard`, `postPaymentAlert`, `createJobChannels`, `postDailySchedule`, `postContactMessage`, `postFailureAlert`) call `restSendToChannel` or `restSendFirst`, which catch exceptions and return `null`. The caller functions ignore the result and return `void`. **This means the BullMQ worker sees a successful job completion even if the message was never posted**, preventing the job from being retried.  
+   *Impact:* If Discord is temporarily unavailable, an approval card, payment alert, or daily schedule is permanently lost. The entire payment → approval flow breaks because the admin never receives the booking card.  
+   *Required fix:* The functions must throw on failure when the message is required, or at least return a success flag so the worker can re-queue. “Worker-safe” must not mean “drop all errors silently.”
+
+HIGH PRIORITY ISSUES
+1. **Unsafe truck add-on display logic in `postBookingApprovalCard`.**  
+   `money(((payload.truckAddonAmount as number) ?? 5000) / 100)` can produce `NaN` if `payload.truckAddonAmount` is a non‑numeric string (e.g., `"hundred"`), which then renders as the string `"null"` in the embed. The fallback of `5000` cents is also undocumented and may silently misrepresent the pricing.  
+2. **No HTTP timeout on the REST client.**  
+   The `REST` instance is created without a `timeout` option. If Discord is slow or unresponsive, the worker can hang (or block on a default timeout) and stall the queue, potentially filling up pending jobs. A reasonable timeout (e.g., 10 s) is needed to prevent worker starvation.  
+3. **Functions return `void`, making failure invisible to callers.**  
+   Even if the intent is to not throw, the calling worker has no way to know that the post failed. This is essentially the same root cause as the critical issue — the consumer (discord worker) cannot react. At minimum, the functions should return a boolean or throw to align with BullMQ’s retry mechanism.
+
+MEDIUM PRIORITY ISSUES
+1. **“Undefined” / “null” strings appear in embeds from non‑numeric money values.**  
+   The `money` helper returns `null` for invalid numbers; template literals then convert `null` to the string `"null"`. Several call sites that do **not** guard with `filter(Boolean)` (e.g., the truck add‑on line) will display `null`.  
+2. **No size guards on many embed fields.**  
+   Discord field values have a 1024‑character limit. While `items` is sliced to 1024, other dynamic fields (customer name, email, address, agreement text) can exceed the limit, causing the REST API to reject the entire message. Because the error is swallowed, the message is silently lost.  
+3. **`fmtDate` may produce “Invalid Date”.**  
+   If the payload’s date string is malformed or missing, the embed will show “Invalid Date” instead of a meaningful fallback or omission.  
+4. **Fallback channel logic in `restSendFirst` can post to an unexpected channel.**  
+   For failure alerts, the code tries `DISCORD_CHANNEL_ALERTS` then `DISCORD_CHANNEL_SCHEDULING`. If the primary channel is inaccessible (e.g., missing permissions), the message lands in scheduling — potentially confusing or cluttering the wrong channel.  
+5. **No request/response body logging for debugging.**  
+   When a REST call fails, only the error message is logged; the actual payload is not. This slows down diagnosis of malformed embeds, rate‑limit backoffs, or permission issues.
+
+LOW PRIORITY ISSUES
+1. **Placeholder guard is overly specific.**  
+   `isConfigured` checks for exact strings like `'REPLACE_ME'` and `'placeholder'`. A developer using a different placeholder (e.g., `'your_token_here'`) will bypass the check and receive a later API error.  
+2. **`dotenv/config` import may be redundant.**  
+   The worker entry point likely already loads dotenv; having it here again is harmless but could be removed for clarity.
+
+SECURITY CONCERNS
+1. **Possibility of token leakage in error logs.**  
+   `restSendToChannel` logs the error message and stack from a failed REST call. If the error object contains the full request configuration (including the `Authorization` header), the bot token could inadvertently appear in logs. Even though discord.js typically does not include headers in error bodies, this should be sanitised explicitly to be safe.
+
+SCALABILITY CONCERNS
+- None beyond the missing timeout. The singleton REST client will respect Discord rate limits automatically and queue requests, so throughput under normal conditions is acceptable.
+
+DEPLOYMENT RISKS
+- **No startup configuration validation.**  
+  The worker does not check that the bot token or required channel IDs are configured until the first job attempts to send. If any mandatory env variable is missing, the worker will appear to start successfully but will fail every job silently. A startup check (e.g., logging “Discord posting disabled” or throwing) would make deployment misconfigurations immediately visible.
+
+ARCHITECTURAL VIOLATIONS
+- None. The module correctly avoids importing any gateway code and does not use Next.js‑specific modules. The use of Prisma for updating `discordApprovalMessageId` is permitted per the architecture.
+
+TECHNICAL DEBT
+1. `money` helper is fragile and returns `null` without indicating why — prone to “null” string leaks.  
+2. Repeated embed‑building logic in each function increases maintenance overhead and the risk of inconsistent guards.  
+3. Payload typing is entirely `Record<string, unknown>`, so no compile‑time safety for required fields. Runtime failures are possible and untested.
+
+DEAD CODE
+- No dead exports detected; all functions appear to be used by the discord worker according to the architecture map.
+
+FINAL VERDICT
+The module’s most severe flaw is its error‑handling philosophy: it silently drops messages when the REST call fails, breaking the entire booking‑approval flow in production. Combined with the missing timeout and unsafe number conversions, this code is **not production‑ready** for a system that depends on reliable Discord notifications. The critical issue must be addressed immediately; the high items are strong blockers for a reliable deployment.

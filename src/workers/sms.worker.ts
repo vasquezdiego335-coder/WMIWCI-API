@@ -64,7 +64,10 @@ async function processSmsJob(job: Job<SmsJobData>): Promise<void> {
 
   // ── Feature flag ─────────────────────────────────────────────────────────
   if (process.env.TWILIO_ENABLED !== 'true') {
-    log.info('SMS disabled (TWILIO_ENABLED != "true") — skipping send')
+    log.info(
+      { dryRun: true, wouldSendTo: maskPhone(to), messagePreview: message?.slice(0, 60) },
+      '✅ SMS DRY RUN — job received and processed, Twilio call skipped (TWILIO_ENABLED != "true")'
+    )
     return
   }
 

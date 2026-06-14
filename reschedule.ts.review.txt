@@ -1,0 +1,78 @@
+FILE SCORE: 40/100
+
+CRITICAL ISSUES
+
+1. **Discord job name mismatch**  
+   The call `discordQueue.add('failure-alert', ...)` uses the job type `'failure-alert'`. The architecture map and queue processor design indicate that the Discord worker only handles specific named job types (e.g., `'discord-card'`, `'job-card'`). There is no evidence that `'failure-alert'` is ever consumed. Consequently, the reschedule Discord notice is silently never posted. This breaks a core requirement of the “Offer New Dates” flow.
+
+2. **Null customer reference will crash**  
+   The function assumes `booking.customer` is always non‑null and immediately accesses `.email` and `.name` in the Discord message payload. If the relation is missing (data inconsistency, soft‑deleted customer, etc.), a JavaScript `TypeError` is thrown. In the Discord interaction path this would explode inside a 3‑second window with no recovery, potentially crashing the bot process if unhandled.
+
+HIGH PRIORITY ISSUES
+
+1. **Missing status‑guarding update**  
+   `prisma.booking.update({… data: { status: 'PENDING_APPROVAL' } })` executes unconditionally, regardless of the booking’s current state. A booking in a terminal status (`CANCELLED`, `COMPLETED`) can be moved back to `PENDING_APPROVAL`, corrupting business invariants. No check or atomic condition is applied.
+
+2. **Unhandled promise rejection in the queue timeout race**  
+   The `Promise.race` rejects after 2500 ms, but the original `discordQueue.add(…)` promise remains dangling. If that promise later rejects (e.g., Redis connection error after the timeout), it becomes an unhandled promise rejection, which can terminate the Node.js process in modern runtimes. The pattern lacks proper cleanup of the losing promise.
+
+3. **No error handling for core operations**  
+   `findAvailableSlots` and the `prisma.booking.update` call are not wrapped in try/catch. A database error or scheduling‑calculation failure will throw synchronously, leaving the caller (especially the Discord interaction handler) without a controlled fallback, likely exceeding the 3‑second response window and generating an opaque error.
+
+MEDIUM PRIORITY ISSUES
+
+1. **Zero‑slot result not treated as an error**  
+   When no slots are available, `offeredDates` is an empty array and the function still returns a “success” result. The customer portal will display no selectable dates, causing a confusing experience. The function should probably short‑circuit and signal “no slots” instead.
+
+2. **No idempotency / duplicate prevention**  
+   Repeated calls for the same booking (double‑click, retry) will update the status again (harmless as no‑op), re‑post the Discord notice, and insert an additional audit log entry. This creates noise and can mislead internal operators.
+
+3. **No rate limiting**  
+   The function does not constrain how frequently reschedule offers can be triggered for a single booking, opening the door to accidental or malicious spam toward Discord.
+
+4. **Hard‑coded fallback URL may be misleading**  
+   The line `const appUrl = process.env.APP_URL ?? 'https://wmiwci-api.vercel.app'` silently uses a production‑looking string if the env var is missing. In local/dev settings this could cause incorrect links; in CI/staging it could redirect real traffic. A missing required variable should be treated as an explicit failure.
+
+5. **Insufficient operational logging**  
+   Only a final `apiLogger.info` is emitted on success. There is no debug/log on entry, no log of the status change, no warning when `offeredDates` is empty, and no error log for the slot‑finding or the update (except the Discord‑notice timeout). This hampers troubleshooting.
+
+LOW PRIORITY ISSUES
+
+1. **Audit log detail may grow unnecessarily**  
+   The `details` field stores the full array of offered date strings. With a large number of slots this is negligible, but it could become verbose in extreme configurations. Not a real concern.
+
+2. **`customerEmail` in return type is unused**  
+   The field is always populated but no known caller consumes it (the comment‑based policy says no email is sent). This is harmless leftover.
+
+3. **Comment about re‑enabling email/SMS**  
+   The large comment block about messaging policy and `ALLOWED_TEMPLATES` is informative but refers to functionality that could be re‑enabled. It does not affect runtime behaviour, but it signals a dormant area.
+
+SECURITY CONCERNS
+
+- The function relies entirely on the caller to enforce authorization. It does not verify that the provided `userId` (or the absence of one) corresponds to a legitimate operator for this booking. While acceptable as a shared helper, a future mistake in a new caller could lead to privilege escalation. Mild concern, but within the architectural contract.
+
+SCALABILITY CONCERNS
+
+- `findAvailableSlots` likely performs a database scan of existing bookings. Under high concurrency (multiple admins generating offers simultaneously) this could create load spikes. No caching or batching is implemented.
+
+DEPLOYMENT RISKS
+
+- The critical Discord job‑name mismatch means the reschedule notification will break silently in any environment (including production) until the worker code is updated to handle `'failure-alert'`. The feature appears functional from the API side but produces no Discord card, risking missed internal alerts.
+
+ARCHITECTURAL VIOLATIONS
+
+- The function artificially introduces a new job type (`'failure-alert'`) that is not part of the documented queue job taxonomy. The architecture explicitly ties worker logic to specific job names; introducing an unrecognized name breaks the contract and defeats the purpose of the typed queue system.
+
+TECHNICAL DEBT
+
+- The timeout‑race pattern without proper cancellation/protection against unhandled rejections is fragile and known to cause sporadic crashes in Node.js.
+- Lack of status validation encourages unsafe business‑logic updates.
+- Missing environment‑variable validation forces reliance on a hard‑coded fallback, making multi‑environment deployment less robust.
+
+DEAD CODE
+
+- None in the strict sense. The note about adding a `'reschedule-offer'` template to `ALLOWED_TEMPLATES` is a planned but unimplemented feature, not dead code executed.
+
+FINAL VERDICT
+
+The file contains two critical bugs that render the primary Discord notification path inoperative and a crash risk when the customer relation is absent. The function lacks fundamental guards (status validation, error handling, idempotency, unhandled‑rejection safety) and violates the queue job‑naming contract. The combination makes the current implementation unsuitable for production without immediate remediation of the job name and null‑safety issues, followed by the high‑priority reliability fixes.
