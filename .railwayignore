@@ -1,6 +1,0 @@
-﻿app/
-.next/
-public/
-next.config.mjs
-postcss.config.js
-tailwind.config.ts
