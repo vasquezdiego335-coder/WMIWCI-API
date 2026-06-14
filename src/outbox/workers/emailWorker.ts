@@ -102,6 +102,13 @@ function shutdown(signal: string) {
 process.on('SIGINT', () => shutdown('SIGINT'))
 process.on('SIGTERM', () => shutdown('SIGTERM'))
 
+/** Start the outbox poller from another entrypoint (e.g. the combined worker
+ *  host). Non-blocking; returns a stop handle. */
+export function startOutboxWorker(): { stop: () => void } {
+  void loop().catch((err) => console.error('[outbox] loop crashed:', err))
+  return { stop: () => { running = false } }
+}
+
 // Run directly: tsx src/outbox/workers/emailWorker.ts
 if (require.main === module) {
   loop().catch((err) => {

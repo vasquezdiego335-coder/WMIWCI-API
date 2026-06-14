@@ -14,6 +14,8 @@
     "db:studio": "prisma studio",
     "db:seed": "tsx prisma/seed.ts",
     "db:reset": "prisma migrate reset --force && npm run db:seed",
+    "host:dev": "tsx --watch src/worker-host.ts",
+    "host:start": "tsx src/worker-host.ts",
     "workers:dev": "tsx --watch src/workers/index.ts",
     "workers:start": "tsx src/workers/index.ts",
     "outbox:dev": "tsx --watch src/outbox/workers/emailWorker.ts",
