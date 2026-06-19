@@ -76,6 +76,68 @@ const commands = [
     .addIntegerOption((opt) =>
       opt.setName('count').setDescription('How many to show (1–25, default 10)').setRequired(false)
     ),
+
+  // ── Owner task board (#owner-tasks) ──
+  new SlashCommandBuilder()
+    .setName('task_add')
+    .setDescription('Add a task to the owner board')
+    .addStringOption((o) =>
+      o.setName('owner').setDescription('Who owns it').setRequired(true).addChoices(
+        { name: 'Diego', value: 'Diego' },
+        { name: 'Sebastian', value: 'Sebastian' }
+      )
+    )
+    .addStringOption((o) => o.setName('title').setDescription('Task title').setRequired(true))
+    .addStringOption((o) => o.setName('due').setDescription('Due date (2026-06-25, 6/25, "Jun 25", today, tomorrow)').setRequired(true))
+    .addIntegerOption((o) =>
+      o.setName('importance').setDescription('1–5 (5 = highest)').setRequired(false).setMinValue(1).setMaxValue(5)
+    )
+    .addStringOption((o) => o.setName('time').setDescription('Due time, optional (9am, 14:30, 9:00 PM)').setRequired(false))
+    .addStringOption((o) => o.setName('notes').setDescription('Description / details').setRequired(false)),
+
+  new SlashCommandBuilder()
+    .setName('task_list')
+    .setDescription('List open tasks (importance → due date → time)')
+    .addStringOption((o) =>
+      o.setName('owner').setDescription('Filter by owner').setRequired(false).addChoices(
+        { name: 'Diego', value: 'Diego' },
+        { name: 'Sebastian', value: 'Sebastian' }
+      )
+    ),
+
+  new SlashCommandBuilder()
+    .setName('task_done')
+    .setDescription('Mark a task done')
+    .addStringOption((o) => o.setName('id').setDescription('Task id (the 6-char code from /task_list)').setRequired(true)),
+
+  new SlashCommandBuilder()
+    .setName('task_delete')
+    .setDescription('Delete a task')
+    .addStringOption((o) => o.setName('id').setDescription('Task id (the 6-char code from /task_list)').setRequired(true)),
+
+  new SlashCommandBuilder()
+    .setName('task_edit')
+    .setDescription('Edit any field of a task')
+    .addStringOption((o) => o.setName('id').setDescription('Task id (the 6-char code from /task_list)').setRequired(true))
+    .addStringOption((o) => o.setName('title').setDescription('New title').setRequired(false))
+    .addIntegerOption((o) =>
+      o.setName('importance').setDescription('New importance 1–5').setRequired(false).setMinValue(1).setMaxValue(5)
+    )
+    .addStringOption((o) =>
+      o.setName('owner').setDescription('Reassign owner').setRequired(false).addChoices(
+        { name: 'Diego', value: 'Diego' },
+        { name: 'Sebastian', value: 'Sebastian' }
+      )
+    )
+    .addStringOption((o) => o.setName('due').setDescription('New due date').setRequired(false))
+    .addStringOption((o) => o.setName('time').setDescription('New due time').setRequired(false))
+    .addStringOption((o) => o.setName('notes').setDescription('New description').setRequired(false)),
+
+  new SlashCommandBuilder().setName('task_today').setDescription('Tasks due today'),
+
+  new SlashCommandBuilder().setName('task_overdue').setDescription('Tasks past their due date'),
+
+  new SlashCommandBuilder().setName('task_setup').setDescription('Create the #owner-tasks channel'),
 ].map((cmd) => cmd.toJSON())
 
 async function registerCommands(): Promise<void> {

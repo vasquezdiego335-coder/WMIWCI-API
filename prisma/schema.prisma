@@ -479,3 +479,35 @@ model ManualEvent {
   @@index([createdAt])
   @@map("manual_events")
 }
+
+enum TaskOwner {
+  DIEGO
+  SEBASTIAN
+}
+
+enum TaskStatus {
+  OPEN
+  DONE
+}
+
+/// Owner task board (#owner-tasks). Manually-created tasks for Diego & Sebastian,
+/// ranked by importance (5 = highest), then due date, then due time. Created from
+/// Discord slash commands (/task_add, /task_list, …).
+model Task {
+  id          String     @id @default(cuid())
+  title       String
+  description String?
+  importance  Int        @default(3) // 1–5, 5 = highest priority
+  owner       TaskOwner
+  dueDate     DateTime   @map("due_date") // calendar date, stored at UTC midnight
+  dueTime     String?    @map("due_time") // optional, normalized "HH:MM" 24h for sorting
+  status      TaskStatus @default(OPEN)
+  completedAt DateTime?  @map("completed_at")
+  createdAt   DateTime   @default(now()) @map("created_at")
+  updatedAt   DateTime   @updatedAt @map("updated_at")
+
+  @@index([status])
+  @@index([owner])
+  @@index([dueDate])
+  @@map("tasks")
+}

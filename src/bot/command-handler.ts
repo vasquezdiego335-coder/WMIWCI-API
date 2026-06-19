@@ -5,6 +5,7 @@ import {
   ActionRowBuilder,
   ButtonBuilder,
   ButtonStyle,
+  ChannelType,
 } from 'discord.js'
 import fs from 'fs'
 import path from 'path'
@@ -13,6 +14,16 @@ import { ManualEventType } from '@prisma/client'
 
 import { botLogger } from '../lib/logger'
 import { prisma } from '../lib/db'
+import {
+  addTask,
+  listTasks,
+  completeTask,
+  deleteTask,
+  editTask,
+  todayTasks,
+  overdueTasks,
+  type Embed,
+} from './task-service'
 
 // ════════════════════════════════════════════════════════════════════════
 //  Slash command registry + dispatcher
@@ -359,6 +370,62 @@ async function handleRecent(interaction: ChatInputCommandInteraction): Promise<v
   await interaction.editReply({ embeds: [embed] })
 }
 
+// ══════════════════════════════════════════════════════════════════════════
+//  Owner task board — /task_add /task_list /task_done /task_delete /task_edit
+//  /task_today /task_overdue /task_setup. All logic is in the shared
+//  task-service (same module the HTTP endpoint uses); these gateway handlers
+//  just defer, run the service, and render the returned embed JSON.
+// ══════════════════════════════════════════════════════════════════════════
+function taskOptions(interaction: ChatInputCommandInteraction): Record<string, string> {
+  const out: Record<string, string> = {}
+  for (const opt of interaction.options.data) {
+    if (opt.value !== undefined && opt.value !== null) out[opt.name] = String(opt.value)
+  }
+  return out
+}
+
+function makeTaskHandler(run: (o: Record<string, string>) => Promise<Embed>): CommandModule['execute'] {
+  return async (interaction: ChatInputCommandInteraction): Promise<void> => {
+    await interaction.deferReply({ ephemeral: true })
+    try {
+      const embed = await run(taskOptions(interaction))
+      await interaction.editReply({ embeds: [embed] })
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      botLogger.error({ cmd: interaction.commandName, err: msg, stack: errStack(err) }, 'Task command error')
+      await respondSafely(interaction, `⚠️ Task command failed: ${msg.slice(0, 120)}`)
+    }
+  }
+}
+
+// /task_setup — create #owner-tasks via the gateway client (REST path lives in
+// app/api/discord/interactions/route.ts for HTTP delivery).
+async function handleTaskSetup(interaction: ChatInputCommandInteraction): Promise<void> {
+  await interaction.deferReply({ ephemeral: true })
+  const guild = interaction.guild
+  if (!guild) {
+    await interaction.editReply('⚠️ Run /task_setup in the server, not a DM.')
+    return
+  }
+  try {
+    const existing = guild.channels.cache.find((c) => c.name === 'owner-tasks')
+    if (existing) {
+      await interaction.editReply(`✅ #owner-tasks already exists: <#${existing.id}>`)
+      return
+    }
+    const ch = await guild.channels.create({
+      name: 'owner-tasks',
+      type: ChannelType.GuildText,
+      topic: 'Owner task board — Diego & Sebastian',
+    })
+    await interaction.editReply(`✅ Created <#${ch.id}> — start with \`/task_add\``)
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    botLogger.error({ err: msg }, 'task_setup failed')
+    await respondSafely(interaction, `⚠️ Couldn't create #owner-tasks: ${msg.slice(0, 120)} (bot needs Manage Channels)`)
+  }
+}
+
 function registerInlineCommand(name: string, execute: CommandModule['execute']): void {
   if (commands.has(name)) {
     botLogger.debug({ command: name }, 'Inline command skipped — already provided by a file command')
@@ -383,6 +450,16 @@ function registerInlineCommands(): void {
   registerInlineCommand('jobaccept', makeLogHandler(ManualEventType.JOBACCEPT))
   registerInlineCommand('followup', makeLogHandler(ManualEventType.FOLLOWUP))
   registerInlineCommand('recent', handleRecent)
+
+  // Owner task board
+  registerInlineCommand('task_add', makeTaskHandler((o) => addTask(o)))
+  registerInlineCommand('task_list', makeTaskHandler((o) => listTasks(o.owner)))
+  registerInlineCommand('task_done', makeTaskHandler((o) => completeTask(o.id)))
+  registerInlineCommand('task_delete', makeTaskHandler((o) => deleteTask(o.id)))
+  registerInlineCommand('task_edit', makeTaskHandler((o) => editTask(o)))
+  registerInlineCommand('task_today', makeTaskHandler(() => todayTasks()))
+  registerInlineCommand('task_overdue', makeTaskHandler(() => overdueTasks()))
+  registerInlineCommand('task_setup', handleTaskSetup)
 }
 
 // ── Build the registry once at module load ────────────────────────────────

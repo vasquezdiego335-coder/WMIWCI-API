@@ -2,6 +2,16 @@ import { NextResponse } from "next/server";
 import nacl from "tweetnacl";
 import { prisma } from "@/lib/db";
 import { ManualEventType } from "@prisma/client";
+import {
+  addTask,
+  listTasks,
+  completeTask,
+  deleteTask,
+  editTask,
+  todayTasks,
+  overdueTasks,
+  type Embed,
+} from "@/bot/task-service";
 import { captureDeposit, cancelDeposit } from "@/lib/stripe";
 import { emailQueue, smsQueue } from "@/lib/queues";
 import { offerRescheduleToCustomer } from "@/lib/reschedule";
@@ -446,6 +456,90 @@ async function handleRecent(interaction: any) {
   });
 }
 
+// ── Owner task board (type 2): /task_add /task_list /task_done /task_delete ──
+// /task_edit /task_today /task_overdue /task_setup. All logic lives in the
+// shared task-service; here we just map options → service → ephemeral embed.
+const TASK_CMDS = new Set([
+  "task_add",
+  "task_list",
+  "task_done",
+  "task_delete",
+  "task_edit",
+  "task_today",
+  "task_overdue",
+  "task_setup",
+]);
+
+// /task_setup — create the #owner-tasks text channel via Discord REST.
+async function setupOwnerChannel(interaction: any): Promise<Embed> {
+  const guildId = interaction?.guild_id;
+  const token = process.env.DISCORD_BOT_TOKEN;
+  if (!guildId) return { title: "⚠️ Run /task_setup in the server, not a DM.", color: 0xef4444 };
+  if (!token) return { title: "⚠️ DISCORD_BOT_TOKEN not configured on the server.", color: 0xef4444 };
+
+  const headers = { Authorization: `Bot ${token}`, "Content-Type": "application/json" };
+  const base = `https://discord.com/api/v10/guilds/${guildId}/channels`;
+
+  // Idempotent: re-running just points at the existing channel.
+  const existing = await fetch(base, { headers })
+    .then((r) => (r.ok ? r.json() : []))
+    .catch(() => []);
+  const found = Array.isArray(existing) ? existing.find((c: any) => c?.name === "owner-tasks") : null;
+  if (found) return { title: "✅ #owner-tasks already exists", color: 0x22c55e, description: `<#${found.id}>` };
+
+  const res = await fetch(base, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ name: "owner-tasks", type: 0, topic: "Owner task board — Diego & Sebastian" }),
+  });
+  if (!res.ok) {
+    const txt = await res.text().catch(() => "");
+    apiLogger.error({ guildId, status: res.status, body: txt.slice(0, 300) }, "task_setup channel create failed");
+    return {
+      title: "⚠️ Couldn't create #owner-tasks",
+      color: 0xef4444,
+      description: (txt.slice(0, 250) || `HTTP ${res.status}`) + "\n(Does the bot have **Manage Channels**?)",
+    };
+  }
+  const ch = await res.json();
+  apiLogger.info({ guildId, channelId: ch.id }, "task_setup created #owner-tasks");
+  return { title: "✅ Created #owner-tasks", color: 0x22c55e, description: `<#${ch.id}> — start with \`/task_add\`` };
+}
+
+async function handleTaskCommand(interaction: any, cmd: string) {
+  const o = cmdOptions(interaction);
+  let embed: Embed;
+  switch (cmd) {
+    case "task_add":
+      embed = await addTask(o);
+      break;
+    case "task_list":
+      embed = await listTasks(o.owner);
+      break;
+    case "task_done":
+      embed = await completeTask(o.id);
+      break;
+    case "task_delete":
+      embed = await deleteTask(o.id);
+      break;
+    case "task_edit":
+      embed = await editTask(o);
+      break;
+    case "task_today":
+      embed = await todayTasks();
+      break;
+    case "task_overdue":
+      embed = await overdueTasks();
+      break;
+    case "task_setup":
+      embed = await setupOwnerChannel(interaction);
+      break;
+    default:
+      return ephemeral(`Unknown task command /${cmd}`);
+  }
+  return NextResponse.json({ type: RES_REPLY, data: { flags: FLAG_EPHEMERAL, embeds: [embed] } });
+}
+
 export async function POST(req: Request) {
   const signature = req.headers.get("x-signature-ed25519");
   const timestamp = req.headers.get("x-signature-timestamp");
@@ -491,6 +585,15 @@ export async function POST(req: Request) {
         const msg = err instanceof Error ? err.message : String(err);
         apiLogger.error({ cmd, err: msg, stack: err instanceof Error ? err.stack : undefined }, "✖ slash command handler failed");
         return ephemeral(`⚠️ Failed to log: ${msg.slice(0, 120)}`);
+      }
+    }
+    if (TASK_CMDS.has(cmd)) {
+      try {
+        return await handleTaskCommand(interaction, cmd);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        apiLogger.error({ cmd, err: msg, stack: err instanceof Error ? err.stack : undefined }, "✖ task command handler failed");
+        return ephemeral(`⚠️ Task command failed: ${msg.slice(0, 120)}`);
       }
     }
     apiLogger.warn({ cmd }, "slash command not handled by HTTP endpoint (gateway bot owns it)");
