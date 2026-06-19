@@ -450,3 +450,32 @@ model IdempotencyKey {
   @@index([expiresAt])
   @@map("idempotency_keys")
 }
+
+enum ManualEventType {
+  QUOTE // price quote given
+  VISIT // went out in person
+  ONSITE // customer wants the quote on-site
+  NOBOOK // customer chose not to book
+  JOBACCEPT // customer gave a verbal yes
+  FOLLOWUP // needs a follow-up / call back
+}
+
+/// Field events logged manually by the crew from Discord (/quote, /visit, /onsite,
+/// /nobook, /jobaccept, /followup). First-party ground truth from the field to
+/// complement the automated booking + payment data above. Standalone by design —
+/// these capture leads who never entered the booking flow.
+model ManualEvent {
+  id           String          @id @default(cuid())
+  eventType    ManualEventType @map("event_type")
+  customerName String?         @map("customer_name")
+  zip          String?
+  jobType      String?         @map("job_type")
+  notes        String?
+  loggedBy     String?         @map("logged_by") // Discord user tag who entered it
+  createdAt    DateTime        @default(now()) @map("created_at")
+
+  @@index([eventType])
+  @@index([zip])
+  @@index([createdAt])
+  @@map("manual_events")
+}
