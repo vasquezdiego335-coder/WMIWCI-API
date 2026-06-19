@@ -9,6 +9,8 @@ import {
 import fs from 'fs'
 import path from 'path'
 
+import { ManualEventType } from '@prisma/client'
+
 import { botLogger } from '../lib/logger'
 import { prisma } from '../lib/db'
 
@@ -269,6 +271,86 @@ async function handleStats(interaction: ChatInputCommandInteraction): Promise<vo
   await interaction.editReply({ embeds: [embed] })
 }
 
+// ══════════════════════════════════════════════════════════════════════════
+//  Field logging — /quote /visit /onsite /nobook /jobaccept /followup
+//  Each writes one manual_events row (see ManualEvent in schema.prisma) and
+//  confirms back ephemerally. All six share one handler factory.
+// ══════════════════════════════════════════════════════════════════════════
+const EVENT_UI: Record<ManualEventType, { emoji: string; label: string }> = {
+  QUOTE: { emoji: '💵', label: 'Quote given' },
+  VISIT: { emoji: '🚚', label: 'In-person visit' },
+  ONSITE: { emoji: '📍', label: 'Wants on-site quote' },
+  NOBOOK: { emoji: '❌', label: 'Did not book' },
+  JOBACCEPT: { emoji: '✅', label: 'Job accepted (verbal)' },
+  FOLLOWUP: { emoji: '🔁', label: 'Follow-up' },
+}
+
+function makeLogHandler(eventType: ManualEventType): CommandModule['execute'] {
+  return async (interaction: ChatInputCommandInteraction): Promise<void> => {
+    const name = interaction.options.getString('name', true).trim()
+    const zip = interaction.options.getString('zip', true).trim()
+    const job = interaction.options.getString('job')?.trim() || null
+    const notes = interaction.options.getString('notes')?.trim() || null
+    await interaction.deferReply({ ephemeral: true })
+
+    botLogger.debug({ eventType, zip }, 'DB → manualEvent.create')
+    const ev = await prisma.manualEvent.create({
+      data: { eventType, customerName: name, zip, jobType: job, notes, loggedBy: interaction.user.tag },
+    })
+    botLogger.info({ eventType, id: ev.id }, 'DB ✓ manualEvent.create')
+
+    const { emoji, label } = EVENT_UI[eventType]
+    const embed = new EmbedBuilder()
+      .setTitle(`${emoji} ${label} — logged`)
+      .setColor(0xff5a1f)
+      .addFields(
+        { name: '👤 Customer', value: name, inline: true },
+        { name: '📍 ZIP', value: zip, inline: true },
+        ...(job ? [{ name: '📦 Job', value: job, inline: true }] : []),
+        ...(notes ? [{ name: '📝 Notes', value: notes.slice(0, 1024), inline: false }] : [])
+      )
+      .setFooter({ text: `Event ID: ${ev.id}` })
+      .setTimestamp()
+
+    await interaction.editReply({ embeds: [embed] })
+  }
+}
+
+// /recent type?:<TYPE> count?:<n> — read the latest field events back (read-only)
+async function handleRecent(interaction: ChatInputCommandInteraction): Promise<void> {
+  const type = (interaction.options.getString('type') as ManualEventType | null) ?? undefined
+  const count = Math.min(Math.max(interaction.options.getInteger('count') ?? 10, 1), 25)
+  await interaction.deferReply({ ephemeral: true })
+
+  botLogger.debug({ type, count }, 'DB → manualEvent.findMany (/recent)')
+  const events = await prisma.manualEvent.findMany({
+    where: type ? { eventType: type } : undefined,
+    orderBy: { createdAt: 'desc' },
+    take: count,
+  })
+  botLogger.debug({ found: events.length }, 'DB ✓ manualEvent.findMany (/recent)')
+
+  const embed = new EmbedBuilder().setTitle('🗒️ Recent field events').setColor(0x0a1628).setTimestamp()
+  if (events.length === 0) {
+    embed.setDescription(type ? `No \`${type}\` events logged yet.` : 'No events logged yet.')
+  } else {
+    embed.setDescription(
+      events
+        .map((e) => {
+          const ui = EVENT_UI[e.eventType]
+          const loc = e.zip ? ` · ${e.zip}` : ''
+          const note = e.notes ? ` · ${e.notes}` : ''
+          return `${ui.emoji} **${e.customerName ?? '—'}**${loc} _(${ui.label})_${note}\n⏱ ${fmtDate(e.createdAt)}`
+        })
+        .join('\n')
+        .slice(0, 4000)
+    )
+    embed.setFooter({ text: `${events.length} event${events.length === 1 ? '' : 's'}` })
+  }
+
+  await interaction.editReply({ embeds: [embed] })
+}
+
 function registerInlineCommand(name: string, execute: CommandModule['execute']): void {
   if (commands.has(name)) {
     botLogger.debug({ command: name }, 'Inline command skipped — already provided by a file command')
@@ -284,6 +366,15 @@ function registerInlineCommands(): void {
   registerInlineCommand('approve', handleApprove)
   registerInlineCommand('deny', handleDeny)
   registerInlineCommand('stats', handleStats)
+
+  // Field logging
+  registerInlineCommand('quote', makeLogHandler(ManualEventType.QUOTE))
+  registerInlineCommand('visit', makeLogHandler(ManualEventType.VISIT))
+  registerInlineCommand('onsite', makeLogHandler(ManualEventType.ONSITE))
+  registerInlineCommand('nobook', makeLogHandler(ManualEventType.NOBOOK))
+  registerInlineCommand('jobaccept', makeLogHandler(ManualEventType.JOBACCEPT))
+  registerInlineCommand('followup', makeLogHandler(ManualEventType.FOLLOWUP))
+  registerInlineCommand('recent', handleRecent)
 }
 
 // ── Build the registry once at module load ────────────────────────────────

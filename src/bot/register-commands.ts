@@ -34,6 +34,48 @@ const commands = [
   new SlashCommandBuilder()
     .setName('setup_business')
     .setDescription('Set up all channels and categories for your moving business'),
+
+  // ── Field logging (manual events) — quick to fill from a phone ──
+  // Every one shares the same 4 options; only the meaning differs.
+  ...(
+    [
+      ['quote', 'Log a price quote you gave'],
+      ['visit', 'Log an in-person visit'],
+      ['onsite', 'Log a customer who wants a quote on-site'],
+      ['nobook', 'Log a customer who chose not to book'],
+      ['jobaccept', 'Log a job accepted by verbal yes'],
+      ['followup', 'Log a customer who needs a follow-up'],
+    ] as const
+  ).map(([name, description]) =>
+    new SlashCommandBuilder()
+      .setName(name)
+      .setDescription(description)
+      .addStringOption((opt) => opt.setName('name').setDescription('Customer name').setRequired(true))
+      .addStringOption((opt) => opt.setName('zip').setDescription('5-digit ZIP code').setRequired(true))
+      .addStringOption((opt) => opt.setName('job').setDescription('Job type (studio, 1BR, office…)').setRequired(false))
+      .addStringOption((opt) => opt.setName('notes').setDescription('Anything worth remembering').setRequired(false))
+  ),
+
+  new SlashCommandBuilder()
+    .setName('recent')
+    .setDescription('Show the last few manually-logged field events')
+    .addStringOption((opt) =>
+      opt
+        .setName('type')
+        .setDescription('Filter by type')
+        .setRequired(false)
+        .addChoices(
+          { name: 'quote', value: 'QUOTE' },
+          { name: 'visit', value: 'VISIT' },
+          { name: 'onsite', value: 'ONSITE' },
+          { name: 'nobook', value: 'NOBOOK' },
+          { name: 'jobaccept', value: 'JOBACCEPT' },
+          { name: 'followup', value: 'FOLLOWUP' }
+        )
+    )
+    .addIntegerOption((opt) =>
+      opt.setName('count').setDescription('How many to show (1–25, default 10)').setRequired(false)
+    ),
 ].map((cmd) => cmd.toJSON())
 
 async function registerCommands(): Promise<void> {
