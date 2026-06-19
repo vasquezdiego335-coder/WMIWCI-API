@@ -287,32 +287,40 @@ const EVENT_UI: Record<ManualEventType, { emoji: string; label: string }> = {
 
 function makeLogHandler(eventType: ManualEventType): CommandModule['execute'] {
   return async (interaction: ChatInputCommandInteraction): Promise<void> => {
-    const name = interaction.options.getString('name', true).trim()
-    const zip = interaction.options.getString('zip', true).trim()
-    const job = interaction.options.getString('job')?.trim() || null
-    const notes = interaction.options.getString('notes')?.trim() || null
+    // Defer FIRST, before anything else, to avoid timeout
     await interaction.deferReply({ ephemeral: true })
 
-    botLogger.debug({ eventType, zip }, 'DB → manualEvent.create')
-    const ev = await prisma.manualEvent.create({
-      data: { eventType, customerName: name, zip, jobType: job, notes, loggedBy: interaction.user.tag },
-    })
-    botLogger.info({ eventType, id: ev.id }, 'DB ✓ manualEvent.create')
+    try {
+      const name = interaction.options.getString('name', true).trim()
+      const zip = interaction.options.getString('zip', true).trim()
+      const job = interaction.options.getString('job')?.trim() || null
+      const notes = interaction.options.getString('notes')?.trim() || null
 
-    const { emoji, label } = EVENT_UI[eventType]
-    const embed = new EmbedBuilder()
-      .setTitle(`${emoji} ${label} — logged`)
-      .setColor(0xff5a1f)
-      .addFields(
-        { name: '👤 Customer', value: name, inline: true },
-        { name: '📍 ZIP', value: zip, inline: true },
-        ...(job ? [{ name: '📦 Job', value: job, inline: true }] : []),
-        ...(notes ? [{ name: '📝 Notes', value: notes.slice(0, 1024), inline: false }] : [])
-      )
-      .setFooter({ text: `Event ID: ${ev.id}` })
-      .setTimestamp()
+      botLogger.debug({ eventType, zip }, 'DB → manualEvent.create')
+      const ev = await prisma.manualEvent.create({
+        data: { eventType, customerName: name, zip, jobType: job, notes, loggedBy: interaction.user.tag },
+      })
+      botLogger.info({ eventType, id: ev.id }, 'DB ✓ manualEvent.create')
 
-    await interaction.editReply({ embeds: [embed] })
+      const { emoji, label } = EVENT_UI[eventType]
+      const embed = new EmbedBuilder()
+        .setTitle(`${emoji} ${label} — logged`)
+        .setColor(0xff5a1f)
+        .addFields(
+          { name: '👤 Customer', value: name, inline: true },
+          { name: '📍 ZIP', value: zip, inline: true },
+          ...(job ? [{ name: '📦 Job', value: job, inline: true }] : []),
+          ...(notes ? [{ name: '📝 Notes', value: notes.slice(0, 1024), inline: false }] : [])
+        )
+        .setFooter({ text: `Event ID: ${ev.id}` })
+        .setTimestamp()
+
+      await interaction.editReply({ embeds: [embed] })
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      botLogger.error({ eventType, err: msg }, 'Field log handler error')
+      await respondSafely(interaction, `⚠️ Failed to log event: ${msg.slice(0, 100)}`)
+    }
   }
 }
 
