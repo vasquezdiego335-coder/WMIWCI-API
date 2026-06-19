@@ -8,7 +8,8 @@ import { apiLogger } from '@/lib/logger'
 //  Enqueues onto the SAME 'sms' queue the production flow uses, so it exercises
 //  the real SMS worker + Twilio path end-to-end.
 //
-//  Body: { "to": "+15551234567", "message": "hello" }  → { ok: true, queued: true }
+//  Body: { "message": "hello" }                     → sends to DEFAULT_TEST_NUMBER
+//  Body: { "to": "+15551234567", "message": "hello" } → sends to explicit number
 //
 //  Guarded in production: this route can send real (billable) texts, so it is
 //  disabled when NODE_ENV=production unless ALLOW_TEST_ENDPOINTS=true.
@@ -17,7 +18,7 @@ import { apiLogger } from '@/lib/logger'
 export const runtime = 'nodejs'
 
 const Body = z.object({
-  to: z.string().trim().min(1, 'to is required'),
+  to: z.string().trim().min(1).optional(),
   message: z.string().trim().min(1, 'message is required').max(1600),
 })
 
@@ -45,7 +46,15 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     )
   }
 
-  const { to, message } = parsed.data
+  const to = parsed.data.to || process.env.DEFAULT_TEST_NUMBER
+  const { message } = parsed.data
+
+  if (!to) {
+    return NextResponse.json(
+      { ok: false, error: 'No "to" in body and DEFAULT_TEST_NUMBER is not set' },
+      { status: 422 }
+    )
+  }
 
   // Timeout-guard the enqueue: BullMQ uses maxRetriesPerRequest:null, so an
   // unreachable Redis would otherwise hang this request forever.
