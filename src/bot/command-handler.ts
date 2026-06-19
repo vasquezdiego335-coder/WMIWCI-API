@@ -287,10 +287,10 @@ const EVENT_UI: Record<ManualEventType, { emoji: string; label: string }> = {
 
 function makeLogHandler(eventType: ManualEventType): CommandModule['execute'] {
   return async (interaction: ChatInputCommandInteraction): Promise<void> => {
-    // Defer FIRST, before anything else, to avoid timeout
-    await interaction.deferReply({ ephemeral: true })
-
     try {
+      // Defer FIRST, before anything else, to avoid timeout
+      await interaction.deferReply({ ephemeral: true })
+
       const name = interaction.options.getString('name', true).trim()
       const zip = interaction.options.getString('zip', true).trim()
       const job = interaction.options.getString('job')?.trim() || null
@@ -318,7 +318,7 @@ function makeLogHandler(eventType: ManualEventType): CommandModule['execute'] {
       await interaction.editReply({ embeds: [embed] })
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
-      botLogger.error({ eventType, err: msg }, 'Field log handler error')
+      botLogger.error({ eventType, err: msg, stack: err instanceof Error ? err.stack : undefined }, 'Field log handler error')
       await respondSafely(interaction, `⚠️ Failed to log event: ${msg.slice(0, 100)}`)
     }
   }
