@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import nacl from "tweetnacl";
 import { prisma } from "@/lib/db";
+import { ManualEventType } from "@prisma/client";
 import { captureDeposit, cancelDeposit } from "@/lib/stripe";
 import { emailQueue, smsQueue } from "@/lib/queues";
 import { offerRescheduleToCustomer } from "@/lib/reschedule";
@@ -13,6 +14,7 @@ export const runtime = "nodejs";
 
 // ── Discord interaction type / response constants ──────────────────────────
 const TYPE_PING = 1;
+const TYPE_APPLICATION_COMMAND = 2; // a slash command
 const TYPE_MESSAGE_COMPONENT = 3; // a button / select press
 const RES_PONG = 1;
 const RES_REPLY = 4; // CHANNEL_MESSAGE_WITH_SOURCE
@@ -366,6 +368,84 @@ async function handleOffer(bookingId: string | undefined, messageId: string | un
   return NextResponse.json({ type: RES_UPDATE_MESSAGE, data: offeredCard(booking, approverName, result.offeredDates) });
 }
 
+// ── Slash commands (type 2): field logging, usable from ANY channel ────────
+// The work is a single fast insert, so we respond synchronously with a type-4
+// reply (well within Discord's 3s window). This handles commands whether Discord
+// delivers them over HTTP (this endpoint) — the gateway bot covers the case
+// where they arrive over the websocket instead.
+const FIELD_LOG: Record<string, { type: ManualEventType; emoji: string; label: string }> = {
+  quote: { type: ManualEventType.QUOTE, emoji: "💵", label: "Quote given" },
+  visit: { type: ManualEventType.VISIT, emoji: "🚚", label: "In-person visit" },
+  onsite: { type: ManualEventType.ONSITE, emoji: "📍", label: "Wants on-site quote" },
+  nobook: { type: ManualEventType.NOBOOK, emoji: "❌", label: "Did not book" },
+  jobaccept: { type: ManualEventType.JOBACCEPT, emoji: "✅", label: "Job accepted (verbal)" },
+  followup: { type: ManualEventType.FOLLOWUP, emoji: "🔁", label: "Follow-up" },
+};
+
+function cmdOptions(interaction: any): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const o of interaction?.data?.options ?? []) out[o.name] = String(o.value ?? "");
+  return out;
+}
+
+function cmdUser(interaction: any): string {
+  const u = interaction?.member?.user ?? interaction?.user;
+  return u?.global_name ?? u?.username ?? "unknown";
+}
+
+async function handleFieldLog(interaction: any, cmd: string) {
+  const def = FIELD_LOG[cmd];
+  const o = cmdOptions(interaction);
+  const name = (o.name ?? "").trim();
+  const zip = (o.zip ?? "").trim();
+  const job = (o.job ?? "").trim() || null;
+  const notes = (o.notes ?? "").trim() || null;
+
+  const ev = await prisma.manualEvent.create({
+    data: { eventType: def.type, customerName: name || null, zip: zip || null, jobType: job, notes, loggedBy: cmdUser(interaction) },
+  });
+  apiLogger.info({ id: ev.id, cmd, zip, channelId: interaction.channel_id }, "✓ field event logged (HTTP)");
+
+  const fields: Array<{ name: string; value: string; inline?: boolean }> = [
+    { name: "👤 Customer", value: name || "—", inline: true },
+    { name: "📍 ZIP", value: zip || "—", inline: true },
+  ];
+  if (job) fields.push({ name: "📦 Job", value: job, inline: true });
+  if (notes) fields.push({ name: "📝 Notes", value: notes.slice(0, 1024), inline: false });
+
+  return NextResponse.json({
+    type: RES_REPLY,
+    data: {
+      flags: FLAG_EPHEMERAL,
+      embeds: [{ title: `${def.emoji} ${def.label} — logged`, color: 0xff5a1f, fields, footer: { text: `Event ID: ${ev.id}` }, timestamp: new Date().toISOString() }],
+    },
+  });
+}
+
+async function handleRecent(interaction: any) {
+  const o = cmdOptions(interaction);
+  const type = (o.type || undefined) as ManualEventType | undefined;
+  const count = Math.min(Math.max(parseInt(o.count || "10", 10) || 10, 1), 25);
+  const events = await prisma.manualEvent.findMany({
+    where: type ? { eventType: type } : undefined,
+    orderBy: { createdAt: "desc" },
+    take: count,
+  });
+  const emojiFor = (t: ManualEventType) => Object.values(FIELD_LOG).find((f) => f.type === t)?.emoji ?? "•";
+  const description =
+    events.length === 0
+      ? "No events logged yet."
+      : events
+          .map((e) => `${emojiFor(e.eventType)} **${e.customerName ?? "—"}**${e.zip ? ` · ${e.zip}` : ""}${e.notes ? ` · ${e.notes}` : ""}`)
+          .join("\n")
+          .slice(0, 4000);
+
+  return NextResponse.json({
+    type: RES_REPLY,
+    data: { flags: FLAG_EPHEMERAL, embeds: [{ title: "🗒️ Recent field events", color: 0x0a1628, description }] },
+  });
+}
+
 export async function POST(req: Request) {
   const signature = req.headers.get("x-signature-ed25519");
   const timestamp = req.headers.get("x-signature-timestamp");
@@ -384,9 +464,36 @@ export async function POST(req: Request) {
 
   const interaction = JSON.parse(rawBody);
 
+  // DEBUG: log every interaction that reaches this endpoint (type + command).
+  apiLogger.info(
+    {
+      type: interaction.type,
+      command: interaction?.data?.name,
+      channelId: interaction?.channel_id,
+      user: cmdUser(interaction),
+    },
+    "⇢ Discord interaction received (HTTP)"
+  );
+
   // Endpoint-verification handshake.
   if (interaction.type === TYPE_PING) {
     return NextResponse.json({ type: RES_PONG });
+  }
+
+  // Slash commands (field logging). Handle here so they work from any channel
+  // and never time out; unknown commands fall through to the generic ack below.
+  if (interaction.type === TYPE_APPLICATION_COMMAND) {
+    const cmd: string = interaction?.data?.name ?? "";
+    if (FIELD_LOG[cmd] || cmd === "recent") {
+      try {
+        return cmd === "recent" ? await handleRecent(interaction) : await handleFieldLog(interaction, cmd);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        apiLogger.error({ cmd, err: msg, stack: err instanceof Error ? err.stack : undefined }, "✖ slash command handler failed");
+        return ephemeral(`⚠️ Failed to log: ${msg.slice(0, 120)}`);
+      }
+    }
+    apiLogger.warn({ cmd }, "slash command not handled by HTTP endpoint (gateway bot owns it)");
   }
 
   // Button presses.
