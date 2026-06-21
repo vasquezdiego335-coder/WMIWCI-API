@@ -103,6 +103,19 @@ const BookingSchema = z.object({
 
   // Preferred language from the site's EN/ES toggle — drives bilingual email/SMS.
   locale: z.string().transform(sanitizeText).pipe(z.string().max(8)).optional(),
+
+  // ── Job photos (uploaded client-side to Cloudinary before submit) ──
+  // Each entry is the {url, publicId} Cloudinary returns. Optional + capped so a
+  // malformed/oversized payload can't bloat the booking. Persisted as File rows.
+  photos: z
+    .array(
+      z.object({
+        url: z.string().url().max(500),
+        publicId: z.string().transform(sanitizeText).pipe(z.string().min(1).max(300)),
+      })
+    )
+    .max(20)
+    .optional(),
 })
 
 const SERVICE_MAP: Record<string, { label: string; price: number }> = {
@@ -210,7 +223,9 @@ async function handleBooking(req: NextRequest): Promise<NextResponse> {
     stairs: data.stairs,
     longWalk: data.longWalk,
     heavyItems: data.heavyItems,
-  }) + (data.source ? `\nSource: ${data.source}` : '')
+  })
+    + (data.source ? `\nSource: ${data.source}` : '')
+    + (data.photos?.length ? `\n📷 ${data.photos.length} job photo(s) attached — view in admin/portal` : '')
   const svc = SERVICE_MAP[data.serviceType]
   const tokenExpiry = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000)
 
@@ -271,6 +286,31 @@ async function handleBooking(req: NextRequest): Promise<NextResponse> {
       stripeCheckoutId: checkoutSession.id,
     },
   })
+
+  // ── Attach uploaded job photos as File rows (non-fatal) ──
+  // The browser already uploaded these to Cloudinary; we only record the
+  // references. A failure here must never block the booking/payment, so it is
+  // caught and logged. createMany skipDuplicates guards the unique cloudinaryId.
+  if (data.photos?.length) {
+    try {
+      await prisma.file.createMany({
+        data: data.photos.map((p) => ({
+          bookingId: booking.id,
+          type: 'PHOTO_BEFORE' as const,
+          cloudinaryId: p.publicId,
+          cloudinaryUrl: p.url,
+          filename: p.publicId.split('/').pop() ?? 'photo',
+          mimeType: 'image/jpeg',
+          sizeBytes: 0,
+          uploadedBy: 'customer',
+        })),
+        skipDuplicates: true,
+      })
+      apiLogger.info({ bookingId: booking.id, count: data.photos.length }, 'Job photos attached')
+    } catch (err) {
+      apiLogger.error({ err, bookingId: booking.id }, 'Failed to attach job photos (non-fatal)')
+    }
+  }
 
   // MESSAGING POLICY: no email/SMS is sent at booking creation. The system sends
   // exactly four customer messages downstream — FINAL CONFIRMATION (email + SMS)

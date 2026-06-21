@@ -155,6 +155,30 @@ export async function postBookingApprovalCard(
   embed.addFields({ name: '💰 Payment & Balance', value: paymentValue })
   if (payload.items) embed.addFields({ name: '📝 Details', value: String(payload.items).slice(0, 1024) })
 
+  // ── Job photos (PHOTO_BEFORE) — render up to 4 as a thumbnail gallery ──
+  // Discord merges embeds that share the SAME `url` into one image gallery, so
+  // we set a common url on the main embed + each image embed. All photos are
+  // also listed as clickable links so none are hidden past the 4-image cap.
+  const photos = await prisma.file
+    .findMany({
+      where: { bookingId, type: 'PHOTO_BEFORE' },
+      select: { cloudinaryUrl: true },
+      orderBy: { createdAt: 'asc' },
+      take: 10,
+    })
+    .catch(() => [] as { cloudinaryUrl: string }[])
+
+  const photoEmbeds: object[] = []
+  if (photos.length) {
+    const GALLERY_URL = 'https://www.moveitclearit.com'
+    const links = photos.map((p, i) => `[Photo ${i + 1}](${p.cloudinaryUrl})`).join(' · ')
+    embed.addFields({ name: `📷 Job Photos (${photos.length})`, value: links.slice(0, 1024) })
+    embed.setURL(GALLERY_URL)
+    for (const p of photos.slice(0, 4)) {
+      photoEmbeds.push(new EmbedBuilder().setURL(GALLERY_URL).setImage(p.cloudinaryUrl).toJSON())
+    }
+  }
+
   const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
     new ButtonBuilder().setCustomId(`approve_booking:${bookingId}`).setLabel('✅ Approve').setStyle(ButtonStyle.Success),
     new ButtonBuilder().setCustomId(`offer_reschedule:${bookingId}`).setLabel('📅 Offer New Dates').setStyle(ButtonStyle.Primary),
@@ -162,7 +186,7 @@ export async function postBookingApprovalCard(
   )
 
   const msg = await restSendToChannel('DISCORD_CHANNEL_SCHEDULING', {
-    embeds: [embed.toJSON()],
+    embeds: [embed.toJSON(), ...photoEmbeds],
     components: [row.toJSON()],
   })
   if (!msg) return
