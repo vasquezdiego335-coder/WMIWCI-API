@@ -137,6 +137,10 @@ model Customer {
   // Preferred language for all customer-facing email + SMS ("en" | "es").
   // Captured from the marketing site's EN/ES toggle at booking time.
   locale       String    @default("en")
+  // TCPA marketing opt-out — set true when a customer texts STOP (inbound SMS
+  // webhook). Phase-3 follow-ups are suppressed for opted-out customers. The 4
+  // transactional booking messages are unaffected (they're not marketing).
+  marketingOptOut Boolean @default(false) @map("marketing_opt_out")
   createdAt    DateTime  @default(now()) @map("created_at")
   updatedAt    DateTime  @updatedAt @map("updated_at")
 
@@ -220,6 +224,15 @@ model Booking {
   userAgent       String?       @map("user_agent")
   referrer        String?
 
+  // ── Marketing attribution (Phase 2) — pushed to the marketing-tracker funnel
+  //    on payment so booking revenue is attributed to its source / found-us. ──
+  source          String?       // QR src / tracking code carried by the booking URL
+  foundUs         String?       @map("found_us") // "Where did you find us?" self-report
+
+  // ── Job completion (Phase 3) — set when the booking transitions to COMPLETED;
+  //    the anchor time for the post-move follow-up sequence. ──
+  completedAt     DateTime?     @map("completed_at")
+
   createdAt       DateTime      @default(now()) @map("created_at")
   updatedAt       DateTime      @updatedAt @map("updated_at")
 
@@ -231,6 +244,8 @@ model Booking {
   notifications   Notification[]
   receipt         Receipt?
   auditLogs       AuditLog[]
+  review          Review?
+  followUps       FollowUpLedger[]
 
   @@index([status])
   @@index([customerId])
@@ -510,4 +525,45 @@ model Task {
   @@index([owner])
   @@index([dueDate])
   @@map("tasks")
+}
+
+/// Exactly-once ledger for post-job customer follow-ups (Phase 3). A row is
+/// written BEFORE the message is sent, so the @@unique([bookingId, type]) is the
+/// hard anti-spam guarantee: a BullMQ retry, a double completion trigger, or a
+/// re-enqueue can never send the same follow-up twice. `referral-ask` is shared
+/// by the positive-review path and the day-5 fallback, so the customer gets at
+/// most ONE referral ask per booking.
+model FollowUpLedger {
+  id        String   @id @default(cuid())
+  bookingId String   @map("booking_id")
+  type      String   // review-request | review-reminder | repeat-reminder | referral-ask
+  channel   String   @default("both") // sms | email | both
+  status    String   @default("sent") // sent | failed | skipped
+  error     String?
+  sentAt    DateTime @default(now()) @map("sent_at")
+
+  booking   Booking  @relation(fields: [bookingId], references: [id])
+
+  @@unique([bookingId, type])
+  @@index([bookingId])
+  @@map("followup_ledger")
+}
+
+/// Customer review of a completed move (Phase 3). Recorded by staff (admin UI /
+/// Discord command) or the customer portal — there is no Google review webhook,
+/// so the rating is captured first-party. A positive review (rating >= 4) fires
+/// exactly one referral ask and suppresses the 48h review reminder.
+model Review {
+  id         String   @id @default(cuid())
+  bookingId  String   @unique @map("booking_id")
+  rating     Int      // 1..5
+  isPositive Boolean  @default(false) @map("is_positive")
+  source     String   @default("admin") // admin | discord | customer-portal
+  comment    String?
+  leftAt     DateTime @default(now()) @map("left_at")
+
+  booking    Booking  @relation(fields: [bookingId], references: [id])
+
+  @@index([bookingId])
+  @@map("reviews")
 }

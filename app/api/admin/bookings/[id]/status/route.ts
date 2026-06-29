@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getSession } from '@/lib/auth'
 import { prisma } from '@/lib/db'
+import { apiLogger } from '@/lib/logger'
+import { onBookingCompleted } from '@/lib/followups'
 import { z } from 'zod'
 
 const VALID_TRANSITIONS: Record<string, string[]> = {
@@ -60,6 +62,17 @@ export async function POST(req: NextRequest, { params }: { params: { id: string 
       details: { from: booking.status, to: newStatus, changedBy: session.name },
     },
   })
+
+  // Phase 3: kick off the post-move follow-up sequence (review/repeat/referral).
+  // Idempotent + self-guarded; awaited so the queue writes happen before we
+  // respond, but never allowed to fail the status change.
+  if (newStatus === 'COMPLETED') {
+    try {
+      await onBookingCompleted(params.id)
+    } catch (err) {
+      apiLogger.error({ err: err instanceof Error ? err.message : String(err), bookingId: params.id }, 'onBookingCompleted failed (non-fatal)')
+    }
+  }
 
   return NextResponse.json(updated)
 }

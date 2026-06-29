@@ -4,6 +4,7 @@ import { prisma } from '../lib/db'
 import { emailQueue, discordQueue, scheduledQueue } from '../lib/queues'
 import { queueLogger } from '../lib/logger'
 import { deleteFiles } from '../lib/cloudinary'
+import { runFollowup, type FollowupType } from '../lib/followups'
 import type { ScheduledJobData } from '../lib/queues'
 
 async function processScheduledJob(job: Job<ScheduledJobData>): Promise<void> {
@@ -202,6 +203,19 @@ async function processScheduledJob(job: Job<ScheduledJobData>): Promise<void> {
       })
 
       log.info({ count: formatted.length }, 'Evening schedule digest queued')
+      break
+    }
+
+    // ── Phase 3 post-move follow-ups (review/repeat/referral) ─────
+    case 'review-request':
+    case 'review-reminder':
+    case 'repeat-reminder':
+    case 'referral-ask': {
+      if (!bookingId) break
+      // All guards (enabled flag, opt-out, quiet hours, frequency cap, exactly-
+      // once ledger) live in runFollowup so this worker stays a thin dispatcher.
+      const result = await runFollowup(bookingId, type as FollowupType)
+      log.info({ bookingId, type, result }, 'follow-up processed')
       break
     }
 

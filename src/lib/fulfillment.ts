@@ -2,6 +2,7 @@ import { prisma } from './db'
 import { emailQueue, smsQueue, discordQueue, marketingQueue } from './queues'
 import { webhookLogger } from './logger'
 import { t } from './i18n'
+import { ingestBookingToTracker } from './tracker'
 import { outboxEnabled, emitPaymentCompleted } from '../outbox/integration'
 
 // ════════════════════════════════════════════════════════════════════════
@@ -217,6 +218,26 @@ export async function fulfillPaidCheckout(params: {
         },
       })
     )
+  )
+
+  // 3b) Marketing-tracker revenue merge (Phase 2). Attribute this paid booking
+  //     to its source / found-us in the scans→leads→jobs funnel. Idempotent on
+  //     external_ref and self-guarded (5s timeout) — a tracker outage is a no-op.
+  //     Revenue recorded is the move ESTIMATE (expected job value), not the $49.
+  tasks.push(
+    ingestBookingToTracker({
+      bookingId,
+      source: booking.source,
+      foundUs: booking.foundUs,
+      name: booking.customer.name,
+      phone: booking.customer.phone,
+      email: booking.customer.email,
+      revenueCents:
+        booking.totalEstimate != null ? Math.round(booking.totalEstimate * 100) : amountTotalCents ?? 4900,
+      status: 'scheduled',
+      scheduledDate: booking.requestedDate ? booking.requestedDate.toISOString().slice(0, 10) : null,
+      notes: `Booking ${booking.displayId} — deposit paid`,
+    })
   )
 
   // 4) Marketing automation enrollment (external tool — env-gated stub)
