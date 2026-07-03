@@ -102,10 +102,6 @@ export default function MyBookingLookup() {
           </div>
         </div>
       </main>
-
-      <footer style={footer}>
-        <p style={footerText}>&copy; {new Date().getFullYear()} We Move It. We Clear It. &middot; Labor-only moving services</p>
-      </footer>
     </div>
   )
 }
@@ -131,5 +127,3 @@ const helpTitle: React.CSSProperties = { fontSize: 13, fontWeight: 700, color: '
 const helpText: React.CSSProperties = { fontSize: 13, color: '#6B7280', margin: 0 }
 const bookLink: React.CSSProperties = { fontSize: 14, color: '#FF5A1F', fontWeight: 600, textDecoration: 'none' }
 const orangeLink: React.CSSProperties = { color: '#FF5A1F', textDecoration: 'none' }
-const footer: React.CSSProperties = { textAlign: 'center', padding: 24, backgroundColor: '#0A1628' }
-const footerText: React.CSSProperties = { fontSize: 12, color: '#8B9BC1', margin: 0 }

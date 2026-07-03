@@ -2,7 +2,7 @@ import Link from 'next/link'
 import type { Metadata } from 'next'
 
 export const metadata: Metadata = {
-  title: 'Terms of Service — We Move It. We Clear It.',
+  title: 'MoveItClearIt Terms of Service',
 }
 
 export default function TermsPage() {
@@ -20,7 +20,7 @@ export default function TermsPage() {
       </header>
 
       <main style={main}>
-        <h1 style={h1}>Terms of Service</h1>
+        <h1 style={h1}>MoveItClearIt Terms of Service</h1>
         <p style={updated}>Last updated: {new Date().toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' })}</p>
 
         <Section title="1. Service Description">

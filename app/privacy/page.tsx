@@ -2,7 +2,7 @@ import Link from 'next/link'
 import type { Metadata } from 'next'
 
 export const metadata: Metadata = {
-  title: 'Privacy Policy — We Move It. We Clear It.',
+  title: 'MoveItClearIt Privacy Policy',
 }
 
 export default function PrivacyPage() {
@@ -20,7 +20,7 @@ export default function PrivacyPage() {
       </header>
 
       <main style={main}>
-        <h1 style={h1}>Privacy Policy</h1>
+        <h1 style={h1}>MoveItClearIt Privacy Policy</h1>
         <p style={updated}>Last updated: {new Date().toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' })}</p>
 
         <Section title="1. Information We Collect">

@@ -1,7 +1,7 @@
 import type { Metadata } from 'next'
 
 export const metadata: Metadata = {
-  title: 'We Move It. We Clear It.',
+  title: 'MoveItClearIt — Labor-Only Moving',
   description: 'Professional labor-only moving services. We provide the muscle — you handle the truck.',
   metadataBase: new URL(process.env.APP_URL ?? 'https://wmiwci-backend.vercel.app'),
   icons: {
@@ -25,6 +25,19 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       </head>
       <body style={{ margin: 0, padding: 0, fontFamily: 'Inter, -apple-system, BlinkMacSystemFont, sans-serif' }}>
         {children}
+        <footer style={{ backgroundColor: '#0A1628', padding: '32px 24px', marginTop: '40px' }}>
+          <div style={{ maxWidth: '720px', margin: '0 auto', textAlign: 'center' }}>
+            <nav aria-label="Legal" style={{ display: 'flex', gap: '24px', justifyContent: 'center', flexWrap: 'wrap', marginBottom: '12px' }}>
+              <a href="https://moveitclearit.com/terms" style={{ color: '#FF5A1F', fontSize: '14px', fontWeight: 600, textDecoration: 'none' }}>
+                MoveItClearIt Terms of Service
+              </a>
+              <a href="https://moveitclearit.com/privacy" style={{ color: '#FF5A1F', fontSize: '14px', fontWeight: 600, textDecoration: 'none' }}>
+                MoveItClearIt Privacy Policy
+              </a>
+            </nav>
+            <p style={{ color: '#9CA3AF', fontSize: '13px', margin: 0 }}>© 2026 MoveItClearIt</p>
+          </div>
+        </footer>
       </body>
     </html>
   )
