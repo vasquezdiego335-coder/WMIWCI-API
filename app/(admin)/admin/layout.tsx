@@ -3,6 +3,12 @@ import { redirect } from 'next/navigation'
 import { getSession } from '@/lib/auth'
 import Link from 'next/link'
 
+// Auth-gated + session/DB-backed — render per request, never statically
+// prerender. Also keeps this segment out of the build-time prerender pass
+// (defense-in-depth; the root cause of prerender crashes is a non-standard
+// NODE_ENV on the host, fixed separately). Cascades to all /admin/* routes.
+export const dynamic = 'force-dynamic'
+
 export const metadata: Metadata = {
   title: 'Admin — We Move It. We Clear It.',
   robots: 'noindex, nofollow',

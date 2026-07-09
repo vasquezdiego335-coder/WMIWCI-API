@@ -195,6 +195,11 @@ export type ScheduledJobData = {
     | 'file-cleanup'
     | 'daily-schedule-morning'
     | 'daily-schedule-evening'
+    // ── Phase 3 post-move follow-ups (handled by runFollowup in followups.ts) ──
+    | 'review-request'
+    | 'review-reminder'
+    | 'repeat-reminder'
+    | 'referral-ask'
   bookingId?: string
   payload?: Record<string, unknown>
 }

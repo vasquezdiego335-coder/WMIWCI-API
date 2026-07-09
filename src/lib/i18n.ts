@@ -94,6 +94,35 @@ const STRINGS = {
     en: `Thanks {name} — we got your message and will reply within a few hours. For anything urgent, call/text ${BIZ_PHONE}. — ${BIZ_NAME}`,
     es: `Gracias {name} — recibimos tu mensaje y responderemos en unas horas. Para algo urgente, llama o escribe al ${BIZ_PHONE}. — ${BIZ_NAME}`,
   },
+  // Lead auto-reply (quote/QR lead from the marketing tracker). Owner-approved
+  // customer message; gated by CUSTOMER_AUTOREPLY_ENABLED in notify.ts.
+  leadAck: {
+    en: `Thanks {name}! We got your moving request and will call you shortly. Urgent? Call/text ${BIZ_PHONE}. — ${BIZ_NAME}`,
+    es: `¡Gracias {name}! Recibimos tu solicitud de mudanza y te llamaremos pronto. ¿Urgente? Llama o escribe al ${BIZ_PHONE}. — ${BIZ_NAME}`,
+  },
+  // ── Phase 3: post-move follow-ups (MARKETING — gated by MARKETING_FOLLOWUPS_ENABLED,
+  //    frequency-capped, quiet-hours-aware, and suppressed on STOP opt-out). ──
+  reviewRequest: {
+    en: `Hi {name}! Thanks for moving with ${BIZ_NAME}. How did we do? A 30-second review really helps us: {url}`,
+    es: `¡Hola {name}! Gracias por mudarte con ${BIZ_NAME}. ¿Cómo lo hicimos? Una reseña de 30 segundos nos ayuda mucho: {url}`,
+  },
+  reviewReminder: {
+    en: `Hi {name}, we hope your move went great! If you have a moment, we'd love a quick review: {url}`,
+    es: `Hola {name}, ¡esperamos que tu mudanza haya salido genial! Si tienes un momento, nos encantaría una reseña rápida: {url}`,
+  },
+  repeatReminder: {
+    en: `Hi {name}! Moving again or need junk cleared? ${BIZ_NAME} has you covered — 10% off for return customers. Book: {url} or call ${BIZ_PHONE}`,
+    es: `¡Hola {name}! ¿Te mudas otra vez o necesitas retirar cosas? ${BIZ_NAME} te ayuda — 10% de descuento para clientes que regresan. Reserva: {url} o llama al ${BIZ_PHONE}`,
+  },
+  referralAsk: {
+    en: `Glad we could help, {name}! Know someone who needs movers? Send them our way and we'll take great care of them: {url} — ${BIZ_NAME}`,
+    es: `¡Nos alegra haber ayudado, {name}! ¿Conoces a alguien que necesite mudanza? Envíalos con nosotros y los cuidaremos muy bien: {url} — ${BIZ_NAME}`,
+  },
+  // Appended to every marketing follow-up SMS (TCPA opt-out instruction).
+  smsOptOut: {
+    en: `Reply STOP to opt out.`,
+    es: `Responde STOP para cancelar.`,
+  },
 } as const
 
 export type StringKey = keyof typeof STRINGS

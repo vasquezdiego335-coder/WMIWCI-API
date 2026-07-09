@@ -1,0 +1,201 @@
+// ════════════════════════════════════════════════════════════════════════
+//  notify.ts — owner + customer notifications for NEW leads and bookings.
+//  ----------------------------------------------------------------------
+//  Self-contained on purpose. New messages are sent from HERE so the existing
+//  customer-email allowlist (src/workers/email.worker.ts), the React email
+//  templates, and the BullMQ EmailJobData union all stay UNTOUCHED:
+//    • SMS  → enqueued on the existing `sms` queue (free-form; the SMS worker
+//             still honors TWILIO_ENABLED, so an un-flagged deploy is a dry run).
+//    • Email→ sent via a DIRECT Resend call (no template/allowlist needed for an
+//             internal alert or a simple bilingual auto-reply).
+//
+//  MESSAGING POLICY NOTE: the codebase limits CUSTOMER messages to the four
+//  pre-approval/final-confirmation pairs. The customer auto-reply below is a
+//  deliberate, owner-approved addition and is gated by CUSTOMER_AUTOREPLY_ENABLED
+//  (default ON) so it can be turned off with one env var. Owner alerts are
+//  internal and never counted against that customer-message policy.
+//
+//  Every send is wrapped so a Redis stall or Resend hiccup is a logged, non-fatal
+//  skip — notifications must never break a lead/booking request.
+// ════════════════════════════════════════════════════════════════════════
+import { smsQueue } from './queues'
+import { resend, EMAIL_FROM, EMAIL_REPLY_TO } from './resend'
+import { apiLogger } from './logger'
+import { normalizeLocale, t, BIZ_NAME, type Locale } from './i18n'
+
+const log = apiLogger.child({ mod: 'notify' })
+
+// Internal recipients (the business). E.164 phone + an inbox you watch.
+const OWNER_PHONE = process.env.OWNER_PHONE?.trim() || ''
+const OWNER_EMAIL = process.env.OWNER_EMAIL?.trim() || ''
+// Customer auto-reply is ON unless explicitly disabled.
+const CUSTOMER_AUTOREPLY = process.env.CUSTOMER_AUTOREPLY_ENABLED !== 'false'
+
+export type LeadInput = {
+  name?: string
+  phone?: string
+  email?: string
+  source?: string // QR src / utm
+  foundUs?: string // "Where did you find us?" dropdown (Phase 2)
+  message?: string
+  locale?: string
+}
+
+export type BookingInput = {
+  name?: string
+  phone?: string
+  email?: string
+  source?: string
+  foundUs?: string
+  serviceType?: string
+  displayId?: string
+  locale?: string
+}
+
+// ── guards ────────────────────────────────────────────────────────────
+function withTimeout<T>(p: Promise<T>, ms = 5000): Promise<T> {
+  return Promise.race([
+    p,
+    new Promise<T>((_, reject) =>
+      setTimeout(() => reject(new Error(`timed out after ${ms}ms`)), ms)
+    ),
+  ])
+}
+
+// Run a side-effect, swallow + log any failure. Never throws.
+async function safe(label: string, fn: () => Promise<unknown>): Promise<void> {
+  try {
+    await withTimeout(fn())
+    log.debug({ label }, 'notification sent')
+  } catch (err) {
+    log.warn(
+      { label, err: err instanceof Error ? err.message : String(err) },
+      'notification failed (non-fatal)'
+    )
+  }
+}
+
+// ── tiny formatting helpers (pure) ────────────────────────────────────
+const dash = (s?: string): string => (s && s.trim() ? s.trim() : '—')
+const esc = (s?: string): string =>
+  (s ?? '').replace(/[<>&]/g, (c) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;' }[c] as string))
+
+function attribution(source?: string, foundUs?: string): string {
+  return [source, foundUs].map((v) => v?.trim()).filter(Boolean).join(' / ') || 'direct'
+}
+
+function table(rows: Array<[string, string | undefined]>): string {
+  const trs = rows
+    .map(([k, v]) => `<tr><td style="padding:4px 10px"><b>${esc(k)}</b></td><td style="padding:4px 10px">${esc(dash(v))}</td></tr>`)
+    .join('')
+  return `<table cellspacing="0" cellpadding="0" style="border-collapse:collapse;font-family:system-ui,Arial,sans-serif;font-size:14px">${trs}</table>`
+}
+
+// ── message builders (pure — exported for unit tests) ─────────────────
+export function ownerLeadSms(l: LeadInput): string {
+  return `🟢 New lead: ${dash(l.name)} · ${dash(l.phone)} · ${attribution(l.source, l.foundUs)}`
+}
+
+export function ownerLeadEmailHtml(l: LeadInput): string {
+  return (
+    `<h2 style="font-family:system-ui,Arial,sans-serif">New lead</h2>` +
+    table([
+      ['Name', l.name],
+      ['Phone', l.phone],
+      ['Email', l.email],
+      ['Source', l.source],
+      ['Found us', l.foundUs],
+      ['Message', l.message],
+    ])
+  )
+}
+
+export function customerLeadEmailHtml(l: LeadInput, locale: Locale): string {
+  const name = esc(l.name || (locale === 'es' ? 'allí' : 'there'))
+  const body =
+    locale === 'es'
+      ? `<p>¡Gracias ${name}!</p><p>Recibimos tu solicitud de mudanza y te llamaremos muy pronto. Si es urgente, llámanos o escríbenos.</p>`
+      : `<p>Thanks ${name}!</p><p>We got your moving request and will call you shortly. If it's urgent, call or text us.</p>`
+  return `<div style="font-family:system-ui,Arial,sans-serif;font-size:15px;line-height:1.5">${body}<p>— ${esc(BIZ_NAME)}</p></div>`
+}
+
+export function ownerBookingSms(b: BookingInput): string {
+  return (
+    `🟠 New booking started: ${dash(b.name)} · ${dash(b.serviceType)}` +
+    ` · ${dash(b.displayId)} · ${attribution(b.source, b.foundUs)}`
+  )
+}
+
+export function ownerBookingEmailHtml(b: BookingInput): string {
+  return (
+    `<h2 style="font-family:system-ui,Arial,sans-serif">New booking started</h2>` +
+    table([
+      ['Name', b.name],
+      ['Phone', b.phone],
+      ['Email', b.email],
+      ['Service', b.serviceType],
+      ['Booking #', b.displayId],
+      ['Source', b.source],
+      ['Found us', b.foundUs],
+    ])
+  )
+}
+
+// ── low-level senders (guarded) ───────────────────────────────────────
+async function sendEmail(to: string, subject: string, html: string, replyTo?: string): Promise<void> {
+  const { error } = await resend.emails.send({
+    from: EMAIL_FROM,
+    to,
+    reply_to: replyTo || EMAIL_REPLY_TO,
+    subject,
+    html,
+  })
+  if (error) throw new Error(`resend: ${error.message ?? JSON.stringify(error)}`)
+}
+
+async function ownerSms(message: string, label: string): Promise<void> {
+  if (!OWNER_PHONE) return void log.warn({ label }, 'OWNER_PHONE not set — skipping owner SMS')
+  await safe(`sms:${label}`, () => smsQueue.add(label, { to: OWNER_PHONE, message }))
+}
+
+async function ownerEmail(subject: string, html: string, label: string, replyTo?: string): Promise<void> {
+  if (!OWNER_EMAIL) return void log.warn({ label }, 'OWNER_EMAIL not set — skipping owner email')
+  await safe(`email:${label}`, () => sendEmail(OWNER_EMAIL, subject, html, replyTo))
+}
+
+// ── public API ────────────────────────────────────────────────────────
+/** New lead (from the marketing-tracker quote form / site). Owner alert + an
+ *  optional customer auto-reply. Resolves once all sends settle (each guarded). */
+export async function notifyLead(input: LeadInput): Promise<void> {
+  const locale = normalizeLocale(input.locale)
+
+  // Owner alert — reply-to is the lead's email so you can reply straight back.
+  await ownerSms(ownerLeadSms(input), 'owner-lead-alert')
+  await ownerEmail(`New lead: ${dash(input.name)}`, ownerLeadEmailHtml(input), 'owner-lead-alert', input.email)
+
+  // Customer auto-reply (flag-gated; only when we have contact info).
+  if (CUSTOMER_AUTOREPLY) {
+    if (input.phone) {
+      await safe('sms:lead-ack', () =>
+        smsQueue.add('lead-ack-sms', { to: input.phone!, message: t(locale, 'leadAck', { name: input.name || '' }) })
+      )
+    }
+    if (input.email) {
+      const subject = locale === 'es' ? 'Recibimos tu solicitud' : 'We got your request'
+      await safe('email:lead-ack', () => sendEmail(input.email!, subject, customerLeadEmailHtml(input, locale)))
+    }
+  }
+}
+
+/** New booking started (pre-payment). Owner alert only — the customer receives
+ *  the existing FINAL CONFIRMATION when payment completes, so we don't text
+ *  people who are still mid-checkout. */
+export async function notifyBookingCreated(input: BookingInput): Promise<void> {
+  await ownerSms(ownerBookingSms(input), 'owner-booking-alert')
+  await ownerEmail(
+    `New booking: ${dash(input.name)} (${dash(input.displayId)})`,
+    ownerBookingEmailHtml(input),
+    'owner-booking-alert',
+    input.email
+  )
+}

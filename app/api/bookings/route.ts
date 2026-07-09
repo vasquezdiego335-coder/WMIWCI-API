@@ -4,6 +4,7 @@ import { prisma } from '@/lib/db'
 import { BOOKING_FEE_CENTS, createBookingCheckout } from '@/lib/stripe'
 import { apiLogger } from '@/lib/logger'
 import { AGREEMENT_VERSION } from '@/lib/agreement'
+import { notifyBookingCreated } from '@/lib/notify'
 
 const TRUCK_PICKUP_RETURN_AMOUNT_CENTS = 5000
 
@@ -90,6 +91,8 @@ const BookingSchema = z.object({
 
   // ── Marketing attribution (?src= from the QR / landing URL) ──
   source: z.string().transform(sanitizeText).pipe(z.string().max(60)).optional(),
+  // "Where did you find us?" self-report from the booking-form dropdown.
+  foundUs: z.string().transform(sanitizeText).pipe(z.string().max(40)).optional(),
 
   // ── Moving Service Agreement (hard-required) ──
   // Must be literally true — booking + Stripe session are refused otherwise.
@@ -248,6 +251,10 @@ async function handleBooking(req: NextRequest): Promise<NextResponse> {
       discountPercent,
       ipAddress: ip,
       userAgent: ua,
+      // Attribution columns (Phase 2) — also kept in itemsDescription text above
+      // for the Discord card; these power the marketing-tracker revenue merge.
+      source: data.source,
+      foundUs: data.foundUs,
       customerTokenExpiry: tokenExpiry,
       // ── Moving Service Agreement acceptance record ──
       agreementAccepted: true,
@@ -321,6 +328,25 @@ async function handleBooking(req: NextRequest): Promise<NextResponse> {
   // email) were both removed.
 
   apiLogger.info({ bookingId: booking.id, customerId: customer.id, serviceType: data.serviceType }, 'Booking created')
+
+  // ── Owner alert: a new booking was started (non-fatal; never blocks booking) ──
+  // The customer is intentionally NOT messaged here — they receive the existing
+  // FINAL CONFIRMATION (email + SMS) when payment completes, so we don't text
+  // people who are still mid-checkout. notifyBookingCreated guards each send.
+  try {
+    await notifyBookingCreated({
+      name: customer.name,
+      phone: customer.phone ?? undefined,
+      email: customer.email,
+      source: data.source,
+      foundUs: data.foundUs,
+      serviceType: svc ? svc.label : data.serviceType,
+      displayId: booking.displayId,
+      locale: customerLocale,
+    })
+  } catch (err) {
+    apiLogger.error({ err, bookingId: booking.id }, 'owner booking alert failed (non-fatal)')
+  }
 
   return NextResponse.json({
     bookingId: booking.id,
