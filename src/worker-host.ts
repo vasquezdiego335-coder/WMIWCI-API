@@ -43,6 +43,7 @@ import { startDiscordWorker } from './workers/discord.worker'
 import { startSmsWorker } from './workers/sms.worker'
 import { startScheduledWorker } from './workers/scheduled.worker'
 import { startMarketingWorker } from './workers/marketing.worker'
+import { startWebhookWorker } from './workers/webhook.worker'
 import { startOutboxWorker } from './outbox/workers/emailWorker'
 import { getDiscordClient } from './bot/discord-actions'
 import { processStripeWebhook } from './lib/stripe-events'
@@ -164,6 +165,7 @@ async function main(): Promise<void> {
     startSmsWorker(),
     startScheduledWorker(),
     startMarketingWorker(),
+    startWebhookWorker(), // consumes 'webhook-retry' — processes Stripe events
   ]
   state.bullWorkers = bullWorkers.length
 
@@ -177,7 +179,7 @@ async function main(): Promise<void> {
   state.discordBot = true
 
   logger.info(
-    '✓ Combined worker host running — HTTP server + 5 BullMQ workers + outbox poller + Discord bot'
+    '✓ Combined worker host running — HTTP server + 6 BullMQ workers (incl. webhook) + outbox poller + Discord bot'
   )
 
   async function shutdown(signal: string): Promise<void> {

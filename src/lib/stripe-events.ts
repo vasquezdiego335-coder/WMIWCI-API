@@ -1,23 +1,32 @@
 // ════════════════════════════════════════════════════════════════════════
-//  Stripe webhook CORE — framework-agnostic.
+//  Stripe webhook CORE — framework-agnostic, FAST-200 design.
 //  ────────────────────────────────────────────────────────────────────
-//  ONE source of truth for "a Stripe event arrived": signature verify →
-//  idempotency (webhookLog) → business handling → mark processed.
+//  The HTTP entry point (processStripeWebhook) does the MINIMUM before it
+//  returns 200 to Stripe:
+//     1. verify the signature (crypto only — no DB, no network)
+//     2. hand the event to the worker via the `webhook-retry` queue
+//     3. return 200
+//  The HEAVY work (idempotency log + fulfillment + notifications) runs in the
+//  WORKER (src/workers/webhook.worker.ts → processStripeEventJob).
 //
-//  It knows NOTHING about Next.js or Express. It takes the raw body + the
-//  stripe-signature header and returns an HTTP { status, body } for the
-//  caller to send. That lets BOTH entry points reuse the exact same logic:
+//  WHY: doing DB writes + 6 Redis enqueues INSIDE the webhook request made the
+//  200 take up to ~15s on a cold Upstash/Postgres connection, which crossed
+//  Stripe's delivery timeout → "failed delivery" + retries. Returning 200 in
+//  ~single-digit ms fixes that permanently.
 //
-//    • app/api/stripe/webhook/route.ts   (Next.js API — primary)
-//    • src/worker-host.ts                (Railway worker — optional)
+//  SAFETY: if the queue handoff fails (Redis unreachable from the API), we do
+//  NOT drop the event — we process it inline as a fallback (the booking status
+//  flip only needs Postgres) and still return 200 so Stripe never retries a
+//  slow/failed response.
 //
-//  Whichever URL you register in the Stripe Dashboard, the behavior is
-//  identical, and the two can never drift apart.
+//  Both entry points share this core:
+//     • app/api/stripe/webhook/route.ts   (Next.js API — primary)
+//     • src/worker-host.ts                (Railway worker — optional endpoint)
 // ════════════════════════════════════════════════════════════════════════
 import Stripe from 'stripe'
 import { constructWebhookEvent } from './stripe'
 import { prisma } from './db'
-import { discordQueue } from './queues'
+import { discordQueue, webhookRetryQueue } from './queues'
 import { fulfillPaidCheckout } from './fulfillment'
 import { webhookLogger } from './logger'
 
@@ -26,66 +35,113 @@ export type StripeWebhookResult = {
   body: { ok: true } | { error: string }
 }
 
+export type VerifyResult =
+  | { ok: true; event: Stripe.Event }
+  | { ok: false; status: 400 | 500; body: { error: string } }
+
 /**
- * Verify, dedupe, handle, and record a Stripe webhook.
- *
- * @param rawBody   The EXACT bytes Stripe sent (a Buffer or the untouched
- *                  UTF-8 string). Never a re-serialized JSON object — the
- *                  signature is computed over the raw bytes.
- * @param signature The `stripe-signature` request header.
- *
- * Always resolves (never throws). Returns 200 for anything we've accepted
- * (including handled-with-internal-error) so Stripe does not retry events we
- * already own; 400/500 only for signatures/config we reject outright.
+ * FAST signature check — crypto only, no I/O. Returns the parsed event or the
+ * HTTP error to send back. Never throws.
+ */
+export function verifyStripeSignature(
+  rawBody: string | Buffer,
+  signature: string | null | undefined
+): VerifyResult {
+  if (!signature) {
+    return { ok: false, status: 400, body: { error: 'Missing signature' } }
+  }
+  if (!process.env.STRIPE_WEBHOOK_SECRET) {
+    webhookLogger.error('STRIPE_WEBHOOK_SECRET is not set — rejecting webhook')
+    return { ok: false, status: 500, body: { error: 'Server misconfigured' } }
+  }
+  try {
+    const event = constructWebhookEvent(rawBody, signature)
+    return { ok: true, event }
+  } catch (err) {
+    webhookLogger.error({ err }, 'Stripe webhook signature verification failed')
+    return { ok: false, status: 400, body: { error: 'Invalid signature' } }
+  }
+}
+
+/**
+ * HTTP entry point. Verify → hand to worker → return 200 immediately.
+ * Always resolves (never throws); returns 200 for any event we accept so
+ * Stripe never retries something we already own.
  */
 export async function processStripeWebhook(
   rawBody: string | Buffer,
   signature: string | null | undefined
 ): Promise<StripeWebhookResult> {
-  if (!signature) {
-    return { status: 400, body: { error: 'Missing signature' } }
-  }
-  if (!process.env.STRIPE_WEBHOOK_SECRET) {
-    webhookLogger.error('STRIPE_WEBHOOK_SECRET is not set — rejecting webhook')
-    return { status: 500, body: { error: 'Server misconfigured' } }
-  }
-
-  // ── Verify the signature over the RAW body ──────────────────────
-  let event: Stripe.Event
-  try {
-    event = constructWebhookEvent(rawBody, signature)
-  } catch (err) {
-    webhookLogger.error({ err }, 'Stripe webhook signature verification failed')
-    return { status: 400, body: { error: 'Invalid signature' } }
-  }
+  const verified = verifyStripeSignature(rawBody, signature)
+  if (!verified.ok) return { status: verified.status, body: verified.body }
+  const event = verified.event
 
   webhookLogger.info({ eventId: event.id, eventType: event.type }, 'Stripe webhook received')
 
-  // ── Idempotency + handling (single try/catch) ───────────────────
-  // The webhookLog upsert can throw a unique-constraint race when Stripe
-  // delivers the same event concurrently. Wrapping everything in one
-  // try/catch makes that race return 200, not 500.
+  // Hand off to the worker. jobId = event.id dedupes duplicate deliveries at
+  // the queue level. 3s guard so a Redis stall can't hang the 200 response.
   try {
-    const existing = await prisma.webhookLog.findUnique({ where: { eventId: event.id } })
-    if (existing && existing.status === 'processed') {
-      webhookLogger.info({ eventId: event.id }, 'Duplicate webhook — skipping')
-      return { status: 200, body: { ok: true } }
+    await Promise.race([
+      webhookRetryQueue.add(
+        'stripe-event',
+        { event },
+        {
+          jobId: event.id,
+          removeOnComplete: { count: 200 },
+          removeOnFail: { count: 200 },
+        }
+      ),
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error('queue handoff timed out after 3s (Redis unreachable?)')), 3000)
+      ),
+    ])
+    webhookLogger.info({ eventId: event.id }, 'Stripe event queued for worker — 200 OK')
+    return { status: 200, body: { ok: true } }
+  } catch (err) {
+    // Redis unreachable/slow from THIS process. Don't lose the event: process
+    // inline (the booking flip only needs Postgres) and still return 200.
+    webhookLogger.warn(
+      { eventId: event.id, err: err instanceof Error ? err.message : String(err) },
+      'Queue handoff failed — processing Stripe event inline as fallback'
+    )
+    try {
+      await processStripeEventJob(event)
+    } catch (inner) {
+      webhookLogger.error(
+        { eventId: event.id, err: inner instanceof Error ? inner.message : String(inner) },
+        'Inline fallback processing failed (event accepted; will not be retried by Stripe)'
+      )
     }
+    return { status: 200, body: { ok: true } }
+  }
+}
 
-    const log = await prisma.webhookLog.upsert({
-      where: { eventId: event.id },
-      update: {},
-      create: {
-        source: 'stripe',
-        eventType: event.type,
-        eventId: event.id,
-        payload: event as any,
-        status: 'pending',
-      },
-    })
+/**
+ * HEAVY path — runs in the WORKER (or the inline fallback). Idempotency via
+ * webhookLog + business handling + mark processed. Throws on failure so the
+ * worker's retry policy (webhook-retry queue: 5 attempts) can re-run it.
+ */
+export async function processStripeEventJob(event: Stripe.Event): Promise<void> {
+  const existing = await prisma.webhookLog.findUnique({ where: { eventId: event.id } })
+  if (existing && existing.status === 'processed') {
+    webhookLogger.info({ eventId: event.id }, 'Duplicate webhook — already processed, skipping')
+    return
+  }
 
+  const log = await prisma.webhookLog.upsert({
+    where: { eventId: event.id },
+    update: {},
+    create: {
+      source: 'stripe',
+      eventType: event.type,
+      eventId: event.id,
+      payload: event as any,
+      status: 'pending',
+    },
+  })
+
+  try {
     await handleStripeEvent(event)
-
     await prisma.webhookLog.update({
       where: { id: log.id },
       data: { status: 'processed', processedAt: new Date() },
@@ -93,29 +149,19 @@ export async function processStripeWebhook(
   } catch (err) {
     const errObj =
       err instanceof Error ? { message: err.message, stack: err.stack } : { message: String(err) }
-    webhookLogger.error({ eventId: event.id, eventType: event.type, err: errObj }, 'Webhook processing failed')
-
-    try {
-      await prisma.webhookLog.updateMany({
-        where: { eventId: event.id, status: 'pending' },
-        data: { status: 'failed' },
-      })
-    } catch {
-      /* best-effort */
-    }
-
-    // Return 200 to prevent Stripe from retrying — we handle retries ourselves.
-    return { status: 200, body: { ok: true } }
+    webhookLogger.error(
+      { eventId: event.id, eventType: event.type, err: errObj },
+      'Webhook processing failed'
+    )
+    await prisma.webhookLog
+      .updateMany({ where: { eventId: event.id, status: 'pending' }, data: { status: 'failed' } })
+      .catch(() => undefined)
+    throw err // surface to the worker so it retries
   }
-
-  return { status: 200, body: { ok: true } }
 }
 
 /**
  * The business switch: turn a verified Stripe event into side-effects.
- * All heavy lifting lives in fulfillPaidCheckout() (idempotent, shared with
- * the browser success-redirect backup path) and the BullMQ queues, so this
- * function only routes by event type.
  */
 export async function handleStripeEvent(event: Stripe.Event): Promise<void> {
   switch (event.type) {
@@ -129,10 +175,6 @@ export async function handleStripeEvent(event: Stripe.Event): Promise<void> {
         )
         return
       }
-
-      // All fulfillment (status flip + email/SMS/Discord/marketing jobs) lives
-      // in the shared, idempotent helper so the browser success redirect can
-      // run the exact same path as a backup when the webhook never arrives.
       await fulfillPaidCheckout({
         bookingId,
         paymentIntentId: (session.payment_intent as string) ?? null,
@@ -153,13 +195,11 @@ export async function handleStripeEvent(event: Stripe.Event): Promise<void> {
       })
       if (!booking) return
 
-      // Update payment record
       await prisma.payment.updateMany({
         where: { stripePaymentIntentId: pi.id },
         data: { status: 'FAILED' },
       })
 
-      // Alert Discord
       await discordQueue.add('failure-alert', {
         type: 'failure-alert',
         bookingId,
@@ -183,7 +223,6 @@ export async function handleStripeEvent(event: Stripe.Event): Promise<void> {
       const session = event.data.object as Stripe.Checkout.Session
       const bookingId = session.metadata?.bookingId
       if (!bookingId) return
-      // Booking stays in PENDING_PAYMENT — abandoned checkout job will handle it
       webhookLogger.info({ bookingId }, 'Checkout session expired')
       break
     }

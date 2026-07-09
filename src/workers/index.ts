@@ -14,6 +14,7 @@ import { startDiscordWorker } from './discord.worker'
 import { startSmsWorker } from './sms.worker'
 import { startScheduledWorker } from './scheduled.worker'
 import { startMarketingWorker } from './marketing.worker'
+import { startWebhookWorker } from './webhook.worker'
 import { logger } from '../lib/logger'
 
 // ── Startup diagnostics ──────────────────────────────────────────────────
@@ -74,7 +75,10 @@ async function main() {
   const marketingWorker = startMarketingWorker()
   logger.info('  ✓ marketing worker started')
 
-  logger.info('All 5 workers running — waiting for jobs')
+  const webhookWorker = startWebhookWorker()
+  logger.info('  ✓ webhook worker started (consumes webhook-retry → Stripe events)')
+
+  logger.info('All 6 workers running — waiting for jobs')
 
   // Graceful shutdown
   async function shutdown() {
@@ -85,6 +89,7 @@ async function main() {
       smsWorker.close(),
       scheduledWorker.close(),
       marketingWorker.close(),
+      webhookWorker.close(),
     ])
     logger.info('All workers stopped cleanly')
     process.exit(0)
