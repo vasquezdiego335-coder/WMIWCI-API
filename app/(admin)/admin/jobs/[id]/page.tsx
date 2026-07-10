@@ -14,6 +14,55 @@ const STATUS_COLORS: Record<string, string> = {
   COMPLETED: '#10B981', ARCHIVED: '#6B7280', CANCELLED: '#374151',
 }
 
+// Friendly names for the raw template ids stored on each Notification.
+const TEMPLATE_LABELS: Record<string, string> = {
+  'pre-approval': 'Pre-confirmation',
+  'final-confirmation': 'Booking approved',
+  'booking-confirmation': 'Booking received',
+  'booking-confirmed': 'Confirmed',
+  'payment-receipt': 'Payment receipt',
+  'booking-denied': 'Booking update',
+  'reschedule-offer': 'Reschedule offer',
+  'booking-rescheduled': 'Rescheduled',
+  'job-reminder': 'Move reminder',
+  'job-completion': 'Job complete',
+  'review-request': 'Review request',
+  'abandoned-checkout': 'Abandoned checkout',
+  'contact-ack': 'Contact reply',
+}
+
+// Ember-orange first-open indicator (matches the email shield/calendar/truck
+// chip style). Shows a filled orange check chip once the customer opens the
+// email, or a muted hollow circle while it's sent-but-unopened.
+function OpenIndicator({ isOpened, openedAt, openCount }: { isOpened: boolean; openedAt: Date | null; openCount: number }) {
+  if (isOpened) {
+    const when = openedAt ? new Date(openedAt).toLocaleString('en-US', { timeZone: 'America/New_York' }) : ''
+    return (
+      <span
+        title={`Opened${when ? ` ${when}` : ''}${openCount > 1 ? ` · ${openCount} opens` : ''}`}
+        style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', flexShrink: 0 }}
+      >
+        <span style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: '22px', height: '22px', borderRadius: '7px', backgroundColor: '#FFF0E6' }}>
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+            <path d="M5 12.5l4.3 4.3L19 7" stroke="#FF6A00" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" />
+          </svg>
+        </span>
+        <span style={{ fontSize: '11px', fontWeight: '700', color: '#FF6A00' }}>Opened</span>
+      </span>
+    )
+  }
+  return (
+    <span title="Sent — not opened yet" style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', flexShrink: 0 }}>
+      <span style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: '22px', height: '22px', borderRadius: '7px', backgroundColor: '#F3F4F6' }}>
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+          <circle cx="12" cy="12" r="8" stroke="#9CA3AF" strokeWidth="2" />
+        </svg>
+      </span>
+      <span style={{ fontSize: '11px', color: '#9CA3AF' }}>Not opened</span>
+    </span>
+  )
+}
+
 export default async function JobDetail({ params }: { params: { id: string } }) {
   await getSession()
 
@@ -94,6 +143,33 @@ export default async function JobDetail({ params }: { params: { id: string } }) 
 
         {/* Right column */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
+
+          {/* Emails & messages — with open tracking */}
+          <Section title={`Emails & messages (${booking.notifications.length})`}>
+            {booking.notifications.length === 0 ? (
+              <p style={{ fontSize: '13px', color: '#9CA3AF', fontStyle: 'italic', margin: '0' }}>No messages sent yet</p>
+            ) : (
+              <div style={{ display: 'flex', flexDirection: 'column' }}>
+                {booking.notifications.map((n, i) => (
+                  <div key={n.id} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px', padding: '10px 0', borderBottom: i < booking.notifications.length - 1 ? '1px solid #F3F4F6' : 'none' }}>
+                    <div style={{ minWidth: 0 }}>
+                      <div style={{ fontSize: '13px', fontWeight: '600', color: '#374151' }}>{TEMPLATE_LABELS[n.template] ?? n.template}</div>
+                      <div style={{ fontSize: '11px', color: '#9CA3AF', marginTop: '2px' }}>
+                        {n.channel}
+                        {' · '}
+                        {n.sentAt
+                          ? `sent ${new Date(n.sentAt).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', timeZone: 'America/New_York' })}`
+                          : n.status.toLowerCase()}
+                      </div>
+                    </div>
+                    {n.channel === 'EMAIL' ? (
+                      <OpenIndicator isOpened={n.isOpened} openedAt={n.openedAt} openCount={n.openCount} />
+                    ) : null}
+                  </div>
+                ))}
+              </div>
+            )}
+          </Section>
 
           {/* Payment */}
           <Section title="Payment">

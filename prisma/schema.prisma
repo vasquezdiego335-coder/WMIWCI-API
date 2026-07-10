@@ -410,6 +410,13 @@ model Notification {
   sentAt     DateTime?           @map("sent_at")
   error      String?
   retries    Int                 @default(0)
+  // Email open tracking (1x1 tracking-pixel). openToken is embedded in the
+  // sent email; GET /api/email/open stamps openedAt + isOpened on first load
+  // and bumps openCount on every load. Only meaningful for EMAIL channel.
+  openToken  String?             @unique @map("open_token")
+  openedAt   DateTime?           @map("opened_at")
+  isOpened   Boolean             @default(false) @map("is_opened")
+  openCount  Int                 @default(0) @map("open_count")
   createdAt  DateTime            @default(now()) @map("created_at")
 
   booking    Booking?            @relation(fields: [bookingId], references: [id])

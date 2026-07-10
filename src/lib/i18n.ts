@@ -137,8 +137,8 @@ export function t(locale: Locale | string | undefined, key: StringKey, vars: Var
 
 // ── Email subjects (bilingual) ────────────────────────────────────────────
 const EMAIL_SUBJECTS: Record<string, { en: string; es: string }> = {
-  'pre-approval':      { en: 'Your booking is approved — pending final confirmation', es: 'Tu reserva está aprobada — pendiente de confirmación final' },
-  'final-confirmation':{ en: 'Booking confirmed — payment & next steps',            es: 'Reserva confirmada — pago y próximos pasos' },
+  'pre-approval':      { en: "We've received your booking request",                 es: 'Recibimos tu solicitud de reserva' },
+  'final-confirmation':{ en: 'Your booking is approved',                           es: 'Tu reserva está aprobada' },
   'pending-approval':  { en: 'We received your booking — pending approval', es: 'Recibimos tu reserva — pendiente de aprobación' },
   'booking-confirmed': { en: 'Your move is confirmed ✅',                    es: 'Tu mudanza está confirmada ✅' },
   'booking-denied':    { en: 'About your booking request',                  es: 'Sobre tu solicitud de reserva' },

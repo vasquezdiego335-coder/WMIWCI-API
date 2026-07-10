@@ -1,0 +1,1334 @@
+import * as React from 'react'
+import { Html, Head, Body, Container, Section, Preview, Button } from '@react-email/components'
+
+// ════════════════════════════════════════════════════════════════════════
+//  SHARED EMAIL UI KIT  —  "Move It Clear It" premium transactional emails
+//  ---------------------------------------------------------------------------
+//  A small design system used by the two live customer emails (pre-approval +
+//  final-confirmation). Everything is inline-styled and email-safe (tables for
+//  structure, system font stack, graceful Outlook degradation). The responsive
+//  rules live in one <style> block injected by <Shell>.
+//
+//  LOCKED PALETTE (per owner): Ink Navy / Ember Orange / Bone White / Antique
+//  Gold. Do not introduce off-palette colors.
+// ════════════════════════════════════════════════════════════════════════
+
+export const C = {
+  navy: '#0D1A2D',
+  orange: '#FF6A00',
+  bone: '#F7F7F2',
+  gold: '#D4A24C',
+
+  page: '#EAE7DF', // warm stone page background so white cards float
+  card: '#FFFFFF',
+  ink: '#0D1A2D',
+  body: '#48515F', // primary paragraph text (slate)
+  muted: '#6B7482', // secondary text
+  label: '#98A2B0', // uppercase eyebrow / KV labels
+  hair: '#EBE6DC', // card hairline border
+  line: '#F1ECE3', // divider inside cards
+  inset: '#F7F7F2', // bone inset panels
+
+  goldTint: '#F7EEDB',
+  goldInk: '#8A6A28',
+  orangeTint: '#FFF0E6',
+  orangeInk: '#B8480A',
+  navyTint: '#EBEEF3',
+} as const
+
+export const FONT =
+  "'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif"
+
+// ── Animation-compat CSS: Apple Mail / iOS render the inline SMIL <svg>;
+//    Gmail / Outlook / most mobile get the animated GIF. Shared by <Shell>'s
+//    <head> AND by <HeroAnimStyle> (for marketing templates that don't use
+//    Shell). Pure CSS class toggle — no MSO comments, no external assets.
+export const HERO_ANIM_CSS = `
+  .hero-gif{display:block;margin:0 auto;}
+  .hero-svg{display:none;}
+  @media screen and (-webkit-min-device-pixel-ratio:0) and (min-resolution:.001dpcm){
+    .hero-svg{display:block!important;}
+    .hero-gif{display:none!important;}
+  }
+`
+
+// ── Responsive + reset CSS (injected once in <Shell>) ─────────────────────
+const HEAD_CSS = `
+  html,body{margin:0!important;padding:0!important;background:${C.page};}
+  *{-ms-text-size-adjust:100%;-webkit-text-size-adjust:100%;}
+  table,td{mso-table-lspace:0pt;mso-table-rspace:0pt;border-collapse:collapse;}
+  img{-ms-interpolation-mode:bicubic;border:0;line-height:100%;outline:none;text-decoration:none;}
+  a{text-decoration:none;}
+  .cta:hover{background:${C.orangeInk}!important;}
+  @media only screen and (max-width:600px){
+    .container{width:100%!important;}
+    .card{border-radius:16px!important;}
+    .cardpad{padding:24px 22px!important;}
+    .heropad{padding:28px 22px!important;}
+    .gutter{padding-left:16px!important;padding-right:16px!important;}
+    .h1{font-size:24px!important;line-height:31px!important;}
+    .stack{display:block!important;width:100%!important;box-sizing:border-box!important;}
+    .stack-gap{height:12px!important;line-height:12px!important;font-size:0!important;}
+    .contactcell{display:block!important;width:100%!important;padding:0 0 12px 0!important;}
+    .btnfull a{display:block!important;width:auto!important;}
+    .tl-label{font-size:11px!important;line-height:14px!important;}
+    .hide-sm{display:none!important;}
+  }
+  ${HERO_ANIM_CSS}
+`
+
+// ─────────────────────────────────────────────────────────────────────────
+//  SHELL — <Html><Head/preview><Body><Container>{children}
+// ─────────────────────────────────────────────────────────────────────────
+export function Shell({
+  lang = 'en',
+  preview,
+  children,
+}: {
+  lang?: string
+  preview: string
+  children: React.ReactNode
+}) {
+  return (
+    <Html lang={lang}>
+      <Head>
+        <meta name="color-scheme" content="light" />
+        <meta name="supported-color-schemes" content="light" />
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <style dangerouslySetInnerHTML={{ __html: HEAD_CSS }} />
+      </Head>
+      <Preview>{preview}</Preview>
+      <Body style={{ margin: 0, padding: 0, background: C.page, fontFamily: FONT }}>
+        {/* page gutter */}
+        <table
+          role="presentation"
+          width="100%"
+          cellPadding={0}
+          cellSpacing={0}
+          border={0}
+          style={{ background: C.page }}
+        >
+          <tbody>
+            <tr>
+              <td align="center" className="gutter" style={{ padding: '24px 20px 40px' }}>
+                <Container
+                  className="container"
+                  style={{ width: '100%', maxWidth: '600px', margin: '0 auto' }}
+                >
+                  {children}
+                </Container>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </Body>
+    </Html>
+  )
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+//  LOGO HEADER  —  swap the wordmark block for an <Img> when the logo art is
+//  ready. Kept as premium type so the email looks finished out of the box.
+// ─────────────────────────────────────────────────────────────────────────
+export function LogoHeader() {
+  return (
+    <Section style={{ padding: '18px 8px 28px', textAlign: 'center' as const }}>
+      {/* LOGO — Move It Clear It chevron mark + wordmark (reproduces public/logo/icon.svg).
+          For the exact art in every client, host a PNG of that SVG and swap the mark cell for:
+          <Img src="https://moveitclearit.com/logo/icon.png" width="50" height="50" alt="Move It Clear It" /> */}
+      <table role="presentation" cellPadding={0} cellSpacing={0} border={0} align="center" style={{ margin: '0 auto' }}>
+        <tbody>
+          <tr>
+            <td valign="middle" style={{ paddingRight: '13px' }}>
+              <table role="presentation" cellPadding={0} cellSpacing={0} border={0}>
+                <tbody>
+                  <tr>
+                    <td
+                      width={50}
+                      height={50}
+                      align="center"
+                      valign="middle"
+                      style={{ width: '50px', height: '50px', background: C.navy, borderRadius: '14px', textAlign: 'center' as const }}
+                    >
+                      <span style={{ fontFamily: FONT, fontSize: '26px', lineHeight: '50px', fontWeight: 900, color: C.orange }}>{'❯'}</span>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </td>
+            <td valign="middle" align="left">
+              <div style={{ fontFamily: FONT, fontSize: '21px', lineHeight: '23px', fontWeight: 800, letterSpacing: '1.4px', color: C.navy }}>
+                MOVE IT CLEAR IT
+              </div>
+              <div style={{ fontFamily: FONT, fontSize: '9.5px', fontWeight: 700, letterSpacing: '1.8px', color: C.gold, textTransform: 'uppercase' as const, marginTop: '6px' }}>
+                Premium Moving &amp; Junk Removal
+              </div>
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    </Section>
+  )
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+//  CARD  —  rounded white surface with hairline + soft shadow
+// ─────────────────────────────────────────────────────────────────────────
+export function Card({
+  children,
+  pad = true,
+  style,
+}: {
+  children: React.ReactNode
+  pad?: boolean
+  style?: React.CSSProperties
+}) {
+  return (
+    <table
+      role="presentation"
+      width="100%"
+      cellPadding={0}
+      cellSpacing={0}
+      border={0}
+      className="card"
+      style={{
+        background: C.card,
+        borderRadius: '18px',
+        border: `1px solid ${C.hair}`,
+        boxShadow: '0 1px 2px rgba(13,26,45,0.04), 0 12px 30px rgba(13,26,45,0.05)',
+        ...style,
+      }}
+    >
+      <tbody>
+        <tr>
+          <td className={pad ? 'cardpad' : undefined} style={pad ? { padding: '28px 30px' } : undefined}>
+            {children}
+          </td>
+        </tr>
+      </tbody>
+    </table>
+  )
+}
+
+export function Spacer({ h = 16 }: { h?: number }) {
+  return (
+    <div className="stack-gap" style={{ height: `${h}px`, lineHeight: `${h}px`, fontSize: 0 }}>
+      &nbsp;
+    </div>
+  )
+}
+
+export function Divider({ my = 18 }: { my?: number }) {
+  return (
+    <div
+      style={{
+        height: '1px',
+        lineHeight: '1px',
+        fontSize: 0,
+        background: C.line,
+        margin: `${my}px 0`,
+      }}
+    >
+      &nbsp;
+    </div>
+  )
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+//  HERO TRUCK ART  —  flat, brand-colored moving truck with SMIL animation
+//  (spinning wheels + flowing road). Renders in Apple Mail / iOS Mail. This is
+//  the SAME art the GIF fallback is generated from (scripts/make-hero-gif.mjs).
+// ─────────────────────────────────────────────────────────────────────────
+export function HeroTruckArt() {
+  return (
+    <table role="presentation" cellPadding={0} cellSpacing={0} border={0} align="center" style={{ margin: '0 auto' }}>
+      <tbody>
+        <tr>
+          <td align="center" style={{ padding: '4px 0' }}>
+            <svg width="320" height="123" viewBox="0 0 520 200" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Move It Clear It — your movers are on the way" style={{ display: 'block', maxWidth: '100%' }}>
+              {/* celebration sparkles */}
+              <path d="M118 67 L121 74 L128 76 L121 78 L118 85 L115 78 L108 76 L115 74 Z" fill="#D4A24C" />
+              <path d="M404 60 L408 68 L416 71 L408 74 L404 82 L400 74 L392 71 L400 68 Z" fill="#D4A24C" />
+              {/* flowing road */}
+              <line x1="40" y1="172" x2="480" y2="172" stroke="#D4A24C" strokeWidth="4" strokeLinecap="round" strokeDasharray="10 16">
+                <animate attributeName="stroke-dashoffset" from="0" to="-26" dur="0.7s" repeatCount="indefinite" />
+              </line>
+              {/* truck body */}
+              <rect x="180" y="78" width="120" height="62" rx="12" fill="#0D1A2D" />
+              <rect x="180" y="120" width="120" height="9" fill="#FF6A00" />
+              <path d="M214 92 L242 106 L214 120" stroke="#FF6A00" strokeWidth="12" strokeLinecap="round" strokeLinejoin="round" fill="none" />
+              <path d="M300 94 h36 l24 24 v18 a5 5 0 0 1 -5 5 h-55 z" fill="#0D1A2D" />
+              <rect x="318" y="102" width="28" height="20" rx="4" fill="#FF6A00" opacity="0.9" />
+              <rect x="357" y="132" width="6" height="9" rx="2" fill="#D4A24C" />
+              {/* rear wheel */}
+              <circle cx="222" cy="150" r="18" fill="#0D1A2D" />
+              <circle cx="222" cy="150" r="7.5" fill="#F7F7F2" />
+              <g>
+                <animateTransform attributeName="transform" attributeType="XML" type="rotate" from="0 222 150" to="360 222 150" dur="0.9s" repeatCount="indefinite" />
+                <path d="M222 143.5 V156.5 M215.5 150 H228.5" stroke="#0D1A2D" strokeWidth="2.4" strokeLinecap="round" />
+              </g>
+              {/* front wheel */}
+              <circle cx="328" cy="150" r="18" fill="#0D1A2D" />
+              <circle cx="328" cy="150" r="7.5" fill="#F7F7F2" />
+              <g>
+                <animateTransform attributeName="transform" attributeType="XML" type="rotate" from="0 328 150" to="360 328 150" dur="0.9s" repeatCount="indefinite" />
+                <path d="M328 143.5 V156.5 M321.5 150 H334.5" stroke="#0D1A2D" strokeWidth="2.4" strokeLinecap="round" />
+              </g>
+            </svg>
+          </td>
+        </tr>
+      </tbody>
+    </table>
+  )
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+//  ANIMATED HERO  —  self-contained. Inline SMIL <svg> for Apple Mail / iOS +
+//  an animated-GIF fallback (`heroGifUrl`) for Gmail / Outlook / most mobile.
+//  Renders the truck by default; pass children to override the art. The
+//  Apple↔rest toggle is pure CSS (HERO_ANIM_CSS in <head>, via <Shell> or
+//  <HeroAnimStyle>) — no MSO comments, no external assets except the GIF.
+// ─────────────────────────────────────────────────────────────────────────
+export function AnimatedHero({
+  heroGifUrl,
+  alt = 'Your movers are on the way',
+  width = 320,
+  height = 123,
+  children,
+}: {
+  heroGifUrl?: string
+  alt?: string
+  width?: number
+  height?: number
+  children?: React.ReactNode
+}) {
+  return (
+    <>
+      <div className={heroGifUrl ? 'hero-svg' : undefined} style={{ textAlign: 'center' as const }}>
+        {children ?? <HeroTruckArt />}
+      </div>
+      {heroGifUrl ? (
+        <img
+          className="hero-gif"
+          src={heroGifUrl}
+          width={width}
+          height={height}
+          alt={alt}
+          style={{ display: 'block', margin: '0 auto', maxWidth: '100%', border: 0 }}
+        />
+      ) : null}
+    </>
+  )
+}
+
+// <style> block carrying HERO_ANIM_CSS, for templates that render their own
+// <Head> instead of <Shell>. Drop <HeroAnimStyle /> inside their <Head>.
+export function HeroAnimStyle() {
+  return <style dangerouslySetInnerHTML={{ __html: HERO_ANIM_CSS }} />
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+//  EYEBROW  —  small tinted icon chip + uppercase section title
+// ─────────────────────────────────────────────────────────────────────────
+export function Eyebrow({
+  icon,
+  title,
+  tone = 'orange',
+}: {
+  icon: IconName
+  title: string
+  tone?: 'orange' | 'navy' | 'gold'
+}) {
+  const map = {
+    orange: { bg: C.orangeTint, fg: C.orange },
+    navy: { bg: C.navyTint, fg: C.navy },
+    gold: { bg: C.goldTint, fg: C.goldInk },
+  } as const
+  const t = map[tone]
+  return (
+    <table role="presentation" cellPadding={0} cellSpacing={0} border={0} style={{ marginBottom: '16px' }}>
+      <tbody>
+        <tr>
+          <td
+            width={38}
+            height={38}
+            align="center"
+            valign="middle"
+            style={{
+              width: '38px',
+              height: '38px',
+              background: t.bg,
+              borderRadius: '11px',
+            }}
+          >
+            <Icon name={icon} color={t.fg} size={19} />
+          </td>
+          <td width={12} style={{ width: '12px' }}>
+            &nbsp;
+          </td>
+          <td valign="middle">
+            <div
+              style={{
+                fontFamily: FONT,
+                fontSize: '12px',
+                fontWeight: 700,
+                letterSpacing: '1.4px',
+                textTransform: 'uppercase' as const,
+                color: C.label,
+              }}
+            >
+              {title}
+            </div>
+          </td>
+        </tr>
+      </tbody>
+    </table>
+  )
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+//  ICON CHIP  —  a rounded chip with a PERFECTLY-centered icon. Uses a table
+//  cell (align/valign) rather than line-height, so the block <svg> centers in
+//  every client. Inline-block so it can sit beside text.
+// ─────────────────────────────────────────────────────────────────────────
+export function IconChip({
+  icon,
+  color,
+  size = 18,
+  dim = 36,
+  bg = '#FFFFFF',
+  border,
+  radius = 10,
+}: {
+  icon: IconName
+  color: string
+  size?: number
+  dim?: number
+  bg?: string
+  border?: string
+  radius?: number
+}) {
+  const bd = border ?? `1px solid ${C.hair}`
+  return (
+    <table role="presentation" cellPadding={0} cellSpacing={0} border={0} style={{ display: 'inline-block' as const }}>
+      <tbody>
+        <tr>
+          <td
+            width={dim}
+            height={dim}
+            align="center"
+            valign="middle"
+            style={{ width: `${dim}px`, height: `${dim}px`, background: bg, border: bd, borderRadius: `${radius}px` }}
+          >
+            <Icon name={icon} color={color} size={size} />
+          </td>
+        </tr>
+      </tbody>
+    </table>
+  )
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+//  PILL  —  status badge
+// ─────────────────────────────────────────────────────────────────────────
+export function Pill({
+  children,
+  tone = 'gold',
+}: {
+  children: React.ReactNode
+  tone?: 'gold' | 'orange' | 'navy'
+}) {
+  const map = {
+    gold: { bg: C.goldTint, fg: C.goldInk, dot: C.gold },
+    orange: { bg: C.orangeTint, fg: C.orangeInk, dot: C.orange },
+    navy: { bg: C.navyTint, fg: C.navy, dot: C.navy },
+  } as const
+  const t = map[tone]
+  return (
+    <span
+      style={{
+        display: 'inline-block',
+        background: t.bg,
+        color: t.fg,
+        fontFamily: FONT,
+        fontSize: '11px',
+        fontWeight: 700,
+        letterSpacing: '1.2px',
+        textTransform: 'uppercase' as const,
+        padding: '7px 13px',
+        borderRadius: '999px',
+      }}
+    >
+      <span
+        style={{
+          display: 'inline-block',
+          width: '6px',
+          height: '6px',
+          borderRadius: '50%',
+          background: t.dot,
+          marginRight: '7px',
+          verticalAlign: 'middle',
+        }}
+      >
+        &nbsp;
+      </span>
+      {children}
+    </span>
+  )
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+//  KEY / VALUE TABLE  —  skips rows whose value is empty
+// ─────────────────────────────────────────────────────────────────────────
+export type KV = { label: string; value?: React.ReactNode; strong?: boolean }
+
+export function KVTable({ rows }: { rows: KV[] }) {
+  const visible = rows.filter((r) => r.value !== undefined && r.value !== null && r.value !== '')
+  return (
+    <table role="presentation" width="100%" cellPadding={0} cellSpacing={0} border={0}>
+      <tbody>
+        {visible.map((r, i) => (
+          <tr key={i}>
+            <td
+              valign="top"
+              style={{
+                padding: '13px 0',
+                borderTop: i === 0 ? 'none' : `1px solid ${C.line}`,
+                fontFamily: FONT,
+                fontSize: '13px',
+                color: C.muted,
+                whiteSpace: 'nowrap' as const,
+              }}
+            >
+              {r.label}
+            </td>
+            <td
+              valign="top"
+              align="right"
+              style={{
+                padding: '13px 0',
+                borderTop: i === 0 ? 'none' : `1px solid ${C.line}`,
+                fontFamily: FONT,
+                fontSize: '14px',
+                fontWeight: r.strong ? 700 : 600,
+                color: r.strong ? C.orange : C.navy,
+                textAlign: 'right' as const,
+              }}
+            >
+              {r.value}
+            </td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  )
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+//  ROUTE BLOCK  —  pickup dot → dashed rail → destination pin
+// ─────────────────────────────────────────────────────────────────────────
+export function RouteBlock({
+  fromLabel,
+  from,
+  toLabel,
+  to,
+}: {
+  fromLabel: string
+  from: string
+  toLabel: string
+  to: string
+}) {
+  return (
+    <table role="presentation" width="100%" cellPadding={0} cellSpacing={0} border={0}>
+      <tbody>
+        <tr>
+          <td width={26} valign="top" style={{ width: '26px' }}>
+            {/* rail */}
+            <table role="presentation" cellPadding={0} cellSpacing={0} border={0}>
+              <tbody>
+                <tr>
+                  <td align="center" style={{ height: '14px' }} valign="middle">
+                    <div
+                      style={{
+                        width: '11px',
+                        height: '11px',
+                        borderRadius: '50%',
+                        background: C.orange,
+                        border: `3px solid ${C.orangeTint}`,
+                        fontSize: 0,
+                        lineHeight: '0px',
+                      }}
+                    >
+                      &nbsp;
+                    </div>
+                  </td>
+                </tr>
+                <tr>
+                  <td align="center" style={{ padding: '3px 0' }}>
+                    <div
+                      style={{
+                        width: '0px',
+                        height: '30px',
+                        borderLeft: `2px dotted ${C.gold}`,
+                        margin: '0 auto',
+                        fontSize: 0,
+                        lineHeight: '0px',
+                      }}
+                    >
+                      &nbsp;
+                    </div>
+                  </td>
+                </tr>
+                <tr>
+                  <td align="center" valign="middle">
+                    <div
+                      style={{
+                        width: '11px',
+                        height: '11px',
+                        borderRadius: '3px',
+                        background: C.navy,
+                        fontSize: 0,
+                        lineHeight: '0px',
+                      }}
+                    >
+                      &nbsp;
+                    </div>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </td>
+          <td width={14} style={{ width: '14px' }}>
+            &nbsp;
+          </td>
+          <td valign="top">
+            <div style={labelSm}>{fromLabel}</div>
+            <div style={{ ...addrVal, paddingBottom: '16px' }}>{from}</div>
+            <div style={labelSm}>{toLabel}</div>
+            <div style={addrVal}>{to}</div>
+          </td>
+        </tr>
+      </tbody>
+    </table>
+  )
+}
+
+const labelSm: React.CSSProperties = {
+  fontFamily: FONT,
+  fontSize: '11px',
+  fontWeight: 700,
+  letterSpacing: '1.2px',
+  textTransform: 'uppercase',
+  color: C.label,
+}
+const addrVal: React.CSSProperties = {
+  fontFamily: FONT,
+  fontSize: '15px',
+  fontWeight: 600,
+  lineHeight: '22px',
+  color: C.navy,
+  paddingTop: '3px',
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+//  CALLOUT  —  tinted rounded panel
+// ─────────────────────────────────────────────────────────────────────────
+export function Callout({
+  tone = 'gold',
+  children,
+}: {
+  tone?: 'gold' | 'orange' | 'bone'
+  children: React.ReactNode
+}) {
+  const map = {
+    gold: { bg: C.goldTint, br: '#EAD9B0' },
+    orange: { bg: C.orangeTint, br: '#FBD9C2' },
+    bone: { bg: C.inset, br: C.hair },
+  } as const
+  const t = map[tone]
+  return (
+    <table role="presentation" width="100%" cellPadding={0} cellSpacing={0} border={0}>
+      <tbody>
+        <tr>
+          <td
+            style={{
+              background: t.bg,
+              border: `1px solid ${t.br}`,
+              borderRadius: '14px',
+              padding: '18px 20px',
+            }}
+          >
+            {children}
+          </td>
+        </tr>
+      </tbody>
+    </table>
+  )
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+//  BUTTONS
+// ─────────────────────────────────────────────────────────────────────────
+export function PrimaryButton({ href, label }: { href: string; label: string }) {
+  return (
+    <table role="presentation" cellPadding={0} cellSpacing={0} border={0} align="center" className="btnfull" style={{ margin: '0 auto' }}>
+      <tbody>
+        <tr>
+          <td align="center" style={{ borderRadius: '13px' }}>
+            <Button
+              href={href}
+              className="cta"
+              style={{
+                background: C.orange,
+                color: '#FFFFFF',
+                fontFamily: FONT,
+                fontSize: '16px',
+                fontWeight: 700,
+                letterSpacing: '0.2px',
+                padding: '17px 40px',
+                borderRadius: '13px',
+                display: 'inline-block',
+                textAlign: 'center' as const,
+                boxShadow: '0 8px 20px rgba(255,106,0,0.28)',
+              }}
+            >
+              {label}&nbsp;&nbsp;&rarr;
+            </Button>
+          </td>
+        </tr>
+      </tbody>
+    </table>
+  )
+}
+
+export function GhostButton({ href, label }: { href: string; label: string }) {
+  return (
+    <table role="presentation" cellPadding={0} cellSpacing={0} border={0} align="center" className="btnfull" style={{ margin: '0 auto' }}>
+      <tbody>
+        <tr>
+          <td align="center">
+            <Button
+              href={href}
+              style={{
+                background: '#FFFFFF',
+                color: C.navy,
+                fontFamily: FONT,
+                fontSize: '15px',
+                fontWeight: 700,
+                padding: '14px 32px',
+                borderRadius: '13px',
+                border: `1.5px solid ${C.hair}`,
+                display: 'inline-block',
+                textAlign: 'center' as const,
+              }}
+            >
+              {label}
+            </Button>
+          </td>
+        </tr>
+      </tbody>
+    </table>
+  )
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+//  CONTACT ROW  —  phone / email / website (stacks on mobile)
+// ─────────────────────────────────────────────────────────────────────────
+export function ContactRow({
+  phone,
+  email,
+  website,
+  websiteLabel,
+  labels,
+}: {
+  phone: string
+  email: string
+  website: string
+  websiteLabel: string
+  labels?: { phone?: string; email?: string; website?: string }
+}) {
+  const L = { phone: 'Call or text', email: 'Email', website: 'Website', ...(labels || {}) }
+  const item = (icon: IconName, label: string, value: string, href: string) => (
+    <td className="contactcell stack" width="33.33%" valign="top" style={{ width: '33.33%', padding: '0 6px' }}>
+      <table role="presentation" cellPadding={0} cellSpacing={0} border={0}>
+        <tbody>
+          <tr>
+            <td
+              width={36}
+              height={36}
+              align="center"
+              valign="middle"
+              style={{ width: '36px', height: '36px', background: C.navyTint, borderRadius: '10px' }}
+            >
+              <Icon name={icon} color={C.navy} size={18} />
+            </td>
+            <td width={10} style={{ width: '10px' }}>
+              &nbsp;
+            </td>
+            <td valign="middle">
+              <div style={{ fontFamily: FONT, fontSize: '10px', fontWeight: 700, letterSpacing: '1px', textTransform: 'uppercase' as const, color: C.label }}>
+                {label}
+              </div>
+              <a href={href} style={{ fontFamily: FONT, fontSize: '13px', fontWeight: 600, color: C.navy, textDecoration: 'none' }}>
+                {value}
+              </a>
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    </td>
+  )
+  return (
+    <table role="presentation" width="100%" cellPadding={0} cellSpacing={0} border={0}>
+      <tbody>
+        <tr>
+          {item('phone', L.phone, phone, `tel:${phone.replace(/[^0-9+]/g, '')}`)}
+          {item('mail', L.email, email, `mailto:${email}`)}
+          {item('globe', L.website, websiteLabel, website)}
+        </tr>
+      </tbody>
+    </table>
+  )
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+//  CONTACT STRIP  —  prominent phone + website pills (stack on mobile)
+// ─────────────────────────────────────────────────────────────────────────
+export function ContactStrip({
+  phone,
+  website,
+  websiteLabel,
+  labels,
+}: {
+  phone: string
+  website: string
+  websiteLabel: string
+  labels?: { call?: string; visit?: string }
+}) {
+  const L = { call: 'Call or text', visit: 'Visit us', ...(labels || {}) }
+  const pill = (icon: IconName, top: string, value: string, href: string) => (
+    <td className="contactcell" width="50%" align="center" valign="middle" style={{ width: '50%', padding: '0 6px' }}>
+      <a href={href} style={{ display: 'block', textDecoration: 'none', background: C.inset, border: `1px solid ${C.hair}`, borderRadius: '13px', padding: '13px 18px' }}>
+        <table role="presentation" cellPadding={0} cellSpacing={0} border={0} align="center" style={{ margin: '0 auto' }}>
+          <tbody>
+            <tr>
+              <td
+                width={34}
+                height={34}
+                align="center"
+                valign="middle"
+                style={{ width: '34px', height: '34px', background: '#FFFFFF', border: `1px solid ${C.hair}`, borderRadius: '9px' }}
+              >
+                <Icon name={icon} color={C.orange} size={17} />
+              </td>
+              <td width={11} style={{ width: '11px' }}>
+                &nbsp;
+              </td>
+              <td valign="middle" align="left">
+                <div style={{ fontFamily: FONT, fontSize: '10px', fontWeight: 700, letterSpacing: '1px', textTransform: 'uppercase' as const, color: C.label }}>{top}</div>
+                <div style={{ fontFamily: FONT, fontSize: '15px', fontWeight: 700, color: C.navy, marginTop: '2px' }}>{value}</div>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </a>
+    </td>
+  )
+  return (
+    <table role="presentation" width="100%" cellPadding={0} cellSpacing={0} border={0}>
+      <tbody>
+        <tr>
+          {pill('phone', L.call, phone, `tel:${phone.replace(/[^0-9+]/g, '')}`)}
+          {pill('globe', L.visit, websiteLabel, website)}
+        </tr>
+      </tbody>
+    </table>
+  )
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+//  SOCIAL CHIPS  —  lettered navy badges (placeholders)
+// ─────────────────────────────────────────────────────────────────────────
+export function SocialChips({
+  instagram = '#',
+  facebook = '#',
+  tiktok = '#',
+  google = '#',
+}: {
+  instagram?: string
+  facebook?: string
+  tiktok?: string
+  google?: string
+}) {
+  const chip = (letter: string, href: string) => (
+    <td style={{ padding: '0 5px' }}>
+      <a
+        href={href}
+        style={{
+          display: 'inline-block',
+          width: '34px',
+          height: '34px',
+          lineHeight: '34px',
+          borderRadius: '50%',
+          background: C.navy,
+          color: C.gold,
+          fontFamily: FONT,
+          fontSize: '14px',
+          fontWeight: 700,
+          textAlign: 'center' as const,
+          textDecoration: 'none',
+        }}
+      >
+        {letter}
+      </a>
+    </td>
+  )
+  return (
+    <table role="presentation" cellPadding={0} cellSpacing={0} border={0} align="center" style={{ margin: '0 auto' }}>
+      <tbody>
+        <tr>
+          {chip('Ig', instagram)}
+          {chip('f', facebook)}
+          {chip('t', tiktok)}
+          {chip('G', google)}
+        </tr>
+      </tbody>
+    </table>
+  )
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+//  FOOTER
+// ─────────────────────────────────────────────────────────────────────────
+export function Footer({
+  disclaimer,
+  legalExtra,
+  year = new Date().getFullYear(),
+  phone,
+  email,
+  websiteLabel,
+  manageUrl = '#',
+  unsubscribeUrl = '#',
+  social,
+  labels,
+}: {
+  disclaimer: React.ReactNode
+  legalExtra?: React.ReactNode
+  year?: number
+  phone: string
+  email: string
+  websiteLabel: string
+  manageUrl?: string
+  unsubscribeUrl?: string
+  social?: { instagram?: string; facebook?: string; tiktok?: string; google?: string }
+  labels?: { manage?: string; unsubscribe?: string; rights?: string }
+}) {
+  const L = {
+    manage: 'Manage preferences',
+    unsubscribe: 'Unsubscribe',
+    rights: 'All rights reserved.',
+    ...(labels || {}),
+  }
+  return (
+    <Section style={{ padding: '30px 22px 8px', textAlign: 'center' as const }}>
+      <div style={{ fontFamily: FONT, fontSize: '14px', fontWeight: 800, letterSpacing: '0.5px', color: C.navy }}>
+        We Move It. We Clear It.
+      </div>
+      <div style={{ fontFamily: FONT, fontSize: '12px', color: C.muted, margin: '8px 0 16px' }}>
+        {phone} &nbsp;&middot;&nbsp; {email} &nbsp;&middot;&nbsp; {websiteLabel}
+      </div>
+
+      <SocialChips {...(social || {})} />
+
+      <div style={{ height: '1px', background: '#DCD7CC', margin: '20px auto', maxWidth: '360px', fontSize: 0, lineHeight: '1px' }}>
+        &nbsp;
+      </div>
+
+      <div style={{ fontFamily: FONT, fontSize: '11.5px', lineHeight: '18px', color: C.muted, maxWidth: '460px', margin: '0 auto' }}>
+        {disclaimer}
+      </div>
+
+      {legalExtra ? (
+        <div style={{ fontFamily: FONT, fontSize: '11px', color: C.label, marginTop: '10px' }}>{legalExtra}</div>
+      ) : null}
+
+      <div style={{ fontFamily: FONT, fontSize: '11px', color: C.label, marginTop: '14px' }}>
+        &copy; {year} We Move It. We Clear It. {L.rights}
+      </div>
+      <div style={{ marginTop: '8px' }}>
+        <a href={manageUrl} style={{ fontFamily: FONT, fontSize: '11px', color: C.muted, textDecoration: 'underline' }}>
+          {L.manage}
+        </a>
+        <span style={{ color: C.label }}> &nbsp;&middot;&nbsp; </span>
+        <a href={unsubscribeUrl} style={{ fontFamily: FONT, fontSize: '11px', color: C.muted, textDecoration: 'underline' }}>
+          {L.unsubscribe}
+        </a>
+      </div>
+    </Section>
+  )
+}
+
+// ═════════════════════════════════════════════════════════════════════════
+//  ICONS  —  inline SVG (renders in Apple Mail / iOS / Gmail; degrades to the
+//  tinted chip in Outlook desktop). Unicode is used for checks/arrows instead.
+// ═════════════════════════════════════════════════════════════════════════
+export type IconName =
+  | 'clipboard'
+  | 'route'
+  | 'shield'
+  | 'clock'
+  | 'steps'
+  | 'phone'
+  | 'mail'
+  | 'globe'
+  | 'calendar'
+  | 'crew'
+  | 'checklist'
+  | 'truck'
+  | 'sparkle'
+  | 'weight'
+  | 'search'
+
+export function Icon({ name, color = C.navy, size = 18 }: { name: IconName; color?: string; size?: number }) {
+  const common = {
+    width: size,
+    height: size,
+    viewBox: '0 0 24 24',
+    fill: 'none',
+    xmlns: 'http://www.w3.org/2000/svg',
+    style: { display: 'inline-block' as const, verticalAlign: 'middle' as const },
+  }
+  switch (name) {
+    case 'clipboard':
+      return (
+        <svg {...common}>
+          <rect x="5.5" y="4.5" width="13" height="16" rx="2.6" stroke={color} strokeWidth="1.7" />
+          <path d="M9 4.6h6v2.1a1 1 0 0 1-1 1h-4a1 1 0 0 1-1-1V4.6z" fill={color} />
+          <path d="M9 12h6M9 15.5h4" stroke={color} strokeWidth="1.7" strokeLinecap="round" />
+        </svg>
+      )
+    case 'route':
+      return (
+        <svg {...common}>
+          <path d="M12 21s6-5.2 6-10a6 6 0 1 0-12 0c0 4.8 6 10 6 10z" stroke={color} strokeWidth="1.7" />
+          <circle cx="12" cy="11" r="2.3" stroke={color} strokeWidth="1.7" />
+        </svg>
+      )
+    case 'shield':
+      return (
+        <svg {...common}>
+          <path d="M12 3.2l6.5 2.6v4.7c0 4.1-2.8 7.4-6.5 9-3.7-1.6-6.5-4.9-6.5-9V5.8L12 3.2z" stroke={color} strokeWidth="1.6" />
+          <path d="M9.2 12l1.9 1.9L15 10.2" stroke={color} strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
+      )
+    case 'clock':
+      return (
+        <svg {...common}>
+          <circle cx="12" cy="12" r="8.2" stroke={color} strokeWidth="1.7" />
+          <path d="M12 7.6V12l3 1.8" stroke={color} strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
+      )
+    case 'steps':
+      return (
+        <svg {...common}>
+          <path d="M9.5 7h9M9.5 12h9M9.5 17h9" stroke={color} strokeWidth="1.7" strokeLinecap="round" />
+          <circle cx="5" cy="7" r="1.4" fill={color} />
+          <circle cx="5" cy="12" r="1.4" fill={color} />
+          <circle cx="5" cy="17" r="1.4" fill={color} />
+        </svg>
+      )
+    case 'phone':
+      return (
+        <svg {...common}>
+          <path
+            d="M6.6 4.5h2.9l1.2 3-1.6 1.15a11 11 0 0 0 4.85 4.85L15.5 15.9l3 1.2v2.9c0 .8-.68 1.45-1.48 1.4C9.9 21.9 4.1 16.1 3.7 9C3.66 8.2 4.3 7.5 5.1 7.5"
+            stroke={color}
+            strokeWidth="1.6"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+        </svg>
+      )
+    case 'mail':
+      return (
+        <svg {...common}>
+          <rect x="3.8" y="5.8" width="16.4" height="12.4" rx="2.4" stroke={color} strokeWidth="1.6" />
+          <path d="M4.6 7.5l7.4 5.2 7.4-5.2" stroke={color} strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
+      )
+    case 'globe':
+      return (
+        <svg {...common}>
+          <circle cx="12" cy="12" r="8.1" stroke={color} strokeWidth="1.6" />
+          <path d="M3.9 12h16.2M12 3.9c2.5 2.2 2.5 13.9 0 16.2M12 3.9c-2.5 2.2-2.5 13.9 0 16.2" stroke={color} strokeWidth="1.6" />
+        </svg>
+      )
+    case 'calendar':
+      return (
+        <svg {...common}>
+          <rect x="4.4" y="5.6" width="15.2" height="14" rx="2.6" stroke={color} strokeWidth="1.6" />
+          <path d="M4.4 9.6h15.2M8.6 3.8v3.4M15.4 3.8v3.4" stroke={color} strokeWidth="1.6" strokeLinecap="round" />
+        </svg>
+      )
+    case 'crew':
+      return (
+        <svg {...common}>
+          <circle cx="9" cy="9" r="3" stroke={color} strokeWidth="1.6" />
+          <path d="M3.8 19.2a5.2 5.2 0 0 1 10.4 0" stroke={color} strokeWidth="1.6" strokeLinecap="round" />
+          <path d="M15.4 6.4a3 3 0 0 1 0 5.2M17 19.2a5.3 5.3 0 0 0-2.1-4.2" stroke={color} strokeWidth="1.6" strokeLinecap="round" />
+        </svg>
+      )
+    case 'checklist':
+      return (
+        <svg {...common}>
+          <path d="M4.4 7.4l1.5 1.5 2.6-2.6M4.4 15.4l1.5 1.5 2.6-2.6" stroke={color} strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" />
+          <path d="M11.5 7.7h8M11.5 15.7h8" stroke={color} strokeWidth="1.7" strokeLinecap="round" />
+        </svg>
+      )
+    case 'truck':
+      return (
+        <svg {...common}>
+          <path d="M3.5 7.5h9v8h-9zM12.5 10.5h4l2.5 2.5v2.5h-6.5z" stroke={color} strokeWidth="1.6" strokeLinejoin="round" />
+          <circle cx="7" cy="17.5" r="1.7" stroke={color} strokeWidth="1.6" />
+          <circle cx="16" cy="17.5" r="1.7" stroke={color} strokeWidth="1.6" />
+        </svg>
+      )
+    case 'sparkle':
+      return (
+        <svg {...common}>
+          <path d="M12 3.5l1.7 4.8 4.8 1.7-4.8 1.7L12 16.5l-1.7-4.8L5.5 10l4.8-1.7z" fill={color} />
+        </svg>
+      )
+    case 'weight':
+      return (
+        <svg {...common}>
+          <path d="M4.6 9.6v4.8M7.6 7.6v8.8M16.4 7.6v8.8M19.4 9.6v4.8" stroke={color} strokeWidth="1.8" strokeLinecap="round" />
+          <path d="M7.6 12h8.8" stroke={color} strokeWidth="1.8" strokeLinecap="round" />
+        </svg>
+      )
+    case 'search':
+      return (
+        <svg {...common}>
+          <circle cx="11" cy="11" r="6.2" stroke={color} strokeWidth="1.7" />
+          <path d="M15.7 15.7L20 20" stroke={color} strokeWidth="1.9" strokeLinecap="round" />
+        </svg>
+      )
+    default:
+      return null
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+//  VERTICAL STEPS  —  numbered circles + connector rail + title/desc.
+//  Used for "What happens next" (both emails).
+// ─────────────────────────────────────────────────────────────────────────
+export function VSteps({ steps }: { steps: { title: string; desc: string }[] }) {
+  return (
+    <table role="presentation" width="100%" cellPadding={0} cellSpacing={0} border={0}>
+      <tbody>
+        {steps.map((s, i) => {
+          const last = i === steps.length - 1
+          return (
+            <tr key={i}>
+              <td width={40} valign="top" style={{ width: '40px' }}>
+                <table role="presentation" cellPadding={0} cellSpacing={0} border={0}>
+                  <tbody>
+                    <tr>
+                      <td
+                        width={30}
+                        height={30}
+                        align="center"
+                        valign="middle"
+                        style={{
+                          width: '30px',
+                          height: '30px',
+                          background: C.navy,
+                          borderRadius: '50%',
+                          color: '#FFFFFF',
+                          fontFamily: FONT,
+                          fontSize: '13px',
+                          fontWeight: 700,
+                        }}
+                      >
+                        {i + 1}
+                      </td>
+                    </tr>
+                    {!last ? (
+                      <tr>
+                        <td align="center" style={{ padding: '4px 0' }}>
+                          <div style={{ width: '0', height: '26px', borderLeft: `2px solid ${C.line}`, margin: '0 auto', fontSize: 0, lineHeight: '0px' }}>
+                            &nbsp;
+                          </div>
+                        </td>
+                      </tr>
+                    ) : null}
+                  </tbody>
+                </table>
+              </td>
+              <td valign="top" style={{ paddingBottom: last ? '0' : '18px' }}>
+                <div style={{ fontFamily: FONT, fontSize: '15px', fontWeight: 700, color: C.navy, lineHeight: '20px' }}>
+                  {s.title}
+                </div>
+                <div style={{ fontFamily: FONT, fontSize: '13px', color: C.muted, lineHeight: '20px', marginTop: '2px' }}>
+                  {s.desc}
+                </div>
+              </td>
+            </tr>
+          )
+        })}
+      </tbody>
+    </table>
+  )
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+//  CHECKLIST  —  orange check chip + line
+// ─────────────────────────────────────────────────────────────────────────
+export function Checklist({ items }: { items: React.ReactNode[] }) {
+  return (
+    <table role="presentation" width="100%" cellPadding={0} cellSpacing={0} border={0}>
+      <tbody>
+        {items.map((it, i) => (
+          <tr key={i}>
+            <td width={30} valign="top" style={{ width: '30px', padding: '7px 0' }}>
+              <span
+                style={{
+                  display: 'inline-block',
+                  width: '22px',
+                  height: '22px',
+                  lineHeight: '22px',
+                  borderRadius: '7px',
+                  background: C.orangeTint,
+                  color: C.orange,
+                  textAlign: 'center' as const,
+                  fontSize: '13px',
+                  fontWeight: 700,
+                }}
+              >
+                &#10003;
+              </span>
+            </td>
+            <td valign="top" style={{ padding: '7px 0' }}>
+              <div style={{ fontFamily: FONT, fontSize: '14px', color: C.body, lineHeight: '21px' }}>{it}</div>
+            </td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  )
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+//  MINI CARD  —  bone tile (icon + label + value); a <td> at 50% width that
+//  stacks on mobile. Place two per <tr>. Used for move-details logistics.
+// ─────────────────────────────────────────────────────────────────────────
+export function MiniCard({ icon, label, value }: { icon: IconName; label: string; value: React.ReactNode }) {
+  return (
+    <td className="stack" width="50%" valign="top" style={{ width: '50%', padding: '6px' }}>
+      <table role="presentation" width="100%" cellPadding={0} cellSpacing={0} border={0} style={{ background: C.inset, borderRadius: '12px' }}>
+        <tbody>
+          <tr>
+            <td style={{ padding: '14px 16px' }}>
+              <table role="presentation" cellPadding={0} cellSpacing={0} border={0}>
+                <tbody>
+                  <tr>
+                    <td valign="middle" style={{ paddingRight: '9px' }}>
+                      <Icon name={icon} color={C.gold} size={17} />
+                    </td>
+                    <td valign="middle" style={{ fontFamily: FONT, fontSize: '10.5px', fontWeight: 700, letterSpacing: '1px', textTransform: 'uppercase' as const, color: C.label }}>
+                      {label}
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+              <div style={{ fontFamily: FONT, fontSize: '14px', fontWeight: 600, color: C.navy, marginTop: '7px', lineHeight: '19px' }}>{value}</div>
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    </td>
+  )
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+//  HORIZONTAL TIMELINE  —  4-step progress rail (nodes: done / active / todo)
+// ─────────────────────────────────────────────────────────────────────────
+export type TLStep = { label: string; micro: string; state: 'done' | 'active' | 'todo' }
+
+export function HTimeline({ steps }: { steps: TLStep[] }) {
+  const lineColor = (i: number, side: 'l' | 'r') => {
+    if (side === 'l' && i === 0) return 'transparent'
+    if (side === 'r' && i === steps.length - 1) return 'transparent'
+    const seg = side === 'r' ? i : i - 1
+    return seg <= 0 ? C.gold : C.hair
+  }
+  const circle = (s: TLStep) => {
+    if (s.state === 'done') {
+      return (
+        <td width={32} height={32} align="center" valign="middle" style={{ width: '32px', height: '32px', background: C.orange, borderRadius: '50%', color: '#FFFFFF', fontFamily: FONT, fontSize: '15px', fontWeight: 700 }}>
+          &#10003;
+        </td>
+      )
+    }
+    if (s.state === 'active') {
+      return (
+        <td width={32} height={32} align="center" valign="middle" style={{ width: '32px', height: '32px', background: '#FFFFFF', border: `2px solid ${C.gold}`, borderRadius: '50%' }}>
+          <span style={{ display: 'inline-block', width: '11px', height: '11px', borderRadius: '50%', background: C.gold }}>&nbsp;</span>
+        </td>
+      )
+    }
+    return (
+      <td width={32} height={32} align="center" valign="middle" style={{ width: '32px', height: '32px', background: '#FFFFFF', border: `2px solid ${C.hair}`, borderRadius: '50%' }}>
+        <span style={{ display: 'inline-block', width: '8px', height: '8px', borderRadius: '50%', background: '#D8D3C8' }}>&nbsp;</span>
+      </td>
+    )
+  }
+  return (
+    <table role="presentation" width="100%" cellPadding={0} cellSpacing={0} border={0}>
+      <tbody>
+        <tr>
+          {steps.map((s, i) => (
+            <td key={i} width="25%" align="center" valign="middle" style={{ width: '25%' }}>
+              <table role="presentation" width="100%" cellPadding={0} cellSpacing={0} border={0}>
+                <tbody>
+                  <tr>
+                    <td valign="middle" style={{ padding: 0 }}>
+                      <div style={{ height: '2px', lineHeight: '2px', fontSize: 0, background: lineColor(i, 'l') }}>&nbsp;</div>
+                    </td>
+                    {circle(s)}
+                    <td valign="middle" style={{ padding: 0 }}>
+                      <div style={{ height: '2px', lineHeight: '2px', fontSize: 0, background: lineColor(i, 'r') }}>&nbsp;</div>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </td>
+          ))}
+        </tr>
+        <tr>
+          {steps.map((s, i) => (
+            <td key={i} width="25%" align="center" valign="top" style={{ width: '25%', padding: '11px 4px 0' }}>
+              <div className="tl-label" style={{ fontFamily: FONT, fontSize: '12px', fontWeight: 700, lineHeight: '15px', color: s.state === 'todo' ? C.muted : C.navy }}>
+                {s.label}
+              </div>
+              {s.micro ? (
+                <div style={{ fontFamily: FONT, fontSize: '10.5px', fontWeight: 600, letterSpacing: '0.3px', color: s.state === 'active' ? C.goldInk : s.state === 'done' ? C.orange : C.label, marginTop: '3px' }}>
+                  {s.micro}
+                </div>
+              ) : null}
+            </td>
+          ))}
+        </tr>
+      </tbody>
+    </table>
+  )
+}
+
+// Shared paragraph style
+export const P: React.CSSProperties = {
+  fontFamily: FONT,
+  fontSize: '15px',
+  lineHeight: '24px',
+  color: C.body,
+  margin: '0 0 14px',
+}

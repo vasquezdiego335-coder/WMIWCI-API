@@ -1,130 +1,330 @@
 import * as React from 'react'
-import { Html, Head, Body, Container, Section, Heading, Text, Button, Hr } from '@react-email/components'
+import {
+  Shell,
+  LogoHeader,
+  AnimatedHero,
+  Card,
+  Eyebrow,
+  Pill,
+  KVTable,
+  RouteBlock,
+  MiniCard,
+  Callout,
+  Divider,
+  Spacer,
+  PrimaryButton,
+  ContactRow,
+  Footer,
+  VSteps,
+  IconChip,
+  C,
+  FONT,
+  P,
+} from './_ui'
 
 // ════════════════════════════════════════════════════════════════════════
-//  FINAL CONFIRMATION EMAIL  (1 of the 2 allowed customer emails)
-//  Queued ONLY by fulfillPaidCheckout() (payment completed — webhook or the
-//  success redirect). Confirms the booking, the payment status, and next steps.
+//  CONFIRMATION EMAIL  ("Your booking is approved")
+//  Sent after approval / payment capture. Same premium design system as the
+//  pre-confirmation: hero illustration → finalized date band → booking
+//  summary (crew, truck, final estimate, payment) → move details → what to
+//  expect on move day → keep-driveways-clear → CTA → support → footer.
+//  Bilingual EN/ES. Optional fields render only when provided.
 // ════════════════════════════════════════════════════════════════════════
 
 interface Props {
   customerName?: string
   displayId?: string
   date?: string
-  amountPaid?: string // dollars, e.g. "49.00"
-  items?: string
+  timeLabel?: string
+  service?: string
+  crewSize?: string | number
+  crewLead?: string
+  truckLabel?: string
+  estimate?: string
+  amountPaid?: string
+  originAddress?: string
+  destAddress?: string
+  stairs?: string
+  elevator?: string
+  parking?: string
+  heavyItems?: string
+  notes?: string
   portalUrl?: string
+  heroGifUrl?: string
+  phone?: string
+  email?: string
+  website?: string
+  websiteLabel?: string
+  social?: { instagram?: string; facebook?: string; tiktok?: string; google?: string }
   locale?: string
 }
 
 export default function FinalConfirmationEmail({
-  customerName = 'Friend',
+  customerName = 'there',
   displayId = '',
   date,
-  amountPaid = '49.00',
-  items,
+  timeLabel,
+  service,
+  crewSize,
+  crewLead,
+  truckLabel,
+  estimate,
+  amountPaid,
+  originAddress,
+  destAddress,
+  stairs,
+  elevator,
+  parking,
+  heavyItems,
+  notes,
   portalUrl = '#',
+  heroGifUrl = '',
+  phone = '862-640-0625',
+  email = 'hello@moveitclearit.com',
+  website = 'https://moveitclearit.com',
+  websiteLabel = 'moveitclearit.com',
+  social,
   locale = 'en',
 }: Props) {
   const es = (locale ?? 'en').toLowerCase().startsWith('es')
-  const dateStr = date
-    ? new Date(date).toLocaleString(es ? 'es-US' : 'en-US', {
-        weekday: 'long',
-        month: 'long',
-        day: 'numeric',
-        hour: 'numeric',
-        minute: '2-digit',
-        timeZone: 'America/New_York',
-      })
-    : es
-    ? 'tu fecha de mudanza'
-    : 'your move date'
+  const locStr = es ? 'es-US' : 'en-US'
+  const dateOnly = date
+    ? new Date(date).toLocaleDateString(locStr, { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric', timeZone: 'America/New_York' })
+    : es ? 'Por confirmar' : 'To be confirmed'
+  const timeOnly = timeLabel || (date ? new Date(date).toLocaleTimeString(locStr, { hour: 'numeric', minute: '2-digit', timeZone: 'America/New_York' }) : undefined)
+  const access = [stairs, elevator].filter(Boolean).join(' · ')
 
-  const c = es
+  const t = es
     ? {
-        lang: 'es',
-        h1: '¡Reserva confirmada! ✅',
-        hi: `Hola ${customerName},`,
-        intro: 'Tu reserva está confirmada. Aquí está el resumen y los próximos pasos:',
-        ref: 'Referencia', dt: 'Fecha y Hora', pay: 'Estado del Pago', det: 'Detalles',
-        payVal: `$${amountPaid} autorizado (retención) — se cobra al completar la aprobación`,
-        steps: 'Próximos pasos',
-        stepsBody:
-          'Nuestro equipo revisará los detalles finales. Mantén tu camión listo y a alguien presente al inicio y al final de la mudanza.',
-        cta: 'Ver Mi Reserva →',
-        footer: '¿Preguntas? Llámanos o escríbenos al 862-640-0625',
+        preview: `Tu reserva está aprobada${displayId ? ` (${displayId})` : ''} — aquí tienes todo para el día de la mudanza.`,
+        pill: 'Aprobada',
+        h1: 'Tu reserva está aprobada.',
+        sub: `Todo listo, ${customerName}. Aquí tienes todo lo que necesitas para el día de la mudanza — nos encargamos de que sea fácil.`,
+        dateLabel: 'Tu mudanza está programada para',
+        sumTitle: 'Resumen de la reserva',
+        kv: { ref: 'Referencia', service: 'Servicio', crew: 'Equipo asignado', truck: 'Camión', est: 'Total final', pay: 'Pago' },
+        payVal: (n: string) => `$${n} de depósito · cobrado`,
+        moveTitle: 'Detalles de la mudanza',
+        from: 'Recogida', to: 'Destino',
+        logi: { access: 'Escaleras / elevador', parking: 'Estacionamiento', heavy: 'Artículos pesados' },
+        notesTitle: 'Notas',
+        expectTitle: 'Qué esperar el día de la mudanza',
+        expect: [
+          { title: 'Llega el equipo', desc: 'Puntuales y listos. Te avisamos cuando vamos en camino.' },
+          { title: 'Recorrido', desc: 'Revisamos juntos tus artículos, el acceso y el plan.' },
+          { title: 'Carga', desc: 'Acolchamos, envolvemos y cargamos todo con seguridad.' },
+          { title: 'Transporte', desc: 'Nos dirigimos a tu destino y mantenemos todo a tiempo.' },
+          { title: 'Descarga', desc: 'Colocamos cada artículo donde lo quieras.' },
+          { title: 'Recorrido final', desc: 'Confirmamos que no falte nada antes de irnos.' },
+        ],
+        remindTitle: 'Mantén la entrada despejada',
+        remindBody: 'Despeja la entrada y los accesos antes de que lleguemos para que podamos estacionar cerca y movernos rápido — mantiene tu mudanza a tiempo.',
+        cta: 'Ver mi reserva',
+        supportTitle: 'Estamos para ayudarte',
+        contactLabels: { phone: 'Llama o escribe', email: 'Correo', website: 'Sitio web' },
+        disclaimer:
+          '¿Necesitas hacer un cambio? Llámanos o escríbenos cuando quieras — con gusto te ayudamos. Tu depósito de $49 se aplica a tu mudanza; cualquier saldo restante se paga el día de la mudanza.',
+        footerLabels: { manage: 'Administrar preferencias', unsubscribe: 'Cancelar suscripción', rights: 'Todos los derechos reservados.' },
+        defTruck: 'U-Haul — a tu nombre',
       }
     : {
-        lang: 'en',
-        h1: 'Booking confirmed! ✅',
-        hi: `Hi ${customerName},`,
-        intro: "Your booking is confirmed. Here's your summary and what happens next:",
-        ref: 'Reference', dt: 'Date & Time', pay: 'Payment Status', det: 'Details',
-        payVal: `$${amountPaid} authorized (hold) — captured on final approval`,
-        steps: 'Next steps',
-        stepsBody:
-          'Our crew will review the final details. Please keep your truck ready and have someone present at the start and end of the move.',
-        cta: 'View Your Booking →',
-        footer: 'Questions? Call or text us at 862-640-0625',
+        preview: `Your booking is approved${displayId ? ` (${displayId})` : ''} — here’s everything for move day.`,
+        pill: 'Approved',
+        h1: 'Your booking is approved.',
+        sub: `You're locked in, ${customerName}. Here’s everything you need for move day — we can’t wait to make it easy.`,
+        dateLabel: 'Your move is set for',
+        sumTitle: 'Booking summary',
+        kv: { ref: 'Reference', service: 'Service', crew: 'Crew assigned', truck: 'Truck', est: 'Final estimate', pay: 'Payment' },
+        payVal: (n: string) => `$${n} deposit · captured`,
+        moveTitle: 'Move details',
+        from: 'Pickup', to: 'Destination',
+        logi: { access: 'Stairs / elevator', parking: 'Parking', heavy: 'Heavy items' },
+        notesTitle: 'Notes',
+        expectTitle: 'What to expect on move day',
+        expect: [
+          { title: 'Crew arrives', desc: 'On time and ready. We’ll text you when we’re en route.' },
+          { title: 'Walkthrough', desc: 'We review your items, access, and the plan together.' },
+          { title: 'Loading', desc: 'We pad, wrap, and load everything securely.' },
+          { title: 'Transport', desc: 'We head to your destination and keep things on schedule.' },
+          { title: 'Unload', desc: 'We place every item exactly where you want it.' },
+          { title: 'Final walkthrough', desc: 'We confirm nothing’s missed before we go.' },
+        ],
+        remindTitle: 'Please keep driveways clear',
+        remindBody: 'Clear your driveway and entryways before we arrive so we can park close and move quickly — it keeps your move right on schedule.',
+        cta: 'View booking',
+        supportTitle: 'We’re here to help',
+        contactLabels: { phone: 'Call or text', email: 'Email', website: 'Website' },
+        disclaimer:
+          'Need to make a change? Call or text us any time — we’re always happy to help. Your $49 deposit is applied to your move; any remaining balance is settled on move day.',
+        footerLabels: { manage: 'Manage preferences', unsubscribe: 'Unsubscribe', rights: 'All rights reserved.' },
+        defTruck: 'U-Haul — rented in your name',
       }
 
+  const crewVal = crewSize ? `${crewSize}${crewLead ? ` · ${es ? 'liderado por' : 'led by'} ${crewLead}` : ''}` : ''
+  const logistics = [
+    { icon: 'steps' as const, label: t.logi.access, value: access },
+    { icon: 'truck' as const, label: t.logi.parking, value: parking },
+    { icon: 'weight' as const, label: t.logi.heavy, value: heavyItems },
+  ].filter((x) => x.value)
+
   return (
-    <Html lang={c.lang}>
-      <Head />
-      <Body style={body}>
-        <Container style={container}>
-          <Section style={header}>
-            <Text style={brandName}>We Move It. We Clear It.</Text>
-          </Section>
-          <Section style={content}>
-            <Heading style={h1}>{c.h1}</Heading>
-            <Text style={p}>{c.hi}</Text>
-            <Text style={p}>{c.intro}</Text>
-            <Section style={detailBox}>
-              {displayId ? (
-                <>
-                  <Text style={detailLabel}>{c.ref}</Text>
-                  <Text style={detailValue}>{displayId}</Text>
-                </>
-              ) : null}
-              <Text style={detailLabel}>{c.dt}</Text>
-              <Text style={detailValue}>{dateStr}</Text>
-              <Text style={detailLabel}>{c.pay}</Text>
-              <Text style={detailValue}>{c.payVal}</Text>
-              {items ? (
-                <>
-                  <Text style={detailLabel}>{c.det}</Text>
-                  <Text style={detailValue}>{items}</Text>
-                </>
-              ) : null}
-            </Section>
-            <Section style={stepsBox}>
-              <Text style={stepsTitle}>{c.steps}</Text>
-              <Text style={stepsText}>{c.stepsBody}</Text>
-            </Section>
-            <Button style={btn} href={portalUrl}>{c.cta}</Button>
-            <Hr style={hr} />
-            <Text style={footer}>{c.footer}</Text>
-          </Section>
-        </Container>
-      </Body>
-    </Html>
+    <Shell lang={es ? 'es' : 'en'} preview={t.preview}>
+      <LogoHeader />
+
+      {/* ── 1 · HERO ─────────────────────────────────────────── */}
+      <Card style={{ borderTop: `3px solid ${C.orange}` }}>
+        <div className="heropad" style={{ textAlign: 'center' as const }}>
+          <AnimatedHero heroGifUrl={heroGifUrl} />
+          <Spacer h={18} />
+          <Pill tone="orange">{t.pill}</Pill>
+          <h1 className="h1" style={{ fontFamily: FONT, fontSize: '28px', lineHeight: '35px', fontWeight: 800, letterSpacing: '-0.5px', color: C.navy, margin: '16px 0 10px' }}>
+            {t.h1}
+          </h1>
+          <p style={{ ...P, marginBottom: 0, maxWidth: '440px', marginLeft: 'auto', marginRight: 'auto' }}>{t.sub}</p>
+        </div>
+      </Card>
+
+      <Spacer h={16} />
+
+      {/* ── 2 · FINALIZED DATE / TIME BAND ───────────────────── */}
+      <table role="presentation" width="100%" cellPadding={0} cellSpacing={0} border={0} className="card" style={{ background: C.navy, borderRadius: '18px' }}>
+        <tbody>
+          <tr>
+            <td className="cardpad" style={{ padding: '22px 30px' }}>
+              <table role="presentation" width="100%" cellPadding={0} cellSpacing={0} border={0}>
+                <tbody>
+                  <tr>
+                    <td valign="middle">
+                      <div style={{ fontFamily: FONT, fontSize: '11px', fontWeight: 700, letterSpacing: '1.4px', textTransform: 'uppercase' as const, color: C.gold }}>{t.dateLabel}</div>
+                      <div style={{ fontFamily: FONT, fontSize: '21px', fontWeight: 800, color: '#FFFFFF', marginTop: '7px', lineHeight: '27px' }}>{dateOnly}</div>
+                      {timeOnly ? <div style={{ fontFamily: FONT, fontSize: '14px', fontWeight: 600, color: '#AEB8C6', marginTop: '4px' }}>{timeOnly}</div> : null}
+                    </td>
+                    <td width={54} align="right" valign="middle" className="hide-sm" style={{ width: '54px' }}>
+                      <IconChip icon="calendar" color={C.gold} size={20} dim={46} border="none" radius={13} bg="rgba(212,162,76,0.16)" />
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </td>
+          </tr>
+        </tbody>
+      </table>
+
+      <Spacer h={16} />
+
+      {/* ── 3 · BOOKING SUMMARY ──────────────────────────────── */}
+      <Card>
+        <Eyebrow icon="clipboard" title={t.sumTitle} tone="orange" />
+        <KVTable
+          rows={[
+            { label: t.kv.ref, value: displayId },
+            { label: t.kv.service, value: service },
+            { label: t.kv.crew, value: crewVal },
+            { label: t.kv.truck, value: truckLabel || t.defTruck },
+            { label: t.kv.est, value: estimate, strong: true },
+            { label: t.kv.pay, value: amountPaid ? t.payVal(amountPaid) : '' },
+          ]}
+        />
+      </Card>
+
+      <Spacer h={16} />
+
+      {/* ── 4 · MOVE DETAILS ─────────────────────────────────── */}
+      {originAddress || destAddress || logistics.length || notes ? (
+        <>
+          <Card>
+            <Eyebrow icon="route" title={t.moveTitle} tone="navy" />
+            {originAddress || destAddress ? (
+              <RouteBlock fromLabel={t.from} from={originAddress || '—'} toLabel={t.to} to={destAddress || '—'} />
+            ) : null}
+            {logistics.length ? (
+              <>
+                <Divider my={18} />
+                <table role="presentation" width="100%" cellPadding={0} cellSpacing={0} border={0}>
+                  <tbody>
+                    <tr>
+                      {logistics.slice(0, 2).map((x, i) => (
+                        <MiniCard key={i} icon={x.icon} label={x.label} value={x.value as string} />
+                      ))}
+                    </tr>
+                    {logistics.length > 2 ? (
+                      <tr>
+                        {logistics.slice(2, 4).map((x, i) => (
+                          <MiniCard key={i} icon={x.icon} label={x.label} value={x.value as string} />
+                        ))}
+                      </tr>
+                    ) : null}
+                  </tbody>
+                </table>
+              </>
+            ) : null}
+            {notes ? (
+              <>
+                <Divider my={18} />
+                <div style={{ fontFamily: FONT, fontSize: '11px', fontWeight: 700, letterSpacing: '1.2px', textTransform: 'uppercase' as const, color: C.label, marginBottom: '8px' }}>{t.notesTitle}</div>
+                <table role="presentation" width="100%" cellPadding={0} cellSpacing={0} border={0}>
+                  <tbody>
+                    <tr>
+                      <td style={{ background: C.inset, borderRadius: '12px', borderLeft: `3px solid ${C.gold}`, padding: '14px 16px', fontFamily: FONT, fontSize: '14px', lineHeight: '21px', color: C.body, whiteSpace: 'pre-line' as const }}>{notes}</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </>
+            ) : null}
+          </Card>
+          <Spacer h={16} />
+        </>
+      ) : null}
+
+      {/* ── 5 · WHAT TO EXPECT ON MOVE DAY ───────────────────── */}
+      <Card>
+        <Eyebrow icon="checklist" title={t.expectTitle} tone="orange" />
+        <VSteps steps={t.expect} />
+      </Card>
+
+      <Spacer h={16} />
+
+      {/* ── 6 · KEEP DRIVEWAYS CLEAR ─────────────────────────── */}
+      <Callout tone="orange">
+        <table role="presentation" width="100%" cellPadding={0} cellSpacing={0} border={0}>
+          <tbody>
+            <tr>
+              <td width={44} valign="top" style={{ width: '44px' }}>
+                <IconChip icon="truck" color={C.orange} size={19} dim={36} border="1px solid #FBD9C2" radius={10} />
+              </td>
+              <td valign="top" style={{ paddingLeft: '4px' }}>
+                <div style={{ fontFamily: FONT, fontSize: '15px', fontWeight: 800, color: C.navy, marginBottom: '4px' }}>{t.remindTitle}</div>
+                <div style={{ fontFamily: FONT, fontSize: '13.5px', lineHeight: '21px', color: C.body }}>{t.remindBody}</div>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </Callout>
+
+      {/* ── 7 · CTA ──────────────────────────────────────────── */}
+      <Spacer h={26} />
+      <PrimaryButton href={portalUrl} label={t.cta} />
+      <Spacer h={26} />
+
+      {/* ── 8 · SUPPORT ──────────────────────────────────────── */}
+      <Card>
+        <Eyebrow icon="phone" title={t.supportTitle} tone="navy" />
+        <ContactRow phone={phone} email={email} website={website} websiteLabel={websiteLabel} labels={t.contactLabels} />
+      </Card>
+
+      {/* ── 9 · FOOTER ───────────────────────────────────────── */}
+      <Footer
+        disclaimer={t.disclaimer}
+        phone={phone}
+        email={email}
+        websiteLabel={websiteLabel}
+        social={social}
+        manageUrl={portalUrl}
+        unsubscribeUrl={portalUrl}
+        labels={t.footerLabels}
+      />
+    </Shell>
   )
 }
 
-const body: React.CSSProperties = { backgroundColor: '#F5F1EA', fontFamily: 'Inter, -apple-system, sans-serif' }
-const container: React.CSSProperties = { maxWidth: '560px', margin: '0 auto', padding: '24px 16px' }
-const header: React.CSSProperties = { backgroundColor: '#0A1628', padding: '24px', borderRadius: '12px 12px 0 0', textAlign: 'center' }
-const brandName: React.CSSProperties = { color: '#FF5A1F', fontSize: '18px', fontWeight: '700', margin: '0' }
-const content: React.CSSProperties = { backgroundColor: '#FFFFFF', padding: '32px 28px', borderRadius: '0 0 12px 12px' }
-const h1: React.CSSProperties = { fontSize: '22px', fontWeight: '700', color: '#0A1628', margin: '0 0 16px' }
-const p: React.CSSProperties = { fontSize: '15px', color: '#374151', lineHeight: '1.6', margin: '0 0 12px' }
-const detailBox: React.CSSProperties = { backgroundColor: '#F5F1EA', padding: '16px', borderRadius: '8px', margin: '20px 0' }
-const detailLabel: React.CSSProperties = { fontSize: '11px', color: '#6B7280', fontWeight: '600', letterSpacing: '0.06em', textTransform: 'uppercase', margin: '8px 0 2px' }
-const detailValue: React.CSSProperties = { fontSize: '14px', color: '#0A1628', fontWeight: '500', margin: '0 0 8px', whiteSpace: 'pre-line' }
-const stepsBox: React.CSSProperties = { backgroundColor: '#FFF7ED', border: '1px solid #FED7AA', borderRadius: '8px', padding: '16px', margin: '16px 0' }
-const stepsTitle: React.CSSProperties = { fontSize: '13px', fontWeight: '700', color: '#0A1628', margin: '0 0 6px' }
-const stepsText: React.CSSProperties = { fontSize: '13px', color: '#374151', lineHeight: '1.6', margin: '0' }
-const btn: React.CSSProperties = { backgroundColor: '#FF5A1F', color: '#FFFFFF', padding: '14px 28px', borderRadius: '8px', fontWeight: '700', fontSize: '15px', display: 'block', textAlign: 'center', textDecoration: 'none', margin: '24px 0' }
-const hr: React.CSSProperties = { borderColor: '#E5E7EB', margin: '24px 0' }
-const footer: React.CSSProperties = { fontSize: '12px', color: '#9CA3AF', textAlign: 'center' }
+// (Hero art now lives in ./_ui as HeroTruckArt, rendered by <AnimatedHero />.)

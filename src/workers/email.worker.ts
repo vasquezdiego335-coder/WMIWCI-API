@@ -1,4 +1,5 @@
 import { Worker, Job } from 'bullmq'
+import { randomUUID } from 'node:crypto'
 import { render } from '@react-email/render'
 import { bullConnection } from '../lib/redis'
 import { resend, EMAIL_FROM, EMAIL_REPLY_TO } from '../lib/resend'
@@ -61,8 +62,8 @@ const TEMPLATES: Record<
 // English fallbacks. Bilingual subjects come from emailSubject(template, locale)
 // when the job payload carries a `locale`.
 const SUBJECTS: Record<EmailJobData['template'], string> = {
-  'pre-approval': 'Your booking is approved — pending final confirmation',
-  'final-confirmation': 'Booking confirmed — payment & next steps',
+  'pre-approval': "We've received your booking request",
+  'final-confirmation': 'Your booking is approved',
   'booking-confirmation': 'Your booking request has been received',
   'payment-receipt': 'Payment confirmed — We Move It. We Clear It.',
   'pending-approval': "We're reviewing your booking",
@@ -75,6 +76,12 @@ const SUBJECTS: Record<EmailJobData['template'], string> = {
   'contact-ack': 'We got your message',
   'reschedule-offer': 'Pick a new date for your move',
   'booking-rescheduled': 'Your move has been rescheduled',
+}
+
+/** Insert a 1x1 open-tracking pixel just before </body> (or append if none). */
+function injectOpenPixel(html: string, src: string): string {
+  const pixel = `<img src="${src}" width="1" height="1" alt="" style="display:block;border:0;width:1px;height:1px;max-height:1px;overflow:hidden;opacity:0;" />`
+  return /<\/body>/i.test(html) ? html.replace(/<\/body>/i, `${pixel}</body>`) : html + pixel
 }
 
 async function processEmailJob(job: Job<EmailJobData>): Promise<void> {
@@ -112,7 +119,18 @@ async function processEmailJob(job: Job<EmailJobData>): Promise<void> {
     throw new Error(`Unknown email template: ${template}`)
   }
 
-  const html = render(component(payload))
+  let html = render(component(payload))
+  // Embed the open-tracking pixel. Requires a Notification row to attribute the
+  // open to + APP_URL to build the public pixel URL. The token is persisted
+  // BEFORE the send, so an open landing the instant the email arrives resolves.
+  if (notificationId && process.env.APP_URL) {
+    const openToken = randomUUID()
+    await prisma.notification
+      .update({ where: { id: notificationId }, data: { openToken } })
+      .catch(() => undefined)
+    const base = process.env.APP_URL.replace(/\/+$/, '')
+    html = injectOpenPixel(html, `${base}/api/email/open?token=${openToken}`)
+  }
   // Subject precedence: explicit payload.subject → bilingual catalog (if the
   // payload carries a locale) → English fallback.
   const subject =
