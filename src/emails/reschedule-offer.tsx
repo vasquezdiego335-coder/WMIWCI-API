@@ -1,11 +1,13 @@
 import * as React from 'react'
 import { Html, Head, Body, Container, Section, Heading, Text, Hr, Button } from '@react-email/components'
+import { AnimatedHero, HeroAnimStyle } from './_ui'
 
 interface Props {
   customerName?: string
   alternateDates?: string[] // pre-formatted Eastern date strings
   rescheduleUrl?: string
   locale?: string
+  heroGifUrl?: string
 }
 
 // Sent when a booking's requested date can't be served, but we want to KEEP
@@ -15,6 +17,7 @@ export default function RescheduleOfferEmail({
   alternateDates = [],
   rescheduleUrl = 'https://www.wemoveitweclearit.com/booking-form.html',
   locale = 'en',
+  heroGifUrl = 'https://moveitclearit.com/email/truck-hero.gif',
 }: Props) {
   const es = (locale ?? 'en').toLowerCase().startsWith('es')
 
@@ -41,14 +44,16 @@ export default function RescheduleOfferEmail({
       }
 
   return (
-    <Html lang={copy.lang}><Head />
+    <Html lang={copy.lang}><Head><HeroAnimStyle /></Head>
       <Body style={{ backgroundColor: '#F5F1EA', fontFamily: 'Inter, sans-serif' }}>
         <Container style={{ maxWidth: '560px', margin: '0 auto', padding: '24px 16px' }}>
           <Section style={{ backgroundColor: '#0A1628', padding: '20px', borderRadius: '12px 12px 0 0', textAlign: 'center' }}>
             <Text style={{ color: '#FF5A1F', fontSize: '16px', fontWeight: '700', margin: '0' }}>We Move It. We Clear It.</Text>
           </Section>
           <Section style={{ backgroundColor: '#FFFFFF', padding: '32px 28px', borderRadius: '0 0 12px 12px' }}>
-            <Heading style={{ fontSize: '20px', fontWeight: '700', color: '#0A1628', margin: '0 0 16px' }}>{copy.heading}</Heading>
+            {/* Animated hero: SVG (Apple Mail) + GIF fallback (Gmail/Outlook) */}
+            <AnimatedHero heroGifUrl={heroGifUrl} />
+            <Heading style={{ fontSize: '20px', fontWeight: '700', color: '#0A1628', margin: '18px 0 16px' }}>{copy.heading}</Heading>
             <Text style={{ fontSize: '15px', color: '#374151', lineHeight: '1.6', margin: '0 0 12px' }}>{copy.p1}</Text>
             <Text style={{ fontSize: '15px', color: '#374151', lineHeight: '1.6', margin: '0 0 12px' }}>{copy.p2}</Text>
 

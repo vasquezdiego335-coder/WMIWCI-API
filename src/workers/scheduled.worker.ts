@@ -54,6 +54,7 @@ async function processScheduledJob(job: Job<ScheduledJobData>): Promise<void> {
           scheduledStart: booking.scheduledStart?.toISOString(),
           originAddress: booking.originAddress,
           portalUrl: `${process.env.APP_URL}/my-booking/${booking.customerToken}`,
+          heroGifUrl: process.env.EMAIL_HERO_GIF_URL || 'https://moveitclearit.com/email/truck-hero.gif',
         },
       })
       log.info({ bookingId }, '24h job reminder queued')
