@@ -1,8 +1,13 @@
 import Stripe from 'stripe'
 
 // $49 booking authorization — HELD (not captured) until an admin approves.
-// Override via STRIPE_BOOKING_FEE_CENTS.
-export const BOOKING_FEE_CENTS = Number(process.env.STRIPE_BOOKING_FEE_CENTS ?? 4900)
+// Override via STRIPE_BOOKING_FEE_CENTS, but never below the $49 floor: a stray
+// low value (e.g. a leftover test "100" = $1) must never reach a real customer.
+const BOOKING_FEE_FLOOR_CENTS = 4900
+export const BOOKING_FEE_CENTS = Math.max(
+  BOOKING_FEE_FLOOR_CENTS,
+  Number(process.env.STRIPE_BOOKING_FEE_CENTS) || BOOKING_FEE_FLOOR_CENTS
+)
 
 function requiredEnv(name: string): string {
   const value = process.env[name]?.trim()
