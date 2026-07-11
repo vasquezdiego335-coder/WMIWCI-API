@@ -50,6 +50,12 @@ export type BookingInput = {
   serviceType?: string
   displayId?: string
   locale?: string
+  // ── Service area (travel fee) ──
+  serviceAreaZone?: string
+  travelFee?: number | null // dollars; null = pending manual review
+  manualReviewRequired?: boolean
+  originAddress?: string
+  destAddress?: string
 }
 
 // ── guards ────────────────────────────────────────────────────────────
@@ -119,10 +125,28 @@ export function customerLeadEmailHtml(l: LeadInput, locale: Locale): string {
   return `<div style="font-family:system-ui,Arial,sans-serif;font-size:15px;line-height:1.5">${body}<p>— ${esc(BIZ_NAME)}</p></div>`
 }
 
+function zoneLabel(zone?: string): string {
+  switch (zone) {
+    case 'primary': return 'Primary (no fee)'
+    case 'extended_nj': return 'Extended NJ (+$50)'
+    case 'new_york': return 'New York (review)'
+    case 'unsupported': return 'Out of area (review)'
+    case 'manual_review': return 'Manual review'
+    default: return '—'
+  }
+}
+
+function travelFeeText(b: BookingInput): string {
+  if (b.travelFee == null) return 'pending review'
+  return b.travelFee > 0 ? `$${b.travelFee} (due on move day)` : 'none'
+}
+
 export function ownerBookingSms(b: BookingInput): string {
+  const zone = b.serviceAreaZone ? ` · ${zoneLabel(b.serviceAreaZone)}` : ''
+  const review = b.manualReviewRequired ? ' ⚠ MANUAL REVIEW' : ''
   return (
     `🟠 New booking started: ${dash(b.name)} · ${dash(b.serviceType)}` +
-    ` · ${dash(b.displayId)} · ${attribution(b.source, b.foundUs)}`
+    ` · ${dash(b.displayId)} · ${attribution(b.source, b.foundUs)}${zone}${review}`
   )
 }
 
@@ -135,6 +159,11 @@ export function ownerBookingEmailHtml(b: BookingInput): string {
       ['Email', b.email],
       ['Service', b.serviceType],
       ['Booking #', b.displayId],
+      ['Pickup', b.originAddress],
+      ['Destination', b.destAddress],
+      ['Service area', b.serviceAreaZone ? zoneLabel(b.serviceAreaZone) : undefined],
+      ['Travel fee', travelFeeText(b)],
+      ['Manual review', b.manualReviewRequired ? 'YES — do not confirm a final travel price' : 'No'],
       ['Source', b.source],
       ['Found us', b.foundUs],
     ])

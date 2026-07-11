@@ -51,6 +51,15 @@ enum DiscountType {
   MANUAL              // manually applied by staff
 }
 
+// Travel service-area zone for a booking (see src/lib/service-area.ts).
+enum ServiceAreaZone {
+  primary       // Essex County + nearby — no travel fee
+  extended_nj   // rest of New Jersey — $50 travel fee (due on move day)
+  new_york      // New York — manual review, no fixed fee
+  manual_review // could not classify the address — manual review
+  unsupported   // outside NJ/NY — manual review
+}
+
 enum PaymentStatus {
   PENDING
   COMPLETED
@@ -187,6 +196,17 @@ model Booking {
   baseRate        Float?        @map("base_rate")
   totalEstimate   Float?        @map("total_estimate")
   finalAmount     Float?        @map("final_amount")
+
+  // ── Service area / travel fee (server-computed; see src/lib/service-area.ts) ──
+  //    travelFee is charged on move day like the truck add-on — never in Stripe.
+  serviceAreaZone      ServiceAreaZone? @map("service_area_zone")
+  travelFee            Int              @default(0) @map("travel_fee") // cents; 0 = none
+  travelFeeDueOnMoveDay Boolean         @default(false) @map("travel_fee_due_on_move_day")
+  manualReviewRequired Boolean          @default(false) @map("manual_review_required")
+  serviceAreaMessage   String?          @map("service_area_message")
+  distanceFromWestOrangeMiles Float?    @map("distance_from_west_orange_miles")
+  estimatedDriveTimeMinutes   Int?      @map("estimated_drive_time_minutes")
+  addressEvaluation    Json?            @map("address_evaluation")
 
   // Discount
   discountCode    String?       @map("discount_code")

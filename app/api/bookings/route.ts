@@ -5,6 +5,7 @@ import { BOOKING_FEE_CENTS, createBookingCheckout } from '@/lib/stripe'
 import { apiLogger } from '@/lib/logger'
 import { AGREEMENT_VERSION } from '@/lib/agreement'
 import { notifyBookingCreated } from '@/lib/notify'
+import { checkServiceArea, travelFeeDollars, type AddressInput } from '@/lib/service-area'
 
 const TRUCK_PICKUP_RETURN_AMOUNT_CENTS = 5000
 
@@ -85,6 +86,29 @@ const BookingSchema = z.object({
   // ── Addresses & access (collected on the booking form) ──
   addressFrom: z.string().transform(sanitizeText).pipe(z.string().max(200)).optional(),
   addressTo: z.string().transform(sanitizeText).pipe(z.string().max(200)).optional(),
+
+  // ── Structured service-area addresses (new booking form) ──
+  // Optional; when present, drive the server-side travel-fee/zone decision. The
+  // single-line addressFrom/addressTo above stay for back-compat.
+  pickupAddresses: z
+    .array(
+      z.object({
+        street: z.string().transform(sanitizeText).pipe(z.string().max(200)).optional(),
+        city: z.string().transform(sanitizeText).pipe(z.string().max(120)).optional(),
+        state: z.string().transform(sanitizeText).pipe(z.string().max(40)).optional(),
+        zip: z.string().transform(sanitizeText).pipe(z.string().max(12)).optional(),
+      }),
+    )
+    .max(10)
+    .optional(),
+  destinationAddress: z
+    .object({
+      street: z.string().transform(sanitizeText).pipe(z.string().max(200)).optional(),
+      city: z.string().transform(sanitizeText).pipe(z.string().max(120)).optional(),
+      state: z.string().transform(sanitizeText).pipe(z.string().max(40)).optional(),
+      zip: z.string().transform(sanitizeText).pipe(z.string().max(12)).optional(),
+    })
+    .optional(),
   stairs: z.coerce.boolean().optional(),
   longWalk: z.coerce.boolean().optional(),
   heavyItems: z.coerce.boolean().optional(),
@@ -173,6 +197,12 @@ function buildDescription(
   return lines.join('\n')
 }
 
+function formatAddr(a?: { street?: string; city?: string; state?: string; zip?: string }): string {
+  if (!a) return ''
+  const region = [a.state, a.zip].map((s) => s?.trim()).filter(Boolean).join(' ')
+  return [a.street, a.city, region].map((s) => s?.trim()).filter(Boolean).join(', ')
+}
+
 async function handleBooking(req: NextRequest): Promise<NextResponse> {
   const ip = req.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ?? 'unknown'
   const ua = req.headers.get('user-agent') ?? ''
@@ -198,6 +228,30 @@ async function handleBooking(req: NextRequest): Promise<NextResponse> {
   }
 
   const data = parsed.data
+
+  // ── Service-area evaluation — SERVER-SIDE source of truth. Any travel fee the
+  //    browser may have shown is ignored; the zone + fee are recomputed here and
+  //    stored on the booking. The fee is a MOVE-DAY amount (like the truck add-on)
+  //    and is never added to the $49 Stripe deposit. ──
+  const saPickups: AddressInput[] = (data.pickupAddresses ?? []).map((a) => ({ ...a }))
+  const structuredDest = data.destinationAddress
+  const saDest: AddressInput | null =
+    structuredDest && (structuredDest.zip || structuredDest.city || structuredDest.state)
+      ? { ...structuredDest }
+      : data.addressTo || data.addressFrom
+        ? { raw: data.addressTo ?? data.addressFrom }
+        : null
+  if (saPickups.length === 0 && data.addressFrom) saPickups.push({ raw: data.addressFrom })
+  const sa = saDest ? checkServiceArea(saPickups, saDest) : null
+  const travelFeeCents = sa?.travelFeeCents ?? 0 // null (pending NY review) -> stored 0
+  const travelFeeUsd = travelFeeCents / 100
+  const originDisplay = data.pickupAddresses?.length
+    ? formatAddr(data.pickupAddresses[0])
+    : data.addressFrom?.trim() ?? ''
+  const destDisplay = data.destinationAddress
+    ? formatAddr(data.destinationAddress)
+    : data.addressTo?.trim() ?? ''
+
   const existingCustomer = await prisma.customer.findUnique({
     where: { email: data.email },
   })
@@ -229,6 +283,12 @@ async function handleBooking(req: NextRequest): Promise<NextResponse> {
   })
     + (data.source ? `\nSource: ${data.source}` : '')
     + (data.photos?.length ? `\n📷 ${data.photos.length} job photo(s) attached — view in admin/portal` : '')
+    + (sa?.zone === 'extended_nj' ? '\nExtended service-area fee: $50 (due on move day)' : '')
+    + (sa?.zone === 'primary' ? '\nService area: Primary — no travel fee' : '')
+    + (sa?.manualReviewRequired ? `\n⚠ Service area: ${sa.zone.toUpperCase()} — MANUAL REVIEW REQUIRED (travel price pending; do not confirm a final travel price)` : '')
+    + ((data.pickupAddresses ?? []).slice(1).map(formatAddr).filter(Boolean).length
+        ? `\nAdditional pickup(s): ${(data.pickupAddresses ?? []).slice(1).map(formatAddr).filter(Boolean).join(' | ')}`
+        : '')
   const svc = SERVICE_MAP[data.serviceType]
   const tokenExpiry = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000)
 
@@ -236,8 +296,8 @@ async function handleBooking(req: NextRequest): Promise<NextResponse> {
     data: {
       customerId: customer.id,
       status: 'DRAFT',
-      originAddress: data.addressFrom?.trim() || 'Provided at confirmation',
-      destAddress: data.addressTo?.trim() || 'Provided at confirmation',
+      originAddress: originDisplay || 'Provided at confirmation',
+      destAddress: destDisplay || 'Provided at confirmation',
       itemsDescription,
       requestedDate,
       depositAmount: BOOKING_FEE_CENTS,
@@ -245,7 +305,15 @@ async function handleBooking(req: NextRequest): Promise<NextResponse> {
       truckAddonDueOnMoveDay,
       truckAddonAmount: truckAddonDueOnMoveDay ? TRUCK_PICKUP_RETURN_AMOUNT_CENTS : 0,
       baseRate: svc?.price ?? null,
-      totalEstimate: svc?.price ?? null,
+      // Move-day total = base labor + travel fee (NY/manual stay pending -> fee 0 here).
+      totalEstimate: svc?.price != null ? svc.price + travelFeeUsd : travelFeeUsd || null,
+      // ── Service area (server-computed; travel fee is due on move day, not in Stripe) ──
+      serviceAreaZone: (sa?.zone ?? null) as any,
+      travelFee: travelFeeCents,
+      travelFeeDueOnMoveDay: travelFeeCents > 0,
+      manualReviewRequired: sa?.manualReviewRequired ?? false,
+      serviceAreaMessage: sa?.message ?? null,
+      addressEvaluation: sa ? (sa.evaluatedAddresses as any) : undefined,
       discountCode: data.discountCode,
       discountType: discountType as any,
       discountPercent,
@@ -343,6 +411,11 @@ async function handleBooking(req: NextRequest): Promise<NextResponse> {
       serviceType: svc ? svc.label : data.serviceType,
       displayId: booking.displayId,
       locale: customerLocale,
+      serviceAreaZone: sa?.zone,
+      travelFee: travelFeeDollars(sa?.travelFeeCents ?? 0),
+      manualReviewRequired: sa?.manualReviewRequired ?? false,
+      originAddress: originDisplay || undefined,
+      destAddress: destDisplay || undefined,
     })
   } catch (err) {
     apiLogger.error({ err, bookingId: booking.id }, 'owner booking alert failed (non-fatal)')
