@@ -56,6 +56,9 @@ interface Props {
   website?: string
   websiteLabel?: string
   social?: { instagram?: string; facebook?: string; tiktok?: string; google?: string }
+  serviceAreaZone?: string
+  travelFee?: number | null
+  manualReviewRequired?: boolean
   locale?: string
 }
 
@@ -84,6 +87,9 @@ export default function FinalConfirmationEmail({
   website = 'https://moveitclearit.com',
   websiteLabel = 'moveitclearit.com',
   social,
+  serviceAreaZone,
+  travelFee,
+  manualReviewRequired,
   locale = 'en',
 }: Props) {
   const es = (locale ?? 'en').toLowerCase().startsWith('es')
@@ -102,8 +108,9 @@ export default function FinalConfirmationEmail({
         sub: `Todo listo, ${customerName}. Aquí tienes todo lo que necesitas para el día de la mudanza — nos encargamos de que sea fácil.`,
         dateLabel: 'Tu mudanza está programada para',
         sumTitle: 'Resumen de la reserva',
-        kv: { ref: 'Referencia', service: 'Servicio', crew: 'Equipo asignado', truck: 'Camión', est: 'Total final', pay: 'Pago' },
+        kv: { ref: 'Referencia', service: 'Servicio', crew: 'Equipo asignado', truck: 'Camión', est: 'Total final', pay: 'Pago', travel: 'Cargo por viaje' },
         payVal: (n: string) => `$${n} de depósito · cobrado`,
+        travelVal: (fee: number | null | undefined) => fee ? `$${fee} · a pagar el día de la mudanza` : (manualReviewRequired ? 'Revisión pendiente' : 'Incluido'),
         moveTitle: 'Detalles de la mudanza',
         from: 'Recogida', to: 'Destino',
         logi: { access: 'Escaleras / elevador', parking: 'Estacionamiento', heavy: 'Artículos pesados' },
@@ -134,8 +141,9 @@ export default function FinalConfirmationEmail({
         sub: `You're locked in, ${customerName}. Here’s everything you need for move day — we can’t wait to make it easy.`,
         dateLabel: 'Your move is set for',
         sumTitle: 'Booking summary',
-        kv: { ref: 'Reference', service: 'Service', crew: 'Crew assigned', truck: 'Truck', est: 'Final estimate', pay: 'Payment' },
+        kv: { ref: 'Reference', service: 'Service', crew: 'Crew assigned', truck: 'Truck', est: 'Final estimate', pay: 'Payment', travel: 'Travel fee' },
         payVal: (n: string) => `$${n} deposit · captured`,
+        travelVal: (fee: number | null | undefined) => fee ? `$${fee} · due on move day` : (manualReviewRequired ? 'Pending review' : 'Included'),
         moveTitle: 'Move details',
         from: 'Pickup', to: 'Destination',
         logi: { access: 'Stairs / elevator', parking: 'Parking', heavy: 'Heavy items' },
@@ -223,6 +231,7 @@ export default function FinalConfirmationEmail({
             { label: t.kv.truck, value: truckLabel || t.defTruck },
             { label: t.kv.est, value: estimate, strong: true },
             { label: t.kv.pay, value: amountPaid ? t.payVal(amountPaid) : '' },
+            ...(serviceAreaZone ? [{ label: t.kv.travel, value: t.travelVal(travelFee) }] : []),
           ]}
         />
       </Card>

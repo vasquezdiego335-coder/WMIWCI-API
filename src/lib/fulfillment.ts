@@ -160,6 +160,9 @@ export async function fulfillPaidCheckout(params: {
             amountPaid,
             items: booking.itemsDescription ?? undefined,
             portalUrl,
+            serviceAreaZone: booking.serviceAreaZone ?? undefined,
+            travelFee: booking.travelFee ? booking.travelFee / 100 : undefined,
+            manualReviewRequired: booking.manualReviewRequired ?? undefined,
             locale,
           },
         })

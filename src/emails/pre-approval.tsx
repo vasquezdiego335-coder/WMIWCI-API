@@ -55,6 +55,9 @@ interface Props {
   website?: string
   websiteLabel?: string
   social?: { instagram?: string; facebook?: string; tiktok?: string; google?: string }
+  serviceAreaZone?: string
+  travelFee?: number | null
+  manualReviewRequired?: boolean
   locale?: string
 }
 
@@ -82,6 +85,9 @@ export default function PreApprovalEmail({
   website = 'https://moveitclearit.com',
   websiteLabel = 'moveitclearit.com',
   social,
+  serviceAreaZone,
+  travelFee,
+  manualReviewRequired,
   locale = 'en',
 }: Props) {
   const es = (locale ?? 'en').toLowerCase().startsWith('es')
@@ -110,7 +116,8 @@ export default function PreApprovalEmail({
         payBadge: 'No es un cargo',
         pay: ['Autorización temporal en tu tarjeta.', 'Se libera si no podemos realizar la mudanza.', 'Solo se cobra después de la aprobación.'],
         sumTitle: 'Resumen de la reserva',
-        kv: { ref: 'Referencia', name: 'Nombre', service: 'Servicio', date: 'Fecha', time: 'Hora', crew: 'Equipo', truck: 'Camión', est: 'Total estimado' },
+        kv: { ref: 'Referencia', name: 'Nombre', service: 'Servicio', date: 'Fecha', time: 'Hora', crew: 'Equipo', truck: 'Camión', est: 'Total estimado', travel: 'Cargo por viaje' },
+        travelVal: (fee: number | null | undefined) => fee ? `$${fee} · a pagar el día de la mudanza` : (manualReviewRequired ? 'Revisión pendiente' : 'Incluido'),
         moveTitle: 'Detalles de la mudanza',
         from: 'Recogida', to: 'Destino',
         logi: { access: 'Escaleras / elevador', parking: 'Estacionamiento', heavy: 'Artículos pesados', photos: 'Fotos' },
@@ -147,7 +154,8 @@ export default function PreApprovalEmail({
         payBadge: 'Not a charge',
         pay: ['Temporary authorization on your card.', 'Released if we can’t take the move.', 'Only captured after approval.'],
         sumTitle: 'Booking summary',
-        kv: { ref: 'Reference', name: 'Name', service: 'Service', date: 'Date', time: 'Time', crew: 'Crew', truck: 'Truck', est: 'Estimated total' },
+        kv: { ref: 'Reference', name: 'Name', service: 'Service', date: 'Date', time: 'Time', crew: 'Crew', truck: 'Truck', est: 'Estimated total', travel: 'Travel fee' },
+        travelVal: (fee: number | null | undefined) => fee ? `$${fee} · due on move day` : (manualReviewRequired ? 'Pending review' : 'Included'),
         moveTitle: 'Move details',
         from: 'Pickup', to: 'Destination',
         logi: { access: 'Stairs / elevator', parking: 'Parking', heavy: 'Heavy items', photos: 'Photos' },
@@ -258,6 +266,7 @@ export default function PreApprovalEmail({
             { label: t.kv.crew, value: crewSize ? `${crewSize}` : '' },
             { label: t.kv.truck, value: truckLabel || t.defTruck },
             { label: t.kv.est, value: estimate, strong: true },
+            ...(serviceAreaZone ? [{ label: t.kv.travel, value: t.travelVal(travelFee) }] : []),
           ]}
         />
       </Card>
