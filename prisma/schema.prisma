@@ -172,6 +172,9 @@ model Booking {
   displayId   String        @unique @default(cuid()) @map("display_id") // human-friendly
   status      BookingStatus @default(DRAFT)
   outboxState BookingState? @map("outbox_state") // src/outbox email state machine (additive, nullable)
+  // Owner checkout tests (mirrors Payment.isInternalTest). EXCLUDED from every
+  // operational count + revenue report. Flagged by scripts/flag-test-bookings.ts.
+  isInternalTest Boolean    @default(false) @map("is_internal_test")
   customerId  String        @map("customer_id")
 
   // Location
@@ -269,6 +272,38 @@ model Booking {
 
   equipmentNeeds   String? @map("equipment_needs") // dollies/straps/piano board (informational)
   crewInstructions String? @map("crew_instructions") // customer's move-day instructions for the crew
+
+  // ── Verified structured address (Phase 2, owner spec 2026-07-12). Written by
+  //    SERVER-side Google Address Validation only — client-claimed components are
+  //    never persisted. Nullable: legacy bookings read as NULL and display the
+  //    originAddress/destAddress strings. verification_status:
+  //    verified | partial | unverified | skipped (no provider key/timeout)
+  originStreetNumber     String? @map("origin_street_number")
+  originRoute            String? @map("origin_route")
+  originCity             String? @map("origin_city")
+  originCounty           String? @map("origin_county")
+  originState            String? @map("origin_state")
+  originZip              String? @map("origin_zip")
+  originCountry          String? @map("origin_country")
+  originFormatted        String? @map("origin_formatted_address")
+  originLat              Float?  @map("origin_lat")
+  originLng              Float?  @map("origin_lng")
+  originPlaceId          String? @map("origin_place_id")
+  originVerification     String? @map("origin_verification_status")
+  originValidationReason String? @map("origin_validation_reason")
+  destStreetNumber       String? @map("dest_street_number")
+  destRoute              String? @map("dest_route")
+  destCity               String? @map("dest_city")
+  destCounty             String? @map("dest_county")
+  destState              String? @map("dest_state")
+  destZip                String? @map("dest_zip")
+  destCountry            String? @map("dest_country")
+  destFormatted          String? @map("dest_formatted_address")
+  destLat                Float?  @map("dest_lat")
+  destLng                Float?  @map("dest_lng")
+  destPlaceId            String? @map("dest_place_id")
+  destVerification       String? @map("dest_verification_status")
+  destValidationReason   String? @map("dest_validation_reason")
 
   // ── Move details (owner spec 2026-07-12) — structured inventory of the job.
   //    Nullable; collected on the booking form (future) or entered by staff. ──
@@ -394,6 +429,9 @@ model Payment {
   amount                Int // in cents
   currency              String        @default("usd")
   status                PaymentStatus @default(PENDING)
+  // Internal checkout tests (owner-flagged; mirrors Stripe metadata.internal_test).
+  // EXCLUDED from every revenue aggregate/report. Never affects payment status.
+  isInternalTest        Boolean       @default(false) @map("is_internal_test")
   description           String?
   receiptUrl            String?       @map("receipt_url")
   metadata              Json?
