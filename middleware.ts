@@ -110,9 +110,24 @@ export async function middleware(req: NextRequest): Promise<NextResponse> {
 // ── MATCHER: PROTECT ADMIN ROUTES (EXCEPT LOGIN) ──────────────
 export const config = {
   matcher: [
-    // Explicitly protect all /admin routes except /admin/login
-    '/admin/(bookings|customers|jobs|staff|schedule|queues|payments|discounts)/:path*',
-    '/admin/(bookings|customers|jobs|staff|schedule|queues|payments|discounts)',  // without trailing path
+    // Protect all /admin routes except /admin/login (listed individually)
+    '/admin/bookings/:path*',
+    '/admin/bookings',
+    '/admin/customers/:path*',
+    '/admin/customers',
+    '/admin/jobs/:path*',
+    '/admin/jobs',
+    '/admin/staff/:path*',
+    '/admin/staff',
+    '/admin/schedule/:path*',
+    '/admin/schedule',
+    '/admin/queues/:path*',
+    '/admin/queues',
+    '/admin/payments/:path*',
+    '/admin/payments',
+    '/admin/discounts/:path*',
+    '/admin/discounts',
+    '/admin',  // protect the root /admin page
     '/api/admin/:path*',
   ],
 }
