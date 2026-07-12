@@ -12,11 +12,19 @@ import {
   overdueTasks,
   type Embed,
 } from "@/bot/task-service";
-import { captureDeposit, cancelDeposit } from "@/lib/stripe";
+import { captureDeposit, cancelDeposit, retrieveChargeForIntent } from "@/lib/stripe";
 import { emailQueue, smsQueue } from "@/lib/queues";
 import { offerRescheduleToCustomer } from "@/lib/reschedule";
 import { t } from "@/lib/i18n";
-import { formatEastern } from "@/lib/scheduling";
+import { formatEastern, confirmationScheduleData } from "@/lib/scheduling";
+import { authorizeOwnerAction, type DiscordActor } from "@/lib/discord-auth";
+import {
+  buildJobCard,
+  serviceLabelFromDescription,
+  truckLabelFromDescription,
+  timeOfDay,
+  TRUCK_OPTION_LABELS,
+} from "@/lib/booking-display";
 import { apiLogger } from "@/lib/logger";
 import { outboxEnabled, emitApproved, emitRescheduleRequested } from "@/outbox/integration";
 
@@ -71,11 +79,21 @@ type CardBooking = {
   customer?: { name: string } | null;
 };
 
-// The "✅ Approved" card that replaces the approval card in place (no buttons).
-function confirmedCard(booking: CardBooking, approverName: string, capturedCents?: number) {
+// The "✅ Approved" card that replaces the approval card in place. The only
+// button that survives is a link to the customer's Stripe receipt (when the
+// capture produced one) — everything else is done, so the decision buttons go.
+function confirmedCard(
+  booking: CardBooking,
+  approverName: string,
+  capturedCents?: number,
+  receiptUrl?: string | null,
+) {
   const when = booking.confirmedDate ?? booking.requestedDate;
   const dateStr = when ? formatEastern(when) : "—";
   const cents = capturedCents ?? booking.depositAmount ?? 4900;
+  const components = receiptUrl
+    ? [{ type: 1, components: [{ type: 2, style: 5, label: "🧾 Customer Receipt", url: receiptUrl }] }]
+    : [];
   return {
     embeds: [
       {
@@ -91,7 +109,7 @@ function confirmedCard(booking: CardBooking, approverName: string, capturedCents
         timestamp: new Date().toISOString(),
       },
     ],
-    components: [], // strip the Approve / Offer / Deny buttons
+    components,
   };
 }
 
@@ -143,7 +161,8 @@ function offeredCard(
 }
 
 // ── approve_booking:<id> → capture the $49 hold → CONFIRMED → notify ───────
-async function handleApprove(bookingId: string | undefined, messageId: string | undefined, approverName: string) {
+async function handleApprove(bookingId: string | undefined, messageId: string | undefined, actor: DiscordActor) {
+  const approverName = actor.username;
   // Load by the clicked card's message id (canonical), falling back to the id
   // carried in the button's custom_id.
   const booking = await prisma.booking.findFirst({
@@ -169,42 +188,110 @@ async function handleApprove(bookingId: string | undefined, messageId: string | 
     return ephemeral("⚠️ No payment hold attached — nothing to capture.");
   }
 
-  // 1) Capture the manual-capture PaymentIntent (the held $49 → charged).
+  // 1) CONCURRENCY GUARD — atomically CLAIM the PENDING_APPROVAL → CONFIRMED
+  //    transition BEFORE touching Stripe. Postgres serializes this conditional
+  //    UPDATE, so of two simultaneous approvals exactly one gets count === 1 and
+  //    proceeds to capture; the loser gets count === 0 and bails out. This is
+  //    what guarantees the $49 is captured at most once. The move-date fields are
+  //    written in the same claim so a CONFIRMED booking is immediately schedulable
+  //    (scheduledStart is what the daily digest + dashboards query on).
+  const sched = confirmationScheduleData(booking);
+  const claim = await prisma.booking.updateMany({
+    where: { id: booking.id, status: "PENDING_APPROVAL" },
+    data: { status: "CONFIRMED", depositPaid: true, ...(sched ?? {}) },
+  });
+  if (claim.count === 0) {
+    // Lost the race (or the booking moved). Re-read and respond honestly.
+    const fresh = await prisma.booking.findUnique({ where: { id: booking.id }, include: { customer: true } });
+    if (fresh?.status === "CONFIRMED") {
+      return NextResponse.json({ type: RES_UPDATE_MESSAGE, data: confirmedCard(fresh, approverName) });
+    }
+    return ephemeral("⏳ This booking was just handled by another owner — no action taken.");
+  }
+
+  // 2) We own the transition — capture the held $49. The idempotency key (keyed
+  //    on the payment intent) means even a pathological double-run collapses into
+  //    a single charge at Stripe.
   let pi;
   try {
-    pi = await captureDeposit(booking.stripePaymentIntentId);
+    pi = await captureDeposit(booking.stripePaymentIntentId, `capture:${booking.stripePaymentIntentId}`);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    apiLogger.error({ bookingId: booking.id, err: msg }, "captureDeposit failed");
-    return ephemeral(`⚠️ Stripe capture failed: ${msg}. The hold was NOT captured.`);
+    apiLogger.error({ bookingId: booking.id, err: msg }, "captureDeposit failed — rolling back approval claim");
+    // Roll the claim back so the booking can be approved again once Stripe is
+    // healthy. Guarded on status === CONFIRMED so we never stomp a later change.
+    await prisma.booking
+      .updateMany({
+        where: { id: booking.id, status: "CONFIRMED" },
+        data: { status: "PENDING_APPROVAL", depositPaid: false, confirmedDate: null, scheduledStart: null, scheduledEnd: null },
+      })
+      .catch((rbErr) =>
+        apiLogger.error(
+          { bookingId: booking.id, err: rbErr instanceof Error ? rbErr.message : String(rbErr) },
+          "✖ CRITICAL: failed to roll back approval claim after Stripe error — booking may be CONFIRMED without capture"
+        )
+      );
+    return ephemeral(`⚠️ Stripe capture failed: ${msg}. The hold was NOT captured — try again.`);
   }
   const capturedCents = pi.amount_received ?? pi.amount ?? booking.depositAmount;
 
-  // 2) Confirm the booking + record the payment (atomic).
+  // 2b) Pull the resulting Charge for the hosted receipt URL + charge id +
+  //     payment method. Best-effort (never blocks approval): the record is nicer
+  //     with it, and it unlocks the "🧾 Customer Receipt" button + View Full
+  //     Booking. Stripe also emails the customer their receipt from this charge.
+  const charge = await retrieveChargeForIntent(pi).catch(() => null);
+  const receiptUrl = charge?.receipt_url ?? null;
+  const stripeChargeId =
+    charge?.id ?? (typeof pi.latest_charge === "string" ? pi.latest_charge : pi.latest_charge?.id) ?? null;
+  const paymentMethodType = charge?.payment_method_details?.type ?? null;
+  const stripeCustomerId =
+    typeof pi.customer === "string" ? pi.customer : pi.customer?.id ?? null;
+  // Only present values (string-only) so this is a clean Prisma JSON input.
+  const paymentMeta: Record<string, string> = { capturedBy: approverName };
+  if (paymentMethodType) paymentMeta.paymentMethodType = paymentMethodType;
+  if (stripeCustomerId) paymentMeta.stripeCustomerId = stripeCustomerId;
+  if (booking.stripeCheckoutId) paymentMeta.stripeCheckoutId = booking.stripeCheckoutId;
+
+  // 3) Record the payment + create the Job record + audit (atomic). The booking
+  //    status/date fields were already set by the claim in step 1.
   await prisma.$transaction([
-    prisma.booking.update({
-      where: { id: booking.id },
-      data: { status: "CONFIRMED", depositPaid: true, confirmedDate: booking.requestedDate },
-    }),
     prisma.payment.create({
       data: {
         bookingId: booking.id,
         stripePaymentIntentId: pi.id,
+        stripeChargeId,
         amount: capturedCents,
         status: "COMPLETED",
         description: "Booking deposit captured on approval",
+        receiptUrl,
+        metadata: paymentMeta,
       },
+    }),
+    prisma.job.upsert({
+      where: { bookingId: booking.id },
+      update: { status: "SCHEDULED" },
+      create: { bookingId: booking.id, status: "SCHEDULED" },
     }),
     prisma.auditLog.create({
       data: {
         action: "PAYMENT_RECEIVED",
         bookingId: booking.id,
-        details: { captured: capturedCents, paymentIntentId: pi.id, approvedBy: approverName },
+        details: {
+          event: "approve_booking",
+          discordUserId: actor.userId ?? null,
+          approvedBy: approverName,
+          previousStatus: "PENDING_APPROVAL",
+          newStatus: "CONFIRMED",
+          captured: capturedCents,
+          paymentIntentId: pi.id,
+          stripeResult: "captured",
+          result: "success",
+        },
       },
     }),
   ]);
 
-  // 3) Queue the PRE-APPROVAL customer messages (email + SMS) — the ONLY pair
+  // 4) Queue the PRE-APPROVAL customer messages (email + SMS) — the ONLY pair
   //    sent from the approval handler. Non-fatal + timeout-guarded so a Redis
   //    stall can't blow Discord's 3s interaction window.
   const locale = booking.customer.locale;
@@ -270,12 +357,16 @@ async function handleApprove(bookingId: string | undefined, messageId: string | 
     "Booking approved → $49 captured → CONFIRMED"
   );
 
-  // 4) Edit the Discord card in place.
-  return NextResponse.json({ type: RES_UPDATE_MESSAGE, data: confirmedCard(booking, approverName, capturedCents) });
+  // 4) Edit the Discord card in place (with a receipt link when Stripe gave one).
+  return NextResponse.json({
+    type: RES_UPDATE_MESSAGE,
+    data: confirmedCard(booking, approverName, capturedCents, receiptUrl),
+  });
 }
 
 // ── deny_booking:<id> → release the hold → CANCELLED → notify ──────────────
-async function handleDeny(bookingId: string | undefined, messageId: string | undefined, approverName: string) {
+async function handleDeny(bookingId: string | undefined, messageId: string | undefined, actor: DiscordActor) {
+  const approverName = actor.username;
   const booking = await prisma.booking.findFirst({
     where: {
       OR: [
@@ -299,26 +390,50 @@ async function handleDeny(bookingId: string | undefined, messageId: string | und
     return ephemeral(`⚠️ Can't deny a booking in ${booking.status}.`);
   }
 
+  // CONCURRENCY GUARD — atomically CLAIM the transition to CANCELLED among the
+  // deny-able statuses. Of two simultaneous clicks exactly one wins; the loser is
+  // told it was already handled (so a deny can't race an approve into a bad mix).
+  const previousStatus = booking.status;
+  const claim = await prisma.booking.updateMany({
+    where: { id: booking.id, status: { in: ["PENDING_APPROVAL", "PENDING_PAYMENT", "DRAFT"] } },
+    data: { status: "CANCELLED" },
+  });
+  if (claim.count === 0) {
+    const fresh = await prisma.booking.findUnique({ where: { id: booking.id }, include: { customer: true } });
+    if (fresh?.status === "CANCELLED") {
+      return NextResponse.json({ type: RES_UPDATE_MESSAGE, data: deniedCard(fresh, approverName) });
+    }
+    return ephemeral("⏳ This booking was just handled by another owner — no action taken.");
+  }
+
   // Release the authorization (no money moves). Tolerate an already-void PI.
+  let stripeResult = "no_hold";
   if (booking.stripePaymentIntentId) {
     try {
       await cancelDeposit(booking.stripePaymentIntentId);
+      stripeResult = "hold_released";
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
+      stripeResult = `release_failed: ${msg.slice(0, 80)}`;
       apiLogger.warn({ bookingId: booking.id, err: msg }, "cancelDeposit failed (continuing — hold may already be void)");
     }
   }
 
-  await prisma.$transaction([
-    prisma.booking.update({ where: { id: booking.id }, data: { status: "CANCELLED" } }),
-    prisma.auditLog.create({
-      data: {
-        action: "BOOKING_STATE_CHANGED",
-        bookingId: booking.id,
-        details: { action: "deny_booking", from: booking.status, deniedBy: approverName },
+  await prisma.auditLog.create({
+    data: {
+      action: "BOOKING_STATE_CHANGED",
+      bookingId: booking.id,
+      details: {
+        event: "deny_booking",
+        discordUserId: actor.userId ?? null,
+        deniedBy: approverName,
+        previousStatus,
+        newStatus: "CANCELLED",
+        stripeResult,
+        result: "success",
       },
-    }),
-  ]);
+    },
+  });
 
   // MESSAGING POLICY: deny does NOT send a customer email/SMS. The system sends
   // exactly four customer messages (pre-approval + final-confirmation, each as
@@ -332,7 +447,8 @@ async function handleDeny(bookingId: string | undefined, messageId: string | und
 }
 
 // ── offer_reschedule:<id> → reuse the shared offer logic → update card ─────
-async function handleOffer(bookingId: string | undefined, messageId: string | undefined, approverName: string) {
+async function handleOffer(bookingId: string | undefined, messageId: string | undefined, actor: DiscordActor) {
+  const approverName = actor.username;
   const booking = await prisma.booking.findFirst({
     where: {
       OR: [
@@ -376,6 +492,383 @@ async function handleOffer(bookingId: string | undefined, messageId: string | un
   // Idempotent: removing the buttons (UPDATE_MESSAGE) prevents a second offer
   // from this card; a fresh approval card posts when the customer picks a date.
   return NextResponse.json({ type: RES_UPDATE_MESSAGE, data: offeredCard(booking, approverName, result.offeredDates) });
+}
+
+// ════════════════════════════════════════════════════════════════════════
+//  view_full_booking:<id> — owner-only ephemeral dump of EVERY stored field.
+//  --------------------------------------------------------------------
+//  Nothing hidden, nothing summarized, no truncation beyond Discord's own
+//  per-field / per-embed limits (which we page across multiple embeds). This
+//  is the "I never want to open the DB" escape hatch. Owner-gated by the same
+//  OWNER_ACTIONS check as approve/deny, and ephemeral so raw customer data is
+//  only ever shown to the owner who clicked, never posted to the channel.
+// ════════════════════════════════════════════════════════════════════════
+type FullField = { name: string; value: string; inline?: boolean };
+
+// Discord caps a single embed at 25 fields / 6000 chars. Page the fields across
+// as many embeds as needed (message allows up to 10) so a data-heavy booking is
+// never dropped.
+function paginateEmbeds(title: string, color: number, description: string, fields: FullField[]) {
+  const embeds: Array<Record<string, unknown>> = [];
+  let cur: FullField[] = [];
+  let curLen = title.length + description.length;
+  const flush = (): void => {
+    if (!cur.length) return;
+    embeds.push({
+      title: embeds.length === 0 ? title : `${title} (cont. ${embeds.length + 1})`,
+      color,
+      description: embeds.length === 0 ? description : undefined,
+      fields: cur,
+    });
+    cur = [];
+    curLen = title.length;
+  };
+  for (const f of fields) {
+    const flen = f.name.length + f.value.length + 8;
+    if (cur.length >= 25 || curLen + flen > 5500) flush();
+    cur.push(f);
+    curLen += flen;
+  }
+  flush();
+  if (embeds.length) {
+    embeds[embeds.length - 1].footer = { text: "Every stored field · ephemeral (only you can see this)" };
+    embeds[embeds.length - 1].timestamp = new Date().toISOString();
+  }
+  return embeds;
+}
+
+async function handleViewFullBooking(bookingId: string | undefined, messageId: string | undefined) {
+  const booking = await prisma.booking.findFirst({
+    where: {
+      OR: [
+        ...(messageId ? [{ discordApprovalMessageId: messageId }] : []),
+        ...(bookingId ? [{ id: bookingId }] : []),
+      ],
+    },
+    include: {
+      customer: true,
+      payments: { orderBy: { createdAt: "desc" } },
+      files: { orderBy: { createdAt: "asc" } },
+      job: true,
+    },
+  });
+  if (!booking) return ephemeral("⚠️ Booking not found for this card.");
+
+  const appUrl = process.env.APP_URL ?? "https://wmiwci-api.vercel.app";
+  const DASH = "—";
+  const s = (v: unknown): string => (v === null || v === undefined || v === "" ? DASH : String(v));
+  const dt = (v: Date | null | undefined): string => (v ? formatEastern(v) : DASH);
+  const moneyC = (c: number | null | undefined): string => (typeof c === "number" ? `$${(c / 100).toFixed(2)}` : DASH);
+  const moneyD = (d: number | null | undefined): string => (typeof d === "number" ? `$${d.toFixed(2)}` : DASH);
+  const yn = (b: boolean | null | undefined): string => (b ? "Yes" : "No");
+  const cap = (v: string, n = 1024): string => (v.length > n ? v.slice(0, n - 1) + "…" : v);
+
+  const c = booking.customer;
+  const fields: FullField[] = [];
+  const add = (name: string, lines: Array<string | null | undefined>, inline = false): void => {
+    const value = lines.filter((l): l is string => !!l && l.length > 0).join("\n");
+    fields.push({ name, value: cap(value || DASH), inline });
+  };
+
+  add("🆔 Booking", [
+    `ID: \`${booking.id}\``,
+    `Ref: ${s(booking.displayId)}`,
+    `Status: ${s(booking.status)}`,
+    booking.outboxState ? `Outbox: ${booking.outboxState}` : null,
+    `Created: ${dt(booking.createdAt)}`,
+  ], true);
+
+  add("👤 Customer", [
+    s(c?.name),
+    `📞 ${s(c?.phone)}`,
+    `✉ ${s(c?.email)}`,
+    `Lang: ${s(c?.locale)} · First-time: ${yn(c?.isFirstTime)}`,
+    `Customer ID: \`${s(c?.id)}\``,
+  ], true);
+
+  add("📅 Schedule", [
+    `Requested: ${dt(booking.requestedDate)}`,
+    `Confirmed: ${dt(booking.confirmedDate)}`,
+    `Window: ${dt(booking.scheduledStart)} → ${dt(booking.scheduledEnd)}`,
+    booking.rescheduleCount ? `Reschedules: ${booking.rescheduleCount}` : null,
+  ], true);
+
+  add("📍 Pickup", [s(booking.originAddress), booking.originFloor != null ? `Floor: ${booking.originFloor}` : null], true);
+  add("📍 Dropoff", [
+    s(booking.destAddress),
+    booking.destFloor != null ? `Floor: ${booking.destFloor}` : null,
+    `Elevator: ${yn(booking.hasElevator)}`,
+  ], true);
+
+  add("🧭 Service Area", [
+    `Zone: ${s(booking.serviceAreaZone)}`,
+    `Travel fee: ${moneyC(booking.travelFee)}${booking.travelFeeDueOnMoveDay ? " (move day)" : ""}`,
+    `Manual review: ${yn(booking.manualReviewRequired)}`,
+    booking.distanceFromWestOrangeMiles != null ? `Distance: ${booking.distanceFromWestOrangeMiles} mi` : null,
+    booking.serviceAreaMessage ? `Note: ${booking.serviceAreaMessage}` : null,
+  ], true);
+
+  add("💰 Pricing", [
+    `Base rate: ${moneyD(booking.baseRate)}`,
+    `Total estimate: ${moneyD(booking.totalEstimate)}`,
+    booking.finalAmount != null ? `Final: ${moneyD(booking.finalAmount)}` : null,
+    `Deposit: ${moneyC(booking.depositAmount)} · Paid: ${yn(booking.depositPaid)}`,
+    booking.truckAddonDueOnMoveDay ? `Truck add-on: ${moneyC(booking.truckAddonAmount)} (move day)` : null,
+  ], true);
+
+  add("🏷️ Discount", [
+    `Code: ${s(booking.discountCode)}`,
+    `Type: ${s(booking.discountType)}`,
+    booking.discountPercent != null ? `Percent: ${booking.discountPercent}%` : null,
+  ], true);
+
+  const payLines = booking.payments.map(
+    (p) =>
+      `${moneyC(p.amount)} · ${p.status}${p.stripeChargeId ? ` · charge \`${p.stripeChargeId}\`` : ""}${
+        p.receiptUrl ? ` · [receipt](${p.receiptUrl})` : ""
+      }`,
+  );
+  add("💳 Stripe", [
+    `Checkout: \`${s(booking.stripeCheckoutId)}\``,
+    `PaymentIntent: \`${s(booking.stripePaymentIntentId)}\``,
+    ...(payLines.length ? payLines : ["No captured payment yet"]),
+  ]);
+
+  add("📜 Agreement", [
+    `Accepted: ${yn(booking.agreementAccepted)}${booking.agreementVersion ? ` (${booking.agreementVersion})` : ""}`,
+    booking.agreementName ? `Name: ${booking.agreementName}` : null,
+    booking.agreementSignature ? `Signature: ${booking.agreementSignature}` : null,
+    booking.agreementAcceptedAt ? `At: ${dt(booking.agreementAcceptedAt)}` : null,
+  ], true);
+
+  add("🌐 Attribution", [
+    `Source: ${s(booking.source)}`,
+    `Found us: ${s(booking.foundUs)}`,
+    booking.referrer ? `Referrer: ${booking.referrer}` : null,
+    booking.ipAddress ? `IP: ${booking.ipAddress}` : null,
+  ], true);
+
+  if (booking.customerNotes) add("📝 Customer Notes", [booking.customerNotes]);
+  if (booking.internalNotes) add("🔒 Internal Notes", [booking.internalNotes]);
+  if (booking.itemsDescription) add("🧾 Full Description (as stored)", [booking.itemsDescription]);
+  if (booking.files.length) {
+    add(
+      `📷 Files (${booking.files.length})`,
+      booking.files.map((f, i) => `[${f.type} ${i + 1}](${f.cloudinaryUrl})`),
+    );
+  }
+
+  const embeds = paginateEmbeds(
+    `📄 Full Booking — ${s(booking.displayId)}`,
+    0x0a1628,
+    `Every stored field for this booking. [Open in dashboard](${appUrl}/admin/bookings)`,
+    fields,
+  );
+
+  return NextResponse.json({ type: RES_REPLY, data: { flags: FLAG_EPHEMERAL, embeds } });
+}
+
+// ════════════════════════════════════════════════════════════════════════
+//  MOVE-DAY JOB BUTTONS — job_start / job_complete / archive_job
+//  --------------------------------------------------------------------
+//  The worker dispatch card (posted by discord-rest createJobChannels) is
+//  edited IN PLACE on every press, using the same shared builder, so the
+//  card always shows the current human status + who pressed what and when.
+//
+//  Valid transitions (two-action crew workflow — matches the Job model):
+//    CONFIRMED/SCHEDULED → IN_PROGRESS → COMPLETED → ARCHIVED
+//  Completing straight from CONFIRMED is tolerated (crew forgot Start) and
+//  audited as such. Backward transitions are refused with an ephemeral note.
+//  Permissions: same boundary as the approve/deny buttons — access to the
+//  jobs channel. Every press is written to the audit log with the clicker.
+// ════════════════════════════════════════════════════════════════════════
+
+type JobBooking = NonNullable<Awaited<ReturnType<typeof loadJobBooking>>>;
+
+function loadJobBooking(bookingId: string) {
+  return prisma.booking.findUnique({
+    where: { id: bookingId },
+    include: { customer: true, job: true },
+  });
+}
+
+// Who pressed Start/Complete (for re-rendering after later presses).
+async function jobAuditTrail(bookingId: string): Promise<{
+  startedBy?: string;
+  startedAtLabel?: string;
+  completedBy?: string;
+  completedAtLabel?: string;
+}> {
+  const rows = await prisma.auditLog
+    .findMany({
+      where: { bookingId, action: { in: ["JOB_STARTED", "JOB_COMPLETED"] } },
+      orderBy: { createdAt: "asc" },
+    })
+    .catch(() => []);
+  const out: { startedBy?: string; startedAtLabel?: string; completedBy?: string; completedAtLabel?: string } = {};
+  for (const row of rows) {
+    const details = (row.details ?? {}) as Record<string, unknown>;
+    const by = typeof details.by === "string" ? details.by : undefined;
+    if (row.action === "JOB_STARTED" && !out.startedBy) {
+      out.startedBy = by ?? "crew";
+      out.startedAtLabel = timeOfDay(row.createdAt);
+    }
+    if (row.action === "JOB_COMPLETED") {
+      out.completedBy = by ?? "crew";
+      out.completedAtLabel = timeOfDay(row.createdAt);
+    }
+  }
+  return out;
+}
+
+async function renderJobCard(booking: JobBooking) {
+  const photoCount = await prisma.file
+    .count({ where: { bookingId: booking.id, type: "PHOTO_BEFORE" } })
+    .catch(() => 0);
+  const trail = await jobAuditTrail(booking.id);
+  const items = booking.itemsDescription;
+  const appUrl = process.env.APP_URL ?? "https://wmiwci-api.vercel.app";
+
+  return buildJobCard({
+    bookingId: booking.id,
+    displayId: booking.displayId,
+    status: booking.status,
+    customerName: booking.customer?.name,
+    customerPhone: booking.customer?.phone,
+    serviceType: serviceLabelFromDescription(items) ?? undefined,
+    moveDate: booking.confirmedDate ?? booking.requestedDate,
+    originAddress: booking.originAddress,
+    destAddress: booking.destAddress,
+    truckOptionLabel: booking.truckAddonDueOnMoveDay
+      ? TRUCK_OPTION_LABELS["truck-pickup-return"]
+      : truckLabelFromDescription(items) ?? undefined,
+    rawDescription: items,
+    photoCount,
+    laborEstimate: booking.baseRate,
+    travelFeeDollars: booking.travelFee ? booking.travelFee / 100 : null,
+    manualReviewRequired: booking.manualReviewRequired,
+    adminUrl: `${appUrl}/admin/bookings`,
+    ...trail,
+  });
+}
+
+// ── job_start:<id> — labor begins ───────────────────────────────────────────
+async function handleJobStart(bookingId: string | undefined, actor: DiscordActor) {
+  const crewName = actor.username;
+  if (!bookingId) return ephemeral("⚠️ This button is missing its booking reference.");
+  const booking = await loadJobBooking(bookingId);
+  if (!booking) return ephemeral("⚠️ Booking not found for this card.");
+
+  // Idempotent second press → just re-render the current card.
+  if (booking.status === "IN_PROGRESS") {
+    return NextResponse.json({ type: RES_UPDATE_MESSAGE, data: await renderJobCard(booking) });
+  }
+  if (booking.status === "COMPLETED" || booking.status === "ARCHIVED") {
+    return ephemeral("✅ This job is already completed.");
+  }
+  if (booking.status === "CANCELLED") {
+    return ephemeral("⚠️ This booking was cancelled — check with the owner before doing any work.");
+  }
+  if (booking.status !== "CONFIRMED" && booking.status !== "SCHEDULED") {
+    return ephemeral("⚠️ This booking hasn't been approved yet — the owner needs to approve it first.");
+  }
+
+  const now = new Date();
+  await prisma.$transaction([
+    prisma.booking.update({ where: { id: booking.id }, data: { status: "IN_PROGRESS" } }),
+    prisma.job.upsert({
+      where: { bookingId: booking.id },
+      update: { status: "IN_PROGRESS", startedAt: now },
+      create: { bookingId: booking.id, status: "IN_PROGRESS", startedAt: now },
+    }),
+    prisma.auditLog.create({
+      data: {
+        action: "JOB_STARTED",
+        bookingId: booking.id,
+        details: { by: crewName, discordUserId: actor.userId ?? null, from: booking.status },
+      },
+    }),
+  ]);
+
+  apiLogger.info({ bookingId: booking.id, by: crewName }, "Job started via Discord");
+  const updated = await loadJobBooking(booking.id);
+  return NextResponse.json({ type: RES_UPDATE_MESSAGE, data: await renderJobCard(updated ?? booking) });
+}
+
+// ── job_complete:<id> — customer confirmed the move is finished ────────────
+async function handleJobComplete(bookingId: string | undefined, actor: DiscordActor) {
+  const crewName = actor.username;
+  if (!bookingId) return ephemeral("⚠️ This button is missing its booking reference.");
+  const booking = await loadJobBooking(bookingId);
+  if (!booking) return ephemeral("⚠️ Booking not found for this card.");
+
+  if (booking.status === "COMPLETED" || booking.status === "ARCHIVED") {
+    return NextResponse.json({ type: RES_UPDATE_MESSAGE, data: await renderJobCard(booking) });
+  }
+  if (booking.status === "CANCELLED") {
+    return ephemeral("⚠️ This booking was cancelled — nothing to complete.");
+  }
+  const skippedStart = booking.status === "CONFIRMED" || booking.status === "SCHEDULED";
+  if (!skippedStart && booking.status !== "IN_PROGRESS") {
+    return ephemeral("⚠️ This booking hasn't been approved yet — the owner needs to approve it first.");
+  }
+
+  const now = new Date();
+  const startedAt = booking.job?.startedAt ?? null;
+  const durationMins = startedAt ? Math.max(0, Math.round((now.getTime() - startedAt.getTime()) / 60000)) : null;
+
+  await prisma.$transaction([
+    prisma.booking.update({
+      where: { id: booking.id },
+      data: { status: "COMPLETED", completedAt: now },
+    }),
+    prisma.job.upsert({
+      where: { bookingId: booking.id },
+      update: { status: "COMPLETED", completedAt: now, ...(durationMins != null ? { durationMins } : {}) },
+      create: { bookingId: booking.id, status: "COMPLETED", startedAt: now, completedAt: now },
+    }),
+    prisma.auditLog.create({
+      data: {
+        action: "JOB_COMPLETED",
+        bookingId: booking.id,
+        details: { by: crewName, discordUserId: actor.userId ?? null, from: booking.status, startNotPressed: skippedStart || undefined },
+      },
+    }),
+  ]);
+
+  apiLogger.info({ bookingId: booking.id, by: crewName, durationMins }, "Job completed via Discord");
+  const updated = await loadJobBooking(booking.id);
+  return NextResponse.json({ type: RES_UPDATE_MESSAGE, data: await renderJobCard(updated ?? booking) });
+}
+
+// ── archive_job:<id> — file the finished card away ─────────────────────────
+async function handleJobArchive(bookingId: string | undefined, actor: DiscordActor) {
+  const crewName = actor.username;
+  if (!bookingId) return ephemeral("⚠️ This button is missing its booking reference.");
+  const booking = await loadJobBooking(bookingId);
+  if (!booking) return ephemeral("⚠️ Booking not found for this card.");
+
+  if (booking.status === "ARCHIVED") {
+    return NextResponse.json({ type: RES_UPDATE_MESSAGE, data: await renderJobCard(booking) });
+  }
+  if (booking.status !== "COMPLETED") {
+    return ephemeral("⚠️ Only a completed job can be archived.");
+  }
+
+  await prisma.$transaction([
+    prisma.booking.update({ where: { id: booking.id }, data: { status: "ARCHIVED" } }),
+    prisma.auditLog.create({
+      data: {
+        action: "BOOKING_STATE_CHANGED",
+        bookingId: booking.id,
+        details: { action: "archive_job", by: crewName, discordUserId: actor.userId ?? null, from: booking.status },
+      },
+    }),
+  ]);
+
+  apiLogger.info({ bookingId: booking.id, by: crewName }, "Job archived via Discord");
+  const updated = await loadJobBooking(booking.id);
+  return NextResponse.json({ type: RES_UPDATE_MESSAGE, data: await renderJobCard(updated ?? booking) });
 }
 
 // ── Slash commands (type 2): field logging, usable from ANY channel ────────
@@ -604,20 +1097,70 @@ export async function POST(req: Request) {
     const customId: string = interaction.data?.custom_id ?? "";
     const [action, id] = customId.split(":");
     const messageId: string | undefined = interaction.message?.id;
-    const user = interaction.member?.user ?? interaction.user;
-    const approver: string = user?.global_name ?? user?.username ?? "admin";
 
-    if (action === "approve_booking") {
-      return handleApprove(id, messageId, approver);
-    }
-    if (action === "deny_booking") {
-      return handleDeny(id, messageId, approver);
-    }
-    if (action === "offer_reschedule") {
-      return handleOffer(id, messageId, approver);
+    // ── OWNER AUTHORIZATION — the single gate for every privileged button ──
+    // Every action that mutates a booking / moves money is owner-only. A user is
+    // an owner when their ID is in DISCORD_OWNER_USER_IDS or they hold
+    // DISCORD_OWNER_ROLE_ID inside the configured guild (see lib/discord-auth).
+    // Unauthorized presses get a generic ephemeral notice and are logged; we
+    // never leak which IDs/roles are allowed.
+    const OWNER_ACTIONS = new Set([
+      "approve_booking",
+      "deny_booking",
+      "offer_reschedule",
+      "view_full_booking",
+      "approve_discount",
+      "deny_discount",
+      "job_start",
+      "job_complete",
+      "archive_job",
+    ]);
+    if (OWNER_ACTIONS.has(action)) {
+      const auth = authorizeOwnerAction(interaction, action);
+      if (!auth.ok) {
+        return ephemeral("🔒 You do not have permission to manage this booking.");
+      }
+      const actor = auth.actor;
+
+      if (action === "approve_booking") {
+        return handleApprove(id, messageId, actor);
+      }
+      if (action === "deny_booking") {
+        return handleDeny(id, messageId, actor);
+      }
+      if (action === "offer_reschedule") {
+        return handleOffer(id, messageId, actor);
+      }
+      if (action === "view_full_booking") {
+        try {
+          return await handleViewFullBooking(id, messageId);
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          apiLogger.error({ action, bookingId: id, err: msg }, "✖ view_full_booking failed");
+          return ephemeral("⚠️ Couldn't load the full booking — try the admin dashboard.");
+        }
+      }
+
+      // Move-day job buttons — each wrapped so a failure never leaves the
+      // worker with a dead "interaction failed" spinner.
+      if (action === "job_start" || action === "job_complete" || action === "archive_job") {
+        try {
+          if (action === "job_start") return await handleJobStart(id, actor);
+          if (action === "job_complete") return await handleJobComplete(id, actor);
+          return await handleJobArchive(id, actor);
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          apiLogger.error({ action, bookingId: id, err: msg }, "✖ job button handler failed");
+          return ephemeral("⚠️ Something went wrong updating this job — try again or use the admin portal.");
+        }
+      }
+
+      // Authorized owner, but the specific action (discount buttons) has no
+      // handler on this endpoint yet — acknowledge without leaking anything.
+      return ephemeral("Received — that action isn't handled by this endpoint yet.");
     }
 
-    // Unknown component (discount buttons, job buttons, …) — acknowledge.
+    // Non-privileged / unknown component — acknowledge.
     return ephemeral("Received — that action isn't handled by this endpoint yet.");
   }
 

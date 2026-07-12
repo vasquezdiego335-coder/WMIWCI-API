@@ -260,7 +260,10 @@ export async function fulfillPaidCheckout(params: {
     )
   )
 
-  // 5) Create the Discord job-coordination card
+  // 5) Create the Discord job-coordination card (worker dispatch view).
+  //    The payload carries everything the MOVE DAY JOB card renders so the
+  //    worker never needs raw DB access; price detail stays owner-side except
+  //    the labor estimate + travel-fee status the crew is allowed to see.
   tasks.push(
     enqueue('discord:create-job-channels', () =>
       discordQueue.add('create-job-channels', {
@@ -270,8 +273,15 @@ export async function fulfillPaidCheckout(params: {
           bookingId,
           displayId: booking.displayId,
           customerName: booking.customer.name,
+          customerPhone: booking.customer.phone,
           originAddress: booking.originAddress,
+          destAddress: booking.destAddress,
+          requestedDate: booking.requestedDate?.toISOString(),
           items: booking.itemsDescription ?? undefined,
+          truckAddonDueOnMoveDay: booking.truckAddonDueOnMoveDay,
+          laborEstimate: booking.baseRate,
+          travelFeeDollars: booking.travelFee ? booking.travelFee / 100 : 0,
+          manualReviewRequired: booking.manualReviewRequired,
         },
       })
     )

@@ -108,8 +108,37 @@ export async function createBookingCheckout(params: {
 }
 
 // Capture the held $49 (used when a booking is APPROVED).
-export async function captureDeposit(paymentIntentId: string): Promise<Stripe.PaymentIntent> {
-  return getStripeClient().paymentIntents.capture(paymentIntentId)
+//
+// The optional idempotencyKey is a second line of defense against a
+// double-capture: even if two approvals race past the DB claim, Stripe collapses
+// two captures that share a key into a single charge. Callers pass a key derived
+// from the payment intent so retries of the SAME capture dedupe, while a genuine
+// re-auth (new PI) is unaffected.
+export async function captureDeposit(
+  paymentIntentId: string,
+  idempotencyKey?: string
+): Promise<Stripe.PaymentIntent> {
+  return getStripeClient().paymentIntents.capture(
+    paymentIntentId,
+    undefined,
+    idempotencyKey ? { idempotencyKey } : undefined
+  )
+}
+
+// After a capture, pull the resulting Charge so callers can persist + display
+// the charge id, the hosted receipt URL, and the payment-method type (none of
+// which live on the PaymentIntent itself). Best-effort: returns null when the
+// PI has no charge yet or the retrieve fails, so it can never break approval.
+export async function retrieveChargeForIntent(
+  pi: Stripe.PaymentIntent
+): Promise<Stripe.Charge | null> {
+  const chargeId = typeof pi.latest_charge === 'string' ? pi.latest_charge : pi.latest_charge?.id
+  if (!chargeId) return null
+  try {
+    return await getStripeClient().charges.retrieve(chargeId)
+  } catch {
+    return null
+  }
 }
 
 // Cancel the authorization to RELEASE the hold (used when a booking is DENIED

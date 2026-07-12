@@ -25,6 +25,7 @@
     "bot:register": "tsx src/bot/register-commands.ts",
     "backup": "bash scripts/backup-db.sh",
     "typecheck": "tsc --noEmit",
+    "test": "tsx --test src/lib/__tests__/booking-display.test.ts",
     "hash-password": "tsx scripts/hash-password.ts",
     "register-commands": "tsx src/bot/register-commands.ts"
   },

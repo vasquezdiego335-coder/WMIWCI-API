@@ -3,6 +3,7 @@ import { getSession } from '@/lib/auth'
 import { prisma } from '@/lib/db'
 import { apiLogger } from '@/lib/logger'
 import { onBookingCompleted } from '@/lib/followups'
+import { confirmationScheduleData } from '@/lib/scheduling'
 import { z } from 'zod'
 
 const VALID_TRANSITIONS: Record<string, string[]> = {
@@ -37,6 +38,20 @@ export async function POST(req: NextRequest, { params }: { params: { id: string 
   }
 
   const data: Record<string, unknown> = { status: newStatus }
+
+  // Confirming here must schedule the booking exactly like the Discord approve
+  // path does: populate scheduledStart (what every schedule view queries on) and
+  // ensure a Job record exists. Without this, an admin-confirmed booking would be
+  // invisible to the daily digest + dashboards.
+  if (newStatus === 'CONFIRMED') {
+    const sched = confirmationScheduleData(booking)
+    if (sched) Object.assign(data, sched)
+    await prisma.job.upsert({
+      where: { bookingId: params.id },
+      update: { status: 'SCHEDULED' },
+      create: { bookingId: params.id, status: 'SCHEDULED' },
+    })
+  }
 
   // Set timestamps on the linked Job record if it exists
   if (newStatus === 'IN_PROGRESS') {

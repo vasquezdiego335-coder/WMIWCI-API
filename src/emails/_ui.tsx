@@ -161,7 +161,7 @@ export function LogoHeader() {
                 MOVE IT CLEAR IT
               </div>
               <div style={{ fontFamily: FONT, fontSize: '9.5px', fontWeight: 700, letterSpacing: '1.8px', color: C.gold, textTransform: 'uppercase' as const, marginTop: '6px' }}>
-                Premium Moving &amp; Junk Removal
+                Premium Labor Moving
               </div>
             </td>
           </tr>

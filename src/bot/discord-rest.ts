@@ -9,6 +9,14 @@ import {
 } from 'discord.js'
 import { botLogger } from '../lib/logger'
 import { prisma } from '../lib/db'
+import {
+  buildJobCard,
+  buildBookingApprovalCard,
+  approvalCardDataFromBooking,
+  serviceLabelFromDescription,
+  truckLabelFromDescription,
+  TRUCK_OPTION_LABELS,
+} from '../lib/booking-display'
 
 // ════════════════════════════════════════════════════════════════════════
 //  Discord REST sender — for the WORKER process (and any non-gateway caller)
@@ -86,15 +94,6 @@ async function restSendFirst(envKeys: string[], body: MessageBody): Promise<{ id
   return null
 }
 
-const fmtDate = (v: unknown): string =>
-  v
-    ? new Date(v as string).toLocaleString('en-US', {
-        timeZone: 'America/New_York',
-        dateStyle: 'medium',
-        timeStyle: 'short',
-      })
-    : 'Date TBD'
-
 // ══════════════════════════════════════════════════════════════════════════
 //  1. Booking approval card  (Approve / Offer New Dates / Deny)
 // ══════════════════════════════════════════════════════════════════════════
@@ -104,61 +103,23 @@ export async function postBookingApprovalCard(
 ): Promise<void> {
   botLogger.info({ bookingId }, '▶ postBookingApprovalCard (REST)')
 
-  const agreementValue = payload.agreementAccepted
-    ? `✅ Accepted${payload.agreementVersion ? ` (${payload.agreementVersion})` : ''}` +
-      (payload.agreementName ? `\nby **${payload.agreementName}**` : '')
-    : '⚠️ NOT accepted'
-
-  const money = (n: unknown): string | null =>
-    typeof n === 'number' ? `$${n.toLocaleString('en-US')}` : null
-
-  const embed = new EmbedBuilder()
-    .setTitle(`📋 New Booking — ${payload.displayId}`)
-    .setColor(0xc9a961)
-    .addFields(
-      {
-        name: '👤 Customer',
-        value:
-          [`**${payload.customerName}**`, payload.customerEmail as string, payload.customerPhone as string]
-            .filter(Boolean)
-            .join('\n') || '—',
-        inline: true,
+  // The booking row is the source of truth — load it so BOTH callers (payment
+  // fulfillment and the customer reschedule re-post) render the same full card
+  // regardless of how thin their queued payload was. A COMPLETED payment (rare
+  // at approval time) carries the captured charge + receipt for display.
+  const booking = await prisma.booking
+    .findUnique({
+      where: { id: bookingId },
+      include: {
+        customer: true,
+        payments: { where: { status: 'COMPLETED' }, orderBy: { createdAt: 'desc' }, take: 1 },
       },
-      {
-        name: '📦 Booking',
-        value:
-          [
-            `📅 ${fmtDate(payload.requestedDate)}`,
-            payload.amountPaid ? `💳 $${payload.amountPaid} authorized (hold)` : '',
-            payload.discountType ? `🏷️ ${payload.discountType}` : '',
-          ]
-            .filter(Boolean)
-            .join('\n') || '—',
-        inline: true,
-      },
-      { name: '📜 Agreement', value: agreementValue, inline: true }
-    )
-    .setFooter({ text: `Booking ID: ${bookingId}` })
-    .setTimestamp()
+    })
+    .catch((err) => {
+      botLogger.warn({ bookingId, err: errMsg(err) }, 'approval card: booking load failed — falling back to payload')
+      return null
+    })
 
-  const paymentValue =
-    [
-      '💳 $49 authorized today (hold — captured on approval)',
-      money(payload.moveTotal) ? `Move total: ${money(payload.moveTotal)}` : '',
-      money(payload.balanceAfterJob) ? `Balance after job: ${money(payload.balanceAfterJob)}` : '',
-      payload.truckAddonDueOnMoveDay
-        ? `🚚 Truck add-on (move day): ${money(((payload.truckAddonAmount as number) ?? 5000) / 100)}`
-        : '',
-    ]
-      .filter(Boolean)
-      .join('\n') || '—'
-  embed.addFields({ name: '💰 Payment & Balance', value: paymentValue })
-  if (payload.items) embed.addFields({ name: '📝 Details', value: String(payload.items).slice(0, 1024) })
-
-  // ── Job photos (PHOTO_BEFORE) — render up to 4 as a thumbnail gallery ──
-  // Discord merges embeds that share the SAME `url` into one image gallery, so
-  // we set a common url on the main embed + each image embed. All photos are
-  // also listed as clickable links so none are hidden past the 4-image cap.
   const photos = await prisma.file
     .findMany({
       where: { bookingId, type: 'PHOTO_BEFORE' },
@@ -167,28 +128,48 @@ export async function postBookingApprovalCard(
       take: 10,
     })
     .catch(() => [] as { cloudinaryUrl: string }[])
+  const photoUrls = photos.map((p) => ({ url: p.cloudinaryUrl }))
 
-  const photoEmbeds: object[] = []
-  if (photos.length) {
-    const GALLERY_URL = 'https://www.moveitclearit.com'
-    const links = photos.map((p, i) => `[Photo ${i + 1}](${p.cloudinaryUrl})`).join(' · ')
-    embed.addFields({ name: `📷 Job Photos (${photos.length})`, value: links.slice(0, 1024) })
-    embed.setURL(GALLERY_URL)
-    for (const p of photos.slice(0, 4)) {
-      photoEmbeds.push(new EmbedBuilder().setURL(GALLERY_URL).setImage(p.cloudinaryUrl).toJSON())
-    }
-  }
+  const appUrl = process.env.APP_URL ?? 'https://wmiwci-api.vercel.app'
+  const adminUrl = `${appUrl}/admin/bookings`
+  // The reschedule route prefixes items with a "🔁 RESCHEDULED" marker.
+  const rescheduled = typeof payload.items === 'string' && /RESCHEDULED/i.test(payload.items as string)
 
-  const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
-    new ButtonBuilder().setCustomId(`approve_booking:${bookingId}`).setLabel('✅ Approve').setStyle(ButtonStyle.Success),
-    new ButtonBuilder().setCustomId(`offer_reschedule:${bookingId}`).setLabel('📅 Offer New Dates').setStyle(ButtonStyle.Primary),
-    new ButtonBuilder().setCustomId(`deny_booking:${bookingId}`).setLabel('❌ Deny').setStyle(ButtonStyle.Danger)
-  )
+  const cardData = booking
+    ? approvalCardDataFromBooking(booking, {
+        photos: photoUrls,
+        photoCount: photos.length,
+        adminUrl,
+        rescheduled,
+        stripeChargeId: booking.payments[0]?.stripeChargeId ?? null,
+        receiptUrl: booking.payments[0]?.receiptUrl ?? null,
+      })
+    : {
+        // Fallback: booking vanished — render whatever the queued payload carried.
+        bookingId,
+        displayId: (payload.displayId as string) ?? null,
+        customerName: (payload.customerName as string) ?? null,
+        customerEmail: (payload.customerEmail as string) ?? null,
+        customerPhone: (payload.customerPhone as string) ?? null,
+        requestedDate: (payload.requestedDate as string) ?? null,
+        originAddress: (payload.originAddress as string) ?? null,
+        destAddress: (payload.destAddress as string) ?? null,
+        rawDescription: (payload.items as string) ?? null,
+        moveTotal: typeof payload.moveTotal === 'number' ? (payload.moveTotal as number) : null,
+        balanceAfterJob: typeof payload.balanceAfterJob === 'number' ? (payload.balanceAfterJob as number) : null,
+        truckAddonDueOnMoveDay: payload.truckAddonDueOnMoveDay === true,
+        agreementAccepted: payload.agreementAccepted === true,
+        agreementVersion: (payload.agreementVersion as string) ?? null,
+        agreementName: (payload.agreementName as string) ?? null,
+        rescheduled,
+        photos: photoUrls,
+        photoCount: photos.length,
+        adminUrl,
+      }
 
-  const msg = await restSendToChannel('DISCORD_CHANNEL_SCHEDULING', {
-    embeds: [embed.toJSON(), ...photoEmbeds],
-    components: [row.toJSON()],
-  })
+  const card = buildBookingApprovalCard(cardData)
+
+  const msg = await restSendToChannel('DISCORD_CHANNEL_SCHEDULING', card)
   if (!msg) return
 
   await prisma.booking
@@ -260,44 +241,46 @@ export async function postFailureAlert(payload: Record<string, unknown>): Promis
 }
 
 // ══════════════════════════════════════════════════════════════════════════
-//  5. Job-coordination card (Start / Complete / Archive)
+//  5. Worker dispatch card — "MOVE DAY JOB" (Start / Complete, links)
+//     Built by the shared, tested builder in lib/booking-display.ts so the
+//     interactions endpoint re-renders the exact same card on button presses.
+//     Worker-facing: human statuses, short ref, no payment breakdown.
 // ══════════════════════════════════════════════════════════════════════════
 export async function createJobChannels(bookingId: string, payload: Record<string, unknown>): Promise<void> {
   botLogger.info({ bookingId }, '▶ createJobChannels (REST)')
-  const embed = new EmbedBuilder()
-    .setTitle(`🚛 Job — ${payload.displayId}`)
-    .setColor(0x0a1628)
-    .addFields(
-      {
-        name: '👤 Customer',
-        value: [`**${payload.customerName}**`, payload.customerEmail as string, payload.customerPhone as string].filter(Boolean).join('\n') || '—',
-        inline: true,
-      },
-      {
-        name: '📋 Details',
-        value:
-          [
-            payload.serviceType ? `Service: **${payload.serviceType}**` : '',
-            payload.confirmedDate ? `📅 ${payload.confirmedDate}` : '',
-            payload.originAddress ? `📍 From: ${payload.originAddress}` : '',
-          ]
-            .filter(Boolean)
-            .join('\n') || '—',
-        inline: true,
-      }
-    )
-    .setDescription('Track the job on move day. Mark **Start** when the crew departs, **Complete** when done.')
-    .setFooter({ text: `Booking ID: ${bookingId}` })
 
-  // Job details (service, truck, access difficulty, customer notes).
-  if (payload.items) embed.addFields({ name: '📝 Job Details', value: String(payload.items).slice(0, 1024) })
+  const items = payload.items ? String(payload.items) : null
+  const appUrl = process.env.APP_URL ?? 'https://wmiwci-api.vercel.app'
 
-  const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
-    new ButtonBuilder().setCustomId(`job_start:${bookingId}`).setLabel('▶️ Start Job').setStyle(ButtonStyle.Primary),
-    new ButtonBuilder().setCustomId(`job_complete:${bookingId}`).setLabel('✅ Complete').setStyle(ButtonStyle.Success),
-    new ButtonBuilder().setCustomId(`archive_job:${bookingId}`).setLabel('🗃️ Archive').setStyle(ButtonStyle.Secondary)
-  )
-  await restSendToChannel('DISCORD_CHANNEL_JOBS', { embeds: [embed.toJSON()], components: [row.toJSON()] })
+  const photoCount = await prisma.file
+    .count({ where: { bookingId, type: 'PHOTO_BEFORE' } })
+    .catch(() => 0)
+
+  const card = buildJobCard({
+    bookingId,
+    displayId: payload.displayId as string | undefined,
+    status: 'CONFIRMED',
+    customerName: payload.customerName as string | undefined,
+    customerPhone: payload.customerPhone as string | undefined,
+    serviceType: serviceLabelFromDescription(items) ?? undefined,
+    moveDate: (payload.requestedDate as string | undefined) ?? (payload.confirmedDate as string | undefined),
+    originAddress: payload.originAddress as string | undefined,
+    destAddress: payload.destAddress as string | undefined,
+    truckOptionLabel:
+      payload.truckAddonDueOnMoveDay === true
+        ? TRUCK_OPTION_LABELS['truck-pickup-return']
+        : truckLabelFromDescription(items) ?? undefined,
+    rawDescription: items,
+    photoCount,
+    laborEstimate: typeof payload.laborEstimate === 'number' ? payload.laborEstimate : null,
+    travelFeeDollars: typeof payload.travelFeeDollars === 'number' ? payload.travelFeeDollars : null,
+    manualReviewRequired: payload.manualReviewRequired === true,
+    adminUrl: `${appUrl}/admin/bookings`,
+  })
+
+  // Button presses edit the clicked card in place (RES_UPDATE_MESSAGE) and the
+  // booking id rides in each button's custom_id, so no message id is persisted.
+  await restSendToChannel('DISCORD_CHANNEL_JOBS', card)
 }
 
 // ══════════════════════════════════════════════════════════════════════════

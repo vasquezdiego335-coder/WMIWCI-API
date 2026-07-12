@@ -6,6 +6,8 @@ import { apiLogger } from '@/lib/logger'
 import { AGREEMENT_VERSION } from '@/lib/agreement'
 import { notifyBookingCreated } from '@/lib/notify'
 import { checkServiceArea, travelFeeDollars, type AddressInput } from '@/lib/service-area'
+import { ELEVATOR_LABELS, PARKING_LABELS, BUILDING_LABELS } from '@/lib/booking-display'
+import { etDateTimeToInstant } from '@/lib/scheduling'
 
 const TRUCK_PICKUP_RETURN_AMOUNT_CENTS = 5000
 
@@ -113,6 +115,26 @@ const BookingSchema = z.object({
   longWalk: z.coerce.boolean().optional(),
   heavyItems: z.coerce.boolean().optional(),
 
+  // ── Structured access details (booking form selects). Unknown values are
+  //    dropped rather than rejected so an old cached form can never 422. ──
+  elevatorAccess: z
+    .string()
+    .transform((v) => (ELEVATOR_LABELS[sanitizeText(v)] ? sanitizeText(v) : undefined))
+    .optional(),
+  parkingDistance: z
+    .string()
+    .transform((v) => (PARKING_LABELS[sanitizeText(v)] ? sanitizeText(v) : undefined))
+    .optional(),
+  buildingYear: z
+    .string()
+    .transform((v) => (BUILDING_LABELS[sanitizeText(v)] ? sanitizeText(v) : undefined))
+    .optional(),
+
+  // ── Client-side estimate snapshot (display only — NEVER drives pricing).
+  //    Shown to the owner so the approval card matches what the customer saw. ──
+  estimateTotal: z.coerce.number().min(0).max(100000).optional(),
+  estimateAddons: z.coerce.number().min(0).max(100000).optional(),
+
   // ── Marketing attribution (?src= from the QR / landing URL) ──
   source: z.string().transform(sanitizeText).pipe(z.string().max(60)).optional(),
   // "Where did you find us?" self-report from the booking-form dropdown.
@@ -164,18 +186,29 @@ const TRUCK_LABELS: Record<string, string> = {
 
 function buildRequestedDate(date?: string, time?: string): Date {
   if (!date) return new Date()
-  const timeStr = time ?? '07:00'
-  const dt = new Date(`${date}T${timeStr}:00`)
-  return isNaN(dt.getTime()) ? new Date() : dt
+  // Interpret the customer's picked date/time as America/New_York wall-clock,
+  // independent of the server's timezone. Using `new Date("...T...")` parsed the
+  // string in the SERVER's zone, so on a UTC host a picked "12:00 PM" was stored
+  // as noon-UTC (= 8 AM ET) and could land the move on the wrong calendar day.
+  const dt = etDateTimeToInstant(date, time ?? '07:00')
+  return dt ?? new Date()
 }
 
-type AccessFlags = { stairs?: boolean; longWalk?: boolean; heavyItems?: boolean }
+type AccessFlags = {
+  stairs?: boolean
+  longWalk?: boolean
+  heavyItems?: boolean
+  elevatorAccess?: string
+  parkingDistance?: string
+  buildingYear?: string
+}
 
 function buildDescription(
   serviceType: string,
   truckOption?: string,
   jobDetails?: string,
   access?: AccessFlags,
+  estimate?: { total?: number; addons?: number },
 ): string {
   const svc = SERVICE_MAP[serviceType]
   const lines: string[] = []
@@ -184,14 +217,30 @@ function buildDescription(
   if (truckOption === 'truck-pickup-return') {
     lines.push('Truck add-on due on move day: $50 (not charged in Stripe)')
   }
-  // Access difficulty — verbose lines + fee note, only when something is selected.
+  // Access conditions — always human-readable (these lines reach the Discord
+  // cards, admin portal, and customer emails verbatim).
   const accessLines: string[] = []
   if (access?.stairs) accessLines.push('Stairs: No elevator / flights to carry up or down')
   if (access?.longWalk) accessLines.push('Long walk: Far from the door to the truck or parking')
   if (access?.heavyItems) accessLines.push('Heavy items: Piano, safe, appliances, dense furniture')
+  if (access?.elevatorAccess && ELEVATOR_LABELS[access.elevatorAccess]) {
+    accessLines.push(`Elevator: ${ELEVATOR_LABELS[access.elevatorAccess]}`)
+  }
+  if (access?.parkingDistance && PARKING_LABELS[access.parkingDistance]) {
+    accessLines.push(`Parking: ${PARKING_LABELS[access.parkingDistance]}`)
+  }
+  if (access?.buildingYear && BUILDING_LABELS[access.buildingYear]) {
+    accessLines.push(`Building: ${BUILDING_LABELS[access.buildingYear]}`)
+  }
   if (accessLines.length) {
     lines.push(...accessLines)
     lines.push('Note: Stairs, long walks, and heavy items may add an extra fee.')
+  }
+  // Owner-facing snapshot of the estimate the CUSTOMER saw (display only —
+  // pricing stays server-computed in baseRate/totalEstimate).
+  if (typeof estimate?.total === 'number' && estimate.total > 0) {
+    const addons = typeof estimate.addons === 'number' && estimate.addons > 0 ? ` (includes $${estimate.addons} access add-ons)` : ''
+    lines.push(`Customer-side estimate: $${estimate.total}${addons}`)
   }
   if (jobDetails?.trim()) lines.push(`Notes: ${jobDetails.trim()}`)
   return lines.join('\n')
@@ -276,16 +325,25 @@ async function handleBooking(req: NextRequest): Promise<NextResponse> {
 
   const requestedDate = buildRequestedDate(data.date, data.time)
   const truckAddonDueOnMoveDay = data.truckOption === 'truck-pickup-return'
-  const itemsDescription = buildDescription(data.serviceType, data.truckOption, data.jobDetails, {
-    stairs: data.stairs,
-    longWalk: data.longWalk,
-    heavyItems: data.heavyItems,
-  })
+  const itemsDescription = buildDescription(
+    data.serviceType,
+    data.truckOption,
+    data.jobDetails,
+    {
+      stairs: data.stairs,
+      longWalk: data.longWalk,
+      heavyItems: data.heavyItems,
+      elevatorAccess: data.elevatorAccess,
+      parkingDistance: data.parkingDistance,
+      buildingYear: data.buildingYear,
+    },
+    { total: data.estimateTotal, addons: data.estimateAddons },
+  )
     + (data.source ? `\nSource: ${data.source}` : '')
     + (data.photos?.length ? `\n📷 ${data.photos.length} job photo(s) attached — view in admin/portal` : '')
     + (sa?.zone === 'extended_nj' ? '\nExtended service-area fee: $50 (due on move day)' : '')
     + (sa?.zone === 'primary' ? '\nService area: Primary — no travel fee' : '')
-    + (sa?.manualReviewRequired ? `\n⚠ Service area: ${sa.zone.toUpperCase()} — MANUAL REVIEW REQUIRED (travel price pending; do not confirm a final travel price)` : '')
+    + (sa?.manualReviewRequired ? '\n⚠ Service area: Owner review required — travel price pending; do not confirm a final travel price' : '')
     + ((data.pickupAddresses ?? []).slice(1).map(formatAddr).filter(Boolean).length
         ? `\nAdditional pickup(s): ${(data.pickupAddresses ?? []).slice(1).map(formatAddr).filter(Boolean).join(' | ')}`
         : '')
@@ -299,6 +357,11 @@ async function handleBooking(req: NextRequest): Promise<NextResponse> {
       originAddress: originDisplay || 'Provided at confirmation',
       destAddress: destDisplay || 'Provided at confirmation',
       itemsDescription,
+      // The customer's own words also land in a dedicated column (not just the
+      // itemsDescription blob) so the Discord card, admin portal, and emails can
+      // show the exact notes cleanly. itemsDescription still carries a "Notes:"
+      // line for the legacy/human summary.
+      customerNotes: data.jobDetails ?? null,
       requestedDate,
       depositAmount: BOOKING_FEE_CENTS,
       depositPaid: false,
