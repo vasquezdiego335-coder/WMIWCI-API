@@ -26,17 +26,29 @@ import BookingRescheduledEmail from '../emails/booking-rescheduled'
 import { emailSubject } from '../lib/i18n'
 
 // ════════════════════════════════════════════════════════════════════════
-//  MESSAGING POLICY — exactly TWO customer emails exist in this system:
-//    • 'pre-approval'       → queued by the Discord approval handler
-//    • 'final-confirmation' → queued by fulfillPaidCheckout()
-//  ALLOWED_TEMPLATES is the single hard guarantee: any other template (legacy
-//  booking-confirmation, contact-ack, booking-denied, reschedule-offer, the
-//  scheduled digests, …) is DROPPED at this choke point with a clear log, so a
-//  stray enqueue anywhere in the codebase can never send a third kind of email.
+//  MESSAGING POLICY — the customer transactional journey. Each of these is a
+//  premium _ui-kit email tied to a real booking lifecycle event:
+//    • 'pre-approval'       → payment step (also sent via the outbox when ON)
+//    • 'final-confirmation' → owner approval (also sent via the outbox when ON)
+//    • 'payment-receipt'    → admin "resend receipt"
+//    • 'job-reminder'       → 72h / 24h before the move (scheduled worker)
+//    • 'review-request'     → after completion (also fired by followups)
+//    • 'abandoned-checkout' → started a booking, no deposit (recovery)
+//    • 'job-completion'     → move complete / thank-you
+//  ALLOWED_TEMPLATES is the single choke point: any template NOT listed here
+//  (legacy booking-confirmation, contact-ack, booking-denied, the scheduled
+//  digests, …) is DROPPED with a clear log, so a stray enqueue can never send
+//  an unintended email. Add a template here only when its design + trigger are
+//  intentionally part of the customer journey.
 // ════════════════════════════════════════════════════════════════════════
 const ALLOWED_TEMPLATES = new Set<EmailJobData['template']>([
   'pre-approval',
   'final-confirmation',
+  'payment-receipt',
+  'job-reminder',
+  'review-request',
+  'abandoned-checkout',
+  'job-completion',
 ])
 
 const TEMPLATES: Record<

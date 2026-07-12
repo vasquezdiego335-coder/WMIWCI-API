@@ -146,6 +146,10 @@ const EMAIL_SUBJECTS: Record<string, { en: string; es: string }> = {
   'booking-rescheduled': { en: 'Your move has been rescheduled',             es: 'Tu mudanza ha sido reprogramada' },
   'job-completion':    { en: 'Your move is complete — receipt enclosed',    es: 'Tu mudanza está completa — recibo adjunto' },
   'contact-ack':       { en: 'We got your message',                         es: 'Recibimos tu mensaje' },
+  'payment-receipt':   { en: 'Payment received — receipt enclosed',         es: 'Pago recibido — recibo adjunto' },
+  'job-reminder':      { en: 'Your move is almost here',                    es: 'Tu mudanza ya casi llega' },
+  'review-request':    { en: 'How did we do? Leave us a review',            es: '¿Cómo lo hicimos? Deja tu reseña' },
+  'abandoned-checkout':{ en: 'Your date is still available',                es: 'Tu fecha sigue disponible' },
 }
 
 export function emailSubject(template: string, locale?: string): string {

@@ -63,8 +63,12 @@ async function processScheduledJob(job: Job<ScheduledJobData>): Promise<void> {
         bookingId,
         payload: {
           customerName: booking.customer.name,
+          displayId: booking.displayId,
+          requestedDate: booking.requestedDate?.toISOString(),
           checkoutUrl: `${process.env.APP_URL}/api/stripe/checkout?resume=${bookingId}`,
+          portalUrl: `${process.env.APP_URL}/my-booking/${booking.customerToken}`,
           heroGifUrl: process.env.EMAIL_HERO_GIF_URL || 'https://moveitclearit.com/email/truck-hero.gif',
+          locale: booking.customer.locale,
         },
       })
       log.info({ bookingId }, 'Abandoned checkout recovery email queued')
@@ -85,10 +89,14 @@ async function processScheduledJob(job: Job<ScheduledJobData>): Promise<void> {
         bookingId,
         payload: {
           customerName: booking.customer.name,
+          displayId: booking.displayId,
           scheduledStart: booking.scheduledStart?.toISOString(),
+          timeLabel: booking.arrivalWindow ?? undefined,
+          leadLabel: booking.customer.locale === 'es' ? 'mañana' : 'tomorrow',
           originAddress: booking.originAddress,
           portalUrl: `${process.env.APP_URL}/my-booking/${booking.customerToken}`,
           heroGifUrl: process.env.EMAIL_HERO_GIF_URL || 'https://moveitclearit.com/email/truck-hero.gif',
+          locale: booking.customer.locale,
         },
       })
       log.info({ bookingId }, '24h job reminder queued')
@@ -109,9 +117,10 @@ async function processScheduledJob(job: Job<ScheduledJobData>): Promise<void> {
         bookingId,
         payload: {
           customerName: booking.customer.name,
-          googleReviewUrl: 'https://g.page/r/REPLACE_WITH_GOOGLE_REVIEW_LINK/review',
+          googleReviewUrl: process.env.GOOGLE_REVIEW_URL || 'https://g.page/r/REPLACE_WITH_GOOGLE_REVIEW_LINK/review',
           portalUrl: `${process.env.APP_URL}/my-booking/${booking.customerToken}`,
           heroGifUrl: process.env.EMAIL_HERO_GIF_URL || 'https://moveitclearit.com/email/truck-hero.gif',
+          locale: booking.customer.locale,
         },
       })
       log.info({ bookingId }, 'Review request queued')
