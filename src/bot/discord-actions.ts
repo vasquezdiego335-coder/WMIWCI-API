@@ -14,6 +14,12 @@ import {
 import { botLogger } from '../lib/logger'
 import { prisma } from '../lib/db'
 import { handleSlashCommand } from './command-handler'
+import {
+  buildJobCard,
+  serviceLabelFromDescription,
+  truckLabelFromDescription,
+  TRUCK_OPTION_LABELS,
+} from '../lib/booking-display'
 
 // ════════════════════════════════════════════════════════════════════════
 //  We Move It. We Clear It. — Discord bot actions + gateway client
@@ -532,8 +538,9 @@ export async function postFailureAlert(payload: Record<string, unknown>): Promis
 }
 
 // ══════════════════════════════════════════════════════════════════════════
-//  5. Job-coordination card  (Start / Complete / Archive)
+//  5. Worker dispatch card — "MOVE DAY JOB" (Start / Complete, links)
 //     Job type: 'create-job-channels'
+//     Same shared builder as discord-rest.ts so the two transports can't drift.
 // ══════════════════════════════════════════════════════════════════════════
 export async function createJobChannels(
   bookingId: string,
@@ -547,44 +554,36 @@ export async function createJobChannels(
     return
   }
 
-  const embed = new EmbedBuilder()
-    .setTitle(`🚛 Job — ${payload.displayId}`)
-    .setColor(0x0a1628) // brand navy
-    .addFields(
-      {
-        name: '👤 Customer',
-        value:
-          [`**${payload.customerName}**`, payload.customerEmail as string, payload.customerPhone as string]
-            .filter(Boolean)
-            .join('\n') || '—',
-        inline: true,
-      },
-      {
-        name: '📋 Details',
-        value:
-          [
-            payload.serviceType ? `Service: **${payload.serviceType}**` : '',
-            payload.confirmedDate ? `📅 ${payload.confirmedDate}` : '',
-            payload.originAddress ? `📍 From: ${payload.originAddress}` : '',
-          ]
-            .filter(Boolean)
-            .join('\n') || '—',
-        inline: true,
-      }
-    )
-    .setDescription(
-      'Use this card to track the job on move day. Mark **Start** when the crew departs, **Complete** when done.'
-    )
-    .setFooter({ text: `Booking ID: ${bookingId}` })
+  const items = payload.items ? String(payload.items) : null
+  const appUrl = process.env.APP_URL ?? 'https://wmiwci-api.vercel.app'
+  const photoCount = await prisma.file
+    .count({ where: { bookingId, type: 'PHOTO_BEFORE' } })
+    .catch(() => 0)
 
-  const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
-    new ButtonBuilder().setCustomId(`job_start:${bookingId}`).setLabel('▶️ Start Job').setStyle(ButtonStyle.Primary),
-    new ButtonBuilder().setCustomId(`job_complete:${bookingId}`).setLabel('✅ Complete').setStyle(ButtonStyle.Success),
-    new ButtonBuilder().setCustomId(`archive_job:${bookingId}`).setLabel('🗃️ Archive').setStyle(ButtonStyle.Secondary)
-  )
+  const card = buildJobCard({
+    bookingId,
+    displayId: payload.displayId as string | undefined,
+    status: 'CONFIRMED',
+    customerName: payload.customerName as string | undefined,
+    customerPhone: payload.customerPhone as string | undefined,
+    serviceType: serviceLabelFromDescription(items) ?? undefined,
+    moveDate: (payload.requestedDate as string | undefined) ?? (payload.confirmedDate as string | undefined),
+    originAddress: payload.originAddress as string | undefined,
+    destAddress: payload.destAddress as string | undefined,
+    truckOptionLabel:
+      payload.truckAddonDueOnMoveDay === true
+        ? TRUCK_OPTION_LABELS['truck-pickup-return']
+        : truckLabelFromDescription(items) ?? undefined,
+    rawDescription: items,
+    photoCount,
+    laborEstimate: typeof payload.laborEstimate === 'number' ? payload.laborEstimate : null,
+    travelFeeDollars: typeof payload.travelFeeDollars === 'number' ? payload.travelFeeDollars : null,
+    manualReviewRequired: payload.manualReviewRequired === true,
+    adminUrl: `${appUrl}/admin/bookings`,
+  })
 
   try {
-    const msg = await channel.send({ embeds: [embed], components: [row] })
+    const msg = await channel.send({ embeds: card.embeds as any, components: card.components as any })
     botLogger.info({ bookingId, messageId: msg.id }, '✔ Job card created')
   } catch (err) {
     botLogger.error({ bookingId, err: errMsg(err), stack: errStack(err) }, '✖ Failed to create job card')
