@@ -134,6 +134,13 @@ export function timeOfDay(date: Date = new Date()): string {
   return new Intl.DateTimeFormat('en-US', { timeZone: TZ, hour: 'numeric', minute: '2-digit' }).format(date)
 }
 
+/** Like timeOfDay but tolerates a string/Date/null (job-card waiting timestamps). */
+export function timeLabel(value: Date | string | null | undefined): string {
+  if (!value) return '—'
+  const d = value instanceof Date ? value : new Date(value)
+  return Number.isNaN(d.getTime()) ? '—' : timeOfDay(d)
+}
+
 // ── Discord-safe text ──────────────────────────────────────────────────────
 /** Neutralize mass mentions and cap length. Keeps normal punctuation intact. */
 export function discordSafe(text: string, max = 1024): string {
@@ -372,6 +379,13 @@ export type JobCardData = {
   startedAtLabel?: string | null
   completedBy?: string | null
   completedAtLabel?: string | null
+  // Waiting-time (Late Arrival & Delay Policy). Timestamps drive the buttons;
+  // waitingSummary is a pre-rendered human line (fee math from waiting-time.ts).
+  crewArrivedAt?: Date | string | null
+  customerReadyAt?: Date | string | null
+  waitingStartedAt?: Date | string | null
+  waitingEndedAt?: Date | string | null
+  waitingSummary?: string | null
 }
 
 function field(name: string, value: string, inline = false): EmbedField {
@@ -429,6 +443,15 @@ export function buildJobCard(data: JobCardData): { embeds: EmbedJson[]; componen
   if (data.completedBy) statusLines.push(`Completed by ${data.completedBy}${data.completedAtLabel ? ` · ${data.completedAtLabel}` : ''}`)
   fields.push(field('Status', statusLines.join('\n'), true))
 
+  // Waiting-time — only surfaced once the crew logs an arrival/waiting event.
+  const waitingLines: string[] = []
+  if (data.crewArrivedAt) waitingLines.push(`Arrived · ${timeLabel(data.crewArrivedAt)}`)
+  if (data.waitingStartedAt)
+    waitingLines.push(`Waiting started · ${timeLabel(data.waitingStartedAt)}${data.waitingEndedAt ? ` → ended ${timeLabel(data.waitingEndedAt)}` : ' (running)'}`)
+  if (data.customerReadyAt) waitingLines.push(`Customer ready · ${timeLabel(data.customerReadyAt)}`)
+  if (data.waitingSummary) waitingLines.push(data.waitingSummary)
+  if (waitingLines.length) fields.push(field('Waiting Time', waitingLines.join('\n')))
+
   const descriptionParts: string[] = []
   if (manualReview && status !== 'COMPLETED' && status !== 'ARCHIVED') {
     descriptionParts.push(
@@ -470,6 +493,25 @@ function jobCardButtons(data: JobCardData): ActionRowJson[] {
     actionRow.push({ type: 2, style: BTN.secondary, label: '🗃 Archive', custom_id: `archive_job:${id}` })
   }
 
+  // ── Waiting-time crew row (Late Arrival & Delay Policy) ──────────────────
+  //    Shown while the job is live (before it's completed/archived/cancelled).
+  //    Each tap stamps a timestamp; the fee is derived in waiting-time.ts.
+  const waitingRow: ButtonJson[] = []
+  const jobLive = status !== 'COMPLETED' && status !== 'ARCHIVED' && status !== 'CANCELLED'
+  if (jobLive) {
+    if (!data.crewArrivedAt) {
+      waitingRow.push({ type: 2, style: BTN.secondary, label: '📍 Arrived', custom_id: `crew_arrived:${id}` })
+    }
+    if (!data.waitingStartedAt) {
+      waitingRow.push({ type: 2, style: BTN.secondary, label: '⏳ Waiting Started', custom_id: `waiting_start:${id}` })
+    } else if (!data.waitingEndedAt && !data.customerReadyAt) {
+      waitingRow.push({ type: 2, style: BTN.primary, label: '⏹ Waiting Ended', custom_id: `waiting_end:${id}` })
+    }
+    if (!data.customerReadyAt) {
+      waitingRow.push({ type: 2, style: BTN.success, label: '👍 Customer Ready', custom_id: `customer_ready:${id}` })
+    }
+  }
+
   const linkRow: ButtonJson[] = []
   // Before the job starts the crew drives to the PICKUP; once in progress the
   // next drive is to the DESTINATION.
@@ -484,6 +526,7 @@ function jobCardButtons(data: JobCardData): ActionRowJson[] {
 
   const rows: ActionRowJson[] = []
   if (actionRow.length) rows.push({ type: 1, components: actionRow })
+  if (waitingRow.length) rows.push({ type: 1, components: waitingRow })
   if (linkRow.length) rows.push({ type: 1, components: linkRow })
   return rows
 }

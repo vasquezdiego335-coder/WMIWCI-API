@@ -1,7 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getSession } from '@/lib/auth'
 import { prisma } from '@/lib/db'
-import { emailQueue } from '@/lib/queues'
 import { z } from 'zod'
 
 const Schema = z.object({ approve: z.boolean() })
@@ -36,19 +35,11 @@ export async function POST(req: NextRequest, { params }: { params: { id: string 
     },
   })
 
-  // Queue notification email to customer
-  await emailQueue.add('discount-decision', {
-    template: 'booking-confirmed',
-    to: booking.customer.email,
-    bookingId: booking.id,
-    payload: {
-      customerName: booking.customer.name,
-      confirmed: approve,
-      discountApplied: approve,
-      discountPercent: approve ? 10 : 0,
-      portalUrl: `${process.env.APP_URL}/my-booking/${booking.customerToken}`,
-    },
-  })
+  // No standalone "discount decision" customer email (it isn't one of the 15
+  // active templates, and previously used the now-archived booking-confirmed
+  // template — which the worker allowlist dropped, so it never sent). The
+  // approved discount is reflected in the booking total the customer sees in
+  // their portal and in the confirmation email.
 
   await prisma.auditLog.create({
     data: {

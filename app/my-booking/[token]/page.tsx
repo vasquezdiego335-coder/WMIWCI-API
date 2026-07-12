@@ -3,6 +3,7 @@ import { prisma } from '@/lib/db'
 import { notFound } from 'next/navigation'
 import { CopyReference } from './CopyReference'
 import { accessSections } from '@/lib/booking-access'
+import { waitingMinutesBetween, WAITING_GRACE_MINUTES, WAITING_POLICY } from '@/lib/waiting-time'
 
 export const revalidate = 0
 
@@ -91,6 +92,9 @@ type CustomerBookingView = {
   travelFeeNote: string | null // clean move-day travel line, or null
   photoCount: number
   receiptUrl: string | null
+  // Live waiting state (Late Arrival & Delay Policy). 'none' hides the banner.
+  waitingState: 'none' | 'waiting' | 'billable'
+  waitingMessage: string | null
 }
 
 const STATUS_MAP: Record<string, ViewStatus> = {
@@ -218,6 +222,22 @@ function buildCustomerView(booking: BookingRecord): CustomerBookingView {
     ? `${money(booking.travelFee / 100)} travel fee — due on move day`
     : null
 
+  // Live waiting banner (Late Arrival & Delay Policy). Keyed off the crew's
+  // "Waiting Started" tap; once waiting ends or the customer is ready, it clears.
+  let waitingState: CustomerBookingView['waitingState'] = 'none'
+  let waitingMessage: string | null = null
+  const waitingResolved = !!(booking.waitingEndedAt || booking.customerReadyAt)
+  if (!waitingResolved && booking.waitingStartedAt) {
+    const elapsed = waitingMinutesBetween(booking.waitingStartedAt, null)
+    if (elapsed > WAITING_GRACE_MINUTES) {
+      waitingState = 'billable'
+      waitingMessage = WAITING_POLICY.portalBillableStarted
+    } else {
+      waitingState = 'waiting'
+      waitingMessage = WAITING_POLICY.portalWaitingStarted
+    }
+  }
+
   return {
     reference,
     customerFirstName: firstName,
@@ -240,6 +260,8 @@ function buildCustomerView(booking: BookingRecord): CustomerBookingView {
     travelFeeNote,
     photoCount: booking.files.length,
     receiptUrl: booking.receipt?.cloudinaryUrl ?? null,
+    waitingState,
+    waitingMessage,
   }
 }
 
@@ -470,6 +492,33 @@ export default async function BookingStatusPage({ params }: { params: { token: s
           <p className="bk-hero__eyebrow bk-anim-up" style={anim(0.34)}>{hero.eyebrow}</p>
           <h1 className="bk-hero__title bk-anim-up" style={anim(0.42)}>{hero.title}</h1>
           <p className="bk-hero__lede bk-anim-up" style={anim(0.5)}>{hero.lede(v)}</p>
+
+          {/* Live waiting-time banner (Late Arrival & Delay Policy) */}
+          {v.waitingState !== 'none' && v.waitingMessage && (
+            <div
+              className="bk-anim-up"
+              style={{
+                ...anim(0.54),
+                margin: '18px auto 0',
+                maxWidth: '440px',
+                display: 'flex',
+                alignItems: 'flex-start',
+                gap: '10px',
+                textAlign: 'left',
+                padding: '13px 16px',
+                borderRadius: '14px',
+                border: `1px solid ${v.waitingState === 'billable' ? '#FBD9C2' : '#E6DFcf'}`,
+                background: v.waitingState === 'billable' ? '#FEF3EC' : '#FBF7EC',
+                color: '#3A2E1E',
+              }}
+              role="status"
+            >
+              <span aria-hidden="true" style={{ fontSize: '18px', lineHeight: '22px' }}>
+                {v.waitingState === 'billable' ? '⏱️' : '⏳'}
+              </span>
+              <span style={{ fontSize: '13.5px', lineHeight: '20px', fontWeight: 600 }}>{v.waitingMessage}</span>
+            </div>
+          )}
 
           {/* Connected progress tracker */}
           <div className="bk-track bk-anim-up" style={anim(0.6)} role="list" aria-label="Booking progress">

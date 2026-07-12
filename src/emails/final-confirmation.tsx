@@ -17,6 +17,7 @@ import {
   Footer,
   VSteps,
   IconChip,
+  WaitingPolicyNote,
   C,
   FONT,
   P,
@@ -309,6 +310,10 @@ export default function FinalConfirmationEmail({
           </tbody>
         </table>
       </Callout>
+
+      {/* ── 6b · ARRIVAL & WAITING-TIME POLICY ───────────────── */}
+      <Spacer h={16} />
+      <WaitingPolicyNote lang={es ? 'es' : 'en'} variant="confirmation" />
 
       {/* ── 7 · CTA ──────────────────────────────────────────── */}
       <Spacer h={26} />

@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { getSession } from '@/lib/auth'
 import { prisma } from '@/lib/db'
 import { z } from 'zod'
+import { computeWaitingFee } from '@/lib/waiting-time'
 
 // PATCH /api/admin/bookings/:id/details
 // Staff-editable operational + logistics fields for the admin dashboard. Kept
@@ -40,6 +41,14 @@ const DetailsSchema = z.object({
   // Itemized fees (cents)
   stairFee: cents, longCarryFee: cents, heavyItemFee: cents, packingFee: cents,
   assemblyFee: cents, disassemblyFee: cents, taxAmount: cents, processingFee: cents,
+  // Waiting time (Late Arrival & Delay Policy). Timestamps are normally set by
+  // the crew's Discord buttons; staff may correct minutes, override/waive the
+  // fee, and mark it collected on move day.
+  waitingMinutes: z.coerce.number().int().min(0).max(1440).optional().nullable(),
+  waitingFeeOverride: cents,
+  waitingFeeWaived: z.coerce.boolean().optional(),
+  waitingWaiverReason: str(500),
+  waitingFeeCollected: z.coerce.boolean().optional(),
 })
 
 export async function PATCH(req: NextRequest, { params }: { params: { id: string } }): Promise<NextResponse> {
@@ -71,6 +80,12 @@ export async function PATCH(req: NextRequest, { params }: { params: { id: string
   }
   if (Object.keys(data).length === 0) {
     return NextResponse.json({ error: 'No fields to update' }, { status: 422 })
+  }
+
+  // If staff corrected the waiting minutes, keep the derived fee in sync (a
+  // manual waitingFeeOverride still wins at display time; this is the baseline).
+  if (data.waitingMinutes != null) {
+    data.waitingFee = computeWaitingFee(Number(data.waitingMinutes)).feeCents
   }
 
   const updated = await prisma.booking.update({ where: { id: params.id }, data })

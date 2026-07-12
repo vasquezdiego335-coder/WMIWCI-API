@@ -27,6 +27,7 @@ import {
   timeOfDay,
   TRUCK_OPTION_LABELS,
 } from "@/lib/booking-display";
+import { resolveWaiting, feeDollars, WAITING_GRACE_MINUTES } from "@/lib/waiting-time";
 import { apiLogger } from "@/lib/logger";
 import { outboxEnabled, emitApproved, emitRescheduleRequested } from "@/outbox/integration";
 
@@ -253,6 +254,12 @@ async function handleApprove(bookingId: string | undefined, messageId: string | 
   if (paymentMethodType) paymentMeta.paymentMethodType = paymentMethodType;
   if (stripeCustomerId) paymentMeta.stripeCustomerId = stripeCustomerId;
   if (booking.stripeCheckoutId) paymentMeta.stripeCheckoutId = booking.stripeCheckoutId;
+  // Mirror the PaymentIntent's own metadata (esp. internal_test) so revenue
+  // reporting classifies owner checkout tests without a manual backfill.
+  for (const [k, v] of Object.entries(pi.metadata ?? {})) {
+    if (typeof v === "string" && paymentMeta[k] == null) paymentMeta[k] = v;
+  }
+  const isInternalTest = (pi.metadata?.internal_test ?? "") === "true";
 
   // 3) Record the payment + create the Job record + audit (atomic). The booking
   //    status/date fields were already set by the claim in step 1.
@@ -267,6 +274,7 @@ async function handleApprove(bookingId: string | undefined, messageId: string | 
         description: "Booking deposit captured on approval",
         receiptUrl,
         metadata: paymentMeta,
+        isInternalTest,
       },
     }),
     prisma.job.upsert({
@@ -444,13 +452,34 @@ async function handleDeny(bookingId: string | undefined, messageId: string | und
     },
   });
 
-  // MESSAGING POLICY: deny does NOT send a customer email/SMS. The system sends
-  // exactly four customer messages (pre-approval + final-confirmation, each as
-  // email + SMS); a denial is not one of them. The hold is released above and
-  // the Discord card is updated below, but the customer is not auto-notified.
+  // MESSAGING: send the BOOKING DECLINED email — the hold was released above, so
+  // the customer is told honestly that their request wasn't accepted and they
+  // were not charged. Guarded so a Redis stall can't blow Discord's 3s window.
+  if (booking.customer.email) {
+    try {
+      await withTimeout(
+        emailQueue.add("booking-declined", {
+          template: "booking-declined",
+          to: booking.customer.email,
+          bookingId: booking.id,
+          payload: {
+            customerName: booking.customer.name,
+            displayId: booking.displayId,
+            requestedDate: booking.requestedDate?.toISOString(),
+            amountHold: String(Math.round(booking.depositAmount / 100)),
+            rebookUrl: `${(process.env.APP_URL ?? "https://moveitclearit.com").replace(/\/+$/, "")}/book`,
+            locale: booking.customer.locale,
+          },
+        }),
+        2500
+      );
+    } catch (err) {
+      apiLogger.error({ bookingId: booking.id, err: err instanceof Error ? err.message : String(err) }, "declined email enqueue failed (non-fatal)");
+    }
+  }
   apiLogger.info(
     { bookingId: booking.id, deniedBy: approverName },
-    "Booking denied → hold released → CANCELLED (no customer email/SMS per messaging policy)"
+    "Booking denied → hold released → CANCELLED → declined email queued"
   );
   return NextResponse.json({ type: RES_UPDATE_MESSAGE, data: deniedCard(booking, approverName) });
 }
@@ -872,6 +901,23 @@ async function renderJobCard(booking: JobBooking) {
   const items = booking.itemsDescription;
   const appUrl = process.env.APP_URL ?? "https://wmiwci-api.vercel.app";
 
+  // Waiting-time summary line (fee math from the single source of truth).
+  const w = resolveWaiting(booking);
+  let waitingSummary: string | null = null;
+  if (w.source !== "none") {
+    if (w.ongoing) {
+      waitingSummary =
+        w.billableMinutes > 0
+          ? `⏳ Waiting ${w.totalMinutes} min — billable, running fee ${feeDollars(w.feeCents)}`
+          : `⏳ Waiting ${w.totalMinutes} min — within the free ${WAITING_GRACE_MINUTES}-min grace`;
+    } else if (w.totalMinutes > 0) {
+      waitingSummary =
+        w.feeCents > 0
+          ? `Waited ${w.totalMinutes} min → ${w.billableMinutes} min billable · Waiting fee ${feeDollars(w.feeCents)} (move day)`
+          : `Waited ${w.totalMinutes} min — within the free ${WAITING_GRACE_MINUTES}-min grace · no fee`;
+    }
+  }
+
   return buildJobCard({
     bookingId: booking.id,
     displayId: booking.displayId,
@@ -891,9 +937,83 @@ async function renderJobCard(booking: JobBooking) {
     travelFeeDollars: booking.travelFee ? booking.travelFee / 100 : null,
     manualReviewRequired: booking.manualReviewRequired,
     adminUrl: `${appUrl}/admin/bookings`,
+    crewArrivedAt: booking.crewArrivedAt,
+    customerReadyAt: booking.customerReadyAt,
+    waitingStartedAt: booking.waitingStartedAt,
+    waitingEndedAt: booking.waitingEndedAt,
+    waitingSummary,
     ...trail,
   });
 }
+
+// ════════════════════════════════════════════════════════════════════════
+//  WAITING-TIME CREW BUTTONS — Late Arrival & Delay Policy (owner spec 2026-07-12)
+//  --------------------------------------------------------------------
+//  Four taps on the job card stamp four timestamps; the fee is DERIVED by
+//  src/lib/waiting-time.ts and persisted at waiting-end so the receipt/report
+//  is a stable record. The fee is COLLECTED ON MOVE DAY — never charged to the
+//  $49 Stripe deposit. All four presses are idempotent (a repeat tap keeps the
+//  first timestamp) and re-render the card in place.
+// ════════════════════════════════════════════════════════════════════════
+
+/** Recompute + persist waitingMinutes/waitingFee from the current timestamps. */
+async function persistWaitingTotals(booking: JobBooking): Promise<void> {
+  const w = resolveWaiting(booking);
+  if (w.source === "none" || w.ongoing) return; // only stamp a settled window
+  await prisma.booking.update({
+    where: { id: booking.id },
+    data: { waitingMinutes: w.totalMinutes, waitingFee: w.feeCents },
+  });
+}
+
+async function stampWaitingEvent(
+  bookingId: string | undefined,
+  actor: DiscordActor,
+  field: "crewArrivedAt" | "waitingStartedAt" | "waitingEndedAt" | "customerReadyAt",
+  auditAction: string,
+): Promise<NextResponse> {
+  const crewName = actor.username;
+  if (!bookingId) return ephemeral("⚠️ This button is missing its booking reference.");
+  const booking = await loadJobBooking(bookingId);
+  if (!booking) return ephemeral("⚠️ Booking not found for this card.");
+  if (booking.status === "CANCELLED") {
+    return ephemeral("⚠️ This booking was cancelled — check with the owner before logging time.");
+  }
+
+  // Idempotent — keep the first timestamp; just re-render.
+  if ((booking as any)[field]) {
+    return NextResponse.json({ type: RES_UPDATE_MESSAGE, data: await renderJobCard(booking) });
+  }
+
+  const now = new Date();
+  await prisma.$transaction([
+    prisma.booking.update({ where: { id: booking.id }, data: { [field]: now } }),
+    prisma.auditLog.create({
+      data: {
+        action: "BOOKING_STATE_CHANGED",
+        bookingId: booking.id,
+        details: { action: auditAction, by: crewName, discordUserId: actor.userId ?? null, at: now.toISOString() },
+      },
+    }),
+  ]);
+
+  // Settle the fee once waiting has ended (or the customer is ready).
+  const refreshed = await loadJobBooking(booking.id);
+  if (refreshed) await persistWaitingTotals(refreshed);
+
+  apiLogger.info({ bookingId: booking.id, by: crewName, event: auditAction }, "Waiting event logged via Discord");
+  const updated = await loadJobBooking(booking.id);
+  return NextResponse.json({ type: RES_UPDATE_MESSAGE, data: await renderJobCard(updated ?? booking) });
+}
+
+const handleCrewArrived = (id: string | undefined, actor: DiscordActor) =>
+  stampWaitingEvent(id, actor, "crewArrivedAt", "crew_arrived");
+const handleWaitingStart = (id: string | undefined, actor: DiscordActor) =>
+  stampWaitingEvent(id, actor, "waitingStartedAt", "waiting_started");
+const handleWaitingEnd = (id: string | undefined, actor: DiscordActor) =>
+  stampWaitingEvent(id, actor, "waitingEndedAt", "waiting_ended");
+const handleCustomerReady = (id: string | undefined, actor: DiscordActor) =>
+  stampWaitingEvent(id, actor, "customerReadyAt", "customer_ready");
 
 // ── job_start:<id> — labor begins ───────────────────────────────────────────
 async function handleJobStart(bookingId: string | undefined, actor: DiscordActor) {
@@ -1257,6 +1377,10 @@ export async function POST(req: Request) {
       "job_start",
       "job_complete",
       "archive_job",
+      "crew_arrived",
+      "waiting_start",
+      "waiting_end",
+      "customer_ready",
     ]);
     if (OWNER_ACTIONS.has(action)) {
       const auth = authorizeOwnerAction(interaction, action);
@@ -1306,6 +1430,20 @@ export async function POST(req: Request) {
           const msg = err instanceof Error ? err.message : String(err);
           apiLogger.error({ action, bookingId: id, err: msg }, "✖ job button handler failed");
           return ephemeral("⚠️ Something went wrong updating this job — try again or use the admin portal.");
+        }
+      }
+
+      // Waiting-time crew buttons — stamp a timestamp + recompute the fee.
+      if (action === "crew_arrived" || action === "waiting_start" || action === "waiting_end" || action === "customer_ready") {
+        try {
+          if (action === "crew_arrived") return await handleCrewArrived(id, actor);
+          if (action === "waiting_start") return await handleWaitingStart(id, actor);
+          if (action === "waiting_end") return await handleWaitingEnd(id, actor);
+          return await handleCustomerReady(id, actor);
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          apiLogger.error({ action, bookingId: id, err: msg }, "✖ waiting button handler failed");
+          return ephemeral("⚠️ Something went wrong logging the waiting time — try again or use the admin portal.");
         }
       }
 

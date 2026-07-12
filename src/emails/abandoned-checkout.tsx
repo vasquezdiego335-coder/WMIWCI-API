@@ -66,8 +66,9 @@ export default function AbandonedCheckoutEmail({
         whyTitle: 'Por qué reservar con nosotros',
         why: [
           'Solo mano de obra — pagas por músculo, no por el margen del intermediario.',
-          'Equipo con antecedentes verificados · equipo incluido.',
-          'Precio fijo — sin cargos ocultos.',
+          'Movers profesionales + equipo de mudanza incluido.',
+          'Precio fijo y transparente — sin cargos ocultos.',
+          'Más de 50 mudanzas completadas en Nueva Jersey.',
         ],
         cta: 'Completar mi reserva',
         holdNote: `El depósito de $${amountHold} es una retención — solo asegura tu lugar y se aplica al total de tu mudanza.`,
@@ -84,8 +85,9 @@ export default function AbandonedCheckoutEmail({
         whyTitle: 'Why book with us',
         why: [
           'Labor-only — you pay for muscle, not a middleman markup.',
-          'Background-checked crew · equipment included.',
-          'Flat-rate pricing — no hidden fees.',
+          'Professional movers + moving equipment included.',
+          'Transparent flat-rate pricing — no hidden fees.',
+          '50+ completed moves across New Jersey.',
         ],
         cta: 'Complete my booking',
         holdNote: `The $${amountHold} deposit is a hold — it just secures your slot and applies to your move total.`,

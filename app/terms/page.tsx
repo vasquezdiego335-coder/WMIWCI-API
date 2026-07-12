@@ -37,7 +37,19 @@ export default function TermsPage() {
           <p>Once captured (after approval), the $49 booking fee is non-refundable. Rescheduling requests must be submitted at least 72 hours before the scheduled service time. Same-day cancellations may result in a cancellation fee equal to 2 hours of labor.</p>
         </Section>
 
-        <Section title="4. Customer Responsibilities">
+        <Section title="4. Arrival Windows, Late Arrival &amp; Waiting Time">
+          <p>Because we provide labor-only service, our crew reserves an <strong>exclusive arrival window</strong> for your move. Keeping every job on schedule protects your appointment and the appointments of the customers scheduled after you.</p>
+          <p>We understand unexpected delays happen, so every booking includes a <strong>complimentary 30-minute grace period</strong> measured from the crew&apos;s arrival. If the crew arrives and cannot begin — for example, items are not packed, access is not available, or no one is present — waiting time begins once the grace period ends.</p>
+          <p>Waiting time after the grace period is billed as follows:</p>
+          <ul>
+            <li><strong>First 30 minutes: complimentary (no charge)</strong></li>
+            <li><strong>Each additional 30 minutes, or any portion thereof: $50</strong></li>
+          </ul>
+          <p>Any waiting fee is calculated from the crew&apos;s logged arrival and ready times, appears as a separate line item on your receipt, and is collected on move day — it is never added to the $49 booking deposit.</p>
+          <p>If a delay exceeds <strong>90 minutes</strong> without prior arrangement with Move It Clear It, and depending on crew availability, we reserve the right to reschedule your move to the next available opening, move you to a later slot, or cancel the reservation. We will make good-faith efforts to reach you and discuss options before doing so.</p>
+        </Section>
+
+        <Section title="5. Customer Responsibilities">
           <p>The customer is responsible for:</p>
           <ul>
             <li>Providing or arranging a suitable moving truck or vehicle</li>
@@ -48,28 +60,28 @@ export default function TermsPage() {
           </ul>
         </Section>
 
-        <Section title="5. Liability Limitations">
+        <Section title="6. Liability Limitations">
           <p>We take reasonable care with all items. However, our liability for damage to items is limited to the lesser of the item's depreciated value or $100 per item. We are not responsible for damage to items that were improperly packed by the customer, pre-existing damage, or damage to furniture that cannot be safely navigated through doorways or stairs.</p>
           <p>We are not liable for: acts of God, delays caused by traffic or weather, or any indirect or consequential damages.</p>
         </Section>
 
-        <Section title="6. Prohibited Items">
+        <Section title="7. Prohibited Items">
           <p>We will not move hazardous materials, explosives, firearms, illegal substances, or any item prohibited by law. We reserve the right to refuse any item at our discretion.</p>
         </Section>
 
-        <Section title="7. Door Hanger Promotions">
+        <Section title="8. Door Hanger Promotions">
           <p>Door hanger promotional discounts (10% off labor) are subject to verification and require approval. Presenting a fraudulent door hanger voids the discount and may result in cancellation of service.</p>
         </Section>
 
-        <Section title="8. Dispute Resolution">
+        <Section title="9. Dispute Resolution">
           <p>Any dispute arising from services provided must be reported within 24 hours of service completion. We will make good-faith efforts to resolve disputes. Disputes unresolved through direct communication may be submitted to binding arbitration.</p>
         </Section>
 
-        <Section title="9. Changes to Terms">
+        <Section title="10. Changes to Terms">
           <p>We reserve the right to modify these terms at any time. Updated terms will be posted at this URL. Continued use of our services constitutes acceptance of the current terms.</p>
         </Section>
 
-        <Section title="10. Contact">
+        <Section title="11. Contact">
           <p>For questions about these terms, contact us at <a href="mailto:hello@moveitclearit.com" style={{ color: '#FF5A1F' }}>hello@moveitclearit.com</a>.</p>
         </Section>
 

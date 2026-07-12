@@ -14,6 +14,7 @@ import {
   ContactRow,
   Footer,
   IconChip,
+  WaitingPolicyNote,
   C,
   FONT,
   P,
@@ -158,6 +159,10 @@ export default function JobReminderEmail({
         <Eyebrow icon="checklist" title={t.prepTitle} tone="orange" />
         <Checklist items={t.prep} />
       </Card>
+
+      {/* ── 3b · ARRIVAL & WAITING-TIME POLICY ───────────────── */}
+      <Spacer h={16} />
+      <WaitingPolicyNote lang={es ? 'es' : 'en'} variant="reminder" />
 
       {/* ── 4 · CTA ──────────────────────────────────────────── */}
       <Spacer h={26} />

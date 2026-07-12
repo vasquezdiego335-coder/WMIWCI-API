@@ -134,25 +134,20 @@ export const marketingQueue = lazyQueue(getMarketingQueue)
 
 // ── Job type definitions ──────────────────────────────────────
 export type EmailJobData = {
+  // The 11 active React customer emails. Enforced by ALLOWED_TEMPLATES in
+  // src/workers/email.worker.ts. (Marketing lead emails live in Leadtracking.)
   template:
-    // ── The ONLY 2 customer emails the system sends (enforced by the
-    //    allowlist in src/workers/email.worker.ts) ──
-    | 'pre-approval'        // admin clicked ✅ Approve in Discord
-    | 'final-confirmation'  // payment completed (fulfillPaidCheckout)
-    // ── Legacy templates: still defined so existing call sites typecheck, but
-    //    the email-worker allowlist drops them at runtime (logged, never sent). ──
-    | 'booking-confirmation'
-    | 'payment-receipt'
-    | 'pending-approval'
-    | 'booking-confirmed'
-    | 'booking-denied'
-    | 'job-reminder'
-    | 'job-completion'
-    | 'review-request'
-    | 'abandoned-checkout'
-    | 'contact-ack'        // auto-reply to a customer who used the contact form
-    | 'reschedule-offer'   // declined booking → here are alternate dates
-    | 'booking-rescheduled'// customer picked a new date → confirmation
+    | 'pre-approval'         // payment step — pre-confirmation
+    | 'final-confirmation'   // owner approval — confirmed
+    | 'booking-declined'     // owner denies a request (hold released)
+    | 'payment-receipt'      // deposit receipt (admin resend / capture)
+    | 'booking-updated'      // date/time/address/service change confirmed
+    | 'booking-cancellation' // a captured booking is cancelled
+    | 'job-reminder'         // 72h / 24h before the move
+    | 'job-completion'       // move complete / thank-you
+    | 'review-request'       // post-move review ask
+    | 'abandoned-checkout'   // started a booking, no deposit
+    | 'referral'             // post-move referral ask
   to: string
   bookingId?: string
   notificationId?: string

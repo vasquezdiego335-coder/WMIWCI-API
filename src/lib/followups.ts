@@ -31,6 +31,7 @@ import { resend, EMAIL_FROM, EMAIL_REPLY_TO } from './resend'
 import { queueLogger } from './logger'
 import { normalizeLocale, t, BIZ_NAME, BIZ_PHONE, type Locale } from './i18n'
 import ReviewRequestEmail from '../emails/review-request'
+import ReferralEmail from '../emails/referral'
 
 const log = queueLogger.child({ mod: 'followups' })
 
@@ -40,6 +41,7 @@ export const FOLLOWUPS_ENABLED = process.env.MARKETING_FOLLOWUPS_ENABLED === 'tr
 const GOOGLE_REVIEW_URL = process.env.GOOGLE_REVIEW_URL?.trim() || ''
 const BOOK_URL = (process.env.MARKETING_SITE_URL?.trim() || 'https://www.moveitclearit.com').replace(/\/+$/, '')
 const REFERRAL_URL = process.env.REFERRAL_URL?.trim() || BOOK_URL
+const REFERRAL_CODE = process.env.REFERRAL_CODE?.trim() || 'REFER15'
 const reviewUrl = () => GOOGLE_REVIEW_URL || BOOK_URL
 
 // Quiet hours (America/New_York): send only when 08:00 <= hour < 21:00.
@@ -240,17 +242,11 @@ function buildMessage(type: FollowupType, name: string, locale: Locale): { sms: 
     case 'referral-ask':
       return {
         sms: withOptOut(t(locale, 'referralAsk', { name, url: REFERRAL_URL }), locale),
-        subject: es ? '¿Conoces a alguien que se muda?' : 'Know someone who’s moving?',
-        html: emailHtml({
-          heading: es ? `¡Gracias por confiar en nosotros, ${esc(name)}!` : `Thanks for trusting us, ${esc(name)}!`,
-          paras: [
-            es
-              ? '¿Conoces a alguien que necesite ayuda para mudarse? Envíalos con nosotros — los cuidaremos igual de bien.'
-              : "Know someone who needs help moving? Send them our way — we'll take just as good care of them.",
-          ],
-          ctaLabel: es ? 'Compartir' : 'Refer a friend',
-          ctaUrl: REFERRAL_URL,
-        }),
+        subject: es ? 'Da 15%. Recibe 15%.' : 'Give 15%. Get 15%.',
+        // Premium branded referral email (shared _ui kit).
+        html: render(
+          ReferralEmail({ customerName: name, referralCode: REFERRAL_CODE, referralUrl: REFERRAL_URL, locale })
+        ),
       }
   }
 }

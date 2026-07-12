@@ -1,11 +1,12 @@
 import { Worker, Job } from 'bullmq'
 import { bullConnection } from '../lib/redis'
 import { prisma } from '../lib/db'
-import { emailQueue, discordQueue, scheduledQueue } from '../lib/queues'
+import { emailQueue, discordQueue, scheduledQueue, smsQueue } from '../lib/queues'
 import { queueLogger } from '../lib/logger'
 import { deleteFiles } from '../lib/cloudinary'
 import { runFollowup, type FollowupType } from '../lib/followups'
 import { etDayRange, moveDateInRange, effectiveMoveDate } from '../lib/scheduling'
+import { dayOfMoveSms } from '../lib/waiting-time'
 import type { ScheduledJobData } from '../lib/queues'
 
 type DigestBooking = {
@@ -182,7 +183,25 @@ async function processScheduledJob(job: Job<ScheduledJobData>): Promise<void> {
         },
       })
 
-      log.info({ count: formatted.length }, 'Morning schedule digest queued')
+      // ── Day-of-move customer SMS (Late Arrival & Delay Policy) ──
+      // Automatic "crew is on the way — please be packed + ready; 30-min grace,
+      // then waiting charges" text to every customer with a move today. The
+      // morning digest is a once-daily cron, so this fires once per job. Only
+      // customers still awaiting the crew (not already IN_PROGRESS) are texted.
+      let smsSent = 0
+      for (const b of jobs) {
+        if (b.status === 'IN_PROGRESS') continue
+        const phone = b.customer?.phone
+        if (!phone) continue
+        await smsQueue.add('day-of-move-reminder', {
+          to: phone,
+          message: dayOfMoveSms(b.customer?.locale),
+          bookingId: b.id,
+        })
+        smsSent++
+      }
+
+      log.info({ count: formatted.length, smsSent }, 'Morning schedule digest + day-of SMS queued')
       break
     }
 

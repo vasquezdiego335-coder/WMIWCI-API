@@ -4,7 +4,14 @@ import { notFound } from 'next/navigation'
 import Link from 'next/link'
 import BookingActions from './BookingActions'
 import OperationsPanel, { PrintButton } from './OperationsPanel'
+import WaitingTimePanel from './WaitingTimePanel'
 import { parseUserAgent } from '@/lib/ua'
+import {
+  resolveWaiting,
+  effectiveWaitingFeeCents,
+  feeDollars,
+  WAITING_RESCHEDULE_THRESHOLD_MINUTES,
+} from '@/lib/waiting-time'
 
 export const revalidate = 0
 
@@ -78,7 +85,7 @@ export default async function JobDetail({ params }: { params: { id: string } }) 
 
   const collected = booking.payments.filter((p) => p.status === 'COMPLETED' && !p.isInternalTest).reduce((s, p) => s + p.amount, 0)
   const refunded = booking.payments.filter((p) => p.status === 'REFUNDED' && !p.isInternalTest).reduce((s, p) => s + p.amount, 0)
-  const moveDayDue = (booking.truckAddonAmount ?? 0) + (booking.travelFee ?? 0) + (booking.additionalTruckFees ?? 0)
+  const moveDayDue = (booking.truckAddonAmount ?? 0) + (booking.travelFee ?? 0) + (booking.additionalTruckFees ?? 0) + effectiveWaitingFeeCents(booking)
     + (booking.stairFee ?? 0) + (booking.longCarryFee ?? 0) + (booking.heavyItemFee ?? 0)
     + (booking.packingFee ?? 0) + (booking.assemblyFee ?? 0) + (booking.disassemblyFee ?? 0) + (booking.taxAmount ?? 0)
   const ua = parseUserAgent(booking.userAgent)
@@ -107,8 +114,16 @@ export default async function JobDetail({ params }: { params: { id: string } }) 
     { label: 'Confirmed', at: booking.confirmedDate },
     { label: 'Crew assigned', at: booking.job?.crew.length ? (booking.job.createdAt ?? null) : null },
     { label: 'Move started', at: booking.job?.startedAt ?? null },
+    { label: 'Crew arrived', at: booking.crewArrivedAt ?? null },
+    { label: 'Waiting started', at: booking.waitingStartedAt ?? null },
+    { label: 'Waiting ended', at: booking.waitingEndedAt ?? null },
+    { label: 'Customer ready', at: booking.customerReadyAt ?? null },
     { label: 'Move completed', at: booking.job?.completedAt ?? booking.completedAt ?? null },
-  ]
+  ].filter((e) => e.at || !['Crew arrived', 'Waiting started', 'Waiting ended', 'Customer ready'].includes(e.label))
+
+  // ── Waiting-time summary (fee math from the single source of truth) ──
+  const waiting = resolveWaiting(booking)
+  const waitingEffectiveFee = effectiveWaitingFeeCents(booking)
 
   return (
     <div>
@@ -295,6 +310,43 @@ export default async function JobDetail({ params }: { params: { id: string } }) 
                 <Badge color={p.status === 'COMPLETED' ? '#10B981' : p.status === 'REFUNDED' ? '#EF4444' : '#F59E0B'}>{p.status}</Badge>
               </div>
             ))}
+          </Card>
+
+          {/* Section 8b: Waiting Time (Late Arrival & Delay Policy) */}
+          <Card title="Waiting Time" icon="⏱" action={<span style={{ fontSize: '11px', color: '#9CA3AF' }}>30 min free · $50/30 min after</span>}>
+            <Row label="Crew arrived" value={dateTime(booking.crewArrivedAt)} />
+            <Row label="Waiting started" value={dateTime(booking.waitingStartedAt)} />
+            <Row label="Waiting ended" value={dateTime(booking.waitingEndedAt)} />
+            <Row label="Customer ready" value={dateTime(booking.customerReadyAt)} />
+            <div style={divider} />
+            <Row label="Minutes waiting" value={waiting.source === 'none' ? '—' : `${waiting.totalMinutes} min${waiting.ongoing ? ' (running)' : ''}`} />
+            <Row label="Billable (after 30 min free)" value={waiting.billableMinutes > 0 ? `${waiting.billableMinutes} min · ${waiting.billableBlocks} × $50` : 'None'} />
+            <Row label="Auto-calculated fee" value={feeDollars(waiting.feeCents)} />
+            {booking.waitingFeeOverride != null && <Row label="Manual override" value={cents(booking.waitingFeeOverride) ?? '—'} strong />}
+            <Row label="Fee owed (move day)" value={booking.waitingFeeWaived ? 'Waived — $0' : (cents(waitingEffectiveFee) ?? '$0.00')} strong />
+            {booking.waitingFeeWaived && booking.waitingWaiverReason && <Row label="Waiver reason" value={booking.waitingWaiverReason} />}
+            <div style={{ margin: '8px 0' }}>
+              <Badge color={booking.waitingFeeWaived ? '#6B7280' : waitingEffectiveFee === 0 ? '#10B981' : booking.waitingFeeCollected ? '#10B981' : '#F59E0B'}>
+                {booking.waitingFeeWaived ? 'Fee waived' : waitingEffectiveFee === 0 ? 'No fee' : booking.waitingFeeCollected ? 'Collected' : 'Not yet collected'}
+              </Badge>
+            </div>
+            {waiting.exceedsRescheduleThreshold && (
+              <div style={{ fontSize: '12px', color: '#B45309', backgroundColor: '#FEF3C7', padding: '8px 10px', borderRadius: '6px', margin: '6px 0' }}>
+                ⚠️ Delay exceeded {WAITING_RESCHEDULE_THRESHOLD_MINUTES} min — reschedule / next-opening / cancel is at crew discretion (owner spec).
+              </div>
+            )}
+            <div style={{ marginTop: '10px' }}>
+              <WaitingTimePanel
+                bookingId={booking.id}
+                defaults={{
+                  waitingMinutes: booking.waitingMinutes != null ? String(booking.waitingMinutes) : '',
+                  waitingFeeOverride: booking.waitingFeeOverride != null ? String(Math.round(booking.waitingFeeOverride / 100)) : '',
+                  waitingFeeWaived: booking.waitingFeeWaived,
+                  waitingWaiverReason: booking.waitingWaiverReason ?? '',
+                  waitingFeeCollected: booking.waitingFeeCollected,
+                }}
+              />
+            </div>
           </Card>
 
           {/* Section 9: Photos */}

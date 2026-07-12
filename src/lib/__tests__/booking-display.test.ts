@@ -181,7 +181,14 @@ test('job card: scheduled state has Start + Complete buttons and a pickup naviga
   const card = buildJobCard({ ...baseCardData(), manualReviewRequired: false })
   const buttons = card.components.flatMap((r) => r.components)
   const ids = buttons.map((b) => b.custom_id).filter(Boolean)
-  assert.deepEqual(ids, ['job_start:cmrgxmon4000fmihhwekvykji', 'job_complete:cmrgxmon4000fmihhwekvykji'])
+  // Job actions, then the waiting-time crew row (no timestamps yet → all three).
+  assert.deepEqual(ids, [
+    'job_start:cmrgxmon4000fmihhwekvykji',
+    'job_complete:cmrgxmon4000fmihhwekvykji',
+    'crew_arrived:cmrgxmon4000fmihhwekvykji',
+    'waiting_start:cmrgxmon4000fmihhwekvykji',
+    'customer_ready:cmrgxmon4000fmihhwekvykji',
+  ])
   const nav = buttons.find((b) => b.label.includes('Navigation'))
   assert.ok(nav?.url?.includes(encodeURIComponent('Rochester Hills, MI')))
 })
@@ -196,7 +203,12 @@ test('job card: in progress → Complete only, navigation flips to destination, 
   })
   const buttons = card.components.flatMap((r) => r.components)
   const ids = buttons.map((b) => b.custom_id).filter(Boolean)
-  assert.deepEqual(ids, ['job_complete:cmrgxmon4000fmihhwekvykji'])
+  assert.deepEqual(ids, [
+    'job_complete:cmrgxmon4000fmihhwekvykji',
+    'crew_arrived:cmrgxmon4000fmihhwekvykji',
+    'waiting_start:cmrgxmon4000fmihhwekvykji',
+    'customer_ready:cmrgxmon4000fmihhwekvykji',
+  ])
   const nav = buttons.find((b) => b.label.includes('Navigation'))
   assert.ok(nav?.url?.includes(encodeURIComponent('12 Elm St')))
   const status = card.embeds[0].fields?.find((f) => f.name === 'Status')

@@ -11,44 +11,48 @@ import type { EmailJobData } from '../lib/queues'
 // Each template is a React component
 import PreApprovalEmail from '../emails/pre-approval'
 import FinalConfirmationEmail from '../emails/final-confirmation'
-import BookingConfirmationEmail from '../emails/booking-confirmation'
+import BookingDeclinedEmail from '../emails/booking-declined'
 import PaymentReceiptEmail from '../emails/payment-receipt'
-import PendingApprovalEmail from '../emails/pending-approval'
-import BookingConfirmedEmail from '../emails/booking-confirmed'
-import BookingDeniedEmail from '../emails/booking-denied'
+import BookingUpdatedEmail from '../emails/booking-updated'
+import BookingCancellationEmail from '../emails/booking-cancellation'
 import JobReminderEmail from '../emails/job-reminder'
 import JobCompletionEmail from '../emails/job-completion'
 import ReviewRequestEmail from '../emails/review-request'
 import AbandonedCheckoutEmail from '../emails/abandoned-checkout'
-import ContactAckEmail from '../emails/contact-ack'
-import RescheduleOfferEmail from '../emails/reschedule-offer'
-import BookingRescheduledEmail from '../emails/booking-rescheduled'
+import ReferralEmail from '../emails/referral'
 import { emailSubject } from '../lib/i18n'
 
 // ════════════════════════════════════════════════════════════════════════
-//  MESSAGING POLICY — the customer transactional journey. Each of these is a
-//  premium _ui-kit email tied to a real booking lifecycle event:
-//    • 'pre-approval'       → payment step (also sent via the outbox when ON)
-//    • 'final-confirmation' → owner approval (also sent via the outbox when ON)
-//    • 'payment-receipt'    → admin "resend receipt"
-//    • 'job-reminder'       → 72h / 24h before the move (scheduled worker)
-//    • 'review-request'     → after completion (also fired by followups)
-//    • 'abandoned-checkout' → started a booking, no deposit (recovery)
-//    • 'job-completion'     → move complete / thank-you
-//  ALLOWED_TEMPLATES is the single choke point: any template NOT listed here
-//  (legacy booking-confirmation, contact-ack, booking-denied, the scheduled
-//  digests, …) is DROPPED with a clear log, so a stray enqueue can never send
-//  an unintended email. Add a template here only when its design + trigger are
+//  MESSAGING POLICY — the 11 React (_ui-kit) customer emails. Each is tied to a
+//  real booking lifecycle event (the marketing lead drip lives in Leadtracking):
+//    • 'pre-approval'         → payment step (premium render via outbox when ON)
+//    • 'final-confirmation'   → owner approval (premium render via outbox when ON)
+//    • 'booking-declined'     → owner denies a request (hold released)
+//    • 'payment-receipt'      → admin "resend receipt"
+//    • 'booking-updated'      → date/time/address/service change confirmed
+//    • 'booking-cancellation' → a captured booking is cancelled
+//    • 'job-reminder'         → 72h / 24h before the move (scheduler — fast-follow)
+//    • 'job-completion'       → move complete / thank-you (COMPLETED transition)
+//    • 'review-request'       → after completion (also fired by followups)
+//    • 'abandoned-checkout'   → started a booking, no deposit (scheduler — fast-follow)
+//    • 'referral'             → post-move referral ask (also fired by followups)
+//  ALLOWED_TEMPLATES is the single choke point: any template NOT listed here is
+//  DROPPED with a clear log, so a stray/legacy enqueue can never send an
+//  unintended email. Add a template here only when its design + trigger are
 //  intentionally part of the customer journey.
 // ════════════════════════════════════════════════════════════════════════
 const ALLOWED_TEMPLATES = new Set<EmailJobData['template']>([
   'pre-approval',
   'final-confirmation',
+  'booking-declined',
   'payment-receipt',
+  'booking-updated',
+  'booking-cancellation',
   'job-reminder',
+  'job-completion',
   'review-request',
   'abandoned-checkout',
-  'job-completion',
+  'referral',
 ])
 
 const TEMPLATES: Record<
@@ -57,18 +61,15 @@ const TEMPLATES: Record<
 > = {
   'pre-approval': (p) => PreApprovalEmail(p as any),
   'final-confirmation': (p) => FinalConfirmationEmail(p as any),
-  'booking-confirmation': (p) => BookingConfirmationEmail(p as any),
+  'booking-declined': (p) => BookingDeclinedEmail(p as any),
   'payment-receipt': (p) => PaymentReceiptEmail(p as any),
-  'pending-approval': (p) => PendingApprovalEmail(p as any),
-  'booking-confirmed': (p) => BookingConfirmedEmail(p as any),
-  'booking-denied': (p) => BookingDeniedEmail(p as any),
+  'booking-updated': (p) => BookingUpdatedEmail(p as any),
+  'booking-cancellation': (p) => BookingCancellationEmail(p as any),
   'job-reminder': (p) => JobReminderEmail(p as any),
   'job-completion': (p) => JobCompletionEmail(p as any),
   'review-request': (p) => ReviewRequestEmail(p as any),
   'abandoned-checkout': (p) => AbandonedCheckoutEmail(p as any),
-  'contact-ack': (p) => ContactAckEmail(p as any),
-  'reschedule-offer': (p) => RescheduleOfferEmail(p as any),
-  'booking-rescheduled': (p) => BookingRescheduledEmail(p as any),
+  'referral': (p) => ReferralEmail(p as any),
 }
 
 // English fallbacks. Bilingual subjects come from emailSubject(template, locale)
@@ -76,18 +77,15 @@ const TEMPLATES: Record<
 const SUBJECTS: Record<EmailJobData['template'], string> = {
   'pre-approval': "We've received your booking request",
   'final-confirmation': 'Your booking is approved',
-  'booking-confirmation': 'Your booking request has been received',
-  'payment-receipt': 'Payment confirmed — We Move It. We Clear It.',
-  'pending-approval': "We're reviewing your booking",
-  'booking-confirmed': '✅ Booking confirmed! See you on move day',
-  'booking-denied': 'Booking update — new times available',
-  'job-reminder': "⏰ Reminder: Your move is tomorrow",
-  'job-completion': '✅ Job complete — thank you!',
+  'booking-declined': 'About your booking request',
+  'payment-receipt': 'Payment received — receipt enclosed',
+  'booking-updated': 'Your booking has been updated',
+  'booking-cancellation': 'Your booking has been cancelled',
+  'job-reminder': 'Your move is almost here',
+  'job-completion': 'Your move is complete — thank you',
   'review-request': 'How did we do? Leave us a review',
-  'abandoned-checkout': 'Your booking is waiting — complete your deposit',
-  'contact-ack': 'We got your message',
-  'reschedule-offer': 'Pick a new date for your move',
-  'booking-rescheduled': 'Your move has been rescheduled',
+  'abandoned-checkout': 'Your date is still available',
+  'referral': 'Give 15%. Get 15%.',
 }
 
 /** Insert a 1x1 open-tracking pixel just before </body> (or append if none). */

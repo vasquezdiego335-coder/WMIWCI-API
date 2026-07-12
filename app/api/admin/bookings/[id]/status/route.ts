@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getSession } from '@/lib/auth'
 import { prisma } from '@/lib/db'
+import { emailQueue } from '@/lib/queues'
 import { apiLogger } from '@/lib/logger'
 import { onBookingCompleted } from '@/lib/followups'
 import { confirmationScheduleData } from '@/lib/scheduling'
@@ -24,7 +25,7 @@ export async function POST(req: NextRequest, { params }: { params: { id: string 
     return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
   }
 
-  const booking = await prisma.booking.findUnique({ where: { id: params.id } })
+  const booking = await prisma.booking.findUnique({ where: { id: params.id }, include: { customer: true } })
   if (!booking) return NextResponse.json({ error: 'Not found' }, { status: 404 })
 
   const body = await req.json()
@@ -77,6 +78,59 @@ export async function POST(req: NextRequest, { params }: { params: { id: string 
       details: { from: booking.status, to: newStatus, changedBy: session.name },
     },
   })
+
+  // ── Customer emails on terminal transitions (guarded, never fatal) ───────
+  //   CANCELLED: honest by capture state — a not-yet-captured booking is a
+  //     "declined" (auth hold releases, no charge); a captured one is a
+  //     "cancellation" (owner follows up on the $49 deposit — no auto-refund is
+  //     issued here, so we never claim one). COMPLETED: the move-complete email.
+  const appBase = (process.env.APP_URL ?? 'https://moveitclearit.com').replace(/\/+$/, '')
+  const es = booking.customer.locale === 'es'
+  const amount = String(Math.round(booking.depositAmount / 100))
+  if (booking.customer.email && newStatus === 'CANCELLED') {
+    const label: 'booking-cancellation' | 'booking-declined' = booking.depositPaid ? 'booking-cancellation' : 'booking-declined'
+    const payload = booking.depositPaid
+      ? {
+          customerName: booking.customer.name,
+          displayId: booking.displayId,
+          date: (booking.scheduledStart ?? booking.confirmedDate ?? booking.requestedDate)?.toISOString(),
+          amount,
+          refundStatus: 'custom' as const,
+          statusText: es
+            ? `Nuestro equipo se comunicará contigo sobre tu depósito de $${amount}. Si tienes preguntas, escríbenos cuando quieras.`
+            : `Our team will follow up with you about your $${amount} deposit. If you have any questions, reach out any time.`,
+          rebookUrl: `${appBase}/book`,
+          locale: booking.customer.locale,
+        }
+      : {
+          customerName: booking.customer.name,
+          displayId: booking.displayId,
+          requestedDate: booking.requestedDate?.toISOString(),
+          amountHold: amount,
+          rebookUrl: `${appBase}/book`,
+          locale: booking.customer.locale,
+        }
+    await emailQueue
+      .add(label, { template: label, to: booking.customer.email, bookingId: params.id, payload })
+      .catch((err) => apiLogger.error({ err: err instanceof Error ? err.message : String(err), bookingId: params.id }, `${label} email enqueue failed (non-fatal)`))
+  }
+  if (booking.customer.email && newStatus === 'COMPLETED') {
+    await emailQueue
+      .add('job-completion', {
+        template: 'job-completion',
+        to: booking.customer.email,
+        bookingId: params.id,
+        payload: {
+          customerName: booking.customer.name,
+          displayId: booking.displayId,
+          completedAt: new Date().toISOString(),
+          portalUrl: `${appBase}/my-booking/${booking.customerToken}`,
+          items: booking.itemsDescription ?? undefined,
+          locale: booking.customer.locale,
+        },
+      })
+      .catch((err) => apiLogger.error({ err: err instanceof Error ? err.message : String(err), bookingId: params.id }, 'job-completion email enqueue failed (non-fatal)'))
+  }
 
   // Phase 3: kick off the post-move follow-up sequence (review/repeat/referral).
   // Idempotent + self-guarded; awaited so the queue writes happen before we

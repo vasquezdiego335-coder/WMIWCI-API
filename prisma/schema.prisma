@@ -343,6 +343,26 @@ model Booking {
   taxAmount      Int? @map("tax_amount")
   processingFee  Int? @map("processing_fee")
 
+  // ── Late Arrival & Delay Policy (owner spec 2026-07-12) ───────────────────
+  //    Complimentary 30-min grace from crew arrival, then $50 per additional
+  //    30-min block. The math lives in src/lib/waiting-time.ts (single source).
+  //    The fee is COLLECTED ON MOVE DAY like the travel fee / truck add-on — it
+  //    is NEVER added to the $49 Stripe deposit and never auto-charged.
+  //    Crew log these four timestamps by tapping the Discord job-card buttons.
+  crewArrivedAt   DateTime? @map("crew_arrived_at")
+  customerReadyAt DateTime? @map("customer_ready_at")
+  waitingStartedAt DateTime? @map("waiting_started_at")
+  waitingEndedAt   DateTime? @map("waiting_ended_at")
+  //    waitingMinutes / waitingFee are DERIVED (waiting-time.ts) and persisted
+  //    at waiting-end so the receipt/report is a stable record. waitingFeeOverride
+  //    (cents, nullable) lets staff hand-set the charge; waived zeroes it out.
+  waitingMinutes       Int?     @map("waiting_minutes")
+  waitingFee           Int?     @map("waiting_fee") // cents; derived unless overridden
+  waitingFeeOverride   Int?     @map("waiting_fee_override") // cents; staff manual override
+  waitingFeeWaived     Boolean  @default(false) @map("waiting_fee_waived")
+  waitingWaiverReason  String?  @map("waiting_waiver_reason")
+  waitingFeeCollected  Boolean  @default(false) @map("waiting_fee_collected")
+
   // ── Internal operations (staff-entered via the admin edit panel) ──
   arrivalWindow      String? @map("arrival_window") // e.g. "8:00–10:00 AM"
   assignedDispatcher String? @map("assigned_dispatcher")

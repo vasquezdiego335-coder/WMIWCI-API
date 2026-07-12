@@ -667,6 +667,52 @@ export function Callout({
 }
 
 // ─────────────────────────────────────────────────────────────────────────
+//  WAITING-TIME POLICY NOTE (Late Arrival & Delay Policy)
+//  One reusable, bilingual block so the confirmation + reminder emails carry
+//  the SAME professional, non-punitive wording. Mirrors src/lib/waiting-time.ts.
+//  `variant` tunes the lead line: 'confirmation' vs 'reminder'.
+// ─────────────────────────────────────────────────────────────────────────
+export function WaitingPolicyNote({
+  lang = 'en',
+  variant = 'confirmation',
+}: {
+  lang?: 'en' | 'es'
+  variant?: 'confirmation' | 'reminder'
+}) {
+  const es = lang === 'es'
+  const title = es ? 'Llegada y tiempo de espera' : 'Arrival & waiting time'
+  const lead = es
+    ? variant === 'reminder'
+      ? 'Para que tu mudanza empiece a tiempo, ten todo empacado y accesible antes de que llegue nuestro equipo.'
+      : 'Por favor ten todo empacado y listo antes de la hora de llegada programada.'
+    : variant === 'reminder'
+      ? 'To help your move begin on time, please have everything packed and accessible before our crew arrives.'
+      : 'Please be packed and ready before your scheduled arrival time.'
+  const body = es
+    ? 'Tu reserva incluye un período de cortesía de 30 minutos al llegar. El tiempo de espera adicional se cobra a $50 por cada 30 minutos, y las demoras prolongadas podrían requerir reprogramar. Reservamos una ventana exclusiva para ti — esto mantiene cada mudanza puntual y es justo para nuestro equipo.'
+    : 'Your booking includes a complimentary 30-minute grace period on arrival. Additional waiting time is billed at $50 per 30 minutes, and extended delays may require rescheduling. We reserve an exclusive window for you — this keeps every move on time and is fair to our crew.'
+  return (
+    <Callout tone="bone">
+      <table role="presentation" width="100%" cellPadding={0} cellSpacing={0} border={0}>
+        <tbody>
+          <tr>
+            <td width={44} valign="top" style={{ width: '44px' }}>
+              <IconChip icon="clock" color={C.navy} size={19} dim={36} border={`1px solid ${C.hair}`} radius={10} />
+            </td>
+            <td valign="top" style={{ paddingLeft: '4px' }}>
+              <div style={{ fontFamily: FONT, fontSize: '15px', fontWeight: 800, color: C.navy, marginBottom: '4px' }}>{title}</div>
+              <div style={{ fontFamily: FONT, fontSize: '13.5px', lineHeight: '21px', color: C.body }}>
+                <strong style={{ color: C.navy }}>{lead}</strong> {body}
+              </div>
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    </Callout>
+  )
+}
+
+// ─────────────────────────────────────────────────────────────────────────
 //  BUTTONS
 // ─────────────────────────────────────────────────────────────────────────
 export function PrimaryButton({ href, label }: { href: string; label: string }) {

@@ -3,6 +3,7 @@ import { prisma } from '../../lib/db'
 import { emailSubject } from '../../lib/i18n'
 import PreApprovalEmail from '../../emails/pre-approval'
 import FinalConfirmationEmail from '../../emails/final-confirmation'
+import BookingUpdatedEmail from '../../emails/booking-updated'
 
 // ════════════════════════════════════════════════════════════════════════
 //  Premium email rendering for the outbox path.
@@ -167,4 +168,34 @@ export async function renderFinalConfirmation(
   )
 
   return { to, subject: emailSubject('final-confirmation', locale), html, locale }
+}
+
+/** NEW_DATE_PICKED (reschedule confirmed) → the premium "booking updated" email. */
+export async function renderBookingUpdated(
+  bookingId: string,
+  opts: { newDate?: string } & Fallback = {}
+): Promise<RenderedEmail> {
+  const b = await loadBooking(bookingId)
+  const locale = b?.customer.locale ?? opts.locale ?? 'en'
+  const to = b?.customer.email ?? opts.customerEmail ?? ''
+  const moveDate = opts.newDate
+    ? new Date(opts.newDate)
+    : b?.scheduledStart ?? b?.confirmedDate ?? b?.requestedDate ?? null
+
+  const html = render(
+    BookingUpdatedEmail({
+      customerName: b?.customer.name ?? opts.customerName,
+      displayId: b?.displayId,
+      changedLabel: locale.startsWith('es') ? 'la fecha' : 'date',
+      date: moveDate?.toISOString(),
+      service: serviceLabel(b?.itemsDescription),
+      originAddress: b?.originAddress,
+      destAddress: b?.destAddress,
+      portalUrl: b ? `${APP_URL}/my-booking/${b.customerToken}` : APP_URL,
+      locale,
+      ...CONTACT,
+    })
+  )
+
+  return { to, subject: emailSubject('booking-updated', locale), html, locale }
 }

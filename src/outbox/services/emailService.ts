@@ -5,7 +5,7 @@ import {
   RescheduleRequestedPayload,
   NewDatePickedPayload,
 } from '../domain/events'
-import { renderPreApproval, renderFinalConfirmation } from './premiumEmails'
+import { renderPreApproval, renderFinalConfirmation, renderBookingUpdated } from './premiumEmails'
 
 // ════════════════════════════════════════════════════════════════════════
 //  Real email provider (Resend). Reuses the app's configured client.
@@ -37,15 +37,6 @@ async function deliverEmail(message: {
   if (error) throw new Error(`Resend error: ${error.message ?? JSON.stringify(error)}`)
   return { id: data?.id ?? 'unknown' }
 }
-
-const fmtDate = (iso: string | null): string =>
-  iso
-    ? new Date(iso).toLocaleString('en-US', {
-        timeZone: 'America/New_York',
-        dateStyle: 'medium',
-        timeStyle: 'short',
-      })
-    : 'your requested date'
 
 /** PAYMENT_COMPLETED → the premium "we've received your booking request" email
  *  (pre-confirmation). Renders the shared _ui React template from live booking
@@ -85,12 +76,13 @@ export async function sendRescheduleRequestEmail(
   })
 }
 
-/** OPTIONAL — NEW_DATE_PICKED → "got your new date" (enable via env in the worker). */
+/** NEW_DATE_PICKED (reschedule confirmed) → the premium "booking updated" email.
+ *  OPTIONAL — enable via OUTBOX_SEND_DATE_PICKED in the worker. */
 export async function sendDatePickedEmail(p: NewDatePickedPayload): Promise<{ id: string }> {
-  return deliverEmail({
-    to: p.customerEmail,
-    subject: 'New date received',
-    html: `<p>Hi ${p.customerName},</p>
-           <p>We got your new date (${fmtDate(p.newDate)}) and are reviewing it now.</p>`,
+  const { to, subject, html } = await renderBookingUpdated(p.bookingId, {
+    newDate: p.newDate,
+    customerEmail: p.customerEmail,
+    customerName: p.customerName,
   })
+  return deliverEmail({ to: to || p.customerEmail, subject, html })
 }

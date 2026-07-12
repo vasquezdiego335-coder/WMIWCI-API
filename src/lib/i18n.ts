@@ -136,20 +136,19 @@ export function t(locale: Locale | string | undefined, key: StringKey, vars: Var
 }
 
 // ── Email subjects (bilingual) ────────────────────────────────────────────
+// Subjects for the 11 active React customer emails (bilingual).
 const EMAIL_SUBJECTS: Record<string, { en: string; es: string }> = {
-  'pre-approval':      { en: "We've received your booking request",                 es: 'Recibimos tu solicitud de reserva' },
-  'final-confirmation':{ en: 'Your booking is approved',                           es: 'Tu reserva está aprobada' },
-  'pending-approval':  { en: 'We received your booking — pending approval', es: 'Recibimos tu reserva — pendiente de aprobación' },
-  'booking-confirmed': { en: 'Your move is confirmed ✅',                    es: 'Tu mudanza está confirmada ✅' },
-  'booking-denied':    { en: 'About your booking request',                  es: 'Sobre tu solicitud de reserva' },
-  'reschedule-offer':  { en: 'Pick a new date for your move',               es: 'Elige una nueva fecha para tu mudanza' },
-  'booking-rescheduled': { en: 'Your move has been rescheduled',             es: 'Tu mudanza ha sido reprogramada' },
-  'job-completion':    { en: 'Your move is complete — receipt enclosed',    es: 'Tu mudanza está completa — recibo adjunto' },
-  'contact-ack':       { en: 'We got your message',                         es: 'Recibimos tu mensaje' },
-  'payment-receipt':   { en: 'Payment received — receipt enclosed',         es: 'Pago recibido — recibo adjunto' },
-  'job-reminder':      { en: 'Your move is almost here',                    es: 'Tu mudanza ya casi llega' },
-  'review-request':    { en: 'How did we do? Leave us a review',            es: '¿Cómo lo hicimos? Deja tu reseña' },
-  'abandoned-checkout':{ en: 'Your date is still available',                es: 'Tu fecha sigue disponible' },
+  'pre-approval':        { en: "We've received your booking request",       es: 'Recibimos tu solicitud de reserva' },
+  'final-confirmation':  { en: 'Your booking is approved',                  es: 'Tu reserva está aprobada' },
+  'booking-declined':    { en: 'About your booking request',                es: 'Sobre tu solicitud de reserva' },
+  'payment-receipt':     { en: 'Payment received — receipt enclosed',       es: 'Pago recibido — recibo adjunto' },
+  'booking-updated':     { en: 'Your booking has been updated',             es: 'Tu reserva ha sido actualizada' },
+  'booking-cancellation':{ en: 'Your booking has been cancelled',           es: 'Tu reserva ha sido cancelada' },
+  'job-reminder':        { en: 'Your move is almost here',                  es: 'Tu mudanza ya casi llega' },
+  'job-completion':      { en: 'Your move is complete — thank you',         es: 'Tu mudanza está completa — gracias' },
+  'review-request':      { en: 'How did we do? Leave us a review',          es: '¿Cómo lo hicimos? Deja tu reseña' },
+  'abandoned-checkout':  { en: 'Your date is still available',              es: 'Tu fecha sigue disponible' },
+  'referral':            { en: 'Give 15%. Get 15%.',                        es: 'Da 15%. Recibe 15%.' },
 }
 
 export function emailSubject(template: string, locale?: string): string {
