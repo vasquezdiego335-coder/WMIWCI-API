@@ -43,8 +43,20 @@ let redisClient: Redis | undefined
 export function getRedis(): Redis {
   if (!redisClient) {
     const url = process.env.REDIS_URL ?? 'redis://localhost:6379'
+    if (!process.env.REDIS_URL) {
+      console.warn('[Redis] ⚠️  REDIS_URL is NOT set — direct client falling back to localhost.')
+    }
+
+    // Match the Railway dual-stack DNS fix used for the BullMQ config so both
+    // connection paths behave identically against the rlwy.net proxy.
+    const extra: RedisOptions = {}
+    if (url.includes('rlwy.net') || url.includes('railway.internal')) {
+      extra.family = 0
+    }
+
     redisClient = new Redis(url, {
       ...buildRedisOptions(),
+      ...extra,
       lazyConnect: true,
     })
 
@@ -90,43 +102,60 @@ export const redis = new Proxy({} as Redis, {
 // Instead we give BullMQ the parsed config. It creates managed connections
 // internally and handles reconnect/error lifecycle itself.
 export function getBullConnection(): ConnectionOptions {
-  const url = process.env.REDIS_URL ?? 'redis://localhost:6379'
+  const rawUrl = process.env.REDIS_URL
+  const url = rawUrl ?? 'redis://localhost:6379'
 
-  // DIAGNOSTIC: log the Redis URL and parsing result
-  const safeUrl = url.replace(/:([^@]+)@/, ':****@')
+  // ── DIAGNOSTIC ──────────────────────────────────────────────────────
+  const safeUrl = url.replace(/:([^@/]+)@/, ':****@')
+  if (!rawUrl) {
+    console.warn('[Redis] ⚠️  REDIS_URL is NOT set — falling back to localhost. ' +
+      'Set REDIS_URL on this service or the app cannot reach Redis.')
+  }
   console.log(`[Redis] getBullConnection: URL="${safeUrl}"`)
 
-  // Parse the URL into host/port/password/username/tls that BullMQ expects.
-  let parsed: URL
+  // Parse the URL into the explicit host/port/password/tls shape BullMQ needs.
+  // We ALWAYS return a config carrying host+port, even on parse failure —
+  // handing BullMQ a config without a host is what produces the cryptic
+  // "Cannot read properties of undefined (reading 'auth')" crash.
+  let parsed: URL | undefined
   try {
     parsed = new URL(url)
-    console.log(`[Redis] URL parsed successfully: host=${parsed.hostname}, port=${parsed.port}, user=${parsed.username}`)
   } catch (err) {
-    // If the URL is not parseable (bare host:port), fall through to the
-    // raw-URL approach. ioredis handles non-standard formats internally.
-    console.error(`[Redis] URL parsing FAILED: ${err instanceof Error ? err.message : String(err)}`)
-    return {
-      ...buildRedisOptions(),
-      lazyConnect: false,
-    } as unknown as ConnectionOptions
+    console.error(`[Redis] ❌ URL parse FAILED for "${safeUrl}": ` +
+      `${err instanceof Error ? err.message : String(err)}. Using localhost:6379 fallback.`)
   }
+
+  const host = parsed?.hostname || 'localhost'
+  const port = parseInt(parsed?.port || '6379', 10)
 
   const opts: Record<string, unknown> = {
     ...buildRedisOptions(),
-    host: parsed.hostname,
-    port: parseInt(parsed.port || '6379', 10),
+    host,
+    port,
     lazyConnect: false,
   }
 
-  if (parsed.password) opts.password = decodeURIComponent(parsed.password)
-  if (parsed.username && parsed.username !== 'default') {
+  if (parsed?.password) opts.password = decodeURIComponent(parsed.password)
+  // ioredis defaults the username to "default"; only set it when it's custom.
+  if (parsed?.username && parsed.username !== 'default') {
     opts.username = decodeURIComponent(parsed.username)
   }
 
-  // Upstash requires TLS on port 6379 (rediss://) or explicitly.
-  if (parsed.protocol === 'rediss:' || url.includes('upstash.io')) {
+  // TLS: rediss:// scheme, or providers that require it (Upstash).
+  if (parsed?.protocol === 'rediss:' || url.includes('upstash.io')) {
     opts.tls = {}
   }
+
+  // Railway's Redis proxy (rlwy.net) and internal hostnames (*.railway.internal)
+  // resolve on a dual IPv4/IPv6 stack. family:0 lets Node try both records
+  // instead of failing with ETIMEDOUT when only one address family is reachable.
+  if (host.includes('rlwy.net') || host.includes('railway.internal')) {
+    opts.family = 0
+  }
+
+  console.log(`[Redis] BullMQ config → host=${host} port=${port} ` +
+    `tls=${opts.tls ? 'on' : 'off'} family=${opts.family ?? 'default'} ` +
+    `auth=${opts.password ? 'yes' : 'no'}`)
 
   return opts as unknown as ConnectionOptions
 }
