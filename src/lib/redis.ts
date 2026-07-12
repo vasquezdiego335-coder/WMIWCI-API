@@ -92,13 +92,19 @@ export const redis = new Proxy({} as Redis, {
 export function getBullConnection(): ConnectionOptions {
   const url = process.env.REDIS_URL ?? 'redis://localhost:6379'
 
+  // DIAGNOSTIC: log the Redis URL and parsing result
+  const safeUrl = url.replace(/:([^@]+)@/, ':****@')
+  console.log(`[Redis] getBullConnection: URL="${safeUrl}"`)
+
   // Parse the URL into host/port/password/username/tls that BullMQ expects.
   let parsed: URL
   try {
     parsed = new URL(url)
-  } catch {
+    console.log(`[Redis] URL parsed successfully: host=${parsed.hostname}, port=${parsed.port}, user=${parsed.username}`)
+  } catch (err) {
     // If the URL is not parseable (bare host:port), fall through to the
     // raw-URL approach. ioredis handles non-standard formats internally.
+    console.error(`[Redis] URL parsing FAILED: ${err instanceof Error ? err.message : String(err)}`)
     return {
       ...buildRedisOptions(),
       lazyConnect: false,
