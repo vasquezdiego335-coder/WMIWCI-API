@@ -71,6 +71,11 @@ export async function middleware(req: NextRequest): Promise<NextResponse> {
   }
 
   // ── Auth check for protected routes ───────────────────────
+  // Let the login page through without a session (avoids redirect loop).
+  if (pathname === '/admin/login') {
+    return NextResponse.next()
+  }
+
   const match = PROTECTED_ROUTES.find((r) => r.pattern.test(pathname))
   if (match) {
     const session = await getSessionFromRequest(req)
