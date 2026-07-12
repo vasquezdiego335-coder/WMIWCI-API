@@ -24,11 +24,13 @@
 //  via a DIRECT Resend call (the email-worker allowlist stays untouched). Every
 //  send is guarded — a Redis/Twilio/Resend hiccup is logged, never fatal.
 // ════════════════════════════════════════════════════════════════════════
+import { render } from '@react-email/render'
 import { prisma } from './db'
 import { smsQueue, scheduledQueue } from './queues'
 import { resend, EMAIL_FROM, EMAIL_REPLY_TO } from './resend'
 import { queueLogger } from './logger'
 import { normalizeLocale, t, BIZ_NAME, BIZ_PHONE, type Locale } from './i18n'
+import ReviewRequestEmail from '../emails/review-request'
 
 const log = queueLogger.child({ mod: 'followups' })
 
@@ -212,17 +214,12 @@ function buildMessage(type: FollowupType, name: string, locale: Locale): { sms: 
       const key = type === 'review-request' ? 'reviewRequest' : 'reviewReminder'
       return {
         sms: withOptOut(t(locale, key, { name, url: reviewUrl() }), locale),
-        subject: es ? '¿Cómo estuvo tu mudanza?' : 'How was your move?',
-        html: emailHtml({
-          heading: es ? `¡Gracias, ${esc(name)}!` : `Thanks, ${esc(name)}!`,
-          paras: [
-            es
-              ? 'Esperamos que tu mudanza haya salido perfecta. Una reseña rápida nos ayuda muchísimo y solo toma 30 segundos.'
-              : 'We hope your move went perfectly. A quick review helps us a ton and takes about 30 seconds.',
-          ],
-          ctaLabel: es ? 'Dejar una reseña' : 'Leave a review',
-          ctaUrl: reviewUrl(),
-        }),
+        subject: es ? '¿Cómo lo hicimos? Deja tu reseña' : 'How did we do? Leave us a review',
+        // Premium branded review email (shared _ui kit), matching the rest of the
+        // transactional set. Replaces the old inline emailHtml() card.
+        html: render(
+          ReviewRequestEmail({ customerName: name, googleReviewUrl: reviewUrl(), locale })
+        ),
       }
     }
     case 'repeat-reminder':

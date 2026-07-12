@@ -15,15 +15,20 @@ export async function POST(_req: NextRequest, { params }: { params: { id: string
   })
   if (!booking) return NextResponse.json({ error: 'Not found' }, { status: 404 })
 
+  // Send the premium PAYMENT RECEIPT template (was mistakenly 'job-completion',
+  // which the worker allowlist dropped — the receipt silently never sent).
   await emailQueue.add('resend-receipt', {
-    template: 'job-completion',
+    template: 'payment-receipt',
     to: booking.customer.email,
     bookingId: booking.id,
     payload: {
       customerName: booking.customer.name,
-      completedAt: booking.updatedAt.toISOString(),
+      displayId: booking.displayId,
+      amountPaid: (booking.depositAmount / 100).toFixed(2),
+      date: booking.updatedAt.toISOString(),
       portalUrl: `${process.env.APP_URL}/my-booking/${booking.customerToken}`,
       items: booking.itemsDescription ?? undefined,
+      locale: booking.customer.locale,
     },
   })
 

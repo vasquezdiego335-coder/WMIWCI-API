@@ -551,6 +551,7 @@ export type ApprovalCardData = {
   photos?: { url: string }[] // up to 4 rendered as an inline gallery
   adminUrl?: string | null
   includeActionButtons?: boolean // Approve/Offer/Deny (default true)
+  warnings?: string[] // missing-info lines (from bookingCompleteness), owner-facing
 }
 
 const GALLERY_URL = 'https://www.moveitclearit.com'
@@ -685,6 +686,12 @@ export function buildBookingApprovalCard(data: ApprovalCardData): {
     fields.push(field(`📷 Job Photos (${photoCount})`, links, true))
   }
 
+  // 13) Missing-info warnings (from bookingCompleteness) — surfaced so the owner
+  //     never approves an undispatchable/mispriced booking without seeing it.
+  if (data.warnings && data.warnings.length) {
+    fields.push(field('⚠️ Needs Attention', data.warnings.map((w) => `• ${w}`).join('\n')))
+  }
+
   const descriptionParts: string[] = []
   if (data.rescheduled) descriptionParts.push('🔁 **Rescheduled by the customer** — approve for the new date.')
   if (data.manualReviewRequired)
@@ -797,6 +804,7 @@ export function approvalCardDataFromBooking(
     stripeChargeId?: string | null
     receiptUrl?: string | null
     includeActionButtons?: boolean
+    warnings?: string[]
   }
 ): ApprovalCardData {
   const dollars = (cents?: number | null): number | null => (typeof cents === 'number' ? cents / 100 : null)
@@ -850,5 +858,6 @@ export function approvalCardDataFromBooking(
     photoCount: opts?.photoCount ?? opts?.photos?.length ?? 0,
     adminUrl: opts?.adminUrl ?? null,
     includeActionButtons: opts?.includeActionButtons ?? true,
+    warnings: opts?.warnings ?? [],
   }
 }

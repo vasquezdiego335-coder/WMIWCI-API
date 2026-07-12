@@ -5,6 +5,7 @@ import {
   RescheduleRequestedPayload,
   NewDatePickedPayload,
 } from '../domain/events'
+import { renderPreApproval, renderFinalConfirmation } from './premiumEmails'
 
 // ════════════════════════════════════════════════════════════════════════
 //  Real email provider (Resend). Reuses the app's configured client.
@@ -37,12 +38,6 @@ async function deliverEmail(message: {
   return { id: data?.id ?? 'unknown' }
 }
 
-const itemsBlock = (items?: string): string =>
-  items
-    ? `<p style="font-size:12px;color:#6b7280;font-weight:700;text-transform:uppercase;margin:16px 0 4px">Job Details</p>
-       <p style="font-size:13px;color:#0a1628;line-height:1.7;white-space:pre-line;margin:0">${items}</p>`
-    : ''
-
 const fmtDate = (iso: string | null): string =>
   iso
     ? new Date(iso).toLocaleString('en-US', {
@@ -52,27 +47,27 @@ const fmtDate = (iso: string | null): string =>
       })
     : 'your requested date'
 
-/** PAYMENT_COMPLETED → "we have your payment, pending approval". */
+/** PAYMENT_COMPLETED → the premium "we've received your booking request" email
+ *  (pre-confirmation). Renders the shared _ui React template from live booking
+ *  data; the event payload is the fallback if the row can't be loaded. */
 export async function sendPreApprovalEmail(p: PaymentCompletedPayload): Promise<{ id: string }> {
-  return deliverEmail({
-    to: p.customerEmail,
-    subject: 'Your booking is pending approval',
-    html: `<p>Hi ${p.customerName},</p>
-           <p>We received your $${p.amountPaid} hold for ${fmtDate(p.requestedDate)}.
-           Your booking is now pending final approval — we'll confirm shortly.</p>
-           ${itemsBlock(p.items)}`,
+  const { to, subject, html } = await renderPreApproval(p.bookingId, {
+    amountPaid: p.amountPaid,
+    customerEmail: p.customerEmail,
+    customerName: p.customerName,
+    requestedDate: p.requestedDate,
   })
+  return deliverEmail({ to: to || p.customerEmail, subject, html })
 }
 
-/** APPROVED → final confirmation. */
+/** APPROVED → the premium "your booking is approved" confirmation email. */
 export async function sendFinalConfirmationEmail(p: ApprovedPayload): Promise<{ id: string }> {
-  return deliverEmail({
-    to: p.customerEmail,
-    subject: 'Booking confirmed ✅',
-    html: `<p>Hi ${p.customerName},</p>
-           <p>Your booking for ${fmtDate(p.requestedDate)} is confirmed. See you then!</p>
-           ${itemsBlock(p.items)}`,
+  const { to, subject, html } = await renderFinalConfirmation(p.bookingId, {
+    customerEmail: p.customerEmail,
+    customerName: p.customerName,
+    requestedDate: p.requestedDate,
   })
+  return deliverEmail({ to: to || p.customerEmail, subject, html })
 }
 
 /** RESCHEDULE_REQUESTED → here are alternate dates. */

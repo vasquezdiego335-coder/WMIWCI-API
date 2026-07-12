@@ -6,6 +6,7 @@ import { apiLogger } from '@/lib/logger'
 import { isDayAvailable, formatEastern } from '@/lib/scheduling'
 import { BIZ_PHONE } from '@/lib/i18n'
 import { outboxEnabled, emitNewDatePicked } from '@/outbox/integration'
+import { customerBookingProjection } from '@/lib/booking-projections'
 
 export async function GET(_req: NextRequest, { params }: { params: { token: string } }): Promise<NextResponse> {
   const booking = await prisma.booking.findFirst({
@@ -26,10 +27,11 @@ export async function GET(_req: NextRequest, { params }: { params: { token: stri
     return NextResponse.json({ error: 'Booking not found or link expired' }, { status: 404 })
   }
 
-  // Omit sensitive fields before returning to customer
-  const { stripeCheckoutId, stripePaymentIntentId, ipAddress, userAgent, discordJobChannelId, discordPaperworkChannelId, discordPhotosChannelId, discordApprovalMessageId, internalNotes, ...safe } = booking as any
-
-  return NextResponse.json(safe)
+  // EXPLICIT allow-list projection (not spread-and-delete): the customer only
+  // ever receives fields opted in by CUSTOMER_BOOKING_ALLOW, so any newly-added
+  // sensitive column (access codes, Stripe IDs, internal notes, IP/UA, Discord
+  // IDs, address evaluation JSON) is excluded by DEFAULT. See booking-projections.
+  return NextResponse.json(customerBookingProjection(booking as unknown as Record<string, unknown>))
 }
 
 const RescheduleSchema = z.object({

@@ -125,14 +125,18 @@ export async function fulfillPaidCheckout(params: {
   const tasks: Promise<void>[] = []
 
   // ════════════════════════════════════════════════════════════════════════
-  //  MESSAGING POLICY — at the PAYMENT step, fulfillPaidCheckout sends ONLY the
-  //  FINAL CONFIRMATION email + SMS. The pre-approval pair is sent later, by the
-  //  Discord approval handler. No other customer email/SMS is queued here.
+  //  MESSAGING POLICY — the PAYMENT step (booking → PENDING_APPROVAL, $49 held
+  //  but NOT captured) sends the PRE-CONFIRMATION email + a payment-step SMS.
+  //  The FINAL CONFIRMATION ("you're approved") is sent later by the Discord
+  //  approval handler once the owner approves and the $49 is captured. Sending
+  //  the pre-confirmation here (not the confirmation) keeps every message honest
+  //  about the true booking state.
   // ════════════════════════════════════════════════════════════════════════
 
-  // 1) Payment-step EMAIL.
-  //    OUTBOX_ENABLED → emit PAYMENT_COMPLETED to the outbox (which sends the
-  //    email) and SKIP the legacy email here, so the customer never gets both.
+  // 1) Payment-step EMAIL = the premium PRE-CONFIRMATION ("we've received your
+  //    booking request"). OUTBOX_ENABLED → emit PAYMENT_COMPLETED to the outbox
+  //    (which renders + sends that template) and SKIP the legacy queue here so
+  //    the customer never gets both.
   if (outboxEnabled()) {
     log.info({ to: booking.customer.email }, '[outbox] emitting PAYMENT_COMPLETED (legacy payment email skipped)')
     tasks.push(
@@ -146,19 +150,21 @@ export async function fulfillPaidCheckout(params: {
       }).then(() => undefined)
     )
   } else {
-    log.info({ to: booking.customer.email }, '[messaging] queueing FINAL CONFIRMATION email')
+    log.info({ to: booking.customer.email }, '[messaging] queueing PRE-CONFIRMATION email')
     tasks.push(
-      enqueue('email:final-confirmation', () =>
-        emailQueue.add('final-confirmation', {
-          template: 'final-confirmation',
+      enqueue('email:pre-approval', () =>
+        emailQueue.add('pre-approval', {
+          template: 'pre-approval',
           to: booking.customer.email,
           bookingId,
           payload: {
             customerName: booking.customer.name,
             displayId: booking.displayId,
-            date: booking.requestedDate?.toISOString(),
-            amountPaid,
-            items: booking.itemsDescription ?? undefined,
+            requestedDate: booking.requestedDate?.toISOString(),
+            originAddress: booking.originAddress,
+            destAddress: booking.destAddress,
+            estimate: booking.totalEstimate != null ? `$${Math.round(booking.totalEstimate).toLocaleString('en-US')}` : undefined,
+            amountHold: String(Math.round(Number(amountPaid))),
             portalUrl,
             serviceAreaZone: booking.serviceAreaZone ?? undefined,
             travelFee: booking.travelFee ? booking.travelFee / 100 : undefined,

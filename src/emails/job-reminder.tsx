@@ -1,32 +1,193 @@
 import * as React from 'react'
-import { Html, Head, Body, Container, Section, Heading, Text, Button, Hr } from '@react-email/components'
-import { AnimatedHero, HeroAnimStyle } from './_ui'
-interface Props { customerName: string; scheduledStart?: string; originAddress: string; portalUrl: string; heroGifUrl?: string }
-export default function JobReminderEmail({ customerName = 'Friend', scheduledStart, originAddress = 'Origin', portalUrl = '#', heroGifUrl = 'https://moveitclearit.com/email/truck-hero.gif' }: Props) {
-  const dateStr = scheduledStart ? new Date(scheduledStart).toLocaleString('en-US', { weekday: 'long', month: 'long', day: 'numeric', hour: 'numeric', minute: '2-digit', timeZone: 'America/New_York' }) : 'tomorrow'
+import {
+  Shell,
+  LogoHeader,
+  AnimatedHero,
+  Card,
+  Eyebrow,
+  Pill,
+  Callout,
+  Checklist,
+  Spacer,
+  Divider,
+  PrimaryButton,
+  ContactRow,
+  Footer,
+  IconChip,
+  C,
+  FONT,
+  P,
+} from './_ui'
+
+// ════════════════════════════════════════════════════════════════════════
+//  MOVE REMINDER  ("Your move is almost here")
+//  Rebuilt on the shared _ui kit to match the confirmation email. Works for
+//  both the 72h and 24h reminders — pass `leadLabel` ("in 3 days" / "tomorrow")
+//  to tune the copy; otherwise it reads off the date. Bilingual EN/ES.
+// ════════════════════════════════════════════════════════════════════════
+
+interface Props {
+  customerName?: string
+  scheduledStart?: string
+  timeLabel?: string
+  leadLabel?: string
+  originAddress?: string
+  displayId?: string
+  portalUrl?: string
+  heroGifUrl?: string
+  phone?: string
+  email?: string
+  website?: string
+  websiteLabel?: string
+  social?: { instagram?: string; facebook?: string; tiktok?: string; google?: string }
+  locale?: string
+}
+
+export default function JobReminderEmail({
+  customerName = 'there',
+  scheduledStart,
+  timeLabel,
+  leadLabel,
+  originAddress,
+  displayId,
+  portalUrl = '#',
+  heroGifUrl,
+  phone = '862-640-0625',
+  email = 'hello@moveitclearit.com',
+  website = 'https://moveitclearit.com',
+  websiteLabel = 'moveitclearit.com',
+  social,
+  locale = 'en',
+}: Props) {
+  const es = (locale ?? 'en').toLowerCase().startsWith('es')
+  const locStr = es ? 'es-US' : 'en-US'
+  const dateStr = scheduledStart
+    ? new Date(scheduledStart).toLocaleDateString(locStr, { weekday: 'long', month: 'long', day: 'numeric', timeZone: 'America/New_York' })
+    : es ? 'muy pronto' : 'coming up soon'
+  const timeStr = timeLabel || (scheduledStart ? new Date(scheduledStart).toLocaleTimeString(locStr, { hour: 'numeric', minute: '2-digit', timeZone: 'America/New_York' }) : undefined)
+
+  const t = es
+    ? {
+        preview: `Tu mudanza es ${leadLabel || dateStr}. Aquí tienes cómo prepararte.`,
+        pill: leadLabel || 'Próxima mudanza',
+        h1: 'Tu mudanza ya casi llega.',
+        sub: `Hola ${customerName}, tu equipo llega ${leadLabel ? leadLabel + ' — ' : ''}${dateStr}${timeStr ? ` a las ${timeStr}` : ''}. Prepárate y lo hacemos rápido.`,
+        whenLabel: 'Tu mudanza está programada para',
+        prepTitle: 'Antes de que llegue el equipo',
+        prep: [
+          'Ten el camión en el lugar de recogida.',
+          'Desconecta electrodomésticos y arma las cajas.',
+          'Despeja pasillos, puertas y la entrada.',
+          'Ten listo el pago del saldo restante.',
+        ],
+        cta: 'Ver mi reserva',
+        reschedule: '¿Necesitas reprogramar? Llámanos o escríbenos lo antes posible.',
+        supportTitle: 'Estamos para ayudarte',
+        contactLabels: { phone: 'Llama o escribe', email: 'Correo', website: 'Sitio web' },
+        disclaimer: 'Te enviamos este recordatorio porque tienes una mudanza reservada con nosotros.',
+        footerLabels: { manage: 'Administrar preferencias', unsubscribe: 'Cancelar suscripción', rights: 'Todos los derechos reservados.' },
+      }
+    : {
+        preview: `Your move is ${leadLabel || dateStr}. Here's how to get ready.`,
+        pill: leadLabel || 'Upcoming move',
+        h1: 'Your move is almost here.',
+        sub: `Hi ${customerName}, your crew arrives ${leadLabel ? leadLabel + ' — ' : ''}${dateStr}${timeStr ? ` at ${timeStr}` : ''}. A little prep keeps everything fast.`,
+        whenLabel: 'Your move is scheduled for',
+        prepTitle: 'Before the crew arrives',
+        prep: [
+          'Have the truck at the pickup location.',
+          'Disconnect appliances and finish packing boxes.',
+          'Clear pathways, doorways, and the driveway.',
+          'Have payment ready for the remaining balance.',
+        ],
+        cta: 'View booking',
+        reschedule: 'Need to reschedule? Call or text us as soon as you can.',
+        supportTitle: "We're here to help",
+        contactLabels: { phone: 'Call or text', email: 'Email', website: 'Website' },
+        disclaimer: "You're receiving this reminder because you have a move booked with us.",
+        footerLabels: { manage: 'Manage preferences', unsubscribe: 'Unsubscribe', rights: 'All rights reserved.' },
+      }
+
   return (
-    <Html lang="en"><Head><HeroAnimStyle /></Head>
-      <Body style={{ backgroundColor: '#F5F1EA', fontFamily: 'Inter, sans-serif' }}>
-        <Container style={{ maxWidth: '560px', margin: '0 auto', padding: '24px 16px' }}>
-          <Section style={{ backgroundColor: '#0A1628', padding: '20px', borderRadius: '12px 12px 0 0', textAlign: 'center' }}><Text style={{ color: '#FF5A1F', fontSize: '16px', fontWeight: '700', margin: '0' }}>We Move It. We Clear It.</Text></Section>
-          <Section style={{ backgroundColor: '#FFFFFF', padding: '32px 28px', borderRadius: '0 0 12px 12px' }}>
-            {/* Animated hero: SVG (Apple Mail) + GIF fallback (Gmail/Outlook) */}
-            <AnimatedHero heroGifUrl={heroGifUrl} />
-            <Heading style={{ fontSize: '20px', fontWeight: '700', color: '#0A1628', margin: '18px 0 16px' }}>⏰ Your move is tomorrow!</Heading>
-            <Text style={{ fontSize: '15px', color: '#374151', lineHeight: '1.6', margin: '0 0 12px' }}>Hi {customerName}, just a reminder that your crew arrives <strong>{dateStr}</strong> at {originAddress}.</Text>
-            <Section style={{ backgroundColor: '#FFF7ED', border: '1px solid #FED7AA', borderRadius: '8px', padding: '16px', margin: '16px 0' }}>
-              <Text style={{ fontSize: '14px', color: '#0A1628', fontWeight: '600', margin: '0 0 8px' }}>Before the crew arrives:</Text>
-              <Text style={{ fontSize: '13px', color: '#374151', margin: '4px 0' }}>✅ Have the truck at the pickup location</Text>
-              <Text style={{ fontSize: '13px', color: '#374151', margin: '4px 0' }}>✅ Disconnect appliances and prepare boxes</Text>
-              <Text style={{ fontSize: '13px', color: '#374151', margin: '4px 0' }}>✅ Clear pathways and doorways</Text>
-              <Text style={{ fontSize: '13px', color: '#374151', margin: '4px 0' }}>✅ Have payment ready for remaining balance</Text>
-            </Section>
-            <Button style={{ backgroundColor: '#FF5A1F', color: '#FFF', padding: '14px 28px', borderRadius: '8px', fontWeight: '700', display: 'block', textAlign: 'center', textDecoration: 'none', margin: '20px 0' }} href={portalUrl}>View Booking Details →</Button>
-            <Hr style={{ borderColor: '#E5E7EB', margin: '20px 0' }} />
-            <Text style={{ fontSize: '12px', color: '#9CA3AF', textAlign: 'center' }}>Need to reschedule? Call 862-640-0625 ASAP</Text>
-          </Section>
-        </Container>
-      </Body>
-    </Html>
+    <Shell lang={es ? 'es' : 'en'} preview={t.preview}>
+      <LogoHeader />
+
+      {/* ── 1 · HERO ─────────────────────────────────────────── */}
+      <Card style={{ borderTop: `3px solid ${C.orange}` }}>
+        <div className="heropad" style={{ textAlign: 'center' as const }}>
+          <AnimatedHero heroGifUrl={heroGifUrl} />
+          <Spacer h={16} />
+          <Pill tone="orange">{t.pill}</Pill>
+          <h1 className="h1" style={{ fontFamily: FONT, fontSize: '26px', lineHeight: '33px', fontWeight: 800, letterSpacing: '-0.4px', color: C.navy, margin: '16px 0 10px' }}>
+            {t.h1}
+          </h1>
+          <p style={{ ...P, marginBottom: 0, maxWidth: '430px', marginLeft: 'auto', marginRight: 'auto' }}>{t.sub}</p>
+        </div>
+      </Card>
+
+      <Spacer h={16} />
+
+      {/* ── 2 · WHEN BAND ────────────────────────────────────── */}
+      <table role="presentation" width="100%" cellPadding={0} cellSpacing={0} border={0} className="card" style={{ background: C.navy, borderRadius: '18px' }}>
+        <tbody>
+          <tr>
+            <td className="cardpad" style={{ padding: '22px 30px' }}>
+              <table role="presentation" width="100%" cellPadding={0} cellSpacing={0} border={0}>
+                <tbody>
+                  <tr>
+                    <td valign="middle">
+                      <div style={{ fontFamily: FONT, fontSize: '11px', fontWeight: 700, letterSpacing: '1.4px', textTransform: 'uppercase' as const, color: C.gold }}>{t.whenLabel}</div>
+                      <div style={{ fontFamily: FONT, fontSize: '21px', fontWeight: 800, color: '#FFFFFF', marginTop: '7px', lineHeight: '27px' }}>{dateStr}</div>
+                      {timeStr ? <div style={{ fontFamily: FONT, fontSize: '14px', fontWeight: 600, color: '#AEB8C6', marginTop: '4px' }}>{timeStr}{originAddress ? ` · ${originAddress}` : ''}</div> : null}
+                    </td>
+                    <td width={54} align="right" valign="middle" className="hide-sm" style={{ width: '54px' }}>
+                      <IconChip icon="clock" color={C.gold} size={20} dim={46} border="none" radius={13} bg="rgba(212,162,76,0.16)" />
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </td>
+          </tr>
+        </tbody>
+      </table>
+
+      <Spacer h={16} />
+
+      {/* ── 3 · PREP CHECKLIST ───────────────────────────────── */}
+      <Card>
+        <Eyebrow icon="checklist" title={t.prepTitle} tone="orange" />
+        <Checklist items={t.prep} />
+      </Card>
+
+      {/* ── 4 · CTA ──────────────────────────────────────────── */}
+      <Spacer h={26} />
+      <PrimaryButton href={portalUrl} label={t.cta} />
+      <Spacer h={22} />
+
+      {/* ── 5 · RESCHEDULE NOTE ──────────────────────────────── */}
+      <Callout tone="gold">
+        <div style={{ fontFamily: FONT, fontSize: '13.5px', lineHeight: '21px', color: C.body, fontWeight: 600 }}>{t.reschedule}</div>
+      </Callout>
+
+      <Spacer h={16} />
+
+      {/* ── 6 · SUPPORT ──────────────────────────────────────── */}
+      <Card>
+        <Eyebrow icon="phone" title={t.supportTitle} tone="navy" />
+        <ContactRow phone={phone} email={email} website={website} websiteLabel={websiteLabel} labels={t.contactLabels} />
+      </Card>
+
+      {/* ── 7 · FOOTER ───────────────────────────────────────── */}
+      <Footer
+        disclaimer={t.disclaimer}
+        phone={phone}
+        email={email}
+        websiteLabel={websiteLabel}
+        social={social}
+        manageUrl={portalUrl}
+        unsubscribeUrl={portalUrl}
+        labels={t.footerLabels}
+      />
+    </Shell>
   )
 }

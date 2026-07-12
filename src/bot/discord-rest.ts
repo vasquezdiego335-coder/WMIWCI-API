@@ -17,6 +17,7 @@ import {
   truckLabelFromDescription,
   TRUCK_OPTION_LABELS,
 } from '../lib/booking-display'
+import { completenessLines } from '../lib/booking-completeness'
 
 // ════════════════════════════════════════════════════════════════════════
 //  Discord REST sender — for the WORKER process (and any non-gateway caller)
@@ -143,6 +144,7 @@ export async function postBookingApprovalCard(
         rescheduled,
         stripeChargeId: booking.payments[0]?.stripeChargeId ?? null,
         receiptUrl: booking.payments[0]?.receiptUrl ?? null,
+        warnings: completenessLines(booking),
       })
     : {
         // Fallback: booking vanished — render whatever the queued payload carried.

@@ -130,6 +130,30 @@ const BookingSchema = z.object({
     .transform((v) => (BUILDING_LABELS[sanitizeText(v)] ? sanitizeText(v) : undefined))
     .optional(),
 
+  // ── Structured access details (owner spec 2026-07-12) — all optional so an
+  //    older cached form never 422s. Pickup=origin, drop-off=dest stay separate.
+  //    Access CODES are persisted to their own columns and NEVER folded into
+  //    itemsDescription (which reaches public emails + the customer summary). ──
+  originUnit: z.string().transform(sanitizeText).pipe(z.string().max(40)).optional(),
+  destUnit: z.string().transform(sanitizeText).pipe(z.string().max(40)).optional(),
+  originFloor: z.coerce.number().int().min(-5).max(200).optional(),
+  destFloor: z.coerce.number().int().min(-5).max(200).optional(),
+  originHasElevator: z.coerce.boolean().optional(),
+  destHasElevator: z.coerce.boolean().optional(),
+  originStairCount: z.coerce.number().int().min(0).max(200).optional(),
+  destStairCount: z.coerce.number().int().min(0).max(200).optional(),
+  originAccessNotes: z.string().transform(sanitizeNotes).pipe(z.string().max(500)).optional(),
+  destAccessNotes: z.string().transform(sanitizeNotes).pipe(z.string().max(500)).optional(),
+  originAccessCode: z.string().transform(sanitizeText).pipe(z.string().max(60)).optional(),
+  destAccessCode: z.string().transform(sanitizeText).pipe(z.string().max(60)).optional(),
+  truckProvider: z.string().transform(sanitizeText).pipe(z.string().max(80)).optional(),
+  truckSize: z.string().transform(sanitizeText).pipe(z.string().max(40)).optional(),
+  truckReservationStatus: z.string().transform(sanitizeText).pipe(z.string().max(40)).optional(),
+  truckPickupLocation: z.string().transform(sanitizeText).pipe(z.string().max(200)).optional(),
+  truckReturnResponsibility: z.string().transform(sanitizeText).pipe(z.string().max(120)).optional(),
+  equipmentNeeds: z.string().transform(sanitizeNotes).pipe(z.string().max(500)).optional(),
+  crewInstructions: z.string().transform(sanitizeNotes).pipe(z.string().max(1000)).optional(),
+
   // ── Client-side estimate snapshot (display only — NEVER drives pricing).
   //    Shown to the owner so the approval card matches what the customer saw. ──
   estimateTotal: z.coerce.number().min(0).max(100000).optional(),
@@ -362,6 +386,28 @@ async function handleBooking(req: NextRequest): Promise<NextResponse> {
       // show the exact notes cleanly. itemsDescription still carries a "Notes:"
       // line for the legacy/human summary.
       customerNotes: data.jobDetails ?? null,
+      // ── Structured access details (nullable; older rows stay null). Access
+      //    CODES persist ONLY here, never in itemsDescription → never in emails
+      //    or the customer summary. Pickup/drop-off kept separate. ──
+      originUnit: data.originUnit,
+      destUnit: data.destUnit,
+      originFloor: data.originFloor,
+      destFloor: data.destFloor,
+      originHasElevator: data.originHasElevator,
+      destHasElevator: data.destHasElevator,
+      originStairCount: data.originStairCount,
+      destStairCount: data.destStairCount,
+      originAccessNotes: data.originAccessNotes,
+      destAccessNotes: data.destAccessNotes,
+      originAccessCode: data.originAccessCode,
+      destAccessCode: data.destAccessCode,
+      truckProvider: data.truckProvider,
+      truckSize: data.truckSize,
+      truckReservationStatus: data.truckReservationStatus,
+      truckPickupLocation: data.truckPickupLocation,
+      truckReturnResponsibility: data.truckReturnResponsibility,
+      equipmentNeeds: data.equipmentNeeds,
+      crewInstructions: data.crewInstructions,
       requestedDate,
       depositAmount: BOOKING_FEE_CENTS,
       depositPaid: false,

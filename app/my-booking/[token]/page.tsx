@@ -2,6 +2,7 @@ import { Fragment } from 'react'
 import { prisma } from '@/lib/db'
 import { notFound } from 'next/navigation'
 import { CopyReference } from './CopyReference'
+import { accessSections } from '@/lib/booking-access'
 
 export const revalidate = 0
 
@@ -197,6 +198,15 @@ function buildCustomerView(booking: BookingRecord): CustomerBookingView {
   const origin = cleanAddr(booking.originAddress)
   const destination = cleanAddr(booking.destAddress)
 
+  // Non-sensitive structured access (unit/floor/elevator/stairs/notes, truck,
+  // equipment/crew) — NEVER the gate codes (includeSensitive:false). Location
+  // lines are tagged so pickup vs drop-off stays clear in the flat summary list.
+  const structuredAccess: string[] = []
+  for (const sec of accessSections(booking, { includeSensitive: false })) {
+    const loc = /Pickup/i.test(sec.title) ? 'Pickup' : /Drop-off/i.test(sec.title) ? 'Drop-off' : null
+    for (const line of sec.lines) structuredAccess.push(loc ? `${loc} — ${line}` : line)
+  }
+
   const estimateTotal = booking.totalEstimate != null && booking.totalEstimate > 0
     ? Math.round(booking.totalEstimate)
     : null
@@ -221,7 +231,7 @@ function buildCustomerView(booking: BookingRecord): CustomerBookingView {
     origin,
     destination,
     truckType: items.truck,
-    accessDetails: items.access,
+    accessDetails: [...items.access, ...structuredAccess],
     extraStops: items.extraStops,
     feeNote: items.feeNote,
     notes: items.notes,

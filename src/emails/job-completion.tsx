@@ -1,28 +1,157 @@
 import * as React from 'react'
-import { Html, Head, Body, Container, Section, Heading, Text, Button, Hr } from '@react-email/components'
-interface Props { customerName: string; completedAt?: string; portalUrl: string; items?: string }
-export default function JobCompletionEmail({ customerName = 'Friend', completedAt, portalUrl = '#', items }: Props) {
+import {
+  Shell,
+  LogoHeader,
+  Card,
+  Eyebrow,
+  Pill,
+  Callout,
+  Spacer,
+  Divider,
+  PrimaryButton,
+  ContactRow,
+  Footer,
+  IconChip,
+  C,
+  FONT,
+  P,
+} from './_ui'
+
+// ════════════════════════════════════════════════════════════════════════
+//  MOVE COMPLETE / THANK YOU  ("Your move is complete")
+//  Rebuilt on the shared _ui kit to match the transactional emails. Closes the
+//  loop after the job, points to the receipt, and sets up the review. Bilingual.
+// ════════════════════════════════════════════════════════════════════════
+
+interface Props {
+  customerName?: string
+  displayId?: string
+  completedAt?: string
+  items?: string
+  portalUrl?: string
+  phone?: string
+  email?: string
+  website?: string
+  websiteLabel?: string
+  social?: { instagram?: string; facebook?: string; tiktok?: string; google?: string }
+  locale?: string
+}
+
+export default function JobCompletionEmail({
+  customerName = 'there',
+  displayId,
+  completedAt,
+  items,
+  portalUrl = '#',
+  phone = '862-640-0625',
+  email = 'hello@moveitclearit.com',
+  website = 'https://moveitclearit.com',
+  websiteLabel = 'moveitclearit.com',
+  social,
+  locale = 'en',
+}: Props) {
+  const es = (locale ?? 'en').toLowerCase().startsWith('es')
+  const dateStr = completedAt
+    ? new Date(completedAt).toLocaleDateString(es ? 'es-US' : 'en-US', { month: 'long', day: 'numeric', year: 'numeric', timeZone: 'America/New_York' })
+    : undefined
+
+  const t = es
+    ? {
+        preview: `¡Tu mudanza está completa, ${customerName}! Gracias por confiar en nosotros.`,
+        pill: 'Mudanza completa',
+        h1: '¡Tu mudanza está completa!',
+        sub: `Gracias por confiar en nosotros con tus cosas, ${customerName}. Fue un gusto ayudarte${dateStr ? ` el ${dateStr}` : ''}.`,
+        detailsTitle: 'Detalles del trabajo',
+        cta: 'Ver mi recibo',
+        nextTitle: '¿Qué sigue?',
+        next: 'Tu recibo y el resumen del trabajo están en tu portal. En unos días te enviaremos un enlace para dejar una reseña — tu opinión significa muchísimo para nuestro equipo local.',
+        supportTitle: 'Estamos para ayudarte',
+        contactLabels: { phone: 'Llama o escribe', email: 'Correo', website: 'Sitio web' },
+        disclaimer: '¿Algo no quedó perfecto? Responde a este correo — lo resolvemos.',
+        footerLabels: { manage: 'Administrar preferencias', unsubscribe: 'Cancelar suscripción', rights: 'Todos los derechos reservados.' },
+      }
+    : {
+        preview: `Your move is complete, ${customerName}! Thank you for trusting us.`,
+        pill: 'Move complete',
+        h1: 'Your move is complete!',
+        sub: `Thank you for trusting us with your belongings, ${customerName}. It was a pleasure helping you${dateStr ? ` on ${dateStr}` : ''}.`,
+        detailsTitle: 'Job details',
+        cta: 'View my receipt',
+        nextTitle: "What's next",
+        next: "Your receipt and job summary are in your portal. In a few days we'll send a link to leave a review — your feedback means everything to our small local crew.",
+        supportTitle: "We're here to help",
+        contactLabels: { phone: 'Call or text', email: 'Email', website: 'Website' },
+        disclaimer: "Something not quite right? Just reply to this email — we'll make it right.",
+        footerLabels: { manage: 'Manage preferences', unsubscribe: 'Unsubscribe', rights: 'All rights reserved.' },
+      }
+
   return (
-    <Html lang="en"><Head />
-      <Body style={{ backgroundColor: '#F5F1EA', fontFamily: 'Inter, sans-serif' }}>
-        <Container style={{ maxWidth: '560px', margin: '0 auto', padding: '24px 16px' }}>
-          <Section style={{ backgroundColor: '#0A1628', padding: '20px', borderRadius: '12px 12px 0 0', textAlign: 'center' }}><Text style={{ color: '#FF5A1F', fontSize: '16px', fontWeight: '700', margin: '0' }}>We Move It. We Clear It.</Text></Section>
-          <Section style={{ backgroundColor: '#FFFFFF', padding: '32px 28px', borderRadius: '0 0 12px 12px' }}>
-            <Heading style={{ fontSize: '20px', fontWeight: '700', color: '#0A1628', margin: '0 0 16px' }}>Job Complete! 🎉</Heading>
-            <Text style={{ fontSize: '15px', color: '#374151', lineHeight: '1.6', margin: '0 0 12px' }}>Hi {customerName}, your move is done! Thank you for trusting us with your belongings.</Text>
-            <Text style={{ fontSize: '15px', color: '#374151', lineHeight: '1.6', margin: '0 0 12px' }}>Your receipt and job summary are available in your booking portal.</Text>
-            {items ? (
-              <Section style={{ backgroundColor: '#F5F1EA', padding: '14px 16px', borderRadius: '8px', margin: '0 0 16px' }}>
-                <Text style={{ fontSize: '11px', color: '#6B7280', fontWeight: '700', letterSpacing: '0.06em', textTransform: 'uppercase', margin: '0 0 6px' }}>Job Details</Text>
-                <Text style={{ fontSize: '13px', color: '#0A1628', lineHeight: '1.7', margin: '0', whiteSpace: 'pre-line' }}>{items}</Text>
-              </Section>
+    <Shell lang={es ? 'es' : 'en'} preview={t.preview}>
+      <LogoHeader />
+
+      {/* ── 1 · HERO ─────────────────────────────────────────── */}
+      <Card style={{ borderTop: `3px solid ${C.orange}` }}>
+        <div className="heropad" style={{ textAlign: 'center' as const }}>
+          <IconChip icon="checklist" color={C.orange} size={26} dim={64} bg={C.orangeTint} border="none" radius={18} />
+          <Spacer h={16} />
+          <Pill tone="orange">{t.pill}</Pill>
+          <h1 className="h1" style={{ fontFamily: FONT, fontSize: '27px', lineHeight: '34px', fontWeight: 800, letterSpacing: '-0.4px', color: C.navy, margin: '16px 0 10px' }}>
+            {t.h1}
+          </h1>
+          <p style={{ ...P, marginBottom: 0, maxWidth: '430px', marginLeft: 'auto', marginRight: 'auto' }}>{t.sub}</p>
+        </div>
+      </Card>
+
+      <Spacer h={16} />
+
+      {/* ── 2 · JOB DETAILS (optional) ───────────────────────── */}
+      {items ? (
+        <>
+          <Card>
+            <Eyebrow icon="clipboard" title={t.detailsTitle} tone="navy" />
+            {displayId ? (
+              <div style={{ fontFamily: FONT, fontSize: '12px', fontWeight: 700, letterSpacing: '0.4px', color: C.muted, marginBottom: '10px' }}>{displayId}</div>
             ) : null}
-            <Button style={{ backgroundColor: '#FF5A1F', color: '#FFF', padding: '14px 28px', borderRadius: '8px', fontWeight: '700', display: 'block', textAlign: 'center', textDecoration: 'none', margin: '20px 0' }} href={portalUrl}>Download Receipt →</Button>
-            <Hr style={{ borderColor: '#E5E7EB', margin: '20px 0' }} />
-            <Text style={{ fontSize: '13px', color: '#6B7280', textAlign: 'center' }}>We'll reach out in 48 hours with a review link. Your feedback means everything to us! 🙏</Text>
-          </Section>
-        </Container>
-      </Body>
-    </Html>
+            <table role="presentation" width="100%" cellPadding={0} cellSpacing={0} border={0}>
+              <tbody>
+                <tr>
+                  <td style={{ background: C.inset, borderRadius: '12px', borderLeft: `3px solid ${C.gold}`, padding: '14px 16px', fontFamily: FONT, fontSize: '14px', lineHeight: '21px', color: C.body, whiteSpace: 'pre-line' as const }}>{items}</td>
+                </tr>
+              </tbody>
+            </table>
+          </Card>
+          <Spacer h={16} />
+        </>
+      ) : null}
+
+      {/* ── 3 · WHAT'S NEXT ──────────────────────────────────── */}
+      <Card>
+        <Eyebrow icon="sparkle" title={t.nextTitle} tone="gold" />
+        <p style={{ ...P, marginBottom: 0 }}>{t.next}</p>
+      </Card>
+
+      {/* ── 4 · CTA ──────────────────────────────────────────── */}
+      <Spacer h={26} />
+      <PrimaryButton href={portalUrl} label={t.cta} />
+      <Spacer h={26} />
+
+      {/* ── 5 · SUPPORT ──────────────────────────────────────── */}
+      <Card>
+        <Eyebrow icon="phone" title={t.supportTitle} tone="navy" />
+        <ContactRow phone={phone} email={email} website={website} websiteLabel={websiteLabel} labels={t.contactLabels} />
+      </Card>
+
+      {/* ── 6 · FOOTER ───────────────────────────────────────── */}
+      <Footer
+        disclaimer={t.disclaimer}
+        phone={phone}
+        email={email}
+        websiteLabel={websiteLabel}
+        social={social}
+        manageUrl={portalUrl}
+        unsubscribeUrl={portalUrl}
+        labels={t.footerLabels}
+      />
+    </Shell>
   )
 }

@@ -1,32 +1,130 @@
 import * as React from 'react'
-import { Html, Head, Body, Container, Section, Heading, Text, Button, Hr } from '@react-email/components'
-import { AnimatedHero, HeroAnimStyle } from './_ui'
+import {
+  Shell,
+  LogoHeader,
+  Card,
+  Eyebrow,
+  Pill,
+  Callout,
+  Spacer,
+  PrimaryButton,
+  ContactRow,
+  Footer,
+  C,
+  FONT,
+  P,
+} from './_ui'
 
-interface Props { customerName: string; googleReviewUrl: string; portalUrl: string; heroGifUrl?: string }
+// ════════════════════════════════════════════════════════════════════════
+//  REVIEW REQUEST  ("How did we do?")
+//  Rebuilt on the shared _ui kit to match the transactional emails. Short by
+//  design — one warm ask, one gold-star row, one CTA. Bilingual EN/ES.
+// ════════════════════════════════════════════════════════════════════════
+
+interface Props {
+  customerName?: string
+  googleReviewUrl?: string
+  portalUrl?: string
+  heroGifUrl?: string
+  phone?: string
+  email?: string
+  website?: string
+  websiteLabel?: string
+  social?: { instagram?: string; facebook?: string; tiktok?: string; google?: string }
+  locale?: string
+}
 
 export default function ReviewRequestEmail({
-  customerName = 'Friend',
+  customerName = 'there',
   googleReviewUrl = '#',
   portalUrl = '#',
-  heroGifUrl = 'https://moveitclearit.com/email/truck-hero.gif',
+  phone = '862-640-0625',
+  email = 'hello@moveitclearit.com',
+  website = 'https://moveitclearit.com',
+  websiteLabel = 'moveitclearit.com',
+  social,
+  locale = 'en',
 }: Props) {
+  const es = (locale ?? 'en').toLowerCase().startsWith('es')
+
+  const t = es
+    ? {
+        preview: `¿Cómo lo hicimos, ${customerName}? Tu reseña ayuda muchísimo.`,
+        pill: 'Gracias',
+        h1: '¿Cómo lo hicimos?',
+        sub: `Fue un placer ayudarte con tu mudanza, ${customerName}. Si tienes 60 segundos, una reseña en Google hace una gran diferencia para nuestro negocio local.`,
+        starNote: 'Toca las estrellas para dejar tu reseña',
+        cta: 'Dejar una reseña en Google',
+        thanks: 'Gracias por confiar en nosotros — significa mucho para todo el equipo.',
+        supportTitle: '¿Algo que podamos mejorar?',
+        contactLabels: { phone: 'Llama o escribe', email: 'Correo', website: 'Sitio web' },
+        disclaimer: 'Te escribimos porque completamos tu mudanza recientemente. ¿Algún problema? Responde a este correo — lo resolvemos.',
+        footerLabels: { manage: 'Administrar preferencias', unsubscribe: 'Cancelar suscripción', rights: 'Todos los derechos reservados.' },
+      }
+    : {
+        preview: `How did we do, ${customerName}? Your review means a lot.`,
+        pill: 'Thank you',
+        h1: 'How did we do?',
+        sub: `It was a pleasure handling your move, ${customerName}. If you have 60 seconds, a Google review makes a huge difference for our small local business.`,
+        starNote: 'Tap the stars to leave your review',
+        cta: 'Leave a Google review',
+        thanks: 'Thank you for trusting us — it means everything to the whole crew.',
+        supportTitle: 'Something we could do better?',
+        contactLabels: { phone: 'Call or text', email: 'Email', website: 'Website' },
+        disclaimer: "You're receiving this because we recently completed your move. Something wrong? Just reply to this email — we'll make it right.",
+        footerLabels: { manage: 'Manage preferences', unsubscribe: 'Unsubscribe', rights: 'All rights reserved.' },
+      }
+
   return (
-    <Html lang="en">
-      <Head><HeroAnimStyle /></Head>
-      <Body style={{ backgroundColor: '#F5F1EA', fontFamily: 'Inter, sans-serif' }}>
-        <Container style={{ maxWidth: '560px', margin: '0 auto', padding: '24px 16px' }}>
-          <Section style={{ backgroundColor: '#0A1628', padding: '20px', borderRadius: '12px 12px 0 0', textAlign: 'center' }}><Text style={{ color: '#FF5A1F', fontSize: '16px', fontWeight: '700', margin: '0' }}>We Move It. We Clear It.</Text></Section>
-          <Section style={{ backgroundColor: '#FFFFFF', padding: '26px 28px 32px', borderRadius: '0 0 12px 12px' }}>
-            {/* Animated hero: SVG (Apple Mail) + GIF fallback (Gmail/Outlook) */}
-            <AnimatedHero heroGifUrl={heroGifUrl} />
-            <Heading style={{ fontSize: '20px', fontWeight: '700', color: '#0A1628', margin: '18px 0 8px' }}>How did we do? ⭐</Heading>
-            <Text style={{ fontSize: '15px', color: '#374151', lineHeight: '1.6', margin: '0 0 12px' }}>Hi {customerName}, it was a pleasure working with you! If you have 60 seconds, a Google review makes a huge difference for our small local business.</Text>
-            <Button style={{ backgroundColor: '#FF5A1F', color: '#FFF', padding: '14px 28px', borderRadius: '8px', fontWeight: '700', display: 'block', textAlign: 'center', textDecoration: 'none', margin: '20px 0' }} href={googleReviewUrl}>Leave a Google Review ⭐ →</Button>
-            <Hr style={{ borderColor: '#E5E7EB', margin: '20px 0' }} />
-            <Text style={{ fontSize: '12px', color: '#9CA3AF', textAlign: 'center' }}>We Move It. We Clear It. · West Orange, NJ · 862-640-0625</Text>
-          </Section>
-        </Container>
-      </Body>
-    </Html>
+    <Shell lang={es ? 'es' : 'en'} preview={t.preview}>
+      <LogoHeader />
+
+      {/* ── 1 · HERO ─────────────────────────────────────────── */}
+      <Card style={{ borderTop: `3px solid ${C.gold}` }}>
+        <div className="heropad" style={{ textAlign: 'center' as const }}>
+          {/* five gold stars */}
+          <div style={{ fontSize: '30px', lineHeight: '30px', letterSpacing: '4px', color: C.gold }}>&#9733;&#9733;&#9733;&#9733;&#9733;</div>
+          <Spacer h={16} />
+          <Pill tone="gold">{t.pill}</Pill>
+          <h1 className="h1" style={{ fontFamily: FONT, fontSize: '27px', lineHeight: '34px', fontWeight: 800, letterSpacing: '-0.4px', color: C.navy, margin: '16px 0 10px' }}>
+            {t.h1}
+          </h1>
+          <p style={{ ...P, marginBottom: 0, maxWidth: '430px', marginLeft: 'auto', marginRight: 'auto' }}>{t.sub}</p>
+        </div>
+      </Card>
+
+      {/* ── 2 · CTA ──────────────────────────────────────────── */}
+      <Spacer h={24} />
+      <div style={{ textAlign: 'center' as const, fontFamily: FONT, fontSize: '12px', fontWeight: 700, letterSpacing: '0.4px', color: C.label, textTransform: 'uppercase' as const, marginBottom: '12px' }}>
+        {t.starNote}
+      </div>
+      <PrimaryButton href={googleReviewUrl} label={t.cta} />
+      <Spacer h={26} />
+
+      {/* ── 3 · THANK YOU ────────────────────────────────────── */}
+      <Callout tone="bone">
+        <div style={{ fontFamily: FONT, fontSize: '14px', lineHeight: '22px', color: C.body, textAlign: 'center' as const }}>{t.thanks}</div>
+      </Callout>
+
+      <Spacer h={16} />
+
+      {/* ── 4 · SUPPORT ──────────────────────────────────────── */}
+      <Card>
+        <Eyebrow icon="phone" title={t.supportTitle} tone="navy" />
+        <ContactRow phone={phone} email={email} website={website} websiteLabel={websiteLabel} labels={t.contactLabels} />
+      </Card>
+
+      {/* ── 5 · FOOTER ───────────────────────────────────────── */}
+      <Footer
+        disclaimer={t.disclaimer}
+        phone={phone}
+        email={email}
+        websiteLabel={websiteLabel}
+        social={social}
+        manageUrl={portalUrl}
+        unsubscribeUrl={portalUrl}
+        labels={t.footerLabels}
+      />
+    </Shell>
   )
 }

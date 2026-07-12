@@ -18,6 +18,8 @@ import { offerRescheduleToCustomer } from "@/lib/reschedule";
 import { t } from "@/lib/i18n";
 import { formatEastern, confirmationScheduleData } from "@/lib/scheduling";
 import { authorizeOwnerAction, type DiscordActor } from "@/lib/discord-auth";
+import { decideDiscount, type DiscountAction } from "@/lib/discount-decision";
+import { accessSections } from "@/lib/booking-access";
 import {
   buildJobCard,
   serviceLabelFromDescription,
@@ -291,8 +293,10 @@ async function handleApprove(bookingId: string | undefined, messageId: string | 
     }),
   ]);
 
-  // 4) Queue the PRE-APPROVAL customer messages (email + SMS) — the ONLY pair
-  //    sent from the approval handler. Non-fatal + timeout-guarded so a Redis
+  // 4) Queue the approval customer messages — the premium FINAL CONFIRMATION
+  //    email ("your booking is approved") + the approval SMS. This fires only
+  //    now, after the owner approved and the $49 was captured, so the message
+  //    matches the true booking state. Non-fatal + timeout-guarded so a Redis
   //    stall can't blow Discord's 3s interaction window.
   const locale = booking.customer.locale;
   const when = booking.requestedDate;
@@ -315,19 +319,24 @@ async function handleApprove(bookingId: string | undefined, messageId: string | 
             items: booking.itemsDescription ?? undefined,
           });
         } else {
-          apiLogger.info({ bookingId: booking.id, to: booking.customer.email }, "[messaging] queueing PRE-APPROVAL email");
-          await emailQueue.add("pre-approval", {
-            template: "pre-approval",
+          apiLogger.info({ bookingId: booking.id, to: booking.customer.email }, "[messaging] queueing FINAL CONFIRMATION email");
+          await emailQueue.add("final-confirmation", {
+            template: "final-confirmation",
             to: booking.customer.email,
             bookingId: booking.id,
             payload: {
               customerName: booking.customer.name,
               displayId: booking.displayId,
-              requestedDate: when?.toISOString(),
-              items: booking.itemsDescription ?? undefined,
+              date: when?.toISOString(),
+              timeLabel: booking.arrivalWindow ?? undefined,
+              amountPaid: String(Math.round(capturedCents / 100)),
               originAddress: booking.originAddress ?? undefined,
               destAddress: booking.destAddress ?? undefined,
+              estimate: booking.totalEstimate != null ? `$${Math.round(booking.totalEstimate).toLocaleString("en-US")}` : undefined,
               portalUrl,
+              serviceAreaZone: booking.serviceAreaZone ?? undefined,
+              travelFee: booking.travelFee ? booking.travelFee / 100 : undefined,
+              manualReviewRequired: booking.manualReviewRequired ?? undefined,
               locale,
             },
           });
@@ -494,6 +503,134 @@ async function handleOffer(bookingId: string | undefined, messageId: string | un
   return NextResponse.json({ type: RES_UPDATE_MESSAGE, data: offeredCard(booking, approverName, result.offeredDates) });
 }
 
+// ── Discount decision card (replaces the pending card; buttons stripped) ──
+function discountDecidedCard(
+  booking: { displayId: string; discountCode?: string | null; customer?: { name: string } | null },
+  approverName: string,
+  approved: boolean,
+  percent: number,
+) {
+  return {
+    embeds: [
+      {
+        title: approved
+          ? `✅ Discount Approved — ${booking.displayId}`
+          : `❌ Discount Denied — ${booking.displayId}`,
+        color: approved ? 0x22c55e : 0xef4444,
+        description: approved
+          ? `Door-hanger discount approved — **${percent}% off** the move.`
+          : `Door-hanger discount denied — customer keeps the **${percent}% first-time** rate.`,
+        fields: [
+          { name: "👤 Customer", value: booking.customer?.name ?? "—", inline: true },
+          { name: "🎟️ Code", value: booking.discountCode || "—", inline: true },
+        ],
+        footer: { text: `${approved ? "Approved" : "Denied"} by ${approverName}` },
+        timestamp: new Date().toISOString(),
+      },
+    ],
+    components: [], // strip the Approve / Deny buttons — no dead-looking controls
+  };
+}
+
+// ── approve_discount / deny_discount → atomic DOOR_HANGER transition ────────
+// The door-hanger discount card carries the bookingId in its custom_id (it does
+// NOT persist a message id like the approval card), so the booking is resolved
+// by that id. No Stripe call: the discount applies to the MOVE total (collected
+// on move day), never to the $49 booking hold.
+async function handleDiscountDecision(
+  bookingId: string | undefined,
+  action: DiscountAction,
+  actor: DiscordActor,
+) {
+  const approverName = actor.username;
+  if (!bookingId) return ephemeral("⚠️ This button is missing its booking reference.");
+
+  const booking = await prisma.booking.findUnique({
+    where: { id: bookingId },
+    include: { customer: true },
+  });
+  if (!booking) return ephemeral("⚠️ Booking not found for this discount request.");
+
+  const decision = decideDiscount(booking.discountType, action);
+
+  // Idempotent: a second click on an already-decided request re-shows the
+  // decided card (approved) or explains it's already handled.
+  if (!decision.ok) {
+    if (decision.reason === "already_approved") {
+      return NextResponse.json({
+        type: RES_UPDATE_MESSAGE,
+        data: discountDecidedCard(booking, approverName, true, booking.discountPercent ?? 30),
+      });
+    }
+    if (decision.reason === "already_denied") {
+      return NextResponse.json({
+        type: RES_UPDATE_MESSAGE,
+        data: discountDecidedCard(booking, approverName, false, booking.discountPercent ?? 10),
+      });
+    }
+    return ephemeral(
+      `⚠️ No pending door-hanger discount to ${action} (currently ${booking.discountType ?? "none"}).`,
+    );
+  }
+
+  // CONCURRENCY GUARD — atomically CLAIM the PENDING → APPROVED/DENIED transition.
+  // Postgres serializes this conditional UPDATE, so of two simultaneous owner
+  // clicks exactly one gets count === 1; the loser gets count === 0 and is told
+  // it was already handled. No double approval, no double denial.
+  const claim = await prisma.booking.updateMany({
+    where: { id: booking.id, discountType: "DOOR_HANGER_PENDING" },
+    data: { discountType: decision.nextType!, discountPercent: decision.nextPercent! },
+  });
+  if (claim.count === 0) {
+    const fresh = await prisma.booking.findUnique({ where: { id: booking.id }, include: { customer: true } });
+    const approvedNow = fresh?.discountType === "DOOR_HANGER_APPROVED";
+    if (fresh && (approvedNow || fresh.discountType === "DOOR_HANGER_DENIED")) {
+      return NextResponse.json({
+        type: RES_UPDATE_MESSAGE,
+        data: discountDecidedCard(fresh, approverName, approvedNow, fresh.discountPercent ?? (approvedNow ? 30 : 10)),
+      });
+    }
+    return ephemeral("⏳ This discount was just handled by another owner — no action taken.");
+  }
+
+  await prisma.auditLog
+    .create({
+      data: {
+        action: action === "approve" ? "DISCOUNT_APPROVED" : "DISCOUNT_DENIED",
+        bookingId: booking.id,
+        details: {
+          event: action === "approve" ? "approve_discount" : "deny_discount",
+          discordUserId: actor.userId ?? null,
+          decidedBy: approverName,
+          previousStatus: "DOOR_HANGER_PENDING",
+          newStatus: decision.nextType,
+          discountPercent: decision.nextPercent,
+          discountCode: booking.discountCode ?? null,
+          result: "success",
+        },
+      },
+    })
+    .catch((err) =>
+      apiLogger.warn(
+        { bookingId: booking.id, err: err instanceof Error ? err.message : String(err) },
+        "discount audit log write failed (non-fatal)",
+      ),
+    );
+
+  // MESSAGING POLICY: no customer email/SMS here (the system sends only the
+  // pre-approval + final-confirmation pairs). The discount adjusts the move
+  // total the customer sees in their portal.
+  apiLogger.info(
+    { bookingId: booking.id, action, by: approverName, percent: decision.nextPercent },
+    `Door-hanger discount ${action === "approve" ? "approved" : "denied"} via Discord`,
+  );
+
+  return NextResponse.json({
+    type: RES_UPDATE_MESSAGE,
+    data: discountDecidedCard(booking, approverName, action === "approve", decision.nextPercent!),
+  });
+}
+
 // ════════════════════════════════════════════════════════════════════════
 //  view_full_booking:<id> — owner-only ephemeral dump of EVERY stored field.
 //  --------------------------------------------------------------------
@@ -599,6 +736,12 @@ async function handleViewFullBooking(bookingId: string | undefined, messageId: s
     booking.destFloor != null ? `Floor: ${booking.destFloor}` : null,
     `Elevator: ${yn(booking.hasElevator)}`,
   ], true);
+
+  // Structured access details — owner-gated view, so sensitive access CODES are
+  // included here (and nowhere customer-facing).
+  for (const sec of accessSections(booking, { includeSensitive: true })) {
+    add(sec.title, sec.lines);
+  }
 
   add("🧭 Service Area", [
     `Zone: ${s(booking.serviceAreaZone)}`,
@@ -1141,6 +1284,17 @@ export async function POST(req: Request) {
         }
       }
 
+      // Door-hanger discount buttons — atomic approve/deny, card updated in place.
+      if (action === "approve_discount" || action === "deny_discount") {
+        try {
+          return await handleDiscountDecision(id, action === "approve_discount" ? "approve" : "deny", actor);
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          apiLogger.error({ action, bookingId: id, err: msg }, "✖ discount button handler failed");
+          return ephemeral("⚠️ Something went wrong updating this discount — try again or use the admin portal.");
+        }
+      }
+
       // Move-day job buttons — each wrapped so a failure never leaves the
       // worker with a dead "interaction failed" spinner.
       if (action === "job_start" || action === "job_complete" || action === "archive_job") {
@@ -1155,8 +1309,7 @@ export async function POST(req: Request) {
         }
       }
 
-      // Authorized owner, but the specific action (discount buttons) has no
-      // handler on this endpoint yet — acknowledge without leaking anything.
+      // Authorized owner, but an unrecognized owner action — acknowledge safely.
       return ephemeral("Received — that action isn't handled by this endpoint yet.");
     }
 
