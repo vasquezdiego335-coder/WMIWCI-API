@@ -14,6 +14,7 @@ import { ManualEventType } from '@prisma/client'
 
 import { botLogger } from '../lib/logger'
 import { prisma } from '../lib/db'
+import { etDayRange, moveDateInRange, effectiveMoveDate } from '../lib/scheduling'
 import {
   addTask,
   listTasks,
@@ -157,27 +158,30 @@ async function handleJob(interaction: ChatInputCommandInteraction): Promise<void
 async function handleSchedule(interaction: ChatInputCommandInteraction): Promise<void> {
   await interaction.deferReply({ ephemeral: true })
 
-  const now = new Date()
-  const start = new Date(now.getFullYear(), now.getMonth(), now.getDate())
-  const end = new Date(start)
-  end.setDate(end.getDate() + 2) // through end of tomorrow
+  // Today + tomorrow, pinned to America/New_York and keyed off the effective move
+  // date (scheduledStart ?? confirmedDate ?? requestedDate) so a just-approved
+  // booking shows up even if a date field is blank.
+  const start = etDayRange(0).start
+  const end = etDayRange(1).end
 
   botLogger.debug({ start, end }, 'DB → booking.findMany (/schedule)')
-  const jobs = await prisma.booking.findMany({
-    where: { status: { in: ['CONFIRMED', 'SCHEDULED'] }, scheduledStart: { gte: start, lt: end } },
+  const rows = await prisma.booking.findMany({
+    where: { status: { in: ['CONFIRMED', 'SCHEDULED', 'IN_PROGRESS'] }, ...moveDateInRange(start, end) },
     include: { customer: true },
-    orderBy: { scheduledStart: 'asc' },
   })
+  const jobs = rows
+    .map((j) => ({ j, when: effectiveMoveDate(j) }))
+    .sort((a, z) => (a.when?.getTime() ?? 0) - (z.when?.getTime() ?? 0))
   botLogger.debug({ count: jobs.length }, 'DB ✓ booking.findMany (/schedule)')
 
   const embed = new EmbedBuilder().setTitle('📅 Schedule — Today & Tomorrow').setColor(0x0a1628).setTimestamp()
   if (jobs.length === 0) {
     embed.setDescription('No confirmed jobs in the next 48 hours. 🏖️')
   } else {
-    for (const j of jobs) {
+    for (const { j, when } of jobs) {
       embed.addFields({
         name: `${j.displayId} — ${j.customer.name}`,
-        value: `⏰ ${fmtDate(j.scheduledStart)}\n📍 ${j.originAddress || 'Address TBD'}`,
+        value: `⏰ ${fmtDate(when)}\n📍 ${j.originAddress || 'Address TBD'}`,
         inline: false,
       })
     }

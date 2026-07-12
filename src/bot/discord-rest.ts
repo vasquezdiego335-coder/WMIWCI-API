@@ -94,15 +94,6 @@ async function restSendFirst(envKeys: string[], body: MessageBody): Promise<{ id
   return null
 }
 
-const fmtDate = (v: unknown): string =>
-  v
-    ? new Date(v as string).toLocaleString('en-US', {
-        timeZone: 'America/New_York',
-        dateStyle: 'medium',
-        timeStyle: 'short',
-      })
-    : 'Date TBD'
-
 // ══════════════════════════════════════════════════════════════════════════
 //  1. Booking approval card  (Approve / Offer New Dates / Deny)
 // ══════════════════════════════════════════════════════════════════════════

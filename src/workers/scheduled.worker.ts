@@ -5,7 +5,41 @@ import { emailQueue, discordQueue, scheduledQueue } from '../lib/queues'
 import { queueLogger } from '../lib/logger'
 import { deleteFiles } from '../lib/cloudinary'
 import { runFollowup, type FollowupType } from '../lib/followups'
+import { etDayRange, moveDateInRange, effectiveMoveDate } from '../lib/scheduling'
 import type { ScheduledJobData } from '../lib/queues'
+
+type DigestBooking = {
+  displayId: string
+  itemsDescription: string | null
+  originAddress: string
+  scheduledStart: Date | null
+  confirmedDate: Date | null
+  requestedDate: Date | null
+  customer: { name: string }
+}
+
+// Shape confirmed bookings into the daily-digest summaries, ordered by — and
+// timed off — their effective move date (scheduledStart ?? confirmedDate ??
+// requestedDate) so a booking is never dropped or mistimed because one date
+// field was blank. All times render in America/New_York.
+function formatDigestJobs(bookings: DigestBooking[]) {
+  return bookings
+    .map((b) => ({ b, when: effectiveMoveDate(b) }))
+    .sort((a, z) => (a.when?.getTime() ?? 0) - (z.when?.getTime() ?? 0))
+    .map(({ b, when }) => ({
+      displayId: b.displayId,
+      customerName: b.customer.name,
+      serviceType: b.itemsDescription?.split('\n')[0]?.replace('Service: ', '') ?? 'Unknown',
+      scheduledTime: when
+        ? when.toLocaleTimeString('en-US', {
+            hour: 'numeric',
+            minute: '2-digit',
+            timeZone: 'America/New_York',
+          })
+        : 'TBD',
+      originAddress: b.originAddress,
+    }))
+}
 
 async function processScheduledJob(job: Job<ScheduledJobData>): Promise<void> {
   const { type, bookingId, payload } = job.data
@@ -110,33 +144,19 @@ async function processScheduledJob(job: Job<ScheduledJobData>): Promise<void> {
 
     // ── 7 AM: Today's confirmed jobs ──────────────────────────────
     case 'daily-schedule-morning': {
-      const todayStart = new Date()
-      todayStart.setHours(0, 0, 0, 0)
-      const todayEnd = new Date()
-      todayEnd.setHours(23, 59, 59, 999)
+      // Day boundaries pinned to America/New_York (not the server's local zone),
+      // so a Sunday ET move can't slip into Saturday-night / Monday UTC.
+      const { start: todayStart, end: todayEnd } = etDayRange(0)
 
       const jobs = await prisma.booking.findMany({
         where: {
           status: { in: ['CONFIRMED', 'SCHEDULED', 'IN_PROGRESS'] },
-          scheduledStart: { gte: todayStart, lte: todayEnd },
+          ...moveDateInRange(todayStart, todayEnd),
         },
         include: { customer: true },
-        orderBy: { scheduledStart: 'asc' },
       })
 
-      const formatted = jobs.map((b) => ({
-        displayId: b.displayId,
-        customerName: b.customer.name,
-        serviceType: b.itemsDescription?.split('\n')[0]?.replace('Service: ', '') ?? 'Unknown',
-        scheduledTime: b.scheduledStart
-          ? b.scheduledStart.toLocaleTimeString('en-US', {
-              hour: 'numeric',
-              minute: '2-digit',
-              timeZone: 'America/New_York',
-            })
-          : 'TBD',
-        originAddress: b.originAddress,
-      }))
+      const formatted = formatDigestJobs(jobs)
 
       const today = new Date().toLocaleDateString('en-US', {
         weekday: 'long',
@@ -159,38 +179,21 @@ async function processScheduledJob(job: Job<ScheduledJobData>): Promise<void> {
 
     // ── 7 PM: Tomorrow's confirmed jobs ───────────────────────────
     case 'daily-schedule-evening': {
-      const tomorrowStart = new Date()
-      tomorrowStart.setDate(tomorrowStart.getDate() + 1)
-      tomorrowStart.setHours(0, 0, 0, 0)
-      const tomorrowEnd = new Date(tomorrowStart)
-      tomorrowEnd.setHours(23, 59, 59, 999)
+      // Tomorrow's ET calendar day (DST-safe — the shift is done in calendar
+      // space, and the boundaries are ET midnights, not server-local ones).
+      const { start: tomorrowStart, end: tomorrowEnd } = etDayRange(1)
 
       const jobs = await prisma.booking.findMany({
         where: {
           status: { in: ['CONFIRMED', 'SCHEDULED'] },
-          scheduledStart: { gte: tomorrowStart, lte: tomorrowEnd },
+          ...moveDateInRange(tomorrowStart, tomorrowEnd),
         },
         include: { customer: true },
-        orderBy: { scheduledStart: 'asc' },
       })
 
-      const formatted = jobs.map((b) => ({
-        displayId: b.displayId,
-        customerName: b.customer.name,
-        serviceType: b.itemsDescription?.split('\n')[0]?.replace('Service: ', '') ?? 'Unknown',
-        scheduledTime: b.scheduledStart
-          ? b.scheduledStart.toLocaleTimeString('en-US', {
-              hour: 'numeric',
-              minute: '2-digit',
-              timeZone: 'America/New_York',
-            })
-          : 'TBD',
-        originAddress: b.originAddress,
-      }))
+      const formatted = formatDigestJobs(jobs)
 
-      const tomorrow = new Date()
-      tomorrow.setDate(tomorrow.getDate() + 1)
-      const tomorrowLabel = tomorrow.toLocaleDateString('en-US', {
+      const tomorrowLabel = tomorrowStart.toLocaleDateString('en-US', {
         weekday: 'long',
         month: 'long',
         day: 'numeric',

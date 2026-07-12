@@ -15,6 +15,8 @@ import {
   serviceLabelFromDescription,
   truckLabelFromDescription,
   buildJobCard,
+  buildBookingApprovalCard,
+  approvalCardDataFromBooking,
   BOOKING_STATUS_LABELS,
   TRUCK_OPTION_LABELS,
   jobDateTime,
@@ -269,4 +271,122 @@ test('job card: "Provided at confirmation" addresses never become navigation lin
   })
   const nav = card.components.flatMap((r) => r.components).find((b) => b.label.includes('Navigation'))
   assert.equal(nav, undefined)
+})
+
+// ════════════════════════════════════════════════════════════════════════
+//  The OWNER approval card — buildBookingApprovalCard / approvalCardDataFromBooking
+// ════════════════════════════════════════════════════════════════════════
+const APPROVAL_BOOKING = {
+  id: 'ckbooking123456',
+  displayId: 'A1B2C3',
+  status: 'PENDING_APPROVAL',
+  originAddress: '123 Main St, Newark, NJ 07102',
+  destAddress: '45 Oak Ave, Montclair, NJ 07042',
+  itemsDescription: NEW_DESCRIPTION,
+  customerNotes: null,
+  requestedDate: new Date('2026-07-18T12:00:00Z'),
+  baseRate: 699,
+  totalEstimate: 749,
+  travelFee: 5000,
+  truckAddonDueOnMoveDay: true,
+  truckAddonAmount: 5000,
+  discountType: 'FIRST_TIME_AUTO',
+  discountCode: null,
+  discountPercent: 10,
+  depositAmount: 4900,
+  depositPaid: false,
+  serviceAreaZone: 'extended_nj',
+  manualReviewRequired: false,
+  serviceAreaMessage: null,
+  stripePaymentIntentId: 'pi_1234567890ABCDEF',
+  stripeCheckoutId: 'cs_test_ABCDEF123456',
+  agreementAccepted: true,
+  agreementVersion: 'v1',
+  agreementName: 'Diego Vasquez',
+  agreementAcceptedAt: new Date('2026-07-12T15:00:00Z'),
+  source: 'qr-door-1',
+  foundUs: 'Facebook',
+  customer: { name: 'Diego Vasquez', email: 'diego@example.com', phone: '(973) 555-0147' },
+}
+const approvalFields = (data: Parameters<typeof buildBookingApprovalCard>[0]) =>
+  buildBookingApprovalCard(data).embeds[0].fields ?? []
+
+test('approval card: shows BOTH addresses as their own fields (the dropped-address bug)', () => {
+  const fields = approvalFields(approvalCardDataFromBooking(APPROVAL_BOOKING, { adminUrl: 'https://x/admin/bookings' }))
+  assert.equal(fields.find((f) => f.name === '📍 Pickup')?.value, '123 Main St, Newark, NJ 07102')
+  assert.equal(fields.find((f) => f.name === '📍 Dropoff')?.value, '45 Oak Ave, Montclair, NJ 07042')
+})
+
+test('approval card: full pricing breakdown (base, travel, truck add-on, discount, deposit, total, balance)', () => {
+  const pricing = approvalFields(approvalCardDataFromBooking(APPROVAL_BOOKING)).find((f) => f.name === '💰 Pricing')?.value ?? ''
+  assert.match(pricing, /Base labor: \$699/)
+  assert.match(pricing, /Travel fee: \$50/)
+  assert.match(pricing, /Truck add-on: \$50/)
+  assert.match(pricing, /10% off/)
+  assert.match(pricing, /Deposit: \$49 held/)
+  assert.match(pricing, /Move total: \$749/)
+  assert.match(pricing, /Balance after job: \$700/)
+})
+
+test('approval card: Stripe references shown (PI + checkout session short refs)', () => {
+  const stripe = approvalFields(approvalCardDataFromBooking(APPROVAL_BOOKING)).find((f) => f.name === '💳 Stripe')?.value ?? ''
+  assert.match(stripe, /hold authorized/i)
+  assert.match(stripe, /Payment Intent/)
+  assert.match(stripe, /Checkout Session/)
+})
+
+test('approval card: notes are the customer words only, not the mixed description blob', () => {
+  const notes = approvalFields(approvalCardDataFromBooking(APPROVAL_BOOKING)).find((f) => f.name === '📝 Customer Notes')?.value ?? ''
+  assert.match(notes, /Gate code is 4321/)
+  assert.ok(!/Service:/.test(notes), 'notes leaked the Service: line')
+  assert.ok(!/Customer-side estimate/.test(notes), 'notes leaked the estimate line')
+})
+
+test('approval card: every owner + link + view-full button, within Discord row/button limits', () => {
+  const card = buildBookingApprovalCard(
+    approvalCardDataFromBooking(APPROVAL_BOOKING, { adminUrl: 'https://x/admin/bookings', receiptUrl: 'https://stripe/r/1' }),
+  )
+  const buttons = card.components.flatMap((r) => r.components)
+  const ids = buttons.map((b) => b.custom_id).filter(Boolean)
+  assert.ok(ids.includes(`approve_booking:${APPROVAL_BOOKING.id}`))
+  assert.ok(ids.includes(`offer_reschedule:${APPROVAL_BOOKING.id}`))
+  assert.ok(ids.includes(`deny_booking:${APPROVAL_BOOKING.id}`))
+  assert.ok(ids.includes(`view_full_booking:${APPROVAL_BOOKING.id}`))
+  const urls = buttons.map((b) => b.url).filter((u): u is string => !!u)
+  assert.equal(urls.filter((u) => /google\.com\/maps/.test(u)).length, 2, 'both maps buttons')
+  assert.ok(urls.includes('https://stripe/r/1'), 'receipt link')
+  assert.ok(card.components.length <= 5, 'more than 5 action rows')
+  for (const row of card.components) assert.ok(row.components.length <= 5, 'more than 5 buttons per row')
+})
+
+test('approval card: photos become an inline gallery + link list', () => {
+  const card = buildBookingApprovalCard(
+    approvalCardDataFromBooking(APPROVAL_BOOKING, { photos: [{ url: 'https://cdn/p1.jpg' }, { url: 'https://cdn/p2.jpg' }] }),
+  )
+  assert.equal(card.embeds.length, 3) // main + 2 image embeds
+  assert.equal(card.embeds[1].image?.url, 'https://cdn/p1.jpg')
+  const photoField = (card.embeds[0].fields ?? []).find((f) => f.name.startsWith('📷 Job Photos'))
+  assert.match(photoField?.value ?? '', /Photo 1/)
+})
+
+test('approval card: manual review adds the owner-review banner + pending travel line', () => {
+  const card = buildBookingApprovalCard(approvalCardDataFromBooking({ ...APPROVAL_BOOKING, manualReviewRequired: true }))
+  assert.match(card.embeds[0].description ?? '', /Owner review required/i)
+  const pricing = (card.embeds[0].fields ?? []).find((f) => f.name === '💰 Pricing')?.value ?? ''
+  assert.match(pricing, /Pending owner review/)
+})
+
+test('approval card: minimal data (only bookingId) never emits null/undefined, keeps View Full', () => {
+  const card = buildBookingApprovalCard({ bookingId: 'onlyid123' })
+  assert.ok(!JSON.stringify(card).includes('undefined'))
+  const ids = card.components.flatMap((r) => r.components).map((b) => b.custom_id).filter(Boolean)
+  assert.ok(ids.includes('view_full_booking:onlyid123'))
+})
+
+test('approvalCardDataFromBooking: cents→dollars conversion + balance math', () => {
+  const data = approvalCardDataFromBooking(APPROVAL_BOOKING)
+  assert.equal(data.travelFeeDollars, 50)
+  assert.equal(data.depositDollars, 49)
+  assert.equal(data.moveTotal, 749)
+  assert.equal(data.balanceAfterJob, 700)
 })

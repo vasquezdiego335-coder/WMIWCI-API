@@ -30,8 +30,11 @@ const REQUIRED_DISCORD: EnvVar[] = [
   { key: 'DISCORD_BOT_TOKEN', required: true },
   { key: 'DISCORD_PUBLIC_KEY', required: true, note: 'verifies interaction signatures' },
   { key: 'DISCORD_APPLICATION_ID', required: true },
+  { key: 'DISCORD_GUILD_ID', required: false, note: 'owner actions are scoped to this server' },
   { key: 'DISCORD_CHANNEL_SCHEDULING', required: false, note: 'approval cards land here' },
   { key: 'DISCORD_CHANNEL_ALERTS', required: false },
+  { key: 'DISCORD_OWNER_USER_IDS', required: false, note: 'comma-list of owner user IDs (or use the role below / legacy staff IDs)' },
+  { key: 'DISCORD_OWNER_ROLE_ID', required: false, note: 'role that grants owner powers' },
 ]
 
 const OPTIONAL_NOTIFY: EnvVar[] = [

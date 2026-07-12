@@ -357,6 +357,11 @@ async function handleBooking(req: NextRequest): Promise<NextResponse> {
       originAddress: originDisplay || 'Provided at confirmation',
       destAddress: destDisplay || 'Provided at confirmation',
       itemsDescription,
+      // The customer's own words also land in a dedicated column (not just the
+      // itemsDescription blob) so the Discord card, admin portal, and emails can
+      // show the exact notes cleanly. itemsDescription still carries a "Notes:"
+      // line for the legacy/human summary.
+      customerNotes: data.jobDetails ?? null,
       requestedDate,
       depositAmount: BOOKING_FEE_CENTS,
       depositPaid: false,

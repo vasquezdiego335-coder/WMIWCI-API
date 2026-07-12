@@ -12,7 +12,7 @@ import {
   overdueTasks,
   type Embed,
 } from "@/bot/task-service";
-import { captureDeposit, cancelDeposit } from "@/lib/stripe";
+import { captureDeposit, cancelDeposit, retrieveChargeForIntent } from "@/lib/stripe";
 import { emailQueue, smsQueue } from "@/lib/queues";
 import { offerRescheduleToCustomer } from "@/lib/reschedule";
 import { t } from "@/lib/i18n";
@@ -79,11 +79,21 @@ type CardBooking = {
   customer?: { name: string } | null;
 };
 
-// The "✅ Approved" card that replaces the approval card in place (no buttons).
-function confirmedCard(booking: CardBooking, approverName: string, capturedCents?: number) {
+// The "✅ Approved" card that replaces the approval card in place. The only
+// button that survives is a link to the customer's Stripe receipt (when the
+// capture produced one) — everything else is done, so the decision buttons go.
+function confirmedCard(
+  booking: CardBooking,
+  approverName: string,
+  capturedCents?: number,
+  receiptUrl?: string | null,
+) {
   const when = booking.confirmedDate ?? booking.requestedDate;
   const dateStr = when ? formatEastern(when) : "—";
   const cents = capturedCents ?? booking.depositAmount ?? 4900;
+  const components = receiptUrl
+    ? [{ type: 1, components: [{ type: 2, style: 5, label: "🧾 Customer Receipt", url: receiptUrl }] }]
+    : [];
   return {
     embeds: [
       {
@@ -99,7 +109,7 @@ function confirmedCard(booking: CardBooking, approverName: string, capturedCents
         timestamp: new Date().toISOString(),
       },
     ],
-    components: [], // strip the Approve / Offer / Deny buttons
+    components,
   };
 }
 
@@ -225,6 +235,23 @@ async function handleApprove(bookingId: string | undefined, messageId: string | 
   }
   const capturedCents = pi.amount_received ?? pi.amount ?? booking.depositAmount;
 
+  // 2b) Pull the resulting Charge for the hosted receipt URL + charge id +
+  //     payment method. Best-effort (never blocks approval): the record is nicer
+  //     with it, and it unlocks the "🧾 Customer Receipt" button + View Full
+  //     Booking. Stripe also emails the customer their receipt from this charge.
+  const charge = await retrieveChargeForIntent(pi).catch(() => null);
+  const receiptUrl = charge?.receipt_url ?? null;
+  const stripeChargeId =
+    charge?.id ?? (typeof pi.latest_charge === "string" ? pi.latest_charge : pi.latest_charge?.id) ?? null;
+  const paymentMethodType = charge?.payment_method_details?.type ?? null;
+  const stripeCustomerId =
+    typeof pi.customer === "string" ? pi.customer : pi.customer?.id ?? null;
+  // Only present values (string-only) so this is a clean Prisma JSON input.
+  const paymentMeta: Record<string, string> = { capturedBy: approverName };
+  if (paymentMethodType) paymentMeta.paymentMethodType = paymentMethodType;
+  if (stripeCustomerId) paymentMeta.stripeCustomerId = stripeCustomerId;
+  if (booking.stripeCheckoutId) paymentMeta.stripeCheckoutId = booking.stripeCheckoutId;
+
   // 3) Record the payment + create the Job record + audit (atomic). The booking
   //    status/date fields were already set by the claim in step 1.
   await prisma.$transaction([
@@ -232,9 +259,12 @@ async function handleApprove(bookingId: string | undefined, messageId: string | 
       data: {
         bookingId: booking.id,
         stripePaymentIntentId: pi.id,
+        stripeChargeId,
         amount: capturedCents,
         status: "COMPLETED",
         description: "Booking deposit captured on approval",
+        receiptUrl,
+        metadata: paymentMeta,
       },
     }),
     prisma.job.upsert({
@@ -327,8 +357,11 @@ async function handleApprove(bookingId: string | undefined, messageId: string | 
     "Booking approved → $49 captured → CONFIRMED"
   );
 
-  // 4) Edit the Discord card in place.
-  return NextResponse.json({ type: RES_UPDATE_MESSAGE, data: confirmedCard(booking, approverName, capturedCents) });
+  // 4) Edit the Discord card in place (with a receipt link when Stripe gave one).
+  return NextResponse.json({
+    type: RES_UPDATE_MESSAGE,
+    data: confirmedCard(booking, approverName, capturedCents, receiptUrl),
+  });
 }
 
 // ── deny_booking:<id> → release the hold → CANCELLED → notify ──────────────
@@ -459,6 +492,180 @@ async function handleOffer(bookingId: string | undefined, messageId: string | un
   // Idempotent: removing the buttons (UPDATE_MESSAGE) prevents a second offer
   // from this card; a fresh approval card posts when the customer picks a date.
   return NextResponse.json({ type: RES_UPDATE_MESSAGE, data: offeredCard(booking, approverName, result.offeredDates) });
+}
+
+// ════════════════════════════════════════════════════════════════════════
+//  view_full_booking:<id> — owner-only ephemeral dump of EVERY stored field.
+//  --------------------------------------------------------------------
+//  Nothing hidden, nothing summarized, no truncation beyond Discord's own
+//  per-field / per-embed limits (which we page across multiple embeds). This
+//  is the "I never want to open the DB" escape hatch. Owner-gated by the same
+//  OWNER_ACTIONS check as approve/deny, and ephemeral so raw customer data is
+//  only ever shown to the owner who clicked, never posted to the channel.
+// ════════════════════════════════════════════════════════════════════════
+type FullField = { name: string; value: string; inline?: boolean };
+
+// Discord caps a single embed at 25 fields / 6000 chars. Page the fields across
+// as many embeds as needed (message allows up to 10) so a data-heavy booking is
+// never dropped.
+function paginateEmbeds(title: string, color: number, description: string, fields: FullField[]) {
+  const embeds: Array<Record<string, unknown>> = [];
+  let cur: FullField[] = [];
+  let curLen = title.length + description.length;
+  const flush = (): void => {
+    if (!cur.length) return;
+    embeds.push({
+      title: embeds.length === 0 ? title : `${title} (cont. ${embeds.length + 1})`,
+      color,
+      description: embeds.length === 0 ? description : undefined,
+      fields: cur,
+    });
+    cur = [];
+    curLen = title.length;
+  };
+  for (const f of fields) {
+    const flen = f.name.length + f.value.length + 8;
+    if (cur.length >= 25 || curLen + flen > 5500) flush();
+    cur.push(f);
+    curLen += flen;
+  }
+  flush();
+  if (embeds.length) {
+    embeds[embeds.length - 1].footer = { text: "Every stored field · ephemeral (only you can see this)" };
+    embeds[embeds.length - 1].timestamp = new Date().toISOString();
+  }
+  return embeds;
+}
+
+async function handleViewFullBooking(bookingId: string | undefined, messageId: string | undefined) {
+  const booking = await prisma.booking.findFirst({
+    where: {
+      OR: [
+        ...(messageId ? [{ discordApprovalMessageId: messageId }] : []),
+        ...(bookingId ? [{ id: bookingId }] : []),
+      ],
+    },
+    include: {
+      customer: true,
+      payments: { orderBy: { createdAt: "desc" } },
+      files: { orderBy: { createdAt: "asc" } },
+      job: true,
+    },
+  });
+  if (!booking) return ephemeral("⚠️ Booking not found for this card.");
+
+  const appUrl = process.env.APP_URL ?? "https://wmiwci-api.vercel.app";
+  const DASH = "—";
+  const s = (v: unknown): string => (v === null || v === undefined || v === "" ? DASH : String(v));
+  const dt = (v: Date | null | undefined): string => (v ? formatEastern(v) : DASH);
+  const moneyC = (c: number | null | undefined): string => (typeof c === "number" ? `$${(c / 100).toFixed(2)}` : DASH);
+  const moneyD = (d: number | null | undefined): string => (typeof d === "number" ? `$${d.toFixed(2)}` : DASH);
+  const yn = (b: boolean | null | undefined): string => (b ? "Yes" : "No");
+  const cap = (v: string, n = 1024): string => (v.length > n ? v.slice(0, n - 1) + "…" : v);
+
+  const c = booking.customer;
+  const fields: FullField[] = [];
+  const add = (name: string, lines: Array<string | null | undefined>, inline = false): void => {
+    const value = lines.filter((l): l is string => !!l && l.length > 0).join("\n");
+    fields.push({ name, value: cap(value || DASH), inline });
+  };
+
+  add("🆔 Booking", [
+    `ID: \`${booking.id}\``,
+    `Ref: ${s(booking.displayId)}`,
+    `Status: ${s(booking.status)}`,
+    booking.outboxState ? `Outbox: ${booking.outboxState}` : null,
+    `Created: ${dt(booking.createdAt)}`,
+  ], true);
+
+  add("👤 Customer", [
+    s(c?.name),
+    `📞 ${s(c?.phone)}`,
+    `✉ ${s(c?.email)}`,
+    `Lang: ${s(c?.locale)} · First-time: ${yn(c?.isFirstTime)}`,
+    `Customer ID: \`${s(c?.id)}\``,
+  ], true);
+
+  add("📅 Schedule", [
+    `Requested: ${dt(booking.requestedDate)}`,
+    `Confirmed: ${dt(booking.confirmedDate)}`,
+    `Window: ${dt(booking.scheduledStart)} → ${dt(booking.scheduledEnd)}`,
+    booking.rescheduleCount ? `Reschedules: ${booking.rescheduleCount}` : null,
+  ], true);
+
+  add("📍 Pickup", [s(booking.originAddress), booking.originFloor != null ? `Floor: ${booking.originFloor}` : null], true);
+  add("📍 Dropoff", [
+    s(booking.destAddress),
+    booking.destFloor != null ? `Floor: ${booking.destFloor}` : null,
+    `Elevator: ${yn(booking.hasElevator)}`,
+  ], true);
+
+  add("🧭 Service Area", [
+    `Zone: ${s(booking.serviceAreaZone)}`,
+    `Travel fee: ${moneyC(booking.travelFee)}${booking.travelFeeDueOnMoveDay ? " (move day)" : ""}`,
+    `Manual review: ${yn(booking.manualReviewRequired)}`,
+    booking.distanceFromWestOrangeMiles != null ? `Distance: ${booking.distanceFromWestOrangeMiles} mi` : null,
+    booking.serviceAreaMessage ? `Note: ${booking.serviceAreaMessage}` : null,
+  ], true);
+
+  add("💰 Pricing", [
+    `Base rate: ${moneyD(booking.baseRate)}`,
+    `Total estimate: ${moneyD(booking.totalEstimate)}`,
+    booking.finalAmount != null ? `Final: ${moneyD(booking.finalAmount)}` : null,
+    `Deposit: ${moneyC(booking.depositAmount)} · Paid: ${yn(booking.depositPaid)}`,
+    booking.truckAddonDueOnMoveDay ? `Truck add-on: ${moneyC(booking.truckAddonAmount)} (move day)` : null,
+  ], true);
+
+  add("🏷️ Discount", [
+    `Code: ${s(booking.discountCode)}`,
+    `Type: ${s(booking.discountType)}`,
+    booking.discountPercent != null ? `Percent: ${booking.discountPercent}%` : null,
+  ], true);
+
+  const payLines = booking.payments.map(
+    (p) =>
+      `${moneyC(p.amount)} · ${p.status}${p.stripeChargeId ? ` · charge \`${p.stripeChargeId}\`` : ""}${
+        p.receiptUrl ? ` · [receipt](${p.receiptUrl})` : ""
+      }`,
+  );
+  add("💳 Stripe", [
+    `Checkout: \`${s(booking.stripeCheckoutId)}\``,
+    `PaymentIntent: \`${s(booking.stripePaymentIntentId)}\``,
+    ...(payLines.length ? payLines : ["No captured payment yet"]),
+  ]);
+
+  add("📜 Agreement", [
+    `Accepted: ${yn(booking.agreementAccepted)}${booking.agreementVersion ? ` (${booking.agreementVersion})` : ""}`,
+    booking.agreementName ? `Name: ${booking.agreementName}` : null,
+    booking.agreementSignature ? `Signature: ${booking.agreementSignature}` : null,
+    booking.agreementAcceptedAt ? `At: ${dt(booking.agreementAcceptedAt)}` : null,
+  ], true);
+
+  add("🌐 Attribution", [
+    `Source: ${s(booking.source)}`,
+    `Found us: ${s(booking.foundUs)}`,
+    booking.referrer ? `Referrer: ${booking.referrer}` : null,
+    booking.ipAddress ? `IP: ${booking.ipAddress}` : null,
+  ], true);
+
+  if (booking.customerNotes) add("📝 Customer Notes", [booking.customerNotes]);
+  if (booking.internalNotes) add("🔒 Internal Notes", [booking.internalNotes]);
+  if (booking.itemsDescription) add("🧾 Full Description (as stored)", [booking.itemsDescription]);
+  if (booking.files.length) {
+    add(
+      `📷 Files (${booking.files.length})`,
+      booking.files.map((f, i) => `[${f.type} ${i + 1}](${f.cloudinaryUrl})`),
+    );
+  }
+
+  const embeds = paginateEmbeds(
+    `📄 Full Booking — ${s(booking.displayId)}`,
+    0x0a1628,
+    `Every stored field for this booking. [Open in dashboard](${appUrl}/admin/bookings)`,
+    fields,
+  );
+
+  return NextResponse.json({ type: RES_REPLY, data: { flags: FLAG_EPHEMERAL, embeds } });
 }
 
 // ════════════════════════════════════════════════════════════════════════
@@ -901,6 +1108,7 @@ export async function POST(req: Request) {
       "approve_booking",
       "deny_booking",
       "offer_reschedule",
+      "view_full_booking",
       "approve_discount",
       "deny_discount",
       "job_start",
@@ -922,6 +1130,15 @@ export async function POST(req: Request) {
       }
       if (action === "offer_reschedule") {
         return handleOffer(id, messageId, actor);
+      }
+      if (action === "view_full_booking") {
+        try {
+          return await handleViewFullBooking(id, messageId);
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          apiLogger.error({ action, bookingId: id, err: msg }, "✖ view_full_booking failed");
+          return ephemeral("⚠️ Couldn't load the full booking — try the admin dashboard.");
+        }
       }
 
       // Move-day job buttons — each wrapped so a failure never leaves the

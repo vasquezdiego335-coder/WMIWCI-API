@@ -16,6 +16,8 @@ import { prisma } from '../lib/db'
 import { handleSlashCommand } from './command-handler'
 import {
   buildJobCard,
+  buildBookingApprovalCard,
+  approvalCardDataFromBooking,
   serviceLabelFromDescription,
   truckLabelFromDescription,
   TRUCK_OPTION_LABELS,
@@ -290,104 +292,65 @@ export async function postBookingApprovalCard(
     return
   }
 
-  const requestedDate = payload.requestedDate
-    ? new Date(payload.requestedDate as string).toLocaleString('en-US', {
-        timeZone: 'America/New_York',
-        dateStyle: 'medium',
-        timeStyle: 'short',
+  // Load the booking (source of truth) and render the SHARED premium card so
+  // the gateway path is byte-for-byte identical to the REST worker path.
+  const booking = await prisma.booking
+    .findUnique({
+      where: { id: bookingId },
+      include: {
+        customer: true,
+        payments: { where: { status: 'COMPLETED' }, orderBy: { createdAt: 'desc' }, take: 1 },
+      },
+    })
+    .catch(() => null)
+
+  const photos = await prisma.file
+    .findMany({
+      where: { bookingId, type: 'PHOTO_BEFORE' },
+      select: { cloudinaryUrl: true },
+      orderBy: { createdAt: 'asc' },
+      take: 10,
+    })
+    .catch(() => [] as { cloudinaryUrl: string }[])
+  const photoUrls = photos.map((p) => ({ url: p.cloudinaryUrl }))
+
+  const appUrl = process.env.APP_URL ?? 'https://wmiwci-api.vercel.app'
+  const rescheduled = typeof payload.items === 'string' && /RESCHEDULED/i.test(payload.items as string)
+
+  const cardData = booking
+    ? approvalCardDataFromBooking(booking, {
+        photos: photoUrls,
+        photoCount: photos.length,
+        adminUrl: `${appUrl}/admin/bookings`,
+        rescheduled,
+        stripeChargeId: booking.payments[0]?.stripeChargeId ?? null,
+        receiptUrl: booking.payments[0]?.receiptUrl ?? null,
       })
-    : 'Date TBD'
-
-  // ── Agreement status (legal acceptance captured at booking) ──
-  const agreementValue = payload.agreementAccepted
-    ? `✅ Accepted${payload.agreementVersion ? ` (${payload.agreementVersion})` : ''}` +
-      (payload.agreementName ? `\nby **${payload.agreementName}**` : '') +
-      (payload.agreementAcceptedAt
-        ? `\n${new Date(payload.agreementAcceptedAt as string).toLocaleString('en-US', {
-            timeZone: 'America/New_York',
-            dateStyle: 'short',
-            timeStyle: 'short',
-          })}`
-        : '')
-    : '⚠️ NOT accepted'
-
-  botLogger.debug({ bookingId, agreementAccepted: !!payload.agreementAccepted }, 'Building booking embed')
-
-  const embed = new EmbedBuilder()
-    .setTitle(`📋 New Booking — ${payload.displayId}`)
-    .setColor(0xc9a961) // antique gold (premium accent — sanctioned for Discord)
-    .addFields(
-      {
-        name: '👤 Customer',
-        value:
-          [`**${payload.customerName}**`, payload.customerEmail as string, payload.customerPhone as string]
-            .filter(Boolean)
-            .join('\n') || '—',
-        inline: true,
-      },
-      {
-        name: '📦 Booking',
-        value:
-          [
-            `📅 ${requestedDate}`,
-            payload.amountPaid ? `💳 $${payload.amountPaid} authorized (hold)` : '',
-            payload.discountType ? `🏷️ ${payload.discountType}` : '',
-          ]
-            .filter(Boolean)
-            .join('\n') || '—',
-        inline: true,
-      },
-      {
-        name: '📜 Agreement',
-        value: agreementValue,
-        inline: true,
+    : {
+        bookingId,
+        displayId: (payload.displayId as string) ?? null,
+        customerName: (payload.customerName as string) ?? null,
+        customerEmail: (payload.customerEmail as string) ?? null,
+        customerPhone: (payload.customerPhone as string) ?? null,
+        requestedDate: (payload.requestedDate as string) ?? null,
+        originAddress: (payload.originAddress as string) ?? null,
+        destAddress: (payload.destAddress as string) ?? null,
+        rawDescription: (payload.items as string) ?? null,
+        agreementAccepted: payload.agreementAccepted === true,
+        agreementVersion: (payload.agreementVersion as string) ?? null,
+        agreementName: (payload.agreementName as string) ?? null,
+        rescheduled,
+        photos: photoUrls,
+        photoCount: photos.length,
+        adminUrl: `${appUrl}/admin/bookings`,
       }
-    )
-    .setFooter({ text: `Booking ID: ${bookingId}` })
-    .setTimestamp()
 
-  // ── Payment & balance breakdown ──
-  const money = (n: unknown): string | null =>
-    typeof n === 'number' ? `$${n.toLocaleString('en-US')}` : null
-  const paymentValue = [
-    '💳 $49 authorized today (hold — captured on approval)',
-    money(payload.moveTotal) ? `Move total: ${money(payload.moveTotal)}` : '',
-    money(payload.balanceAfterJob) ? `Balance after job: ${money(payload.balanceAfterJob)}` : '',
-    payload.truckAddonDueOnMoveDay
-      ? `🚚 Truck add-on (move day): ${money(((payload.truckAddonAmount as number) ?? 5000) / 100)}`
-      : '',
-  ]
-    .filter(Boolean)
-    .join('\n')
-  embed.addFields({ name: '💰 Payment & Balance', value: paymentValue || '—' })
-
-  if (payload.items) {
-    embed.addFields({ name: '📝 Details', value: String(payload.items).slice(0, 1024) })
-  }
-
-  // custom_id format: "action:bookingId" — matches the interactions handler.
-  // Three outcomes:
-  //   ✅ Approve         → capture the $49 hold, confirm the move
-  //   📅 Offer New Dates → KEEP the hold, email/SMS the customer 3 alternates
-  //   ❌ Deny            → release the hold (terminal), apology + rebook link
-  const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
-    new ButtonBuilder()
-      .setCustomId(`approve_booking:${bookingId}`)
-      .setLabel('✅ Approve')
-      .setStyle(ButtonStyle.Success),
-    new ButtonBuilder()
-      .setCustomId(`offer_reschedule:${bookingId}`)
-      .setLabel('📅 Offer New Dates')
-      .setStyle(ButtonStyle.Primary),
-    new ButtonBuilder()
-      .setCustomId(`deny_booking:${bookingId}`)
-      .setLabel('❌ Deny')
-      .setStyle(ButtonStyle.Danger)
-  )
+  const card = buildBookingApprovalCard(cardData)
 
   let msg
   try {
-    msg = await channel.send({ embeds: [embed], components: [row] })
+    // channel.send accepts raw API embed/component JSON (what the builder emits).
+    msg = await channel.send({ embeds: card.embeds as any, components: card.components as any })
     botLogger.info({ bookingId, messageId: msg.id, channelId: channel.id }, '✉ Booking card sent')
   } catch (err) {
     botLogger.error({ bookingId, err: errMsg(err), stack: errStack(err) }, '✖ Failed to send booking card')
