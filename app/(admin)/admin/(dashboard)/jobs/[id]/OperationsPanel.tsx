@@ -30,6 +30,7 @@ const TRUCK: FieldDef[] = [
   { key: 'truckFuelPolicy', label: 'Fuel policy' },
 ]
 const AREAS: FieldDef[] = [
+  { key: 'internalNotes', label: 'Internal notes (legacy — visible to all staff)', kind: 'area' },
   { key: 'dispatcherNotes', label: 'Dispatcher notes', kind: 'area' },
   { key: 'crewNotes', label: 'Crew notes', kind: 'area' },
   { key: 'officeNotes', label: 'Office notes', kind: 'area' },

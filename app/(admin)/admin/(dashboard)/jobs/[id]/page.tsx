@@ -4,7 +4,6 @@ import { notFound } from 'next/navigation'
 import Link from 'next/link'
 import BookingActions from './BookingActions'
 import OperationsPanel, { PrintButton } from './OperationsPanel'
-import { accessSections } from '@/lib/booking-access'
 import { parseUserAgent } from '@/lib/ua'
 
 export const revalidate = 0
@@ -83,7 +82,6 @@ export default async function JobDetail({ params }: { params: { id: string } }) 
     + (booking.stairFee ?? 0) + (booking.longCarryFee ?? 0) + (booking.heavyItemFee ?? 0)
     + (booking.packingFee ?? 0) + (booking.assemblyFee ?? 0) + (booking.disassemblyFee ?? 0) + (booking.taxAmount ?? 0)
   const ua = parseUserAgent(booking.userAgent)
-  const access = accessSections(booking, { includeSensitive: true })
   const items = parseItemsBlob(booking.itemsDescription)
   const c = booking.customer
   const paymentStatus = collected > 0 ? 'PAID DEPOSIT' : booking.status === 'PENDING_PAYMENT' ? 'AWAITING PAYMENT' : 'UNPAID'
@@ -95,6 +93,7 @@ export default async function JobDetail({ params }: { params: { id: string } }) 
     truckSize: booking.truckSize ?? '', truckReservationNumber: booking.truckReservationNumber ?? '',
     truckReservationStatus: booking.truckReservationStatus ?? '', truckPickupTime: booking.truckPickupTime ?? '',
     driverName: booking.driverName ?? '', driverPhone: booking.driverPhone ?? '', truckFuelPolicy: booking.truckFuelPolicy ?? '',
+    internalNotes: booking.internalNotes ?? '',
     dispatcherNotes: booking.dispatcherNotes ?? '', crewNotes: booking.crewNotes ?? '',
     officeNotes: booking.officeNotes ?? '', outstandingTasks: booking.outstandingTasks ?? '',
   }
@@ -229,10 +228,24 @@ export default async function JobDetail({ params }: { params: { id: string } }) 
             <Row label="Additional truck fees" value={cents(booking.additionalTruckFees) ?? '—'} />
           </Card>
 
+          {/* Section 14: Customer Notes — the customer's exact words, never truncated */}
+          <Card title="Customer Notes" icon="💬">
+            {booking.customerNotes?.trim()
+              ? <p style={{ fontSize: '13px', color: '#374151', margin: 0, whiteSpace: 'pre-wrap', lineHeight: 1.6 }}>{booking.customerNotes}</p>
+              : <Empty>No notes from the customer</Empty>}
+            {booking.crewInstructions?.trim() && (
+              <div style={{ marginTop: '12px', borderTop: '1px solid #F3F4F6', paddingTop: '10px' }}>
+                <div style={{ fontSize: '11px', color: '#9CA3AF', marginBottom: '2px' }}>Move-day instructions for the crew</div>
+                <p style={{ fontSize: '13px', color: '#374151', margin: 0, whiteSpace: 'pre-wrap', lineHeight: 1.6 }}>{booking.crewInstructions}</p>
+              </div>
+            )}
+          </Card>
+
           {/* Section 12: Internal Operations (editable) */}
           <Card title="Internal Operations" icon="🛠" action={<span style={{ fontSize: '11px', color: '#9CA3AF' }}>staff-editable</span>}>
             <Row label="Completion" value={booking.completionProgress != null ? `${booking.completionProgress}%` : '—'} />
             <Row label="Problem flags" value={booking.problemFlags ?? '—'} />
+            <NotesBlock label="Internal notes" value={booking.internalNotes} />
             <NotesBlock label="Dispatcher notes" value={booking.dispatcherNotes} />
             <NotesBlock label="Crew notes" value={booking.crewNotes} />
             <NotesBlock label="Office notes" value={booking.officeNotes} />
