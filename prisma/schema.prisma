@@ -44,20 +44,20 @@ enum BookingState {
 }
 
 enum DiscountType {
-  FIRST_TIME_AUTO     // 10% automatic for new customers
+  FIRST_TIME_AUTO // 10% automatic for new customers
   DOOR_HANGER_PENDING // 30% claimed, awaiting approval
-  DOOR_HANGER_APPROVED// 30% approved by owner
-  DOOR_HANGER_DENIED  // denied, fallback offered
-  MANUAL              // manually applied by staff
+  DOOR_HANGER_APPROVED // 30% approved by owner
+  DOOR_HANGER_DENIED // denied, fallback offered
+  MANUAL // manually applied by staff
 }
 
 // Travel service-area zone for a booking (see src/lib/service-area.ts).
 enum ServiceAreaZone {
-  primary       // Essex County + nearby — no travel fee
-  extended_nj   // rest of New Jersey — $50 travel fee (due on move day)
-  new_york      // New York — manual review, no fixed fee
+  primary // Essex County + nearby — no travel fee
+  extended_nj // rest of New Jersey — $50 travel fee (due on move day)
+  new_york // New York — manual review, no fixed fee
   manual_review // could not classify the address — manual review
-  unsupported   // outside NJ/NY — manual review
+  unsupported // outside NJ/NY — manual review
 }
 
 enum PaymentStatus {
@@ -99,6 +99,7 @@ enum FileType {
 enum AuditAction {
   BOOKING_CREATED
   BOOKING_STATE_CHANGED
+  BOOKING_DETAILS_UPDATED
   PAYMENT_RECEIVED
   PAYMENT_FAILED
   DISCOUNT_APPLIED
@@ -118,70 +119,77 @@ enum AuditAction {
 // ── MODELS ────────────────────────────────────────────────────
 
 model User {
-  id           String    @id @default(cuid())
-  email        String    @unique
-  passwordHash String    @map("password_hash")
+  id           String   @id @default(cuid())
+  email        String   @unique
+  passwordHash String   @map("password_hash")
   name         String
-  role         UserRole  @default(CREW)
-  discordId    String?   @map("discord_id")
+  role         UserRole @default(CREW)
+  discordId    String?  @map("discord_id")
   phone        String?
-  active       Boolean   @default(true)
-  createdAt    DateTime  @default(now()) @map("created_at")
-  updatedAt    DateTime  @updatedAt @map("updated_at")
+  active       Boolean  @default(true)
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
 
   // Relations
-  availability  Availability[]
-  assignedJobs  JobCrew[]
-  auditLogs     AuditLog[]
+  availability Availability[]
+  assignedJobs JobCrew[]
+  auditLogs    AuditLog[]
 
   @@map("users")
 }
 
 model Customer {
-  id           String    @id @default(cuid())
-  email        String    @unique
-  name         String
-  phone        String
-  isFirstTime  Boolean   @default(true) @map("is_first_time")
+  id              String   @id @default(cuid())
+  email           String   @unique
+  name            String
+  phone           String
+  isFirstTime     Boolean  @default(true) @map("is_first_time")
   // Preferred language for all customer-facing email + SMS ("en" | "es").
   // Captured from the marketing site's EN/ES toggle at booking time.
-  locale       String    @default("en")
+  locale          String   @default("en")
   // TCPA marketing opt-out — set true when a customer texts STOP (inbound SMS
   // webhook). Phase-3 follow-ups are suppressed for opted-out customers. The 4
   // transactional booking messages are unaffected (they're not marketing).
-  marketingOptOut Boolean @default(false) @map("marketing_opt_out")
-  createdAt    DateTime  @default(now()) @map("created_at")
-  updatedAt    DateTime  @updatedAt @map("updated_at")
+  marketingOptOut Boolean  @default(false) @map("marketing_opt_out")
+
+  // ── Extended contact (admin operations, owner spec 2026-07-12) — all nullable ──
+  preferredName         String? @map("preferred_name")
+  secondaryPhone        String? @map("secondary_phone")
+  emergencyContact      String? @map("emergency_contact")
+  emergencyContactPhone String? @map("emergency_contact_phone")
+
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
 
   // Relations
-  bookings     Booking[]
+  bookings Booking[]
 
   @@map("customers")
 }
 
 model Booking {
-  id              String        @id @default(cuid())
-  displayId       String        @unique @default(cuid()) @map("display_id") // human-friendly
-  status          BookingStatus @default(DRAFT)
-  outboxState     BookingState? @map("outbox_state") // src/outbox email state machine (additive, nullable)
-  customerId      String        @map("customer_id")
+  id          String        @id @default(cuid())
+  displayId   String        @unique @default(cuid()) @map("display_id") // human-friendly
+  status      BookingStatus @default(DRAFT)
+  outboxState BookingState? @map("outbox_state") // src/outbox email state machine (additive, nullable)
+  customerId  String        @map("customer_id")
 
   // Location
-  originAddress   String        @map("origin_address")
-  destAddress     String        @map("dest_address")
-  originFloor     Int?          @map("origin_floor")
-  destFloor       Int?          @map("dest_floor")
-  hasElevator     Boolean       @default(false) @map("has_elevator")
+  originAddress String  @map("origin_address")
+  destAddress   String  @map("dest_address")
+  originFloor   Int?    @map("origin_floor")
+  destFloor     Int?    @map("dest_floor")
+  hasElevator   Boolean @default(false) @map("has_elevator")
 
   // Items
-  itemsDescription String?      @map("items_description")
-  estimatedHours   Float?       @map("estimated_hours")
+  itemsDescription String? @map("items_description")
+  estimatedHours   Float?  @map("estimated_hours")
 
   // Schedule
-  requestedDate   DateTime?     @map("requested_date")
-  confirmedDate   DateTime?     @map("confirmed_date")
-  scheduledStart  DateTime?     @map("scheduled_start")
-  scheduledEnd    DateTime?     @map("scheduled_end")
+  requestedDate  DateTime? @map("requested_date")
+  confirmedDate  DateTime? @map("confirmed_date")
+  scheduledStart DateTime? @map("scheduled_start")
+  scheduledEnd   DateTime? @map("scheduled_end")
 
   // Reschedule tracking — the $49 hold stays attached across reschedules.
   previousRequestedDate DateTime? @map("previous_requested_date")
@@ -189,83 +197,164 @@ model Booking {
   rescheduledAt         DateTime? @map("rescheduled_at")
 
   // Pricing
-  depositAmount   Int           @default(4900) @map("deposit_amount") // cents — $49 booking fee
-  depositPaid     Boolean       @default(false) @map("deposit_paid")
+  depositAmount          Int     @default(4900) @map("deposit_amount") // cents — $49 booking fee
+  depositPaid            Boolean @default(false) @map("deposit_paid")
   truckAddonDueOnMoveDay Boolean @default(false) @map("truck_addon_due_on_move_day")
-  truckAddonAmount Int          @default(0) @map("truck_addon_amount") // cents
-  baseRate        Float?        @map("base_rate")
-  totalEstimate   Float?        @map("total_estimate")
-  finalAmount     Float?        @map("final_amount")
+  truckAddonAmount       Int     @default(0) @map("truck_addon_amount") // cents
+  baseRate               Float?  @map("base_rate")
+  totalEstimate          Float?  @map("total_estimate")
+  finalAmount            Float?  @map("final_amount")
 
   // ── Service area / travel fee (server-computed; see src/lib/service-area.ts) ──
   //    travelFee is charged on move day like the truck add-on — never in Stripe.
-  serviceAreaZone      ServiceAreaZone? @map("service_area_zone")
-  travelFee            Int              @default(0) @map("travel_fee") // cents; 0 = none
-  travelFeeDueOnMoveDay Boolean         @default(false) @map("travel_fee_due_on_move_day")
-  manualReviewRequired Boolean          @default(false) @map("manual_review_required")
-  serviceAreaMessage   String?          @map("service_area_message")
-  distanceFromWestOrangeMiles Float?    @map("distance_from_west_orange_miles")
-  estimatedDriveTimeMinutes   Int?      @map("estimated_drive_time_minutes")
-  addressEvaluation    Json?            @map("address_evaluation")
+  serviceAreaZone             ServiceAreaZone? @map("service_area_zone")
+  travelFee                   Int              @default(0) @map("travel_fee") // cents; 0 = none
+  travelFeeDueOnMoveDay       Boolean          @default(false) @map("travel_fee_due_on_move_day")
+  manualReviewRequired        Boolean          @default(false) @map("manual_review_required")
+  serviceAreaMessage          String?          @map("service_area_message")
+  distanceFromWestOrangeMiles Float?           @map("distance_from_west_orange_miles")
+  estimatedDriveTimeMinutes   Int?             @map("estimated_drive_time_minutes")
+  addressEvaluation           Json?            @map("address_evaluation")
 
   // Discount
-  discountCode    String?       @map("discount_code")
-  discountType    DiscountType? @map("discount_type")
-  discountPercent Float?        @map("discount_percent")
-  discountApprovedById String?  @map("discount_approved_by_id")
+  discountCode         String?       @map("discount_code")
+  discountType         DiscountType? @map("discount_type")
+  discountPercent      Float?        @map("discount_percent")
+  discountApprovedById String?       @map("discount_approved_by_id")
 
   // Stripe
-  stripeCheckoutId  String?     @unique @map("stripe_checkout_id")
+  stripeCheckoutId      String? @unique @map("stripe_checkout_id")
   stripePaymentIntentId String? @unique @map("stripe_payment_intent_id")
 
   // Discord
-  discordJobChannelId      String? @map("discord_job_channel_id")
+  discordJobChannelId       String? @map("discord_job_channel_id")
   discordPaperworkChannelId String? @map("discord_paperwork_channel_id")
-  discordPhotosChannelId   String? @map("discord_photos_channel_id")
-  discordApprovalMessageId String? @map("discord_approval_message_id")
+  discordPhotosChannelId    String? @map("discord_photos_channel_id")
+  discordApprovalMessageId  String? @map("discord_approval_message_id")
 
   // Self-service token for customer portal
-  customerToken   String        @unique @default(cuid()) @map("customer_token")
-  customerTokenExpiry DateTime  @map("customer_token_expiry")
+  customerToken       String   @unique @default(cuid()) @map("customer_token")
+  customerTokenExpiry DateTime @map("customer_token_expiry")
 
   // Notes
-  internalNotes   String?       @map("internal_notes")
-  customerNotes   String?       @map("customer_notes")
+  internalNotes String? @map("internal_notes")
+  customerNotes String? @map("customer_notes")
+
+  // ── Structured access details (owner spec 2026-07-12) ────────────────────
+  //    Backward-compatible: EVERY field is nullable, so existing bookings read
+  //    as null. Pickup (origin*) and drop-off (dest*) are kept separate.
+  //    originFloor/destFloor above are REUSED for the floor number (no dupes).
+  //    SENSITIVE: origin/destAccessCode are gate/lockbox/buzzer codes — surfaced
+  //    ONLY in the owner-gated Discord "View Full Booking" + authorized admin
+  //    views; they are omitted from the customer portal API and never written to
+  //    itemsDescription (which feeds public emails + the customer summary).
+  originUnit        String?  @map("origin_unit") // apartment / unit #
+  destUnit          String?  @map("dest_unit")
+  originHasElevator Boolean? @map("origin_has_elevator") // per-location elevator
+  destHasElevator   Boolean? @map("dest_has_elevator")
+  originStairCount  Int?     @map("origin_stair_count") // flights / approx count
+  destStairCount    Int?     @map("dest_stair_count")
+  originAccessNotes String?  @map("origin_access_notes") // parking/loading + building access (non-sensitive)
+  destAccessNotes   String?  @map("dest_access_notes")
+  originAccessCode  String?  @map("origin_access_code") // SENSITIVE
+  destAccessCode    String?  @map("dest_access_code") // SENSITIVE
+
+  // Customer-provided truck details — informational only. The $50 pickup/return
+  // FEE stays governed by truckAddonDueOnMoveDay/truckAddonAmount (no new fee).
+  truckProvider             String? @map("truck_provider") // customer / U-Haul / Penske / WMIWCI
+  truckSize                 String? @map("truck_size") // 10ft / 15ft / 26ft …
+  truckReservationStatus    String? @map("truck_reservation_status") // reserved / not-yet / n/a
+  truckPickupLocation       String? @map("truck_pickup_location")
+  truckReturnResponsibility String? @map("truck_return_responsibility")
+
+  equipmentNeeds   String? @map("equipment_needs") // dollies/straps/piano board (informational)
+  crewInstructions String? @map("crew_instructions") // customer's move-day instructions for the crew
+
+  // ── Move details (owner spec 2026-07-12) — structured inventory of the job.
+  //    Nullable; collected on the booking form (future) or entered by staff. ──
+  bedrooms           Int?     @map("bedrooms")
+  estimatedCubicFeet Int?     @map("estimated_cubic_feet")
+  estimatedWeightLbs Int?     @map("estimated_weight_lbs")
+  numBoxes           Int?     @map("num_boxes")
+  needsPacking       Boolean? @map("needs_packing")
+  needsUnpacking     Boolean? @map("needs_unpacking")
+  needsAssembly      Boolean? @map("needs_assembly")
+  needsDisassembly   Boolean? @map("needs_disassembly")
+  needsStorage       Boolean? @map("needs_storage")
+  hasPiano           Boolean? @map("has_piano")
+  hasSafe            Boolean? @map("has_safe")
+  hasPoolTable       Boolean? @map("has_pool_table")
+  hasAppliances      Boolean? @map("has_appliances")
+  specialtyItems     String?  @map("specialty_items")
+
+  // ── Truck operations (extends the customer-provided truck fields above) ──
+  truckReservationNumber String? @map("truck_reservation_number")
+  truckPickupTime        String? @map("truck_pickup_time")
+  truckReturnAddress     String? @map("truck_return_address")
+  driverName             String? @map("driver_name")
+  driverPhone            String? @map("driver_phone")
+  driverLicense          String? @map("driver_license")
+  truckFuelPolicy        String? @map("truck_fuel_policy")
+  additionalTruckFees    Int?    @map("additional_truck_fees") // cents
+
+  // ── Itemized fees (cents) — base/travel/truck add-on/discount live above.
+  //    Nullable so existing bookings stay null; a professional invoice reads them. ──
+  stairFee       Int? @map("stair_fee")
+  longCarryFee   Int? @map("long_carry_fee")
+  heavyItemFee   Int? @map("heavy_item_fee")
+  packingFee     Int? @map("packing_fee")
+  assemblyFee    Int? @map("assembly_fee")
+  disassemblyFee Int? @map("disassembly_fee")
+  taxAmount      Int? @map("tax_amount")
+  processingFee  Int? @map("processing_fee")
+
+  // ── Internal operations (staff-entered via the admin edit panel) ──
+  arrivalWindow      String? @map("arrival_window") // e.g. "8:00–10:00 AM"
+  assignedDispatcher String? @map("assigned_dispatcher")
+  dispatcherNotes    String? @map("dispatcher_notes")
+  crewNotes          String? @map("crew_notes")
+  driverNotes        String? @map("driver_notes")
+  officeNotes        String? @map("office_notes")
+  schedulingNotes    String? @map("scheduling_notes")
+  travelNotes        String? @map("travel_notes")
+  problemFlags       String? @map("problem_flags")
+  outstandingTasks   String? @map("outstanding_tasks")
+  completionProgress Int?    @map("completion_progress") // 0–100
 
   // Moving Service Agreement (legal acceptance record)
   agreementAccepted   Boolean   @default(false) @map("agreement_accepted")
   agreementVersion    String?   @map("agreement_version")
   agreementAcceptedAt DateTime? @map("agreement_accepted_at")
-  agreementName       String?   @map("agreement_name")      // printed name typed by the customer
+  agreementName       String?   @map("agreement_name") // printed name typed by the customer
   agreementSignature  String?   @map("agreement_signature") // optional typed signature
 
   // Metadata
-  ipAddress       String?       @map("ip_address")
-  userAgent       String?       @map("user_agent")
-  referrer        String?
+  ipAddress String? @map("ip_address")
+  userAgent String? @map("user_agent")
+  referrer  String?
 
   // ── Marketing attribution (Phase 2) — pushed to the marketing-tracker funnel
   //    on payment so booking revenue is attributed to its source / found-us. ──
-  source          String?       // QR src / tracking code carried by the booking URL
-  foundUs         String?       @map("found_us") // "Where did you find us?" self-report
+  source  String? // QR src / tracking code carried by the booking URL
+  foundUs String? @map("found_us") // "Where did you find us?" self-report
 
   // ── Job completion (Phase 3) — set when the booking transitions to COMPLETED;
   //    the anchor time for the post-move follow-up sequence. ──
-  completedAt     DateTime?     @map("completed_at")
+  completedAt DateTime? @map("completed_at")
 
-  createdAt       DateTime      @default(now()) @map("created_at")
-  updatedAt       DateTime      @updatedAt @map("updated_at")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
 
   // Relations
-  customer        Customer      @relation(fields: [customerId], references: [id])
-  payments        Payment[]
-  job             Job?
-  files           File[]
-  notifications   Notification[]
-  receipt         Receipt?
-  auditLogs       AuditLog[]
-  review          Review?
-  followUps       FollowUpLedger[]
+  customer      Customer         @relation(fields: [customerId], references: [id])
+  payments      Payment[]
+  job           Job?
+  files         File[]
+  notifications Notification[]
+  receipt       Receipt?
+  auditLogs     AuditLog[]
+  review        Review?
+  followUps     FollowUpLedger[]
 
   @@index([status])
   @@index([customerId])
@@ -302,7 +391,7 @@ model Payment {
   bookingId             String        @map("booking_id")
   stripePaymentIntentId String?       @unique @map("stripe_payment_intent_id")
   stripeChargeId        String?       @unique @map("stripe_charge_id")
-  amount                Int           // in cents
+  amount                Int // in cents
   currency              String        @default("usd")
   status                PaymentStatus @default(PENDING)
   description           String?
@@ -312,7 +401,7 @@ model Payment {
   updatedAt             DateTime      @updatedAt @map("updated_at")
 
   // Relations
-  booking               Booking       @relation(fields: [bookingId], references: [id])
+  booking Booking @relation(fields: [bookingId], references: [id])
 
   @@index([bookingId])
   @@index([status])
@@ -331,38 +420,38 @@ model Job {
   updatedAt    DateTime  @updatedAt @map("updated_at")
 
   // Relations
-  booking      Booking   @relation(fields: [bookingId], references: [id])
-  crew         JobCrew[]
-  files        File[]
+  booking Booking   @relation(fields: [bookingId], references: [id])
+  crew    JobCrew[]
+  files   File[]
 
   @@index([status])
   @@map("jobs")
 }
 
 model JobCrew {
-  id        String   @id @default(cuid())
-  jobId     String   @map("job_id")
-  userId    String   @map("user_id")
+  id         String   @id @default(cuid())
+  jobId      String   @map("job_id")
+  userId     String   @map("user_id")
   assignedAt DateTime @default(now()) @map("assigned_at")
 
-  job       Job      @relation(fields: [jobId], references: [id])
-  user      User     @relation(fields: [userId], references: [id])
+  job  Job  @relation(fields: [jobId], references: [id])
+  user User @relation(fields: [userId], references: [id])
 
   @@unique([jobId, userId])
   @@map("job_crew")
 }
 
 model Availability {
-  id         String   @id @default(cuid())
-  userId     String   @map("user_id")
-  date       DateTime @db.Date
-  isDayOff   Boolean  @default(false) @map("is_day_off")
-  startTime  String?  @map("start_time") // "08:00"
-  endTime    String?  @map("end_time")   // "18:00"
-  notes      String?
-  createdAt  DateTime @default(now()) @map("created_at")
+  id        String   @id @default(cuid())
+  userId    String   @map("user_id")
+  date      DateTime @db.Date
+  isDayOff  Boolean  @default(false) @map("is_day_off")
+  startTime String?  @map("start_time") // "08:00"
+  endTime   String?  @map("end_time") // "18:00"
+  notes     String?
+  createdAt DateTime @default(now()) @map("created_at")
 
-  user       User     @relation(fields: [userId], references: [id])
+  user User @relation(fields: [userId], references: [id])
 
   @@unique([userId, date])
   @@index([date])
@@ -383,20 +472,20 @@ model DayBlock {
 }
 
 model File {
-  id            String    @id @default(cuid())
-  bookingId     String?   @map("booking_id")
-  jobId         String?   @map("job_id")
+  id            String   @id @default(cuid())
+  bookingId     String?  @map("booking_id")
+  jobId         String?  @map("job_id")
   type          FileType
-  cloudinaryId  String    @unique @map("cloudinary_id")
-  cloudinaryUrl String    @map("cloudinary_url")
+  cloudinaryId  String   @unique @map("cloudinary_id")
+  cloudinaryUrl String   @map("cloudinary_url")
   filename      String
-  mimeType      String    @map("mime_type")
-  sizeBytes     Int       @map("size_bytes")
-  uploadedBy    String?   @map("uploaded_by") // user ID or "customer"
-  createdAt     DateTime  @default(now()) @map("created_at")
+  mimeType      String   @map("mime_type")
+  sizeBytes     Int      @map("size_bytes")
+  uploadedBy    String?  @map("uploaded_by") // user ID or "customer"
+  createdAt     DateTime @default(now()) @map("created_at")
 
-  booking       Booking?  @relation(fields: [bookingId], references: [id])
-  job           Job?      @relation(fields: [jobId], references: [id])
+  booking Booking? @relation(fields: [bookingId], references: [id])
+  job     Job?     @relation(fields: [jobId], references: [id])
 
   @@index([bookingId])
   @@index([jobId])
@@ -412,34 +501,34 @@ model Receipt {
   sentTo        String?   @map("sent_to")
   createdAt     DateTime  @default(now()) @map("created_at")
 
-  booking       Booking   @relation(fields: [bookingId], references: [id])
+  booking Booking @relation(fields: [bookingId], references: [id])
 
   @@map("receipts")
 }
 
 model Notification {
-  id         String              @id @default(cuid())
-  bookingId  String?             @map("booking_id")
-  channel    NotificationChannel
-  status     NotificationStatus  @default(QUEUED)
-  recipient  String              // email / phone / discord channel
-  subject    String?
-  template   String              // template name
-  payload    Json                // template data
-  bullJobId  String?             @map("bull_job_id")
-  sentAt     DateTime?           @map("sent_at")
-  error      String?
-  retries    Int                 @default(0)
+  id        String              @id @default(cuid())
+  bookingId String?             @map("booking_id")
+  channel   NotificationChannel
+  status    NotificationStatus  @default(QUEUED)
+  recipient String // email / phone / discord channel
+  subject   String?
+  template  String // template name
+  payload   Json // template data
+  bullJobId String?             @map("bull_job_id")
+  sentAt    DateTime?           @map("sent_at")
+  error     String?
+  retries   Int                 @default(0)
   // Email open tracking (1x1 tracking-pixel). openToken is embedded in the
   // sent email; GET /api/email/open stamps openedAt + isOpened on first load
   // and bumps openCount on every load. Only meaningful for EMAIL channel.
-  openToken  String?             @unique @map("open_token")
-  openedAt   DateTime?           @map("opened_at")
-  isOpened   Boolean             @default(false) @map("is_opened")
-  openCount  Int                 @default(0) @map("open_count")
-  createdAt  DateTime            @default(now()) @map("created_at")
+  openToken String?             @unique @map("open_token")
+  openedAt  DateTime?           @map("opened_at")
+  isOpened  Boolean             @default(false) @map("is_opened")
+  openCount Int                 @default(0) @map("open_count")
+  createdAt DateTime            @default(now()) @map("created_at")
 
-  booking    Booking?            @relation(fields: [bookingId], references: [id])
+  booking Booking? @relation(fields: [bookingId], references: [id])
 
   @@index([bookingId])
   @@index([status])
@@ -448,11 +537,11 @@ model Notification {
 
 model WebhookLog {
   id          String    @id @default(cuid())
-  source      String    // "stripe" | "discord"
+  source      String // "stripe" | "discord"
   eventType   String    @map("event_type")
   eventId     String?   @unique @map("event_id") // idempotency key
   payload     Json
-  status      String    // "processed" | "failed" | "duplicate"
+  status      String // "processed" | "failed" | "duplicate"
   error       String?
   processedAt DateTime? @map("processed_at")
   createdAt   DateTime  @default(now()) @map("created_at")
@@ -472,8 +561,8 @@ model AuditLog {
   ipAddress String?     @map("ip_address")
   createdAt DateTime    @default(now()) @map("created_at")
 
-  user      User?       @relation(fields: [userId], references: [id])
-  booking   Booking?    @relation(fields: [bookingId], references: [id])
+  user    User?    @relation(fields: [userId], references: [id])
+  booking Booking? @relation(fields: [bookingId], references: [id])
 
   @@index([userId])
   @@index([bookingId])
@@ -563,13 +652,13 @@ model Task {
 model FollowUpLedger {
   id        String   @id @default(cuid())
   bookingId String   @map("booking_id")
-  type      String   // review-request | review-reminder | repeat-reminder | referral-ask
+  type      String // review-request | review-reminder | repeat-reminder | referral-ask
   channel   String   @default("both") // sms | email | both
   status    String   @default("sent") // sent | failed | skipped
   error     String?
   sentAt    DateTime @default(now()) @map("sent_at")
 
-  booking   Booking  @relation(fields: [bookingId], references: [id])
+  booking Booking @relation(fields: [bookingId], references: [id])
 
   @@unique([bookingId, type])
   @@index([bookingId])
@@ -583,13 +672,13 @@ model FollowUpLedger {
 model Review {
   id         String   @id @default(cuid())
   bookingId  String   @unique @map("booking_id")
-  rating     Int      // 1..5
+  rating     Int // 1..5
   isPositive Boolean  @default(false) @map("is_positive")
   source     String   @default("admin") // admin | discord | customer-portal
   comment    String?
   leftAt     DateTime @default(now()) @map("left_at")
 
-  booking    Booking  @relation(fields: [bookingId], references: [id])
+  booking Booking @relation(fields: [bookingId], references: [id])
 
   @@index([bookingId])
   @@map("reviews")

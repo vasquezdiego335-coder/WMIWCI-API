@@ -38,9 +38,10 @@ export default function BookingActions({ bookingId, status }: { bookingId: strin
     setError('')
 
     try {
+      const csrf = document.cookie.split('; ').find((c) => c.startsWith('moveit_csrf='))?.split('=')[1]
       const res = await fetch(`/api/admin/bookings/${bookingId}/status`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...(csrf ? { 'X-CSRF-Token': decodeURIComponent(csrf) } : {}) },
         body: JSON.stringify({ status: next }),
       })
 
