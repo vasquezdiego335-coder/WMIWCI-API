@@ -39,9 +39,11 @@ export default async function AdminPayments({
     prisma.payment.count({ where }),
   ])
 
+  // isInternalTest=false: owner checkout tests stay visible in the list (with a
+  // TEST badge) but NEVER count toward collected/refunded/net revenue.
   const [completedAgg, refundedAgg] = await Promise.all([
-    prisma.payment.aggregate({ where: { status: 'COMPLETED' }, _sum: { amount: true } }),
-    prisma.payment.aggregate({ where: { status: 'REFUNDED' }, _sum: { amount: true } }),
+    prisma.payment.aggregate({ where: { status: 'COMPLETED', isInternalTest: false }, _sum: { amount: true } }),
+    prisma.payment.aggregate({ where: { status: 'REFUNDED', isInternalTest: false }, _sum: { amount: true } }),
   ])
 
   const totalRevenue = (completedAgg._sum.amount ?? 0) / 100
@@ -114,6 +116,9 @@ export default async function AdminPayments({
                   <span style={{ ...badge, backgroundColor: STATUS_COLORS[p.status] ?? '#9CA3AF' }}>
                     {p.status}
                   </span>
+                  {p.isInternalTest && (
+                    <span style={{ ...badge, backgroundColor: '#6B7280', marginLeft: '6px' }} title="Internal checkout test — excluded from revenue">TEST</span>
+                  )}
                 </td>
                 <td style={td}>
                   <Link href={`/admin/jobs/${p.bookingId}`} style={{ color: '#FF5A1F', fontSize: '12px' }}>

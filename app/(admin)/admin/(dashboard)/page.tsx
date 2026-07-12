@@ -18,18 +18,22 @@ async function getDashboardData() {
     totalBookings,
   ] = await Promise.all([
     prisma.booking.findMany({
-      where: { scheduledStart: { gte: todayStart, lte: todayEnd }, status: { in: ['SCHEDULED', 'IN_PROGRESS', 'CONFIRMED'] } },
+      where: { scheduledStart: { gte: todayStart, lte: todayEnd }, status: { in: ['SCHEDULED', 'IN_PROGRESS', 'CONFIRMED'] }, isInternalTest: false },
       include: { customer: { select: { name: true, phone: true } } },
       orderBy: { scheduledStart: 'asc' },
     }),
-    prisma.booking.count({ where: { status: 'PENDING_APPROVAL' } }),
-    prisma.booking.count({ where: { discountType: 'DOOR_HANGER_PENDING' } }),
+    prisma.booking.count({ where: { status: 'PENDING_APPROVAL', isInternalTest: false } }),
+    prisma.booking.count({ where: { discountType: 'DOOR_HANGER_PENDING', isInternalTest: false } }),
     prisma.payment.aggregate({
-      where: { status: 'COMPLETED', createdAt: { gte: new Date(now.getFullYear(), now.getMonth(), 1) } },
+      // isInternalTest=false: owner checkout tests never count as revenue.
+      where: { status: 'COMPLETED', isInternalTest: false, createdAt: { gte: new Date(now.getFullYear(), now.getMonth(), 1) } },
       _sum: { amount: true },
     }),
     prisma.payment.count({ where: { status: 'FAILED' } }),
-    prisma.booking.count({ where: { status: { notIn: ['DRAFT', 'CANCELLED'] } } }),
+    // REAL operational bookings only. Two exclusions fix the inflated "53":
+    //  • PENDING_PAYMENT = abandoned checkout (submitted, Stripe never paid) — not a booking.
+    //  • isInternalTest = the owner's own checkout tests (flagged by signal).
+    prisma.booking.count({ where: { status: { in: ['PENDING_APPROVAL', 'CONFIRMED', 'SCHEDULED', 'IN_PROGRESS', 'COMPLETED'] }, isInternalTest: false } }),
   ])
 
   return { todayBookings, pendingApproval, pendingDiscounts, thisMonthRevenue, failedPayments, totalBookings }

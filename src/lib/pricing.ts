@@ -28,7 +28,11 @@ export function formatCentsUSD(cents: number): string {
   return formatUSD(centsToDollars(cents))
 }
 
-export type PaymentLike = { amount: number; status: string } // amount in CENTS
+export type PaymentLike = { amount: number; status: string; isInternalTest?: boolean | null } // amount in CENTS
+
+/** True for payments that count as REAL money: captured AND not an owner
+ *  checkout test. THE revenue filter — every aggregate/report derives from it. */
+export const isRealPayment = (p: PaymentLike): boolean => p.status === 'COMPLETED' && !p.isInternalTest
 
 export type PricingInput = {
   baseRate?: number | null // DOLLARS
@@ -69,8 +73,10 @@ export function bookingPricing(b: PricingInput): PricingBreakdown {
   const depositDollars = round2(centsToDollars(b.depositAmount ?? 4900))
 
   const payments = b.payments ?? []
-  const collectedCents = payments.filter((p) => p.status === 'COMPLETED').reduce((s, p) => s + p.amount, 0)
-  const refundedCents = payments.filter((p) => p.status === 'REFUNDED').reduce((s, p) => s + p.amount, 0)
+  // Internal checkout tests are invisible to money math (they're still listed
+  // in payment history UIs, just never counted).
+  const collectedCents = payments.filter(isRealPayment).reduce((s, p) => s + p.amount, 0)
+  const refundedCents = payments.filter((p) => p.status === 'REFUNDED' && !p.isInternalTest).reduce((s, p) => s + p.amount, 0)
   const depositCaptured = !!b.depositPaid || collectedCents > 0
 
   const moveTotalDollars = typeof b.totalEstimate === 'number' ? round2(b.totalEstimate) : null
@@ -116,7 +122,7 @@ export function pricingConsistencyIssues(b: PricingInput): string[] {
   }
 
   // Collected must never exceed what was actually captured.
-  const capturedCents = (b.payments ?? []).filter((x) => x.status === 'COMPLETED').reduce((s, x) => s + x.amount, 0)
+  const capturedCents = (b.payments ?? []).filter(isRealPayment).reduce((s, x) => s + x.amount, 0)
   if (round2(p.collectedDollars) !== round2(centsToDollars(capturedCents))) {
     issues.push('collectedDollars does not match CAPTURED (COMPLETED) payments')
   }

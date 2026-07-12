@@ -264,7 +264,8 @@ async function handleStats(interaction: ChatInputCommandInteraction): Promise<vo
     prisma.booking.count({ where: { status: 'PENDING_APPROVAL' } }),
     prisma.booking.count({ where: { createdAt: { gte: monthStart } } }),
     prisma.payment.aggregate({
-      where: { status: 'COMPLETED', createdAt: { gte: monthStart } },
+      // isInternalTest=false: owner checkout tests never count as revenue.
+      where: { status: 'COMPLETED', isInternalTest: false, createdAt: { gte: monthStart } },
       _sum: { amount: true },
     }),
   ])
