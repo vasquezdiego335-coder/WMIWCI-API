@@ -6,9 +6,13 @@
 #
 # NOTE: the worker service overrides build/start in its own Railway UI settings,
 # so this file only governs the admin service.
+#
+# Migrations are NOT run in the build: build-time connections to Neon are flaky
+# (advisory-lock timeouts / cold endpoint) and blocked deploys. Run migrations
+# deliberately instead:  npx prisma migrate deploy  (locally, against prod URL).
 
 [phases.build]
-cmds = ["npx prisma generate", "npx prisma migrate deploy", "npx next build"]
+cmds = ["npx prisma generate", "npx next build"]
 
 [start]
 cmd = "npm run start"
