@@ -24,6 +24,10 @@ export const CUSTOMER_BOOKING_ALLOW = [
   'id', 'displayId', 'status', 'createdAt', 'updatedAt', 'completedAt',
   'requestedDate', 'confirmedDate', 'scheduledStart', 'scheduledEnd', 'rescheduleCount',
   'originAddress', 'destAddress',
+  // Verified structured address — the customer's OWN address, safe to return.
+  // (place_id / lat / lng / validation_reason stay owner-only.)
+  'originFormatted', 'originCity', 'originState', 'originZip', 'originCounty', 'originVerification',
+  'destFormatted', 'destCity', 'destState', 'destZip', 'destCounty', 'destVerification',
   'originUnit', 'destUnit', 'originFloor', 'destFloor',
   'originHasElevator', 'destHasElevator', 'originStairCount', 'destStairCount',
   'originAccessNotes', 'destAccessNotes',

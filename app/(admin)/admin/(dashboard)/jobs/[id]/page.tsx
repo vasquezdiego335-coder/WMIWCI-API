@@ -70,14 +70,14 @@ export default async function JobDetail({ params }: { params: { id: string } }) 
   // Customer lifetime aggregates (across ALL their bookings).
   const custBookings = await prisma.booking.findMany({
     where: { customerId: booking.customerId },
-    select: { id: true, status: true, payments: { where: { status: 'COMPLETED' }, select: { amount: true } } },
+    select: { id: true, status: true, payments: { where: { status: 'COMPLETED', isInternalTest: false }, select: { amount: true } } },
   })
   const totalBookings = custBookings.length
   const lifetimeCents = custBookings.flatMap((b) => b.payments).reduce((s, p) => s + p.amount, 0)
   const previousMoves = custBookings.filter((b) => b.status === 'COMPLETED' && b.id !== booking.id).length
 
-  const collected = booking.payments.filter((p) => p.status === 'COMPLETED').reduce((s, p) => s + p.amount, 0)
-  const refunded = booking.payments.filter((p) => p.status === 'REFUNDED').reduce((s, p) => s + p.amount, 0)
+  const collected = booking.payments.filter((p) => p.status === 'COMPLETED' && !p.isInternalTest).reduce((s, p) => s + p.amount, 0)
+  const refunded = booking.payments.filter((p) => p.status === 'REFUNDED' && !p.isInternalTest).reduce((s, p) => s + p.amount, 0)
   const moveDayDue = (booking.truckAddonAmount ?? 0) + (booking.travelFee ?? 0) + (booking.additionalTruckFees ?? 0)
     + (booking.stairFee ?? 0) + (booking.longCarryFee ?? 0) + (booking.heavyItemFee ?? 0)
     + (booking.packingFee ?? 0) + (booking.assemblyFee ?? 0) + (booking.disassemblyFee ?? 0) + (booking.taxAmount ?? 0)
@@ -186,10 +186,14 @@ export default async function JobDetail({ params }: { params: { id: string } }) 
           {/* Section 3 & 4: Addresses */}
           <AddressCard title="Pickup Address" icon="🟢" address={booking.originAddress}
             unit={booking.originUnit} floor={booking.originFloor} elevator={booking.originHasElevator}
-            stairs={booking.originStairCount} notes={booking.originAccessNotes} code={booking.originAccessCode} />
+            stairs={booking.originStairCount} notes={booking.originAccessNotes} code={booking.originAccessCode}
+            verification={booking.originVerification} formatted={booking.originFormatted}
+            county={booking.originCounty} reason={booking.originValidationReason} />
           <AddressCard title="Delivery Address" icon="🔴" address={booking.destAddress}
             unit={booking.destUnit} floor={booking.destFloor} elevator={booking.destHasElevator}
-            stairs={booking.destStairCount} notes={booking.destAccessNotes} code={booking.destAccessCode} />
+            stairs={booking.destStairCount} notes={booking.destAccessNotes} code={booking.destAccessCode}
+            verification={booking.destVerification} formatted={booking.destFormatted}
+            county={booking.destCounty} reason={booking.destValidationReason} />
 
           {/* Section 5: Move Information */}
           <Card title="Move Information" icon="📦">
@@ -385,16 +389,37 @@ function Card({ title, icon, children, wide, action }: { title: string; icon: st
     </div>
   )
 }
-function AddressCard({ title, icon, address, unit, floor, elevator, stairs, notes, code }: { title: string; icon: string; address: string; unit?: string | null; floor?: number | null; elevator?: boolean | null; stairs?: number | null; notes?: string | null; code?: string | null }) {
+function AddressCard({ title, icon, address, unit, floor, elevator, stairs, notes, code, verification, formatted, county, reason }: { title: string; icon: string; address: string; unit?: string | null; floor?: number | null; elevator?: boolean | null; stairs?: number | null; notes?: string | null; code?: string | null; verification?: string | null; formatted?: string | null; county?: string | null; reason?: string | null }) {
+  // Verification badge — legacy bookings (verification null) show nothing.
+  const vb: Record<string, { color: string; label: string }> = {
+    verified: { color: '#10B981', label: '✓ Verified' },
+    partial: { color: '#F59E0B', label: '◐ Partial — confirm unit' },
+    unverified: { color: '#EF4444', label: '⚠ Unverified' },
+    skipped: { color: '#9CA3AF', label: '○ Not verified' },
+  }
+  const badge = verification ? vb[verification] : null
+  const manualReview = !!reason && reason.startsWith('manual_entry')
   return (
     <Card title={title} icon={icon}>
-      <p style={{ fontSize: '14px', fontWeight: 600, color: '#0A1628', margin: '0 0 6px' }}>{address}</p>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '10px', marginBottom: '6px' }}>
+        <p style={{ fontSize: '14px', fontWeight: 600, color: '#0A1628', margin: 0 }}>{address}</p>
+        {badge && <Badge color={badge.color}>{badge.label}</Badge>}
+      </div>
+      {formatted && formatted !== address && (
+        <p style={{ fontSize: '12px', color: '#6B7280', margin: '0 0 6px' }}>Verified as: {formatted}</p>
+      )}
+      {manualReview && (
+        <p style={{ fontSize: '12px', color: '#B45309', background: '#FFFBEB', border: '1px solid #FDE68A', borderRadius: '6px', padding: '6px 8px', margin: '0 0 8px' }}>
+          ⚠ Manual entry — owner review needed{reason ? `: ${reason.replace(/^manual_entry:\s*/, '')}` : ''}
+        </p>
+      )}
       <div style={{ display: 'flex', gap: '10px', marginBottom: '12px' }}>
-        <a href={gmaps(address)} target="_blank" rel="noreferrer" style={miniLink}>Google Maps ↗</a>
-        <a href={amaps(address)} target="_blank" rel="noreferrer" style={miniLink}>Apple Maps ↗</a>
+        <a href={gmaps(formatted || address)} target="_blank" rel="noreferrer" style={miniLink}>Google Maps ↗</a>
+        <a href={amaps(formatted || address)} target="_blank" rel="noreferrer" style={miniLink}>Apple Maps ↗</a>
       </div>
       <Row label="Apartment / Unit" value={unit ?? '—'} />
       <Row label="Floor" value={floor != null ? String(floor) : '—'} />
+      <Row label="County" value={county ?? '—'} />
       <Row label="Elevator" value={elevator == null ? '—' : elevator ? 'Yes' : 'No'} />
       <Row label="Flights of stairs" value={stairs != null ? String(stairs) : '—'} />
       <Row label="Access instructions" value={notes ?? '—'} />

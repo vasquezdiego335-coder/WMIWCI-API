@@ -6,6 +6,8 @@ import { apiLogger } from '@/lib/logger'
 import { AGREEMENT_VERSION } from '@/lib/agreement'
 import { notifyBookingCreated } from '@/lib/notify'
 import { checkServiceArea, travelFeeDollars, type AddressInput } from '@/lib/service-area'
+import { verifyAddress, type VerifiedAddress } from '@/lib/address-verify'
+import { assessAddress } from '@/lib/address'
 import { ELEVATOR_LABELS, PARKING_LABELS, BUILDING_LABELS } from '@/lib/booking-display'
 import { etDateTimeToInstant } from '@/lib/scheduling'
 
@@ -154,6 +156,14 @@ const BookingSchema = z.object({
   equipmentNeeds: z.string().transform(sanitizeNotes).pipe(z.string().max(500)).optional(),
   crewInstructions: z.string().transform(sanitizeNotes).pipe(z.string().max(1000)).optional(),
 
+  // ── Phase 2 address verification handshake. addressFormVersion >= 2 means the
+  //    form ran the autocomplete widget and enforced suggestion selection, so the
+  //    server may hard-reject undeliverable strings. manualEntryReason is the
+  //    controlled fallback (verification genuinely failed) — it always routes the
+  //    booking to owner manual review instead of rejecting. ──
+  addressFormVersion: z.coerce.number().int().min(1).max(10).optional(),
+  manualEntryReason: z.string().transform(sanitizeNotes).pipe(z.string().max(300)).optional(),
+
   // ── Client-side estimate snapshot (display only — NEVER drives pricing).
   //    Shown to the owner so the approval card matches what the customer saw. ──
   estimateTotal: z.coerce.number().min(0).max(100000).optional(),
@@ -270,6 +280,28 @@ function buildDescription(
   return lines.join('\n')
 }
 
+// Map a SERVER verification result to the origin_*/dest_* columns. Client-side
+// claims never reach here. 'skipped' (no key/timeout) stores only the status +
+// reason so a later re-verification pass can find these rows.
+function verifiedAddressColumns(prefix: 'origin' | 'dest', v: VerifiedAddress, manualReason?: string): Record<string, unknown> {
+  const p = (k: string) => `${prefix}${k}`
+  return {
+    [p('StreetNumber')]: v.streetNumber ?? null,
+    [p('Route')]: v.route ?? null,
+    [p('City')]: v.city ?? null,
+    [p('County')]: v.county ?? null,
+    [p('State')]: v.state ?? null,
+    [p('Zip')]: v.zip ?? null,
+    [p('Country')]: v.country ?? null,
+    [p('Formatted')]: v.formatted ?? null,
+    [p('Lat')]: v.lat ?? null,
+    [p('Lng')]: v.lng ?? null,
+    [p('PlaceId')]: v.placeId ?? null,
+    [p('Verification')]: v.status,
+    [p('ValidationReason')]: manualReason ? `manual_entry: ${manualReason}` : v.reason ?? null,
+  }
+}
+
 function formatAddr(a?: { street?: string; city?: string; state?: string; zip?: string }): string {
   if (!a) return ''
   const region = [a.state, a.zip].map((s) => s?.trim()).filter(Boolean).join(' ')
@@ -318,12 +350,57 @@ async function handleBooking(req: NextRequest): Promise<NextResponse> {
   const sa = saDest ? checkServiceArea(saPickups, saDest) : null
   const travelFeeCents = sa?.travelFeeCents ?? 0 // null (pending NY review) -> stored 0
   const travelFeeUsd = travelFeeCents / 100
-  const originDisplay = data.pickupAddresses?.length
+  let originDisplay = data.pickupAddresses?.length
     ? formatAddr(data.pickupAddresses[0])
     : data.addressFrom?.trim() ?? ''
-  const destDisplay = data.destinationAddress
+  let destDisplay = data.destinationAddress
     ? formatAddr(data.destinationAddress)
     : data.addressTo?.trim() ?? ''
+
+  // ── Phase 2: SERVER-side address verification. The browser's autocomplete
+  //    selection is UX only — we re-verify the submitted STRINGS with Google
+  //    Address Validation (degrade-safe: no key/timeout → 'skipped' and the
+  //    offline heuristics in address.ts take over). Client components are never
+  //    trusted or persisted. Enforcement is version-gated so an old cached form
+  //    can NEVER be hard-rejected — it routes to manual review instead. ──
+  const formV2 = (data.addressFormVersion ?? 1) >= 2
+  const [originV, destV] = await Promise.all([
+    verifyAddress([originDisplay]),
+    verifyAddress([destDisplay]),
+  ])
+  const originAssess = assessAddress(originDisplay)
+  const destAssess = assessAddress(destDisplay)
+
+  const addressFieldErrors: Record<string, string[]> = {}
+  if (formV2 && !data.manualEntryReason) {
+    // The new form promised a selected, verified suggestion. If Google says the
+    // string is not deliverable (street/city-level only), or the provider was
+    // unavailable AND the string fails even the offline completeness check,
+    // reject with a field-mapped error so the form can highlight the input.
+    const bad = (v: { status: string }, assess: { complete: boolean }) =>
+      v.status === 'unverified' || (v.status === 'skipped' && !assess.complete)
+    if (bad(originV, originAssess)) addressFieldErrors.addressFrom = ['Select a complete pickup address (street number, city, ZIP) from the suggestions.']
+    if (bad(destV, destAssess)) addressFieldErrors.addressTo = ['Select a complete destination address (street number, city, ZIP) from the suggestions.']
+    if (Object.keys(addressFieldErrors).length) {
+      return NextResponse.json(
+        { error: 'Address verification failed', details: { fieldErrors: addressFieldErrors } },
+        { status: 422 },
+      )
+    }
+  }
+  // Verified + new form → the customer SAW and picked this exact address, so the
+  // canonical formatted string becomes the display address everywhere. Legacy
+  // payloads keep the customer's own string (formatted lands in origin_formatted).
+  if (formV2 && originV.status === 'verified' && originV.formatted) originDisplay = originV.formatted
+  if (formV2 && destV.status === 'verified' && destV.formatted) destDisplay = destV.formatted
+
+  // Manual review when: customer used the manual-entry fallback, or either
+  // address is unverified/incomplete (legacy path) — the owner sees the reason.
+  const addressNeedsReview =
+    !!data.manualEntryReason ||
+    originV.status === 'unverified' || destV.status === 'unverified' ||
+    (originV.status === 'skipped' && !originAssess.complete) ||
+    (destV.status === 'skipped' && !destAssess.complete)
 
   const existingCustomer = await prisma.customer.findUnique({
     where: { email: data.email },
@@ -408,6 +485,9 @@ async function handleBooking(req: NextRequest): Promise<NextResponse> {
       truckReturnResponsibility: data.truckReturnResponsibility,
       equipmentNeeds: data.equipmentNeeds,
       crewInstructions: data.crewInstructions,
+      // ── Verified structured address (server verification results ONLY) ──
+      ...verifiedAddressColumns('origin', originV, data.manualEntryReason),
+      ...verifiedAddressColumns('dest', destV, data.manualEntryReason),
       requestedDate,
       depositAmount: BOOKING_FEE_CENTS,
       depositPaid: false,
@@ -420,7 +500,7 @@ async function handleBooking(req: NextRequest): Promise<NextResponse> {
       serviceAreaZone: (sa?.zone ?? null) as any,
       travelFee: travelFeeCents,
       travelFeeDueOnMoveDay: travelFeeCents > 0,
-      manualReviewRequired: sa?.manualReviewRequired ?? false,
+      manualReviewRequired: (sa?.manualReviewRequired ?? false) || addressNeedsReview,
       serviceAreaMessage: sa?.message ?? null,
       addressEvaluation: sa ? (sa.evaluatedAddresses as any) : undefined,
       discountCode: data.discountCode,
