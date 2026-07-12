@@ -1,9 +1,14 @@
-# Railway build + start config.
-# Serves the Next.js admin dashboard AND the combined worker host
-# in a single container (optimized for the $5 plan).
+# Railway build + start config for the ADMIN service (wonderful-strength).
+# Serves ONLY the Next.js admin dashboard. The BullMQ workers + Discord bot
+# run in the SEPARATE worker service (patient-communication) via host:start —
+# do NOT run them here too, or the Discord bot logs in twice and customers get
+# duplicate emails/SMS.
+#
+# NOTE: the worker service overrides build/start in its own Railway UI settings,
+# so this file only governs the admin service.
 
 [phases.build]
 cmds = ["npx prisma generate", "npx prisma migrate deploy", "npx next build"]
 
 [start]
-cmd = "npm run prod:start"
+cmd = "npm run start"
