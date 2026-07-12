@@ -71,11 +71,6 @@ export async function middleware(req: NextRequest): Promise<NextResponse> {
   }
 
   // ── Auth check for protected routes ───────────────────────
-  // Let the login page through without a session (avoids redirect loop).
-  if (pathname === '/admin/login') {
-    return NextResponse.next()
-  }
-
   const match = PROTECTED_ROUTES.find((r) => r.pattern.test(pathname))
   if (match) {
     const session = await getSessionFromRequest(req)
@@ -112,10 +107,12 @@ export async function middleware(req: NextRequest): Promise<NextResponse> {
   return res
 }
 
-// ── MATCHER: ONLY PROTECT ADMIN ROUTES ───────────────────────
+// ── MATCHER: PROTECT ADMIN ROUTES (EXCEPT LOGIN) ──────────────
 export const config = {
   matcher: [
-    '/admin/:path*',
+    // Explicitly protect all /admin routes except /admin/login
+    '/admin/(bookings|customers|jobs|staff|schedule|queues|payments|discounts)/:path*',
+    '/admin/(bookings|customers|jobs|staff|schedule|queues|payments|discounts)',  // without trailing path
     '/api/admin/:path*',
   ],
 }
