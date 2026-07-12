@@ -357,7 +357,7 @@ async function handleApprove(bookingId: string | undefined, messageId: string | 
     "Booking approved → $49 captured → CONFIRMED"
   );
 
-  // 4) Edit the Discord card in place (with a receipt link when Stripe gave one).
+  // 5) Edit the Discord card in place (with a receipt link when Stripe gave one).
   return NextResponse.json({
     type: RES_UPDATE_MESSAGE,
     data: confirmedCard(booking, approverName, capturedCents, receiptUrl),

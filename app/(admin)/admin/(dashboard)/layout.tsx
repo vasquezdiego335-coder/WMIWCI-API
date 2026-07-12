@@ -33,9 +33,7 @@ export default async function AdminLayout({ children }: { children: React.ReactN
   }
 
   return (
-    <html lang="en">
-      <body style={{ margin: 0, fontFamily: 'Inter, -apple-system, sans-serif', backgroundColor: '#F5F1EA' }}>
-        <div style={{ display: 'flex', minHeight: '100vh' }}>
+    <div style={{ display: 'flex', minHeight: '100vh', backgroundColor: '#F5F1EA' }}>
           {/* Sidebar */}
           <aside style={{ width: '220px', backgroundColor: '#0A1628', padding: '24px 0', flexShrink: 0, position: 'fixed', height: '100vh', overflowY: 'auto' }}>
             <div style={{ padding: '0 20px 24px', borderBottom: '1px solid rgba(255,90,31,0.2)' }}>
@@ -68,8 +66,6 @@ export default async function AdminLayout({ children }: { children: React.ReactN
           <main style={{ marginLeft: '220px', flex: 1, padding: '32px', minHeight: '100vh' }}>
             {children}
           </main>
-        </div>
-      </body>
-    </html>
+    </div>
   )
 }
