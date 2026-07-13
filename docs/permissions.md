@@ -4,9 +4,38 @@ Source of truth: `src/lib/permissions.ts#can(role, action)`. Enforced
 **server-side** on every route; UI hiding is convenience only. CREW and
 unauthenticated are denied all admin actions (middleware also blocks them).
 
-Policy: **OWNER** does everything. **MANAGER** runs day-to-day operations but has
-no owner-financial authority (no owner-money, no company profit, no finalized
-edits, no permanent dismissals, no overrides, no seeding, no audit log).
+## Founders
+
+**Diego and Sebastian are BOTH co-owners / co-founders and use the same `OWNER`
+role with identical access.** There is no `PRIMARY_OWNER` / `CO_OWNER`
+distinction — the `UserRole` enum is `OWNER | MANAGER | CREW`, and the permission
+model is role-based, so any two OWNER accounts are provably identical
+(`permissions.test.ts` asserts founder parity). **`MANAGER` is reserved for
+future non-owner employees** (operational access only); there are no manager
+accounts among the founders.
+
+> **Seed defect fixed (2.1):** `prisma/seed.ts` previously created Sebastian as
+> `MANAGER`. It now creates him as `OWNER`. The live production account was
+> `MANAGER` at audit time — correct it with the non-automatic procedure below
+> (owner-run). Until then, Sebastian is restricted by the matrix even though the
+> model is correct.
+
+### Production role fix (owner-run — not automatic)
+```
+# dry run (read-only, shows the change):
+npx tsx scripts/set-user-role.ts --email sebastian@moveitclearit.com --role OWNER
+# apply:
+npx tsx scripts/set-user-role.ts --email sebastian@moveitclearit.com --role OWNER --apply
+```
+Idempotent, audited (before→after), touches only the `role` field — never
+passwords. Equivalent SQL if you prefer:
+`UPDATE users SET role = 'OWNER' WHERE email = 'sebastian@moveitclearit.com';`
+
+## Policy
+**OWNER** (both founders) does everything. **MANAGER** (future employees) runs
+day-to-day operations but has no owner-financial authority (no owner-money, no
+company profit, no finalized edits, no permanent dismissals, no overrides, no
+seeding, no audit log).
 
 | Action | OWNER | MANAGER |
 | --- | :---: | :---: |

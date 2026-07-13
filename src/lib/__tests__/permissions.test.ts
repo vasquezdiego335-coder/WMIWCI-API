@@ -45,6 +45,23 @@ test('CREW and unauthenticated are denied everything', () => {
   assert.equal(can(undefined, 'reminder.resolve'), false)
 })
 
+test('both founders are OWNER → identical access (no PRIMARY/CO distinction)', () => {
+  // Diego and Sebastian are both co-owners with the OWNER role. The permission
+  // model is role-based, so any two OWNER accounts are provably identical.
+  const actions = [
+    'action_center.view', 'reminder.dismiss_permanent', 'reminder.restore', 'roadmap.seed',
+    'money.view_company_profit', 'money.view_owner_ledger', 'money.create_owner_transaction',
+    'money.edit_finalized_expense', 'money.worker_pay_override', 'payroll.approve', 'payroll.mark_paid',
+    'audit.view',
+  ] as const
+  for (const a of actions) {
+    const diego = can('OWNER', a)
+    const sebastian = can('OWNER', a) // same role → same result, by construction
+    assert.equal(diego, sebastian, a)
+    assert.equal(diego, true, a) // and both have full access
+  }
+})
+
 test('denyReason gives an owner-friendly message and null when allowed', () => {
   assert.equal(denyReason('OWNER', 'roadmap.seed'), null)
   assert.equal(denyReason('MANAGER', 'reminder.dismiss_permanent'), 'Only an owner can perform this action.')

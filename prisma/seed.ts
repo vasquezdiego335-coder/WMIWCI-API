@@ -26,17 +26,19 @@ async function main() {
     },
   })
 
+  // Sebastian is the SECOND CO-OWNER / co-founder — same OWNER role as Diego,
+  // not a manager. (MANAGER is reserved for future non-owner employees.)
   const sebastian = await prisma.user.upsert({
     where: { email: 'sebastian@moveitclearit.com' },
     update: {
       discordId: process.env.DISCORD_USER_SEBASTIAN ?? null,
-      role: UserRole.MANAGER,
+      role: UserRole.OWNER,
     },
     create: {
       email: 'sebastian@moveitclearit.com',
       passwordHash: sebastianHash,
       name: 'Sebastian',
-      role: UserRole.MANAGER,
+      role: UserRole.OWNER,
       discordId: process.env.DISCORD_USER_SEBASTIAN ?? null,
     },
   })
