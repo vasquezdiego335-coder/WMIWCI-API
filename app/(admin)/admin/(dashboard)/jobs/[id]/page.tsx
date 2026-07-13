@@ -5,6 +5,7 @@ import Link from 'next/link'
 import BookingActions from './BookingActions'
 import OperationsPanel, { PrintButton } from './OperationsPanel'
 import WaitingTimePanel from './WaitingTimePanel'
+import RecordPaymentPanel from './RecordPaymentPanel'
 import { parseUserAgent } from '@/lib/ua'
 import {
   resolveWaiting,
@@ -12,6 +13,10 @@ import {
   feeDollars,
   WAITING_RESCHEDULE_THRESHOLD_MINUTES,
 } from '@/lib/waiting-time'
+import { crewPayOwedCents } from '@/lib/profit'
+import { jobProfit } from '@/lib/job-money'
+import ExpenseForm from '../../ExpenseForm'
+import { EXPENSE_CATEGORY_LABELS } from '../../_labels'
 
 export const revalidate = 0
 
@@ -65,7 +70,8 @@ export default async function JobDetail({ params }: { params: { id: string } }) 
     include: {
       customer: true,
       payments: { orderBy: { createdAt: 'desc' } },
-      job: { include: { crew: { include: { user: { select: { name: true, role: true } } } } } },
+      job: { include: { crew: { include: { user: { select: { name: true, role: true, payRate: true } } } } } },
+      expenses: { orderBy: { incurredOn: 'desc' } },
       files: { orderBy: { createdAt: 'desc' } },
       receipt: true,
       notifications: { orderBy: { createdAt: 'desc' }, take: 25 },
@@ -88,6 +94,13 @@ export default async function JobDetail({ params }: { params: { id: string } }) 
   const moveDayDue = (booking.truckAddonAmount ?? 0) + (booking.travelFee ?? 0) + (booking.additionalTruckFees ?? 0) + effectiveWaitingFeeCents(booking)
     + (booking.stairFee ?? 0) + (booking.longCarryFee ?? 0) + (booking.heavyItemFee ?? 0)
     + (booking.packingFee ?? 0) + (booking.assemblyFee ?? 0) + (booking.disassemblyFee ?? 0) + (booking.taxAmount ?? 0)
+  // Per-job profit (recorded money): revenue − crew pay − job expenses − Stripe
+  // fees − refunds. Shares the exact math with the Jobs list + dashboard.
+  const profit = jobProfit(booking)
+  const crewRows = booking.job?.crew ?? []
+  const crewTotalOwed = crewRows.reduce((s, cr) => s + crewPayOwedCents({ actualHours: cr.actualHours, scheduledHours: cr.scheduledHours, payRate: cr.payRate, userPayRate: cr.user.payRate, flatPay: cr.flatPay, tips: cr.tips, bonus: cr.bonus, deductions: cr.deductions }), 0)
+  const crewPaidOwed = crewRows.filter((cr) => cr.payStatus !== 'PAID').reduce((s, cr) => s + crewPayOwedCents({ actualHours: cr.actualHours, scheduledHours: cr.scheduledHours, payRate: cr.payRate, userPayRate: cr.user.payRate, flatPay: cr.flatPay, tips: cr.tips, bonus: cr.bonus, deductions: cr.deductions }), 0)
+
   const ua = parseUserAgent(booking.userAgent)
   const items = parseItemsBlob(booking.itemsDescription)
   const c = booking.customer
@@ -299,6 +312,51 @@ export default async function JobDetail({ params }: { params: { id: string } }) 
             </div>
           </Card>
 
+          {/* Section 7b: Job Profit & Costs (admin OS) */}
+          <Card title="Job Profit & Costs" icon="📊" action={<span style={{ fontSize: '11px', color: '#9CA3AF' }}>recorded money</span>}>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
+              <Row label="Revenue collected" value={cents(profit.grossRevenueCents) ?? '$0.00'} strong />
+              <div style={divider} />
+              <Row label="− Crew pay" value={cents(profit.crewPayCents) ?? '$0.00'} />
+              <Row label="− Job expenses" value={cents(profit.expenseCents) ?? '$0.00'} />
+              <Row label="− Stripe fees (est.)" value={cents(profit.stripeFeeCents) ?? '$0.00'} />
+              {profit.refundedCents > 0 && <Row label="− Refunds" value={cents(profit.refundedCents)!} />}
+              <div style={divider} />
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '4px' }}>
+                <span style={{ fontSize: '13px', fontWeight: 700, color: '#0A1628' }}>Net profit</span>
+                <span style={{ fontSize: '20px', fontWeight: 800, color: profit.netProfitCents >= 0 ? '#C9A961' : '#EF4444', fontVariantNumeric: 'tabular-nums' }}>{cents(profit.netProfitCents) ?? '$0.00'}</span>
+              </div>
+              {profit.marginPct != null && (
+                <div style={{ fontSize: '11px', color: '#9CA3AF', textAlign: 'right', marginTop: '2px' }}>{Math.round(profit.marginPct * 100)}% margin · crew owed {cents(crewPaidOwed) ?? '$0.00'} unpaid</div>
+              )}
+            </div>
+            {profit.grossRevenueCents <= (booking.depositPaid ? booking.depositAmount : 0) && (
+              <p style={{ fontSize: '11px', color: '#B45309', background: '#FFFBEB', border: '1px solid #FDE68A', borderRadius: '6px', padding: '7px 9px', margin: '10px 0 0' }}>
+                Only the deposit is recorded. Use “Record payment” to log move-day cash so profit is accurate.
+              </p>
+            )}
+          </Card>
+
+          {/* Section 7c: Job Expenses (admin OS) */}
+          <Card title={`Job Expenses (${booking.expenses.length})`} icon="🧾">
+            {booking.expenses.length === 0 ? (
+              <Empty>No expenses logged for this job</Empty>
+            ) : (
+              booking.expenses.map((e, i) => (
+                <div key={e.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '12px', padding: '8px 0', borderBottom: i < booking.expenses.length - 1 ? '1px solid #F3F4F6' : 'none' }}>
+                  <div style={{ minWidth: 0 }}>
+                    <div style={{ fontSize: '13px', fontWeight: 600 }}>{EXPENSE_CATEGORY_LABELS[e.category] ?? e.category}{e.vendor ? ` · ${e.vendor}` : ''}</div>
+                    <div style={{ fontSize: '11px', color: '#9CA3AF' }}>{new Date(e.incurredOn).toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'America/New_York' })}{e.receiptUrl ? ' · ' : ''}{e.receiptUrl && <a href={e.receiptUrl} target="_blank" rel="noreferrer" style={{ color: '#FF5A1F' }}>receipt</a>}</div>
+                  </div>
+                  <div style={{ fontSize: '14px', fontWeight: 700, fontVariantNumeric: 'tabular-nums' }}>{cents(e.amount)}</div>
+                </div>
+              ))
+            )}
+            <div style={{ marginTop: '12px' }}>
+              <ExpenseForm presetBookingId={booking.id} presetJobLabel={c.name} compact />
+            </div>
+          </Card>
+
           {/* Section 8: Payment Information */}
           <Card title="Payment Information" icon="💳">
             <Row label="Payment intent" value={booking.stripePaymentIntentId ?? '—'} mono />
@@ -310,6 +368,7 @@ export default async function JobDetail({ params }: { params: { id: string } }) 
                 <Badge color={p.status === 'COMPLETED' ? '#10B981' : p.status === 'REFUNDED' ? '#EF4444' : '#F59E0B'}>{p.status}</Badge>
               </div>
             ))}
+            <RecordPaymentPanel bookingId={booking.id} />
           </Card>
 
           {/* Section 8b: Waiting Time (Late Arrival & Delay Policy) */}
@@ -375,15 +434,36 @@ export default async function JobDetail({ params }: { params: { id: string } }) 
             ))}
           </Card>
 
-          {/* Crew */}
+          {/* Crew & Payroll */}
           {booking.job && (
-            <Card title="Crew & Dispatch" icon="👥">
+            <Card title="Crew & Payroll" icon="👥" action={crewTotalOwed > 0 ? <span style={{ fontSize: '11px', color: '#9CA3AF' }}>{cents(crewTotalOwed)} labor</span> : undefined}>
               <Row label="Job status" value={booking.job.status} />
               {booking.job.startedAt && <Row label="Started" value={dateTime(booking.job.startedAt)} />}
               {booking.job.completedAt && <Row label="Completed" value={dateTime(booking.job.completedAt)} />}
-              {booking.job.crew.length > 0 ? booking.job.crew.map((cr) => (
-                <div key={cr.id} style={{ fontSize: '13px', padding: '4px 0' }}>{cr.user.name} <span style={{ color: '#9CA3AF' }}>· {cr.user.role}</span></div>
-              )) : <Empty>No crew assigned yet</Empty>}
+              <div style={divider} />
+              {crewRows.length > 0 ? crewRows.map((cr) => {
+                const owed = crewPayOwedCents({ actualHours: cr.actualHours, scheduledHours: cr.scheduledHours, payRate: cr.payRate, userPayRate: cr.user.payRate, flatPay: cr.flatPay, tips: cr.tips, bonus: cr.bonus, deductions: cr.deductions })
+                const paid = cr.payStatus === 'PAID'
+                return (
+                  <div key={cr.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '10px', padding: '6px 0' }}>
+                    <div style={{ minWidth: 0 }}>
+                      <div style={{ fontSize: '13px', fontWeight: 600 }}>{cr.user.name}{cr.crewLeader ? ' 👑' : ''} <span style={{ color: '#9CA3AF', fontWeight: 400 }}>· {cr.user.role}</span></div>
+                      <div style={{ fontSize: '11px', color: '#9CA3AF' }}>{cr.actualHours != null ? `${cr.actualHours}h` : cr.scheduledHours != null ? `${cr.scheduledHours}h sched` : 'hours not set'}{cr.flatPay ? ' · flat' : ''}</div>
+                    </div>
+                    <div style={{ textAlign: 'right' }}>
+                      <div style={{ fontSize: '13px', fontWeight: 700, fontVariantNumeric: 'tabular-nums' }}>{cents(owed)}</div>
+                      <Badge color={paid ? '#10B981' : '#F59E0B'}>{paid ? 'PAID' : cr.payStatus.replace(/_/g, ' ')}</Badge>
+                    </div>
+                  </div>
+                )
+              }) : <Empty>No crew assigned yet</Empty>}
+              {crewRows.length > 0 && (
+                <>
+                  <div style={divider} />
+                  <Row label="Total labor" value={cents(crewTotalOwed) ?? '$0.00'} strong />
+                  {crewPaidOwed > 0 && <Row label="Unpaid" value={cents(crewPaidOwed)!} />}
+                </>
+              )}
             </Card>
           )}
         </div>

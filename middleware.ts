@@ -127,6 +127,12 @@ export const config = {
     '/admin/payments',
     '/admin/discounts/:path*',
     '/admin/discounts',
+    '/admin/expenses/:path*',
+    '/admin/expenses',
+    '/admin/owner-money/:path*',
+    '/admin/owner-money',
+    '/admin/logs/:path*',
+    '/admin/logs',
     '/admin',  // protect the root /admin page
     '/api/admin/:path*',
   ],

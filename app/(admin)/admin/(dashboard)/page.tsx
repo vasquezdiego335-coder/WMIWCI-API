@@ -1,6 +1,8 @@
 import { prisma } from '@/lib/db'
 import { getSession } from '@/lib/auth'
 import Link from 'next/link'
+import { fmtCents, crewPayOwedCents } from '@/lib/profit'
+import { moveDayDueCents } from '@/lib/job-money'
 
 export const revalidate = 60 // revalidate every 60 seconds
 
@@ -8,14 +10,16 @@ async function getDashboardData() {
   const now = new Date()
   const todayStart = new Date(now); todayStart.setHours(0, 0, 0, 0)
   const todayEnd = new Date(now); todayEnd.setHours(23, 59, 59, 999)
+  const monthStart = new Date(now.getFullYear(), now.getMonth(), 1)
 
   const [
     todayBookings,
     pendingApproval,
     pendingDiscounts,
     thisMonthRevenue,
-    failedPayments,
+    thisMonthExpenses,
     totalBookings,
+    liveJobs,
   ] = await Promise.all([
     prisma.booking.findMany({
       where: { scheduledStart: { gte: todayStart, lte: todayEnd }, status: { in: ['SCHEDULED', 'IN_PROGRESS', 'CONFIRMED'] }, isInternalTest: false },
@@ -26,38 +30,66 @@ async function getDashboardData() {
     prisma.booking.count({ where: { discountType: 'DOOR_HANGER_PENDING', isInternalTest: false } }),
     prisma.payment.aggregate({
       // isInternalTest=false: owner checkout tests never count as revenue.
-      where: { status: 'COMPLETED', isInternalTest: false, createdAt: { gte: new Date(now.getFullYear(), now.getMonth(), 1) } },
+      where: { status: 'COMPLETED', isInternalTest: false, createdAt: { gte: monthStart } },
       _sum: { amount: true },
     }),
-    prisma.payment.count({ where: { status: 'FAILED' } }),
+    prisma.expense.aggregate({ where: { incurredOn: { gte: monthStart } }, _sum: { amount: true } }),
     // REAL operational bookings only. Two exclusions fix the inflated "53":
     //  • PENDING_PAYMENT = abandoned checkout (submitted, Stripe never paid) — not a booking.
     //  • isInternalTest = the owner's own checkout tests (flagged by signal).
     prisma.booking.count({ where: { status: { in: ['PENDING_APPROVAL', 'CONFIRMED', 'SCHEDULED', 'IN_PROGRESS', 'COMPLETED'] }, isInternalTest: false } }),
+    // Live jobs → outstanding move-day balances + unpaid crew (money-spine cards).
+    prisma.booking.findMany({
+      where: { status: { in: ['IN_PROGRESS', 'COMPLETED'] }, isInternalTest: false },
+      select: {
+        status: true, truckAddonAmount: true, travelFee: true, additionalTruckFees: true,
+        stairFee: true, longCarryFee: true, heavyItemFee: true, packingFee: true, assemblyFee: true,
+        disassemblyFee: true, taxAmount: true, waitingFee: true, waitingFeeOverride: true, waitingFeeWaived: true,
+        job: { select: { crew: { select: { actualHours: true, scheduledHours: true, payRate: true, flatPay: true, tips: true, bonus: true, deductions: true, payStatus: true, user: { select: { payRate: true } } } } } },
+      },
+      take: 500,
+    }),
   ])
 
-  return { todayBookings, pendingApproval, pendingDiscounts, thisMonthRevenue, failedPayments, totalBookings }
+  const outstandingBalances = liveJobs.reduce((s, b) => s + moveDayDueCents(b as never), 0)
+  const unpaidCrew = liveJobs.reduce((s, b) => s + (b.job?.crew ?? [])
+    .filter((c) => c.payStatus !== 'PAID')
+    .reduce((cs, c) => cs + crewPayOwedCents({ actualHours: c.actualHours, scheduledHours: c.scheduledHours, payRate: c.payRate, userPayRate: c.user?.payRate, flatPay: c.flatPay, tips: c.tips, bonus: c.bonus, deductions: c.deductions }), 0), 0)
+
+  return { todayBookings, pendingApproval, pendingDiscounts, thisMonthRevenue, thisMonthExpenses, totalBookings, outstandingBalances, unpaidCrew }
 }
 
 export default async function AdminDashboard() {
   const session = await getSession()
-  const { todayBookings, pendingApproval, pendingDiscounts, thisMonthRevenue, failedPayments, totalBookings } = await getDashboardData()
+  const { todayBookings, pendingApproval, pendingDiscounts, thisMonthRevenue, thisMonthExpenses, totalBookings, outstandingBalances, unpaidCrew } = await getDashboardData()
 
-  const monthRevenue = ((thisMonthRevenue._sum.amount ?? 0) / 100).toFixed(2)
+  const revenueCents = thisMonthRevenue._sum.amount ?? 0
+  const expenseCents = thisMonthExpenses._sum.amount ?? 0
 
   return (
     <div>
       <h1 style={h1}>Dashboard</h1>
       <p style={subtitle}>Good morning, {session?.name}. Here's what's happening today.</p>
 
-      {/* Stat cards */}
+      {/* Money-spine cards (owner spec 2026-07-13). Net profit / cash available
+          land with the Reports increment where the P&L rule is defined. */}
       <div style={statsGrid}>
+        <StatCard label="Revenue This Month" value={fmtCents(revenueCents)} color="#10B981" />
+        <StatCard label="Expenses This Month" value={fmtCents(expenseCents)} color="#C9A961" />
+        <StatCard label="Outstanding Balances" value={fmtCents(outstandingBalances)} color={outstandingBalances > 0 ? '#F59E0B' : '#10B981'} />
+        <StatCard label="Unpaid Worker Pay" value={fmtCents(unpaidCrew)} color={unpaidCrew > 0 ? '#EF4444' : '#10B981'} />
         <StatCard label="Today's Jobs" value={todayBookings.length.toString()} color="#FF5A1F" />
         <StatCard label="Pending Approval" value={pendingApproval.toString()} color={pendingApproval > 0 ? '#F59E0B' : '#10B981'} />
         <StatCard label="Discount Requests" value={pendingDiscounts.toString()} color={pendingDiscounts > 0 ? '#EF4444' : '#10B981'} />
-        <StatCard label="Revenue This Month" value={`$${monthRevenue}`} color="#10B981" />
-        <StatCard label="Failed Payments" value={failedPayments.toString()} color={failedPayments > 0 ? '#EF4444' : '#10B981'} />
         <StatCard label="Total Bookings" value={totalBookings.toString()} color="#6366F1" />
+      </div>
+
+      {/* Quick actions */}
+      <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap', marginBottom: '28px' }}>
+        <Link href="/admin/jobs" style={quickAction}>🚚 Jobs pipeline</Link>
+        <Link href="/admin/expenses" style={quickAction}>🧾 Add expense</Link>
+        <Link href="/admin/owner-money" style={quickAction}>🏦 Owner money</Link>
+        <Link href="/admin/bookings" style={quickAction}>📋 Bookings</Link>
       </div>
 
       {/* Alerts */}
@@ -126,6 +158,7 @@ function statusColor(status: string): string {
 
 const h1: React.CSSProperties = { fontSize: '24px', fontWeight: '700', color: '#0A1628', margin: '0 0 4px' }
 const subtitle: React.CSSProperties = { fontSize: '14px', color: '#6B7280', margin: '0 0 28px' }
+const quickAction: React.CSSProperties = { padding: '9px 14px', backgroundColor: '#FFFFFF', color: '#374151', border: '1px solid #E5E7EB', borderRadius: '9px', fontSize: '13px', fontWeight: 600, textDecoration: 'none', boxShadow: '0 1px 3px rgba(0,0,0,0.05)' }
 const statsGrid: React.CSSProperties = { display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(180px, 1fr))', gap: '16px', marginBottom: '28px' }
 const alert: React.CSSProperties = { backgroundColor: '#FEF2F2', border: '1px solid #FECACA', borderRadius: '8px', padding: '12px 16px', fontSize: '14px', color: '#374151', marginBottom: '16px' }
 const h2: React.CSSProperties = { fontSize: '18px', fontWeight: '600', color: '#0A1628', margin: '28px 0 16px' }

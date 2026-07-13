@@ -114,6 +114,123 @@ enum AuditAction {
   USER_LOGOUT
   SCHEDULE_MODIFIED
   AVAILABILITY_SET
+  // ── Admin operating system (owner spec 2026-07-13) ──
+  EXPENSE_CREATED
+  EXPENSE_UPDATED
+  EXPENSE_APPROVED
+  EXPENSE_REJECTED
+  EXPENSE_DELETED
+  OWNER_TRANSACTION_CREATED
+  OWNER_TRANSACTION_UPDATED
+  OWNER_TRANSACTION_DELETED
+  CREW_ASSIGNED
+  CREW_PAY_UPDATED
+  CREW_PAID
+  LEAD_CREATED
+  LEAD_STATUS_CHANGED
+  PRICE_CHANGED
+  BUSINESS_CONFIG_UPDATED
+}
+
+// ── Admin operating system enums (owner spec 2026-07-13) ──────────────────────
+//    The money spine: every dollar is a job expense, an owner transaction, or a
+//    general business expense. These enums back those three ledgers + payroll.
+
+enum ExpenseCategory {
+  WORKER_PAY
+  GAS
+  TOLLS
+  PARKING
+  TRUCK_RENTAL
+  MOVING_EQUIPMENT
+  MOVING_BLANKETS
+  STRAPS_DOLLIES
+  ADVERTISING
+  WEBSITE_SOFTWARE
+  INSURANCE
+  PHONE
+  CREW_FOOD
+  REFUNDS
+  OFFICE
+  LEGAL_REGISTRATION
+  SUPPLIES
+  MISC
+}
+
+enum ExpenseStatus {
+  SUBMITTED
+  NEEDS_REVIEW
+  APPROVED
+  REJECTED
+  REIMBURSED
+}
+
+// Shared across expenses, owner transactions, and crew pay — how money moved.
+enum PaymentMethod {
+  CASH
+  CARD
+  ZELLE
+  VENMO
+  CASHAPP
+  BANK_TRANSFER
+  CHECK
+  OTHER
+}
+
+enum OwnerTransactionType {
+  CONTRIBUTION // owner put money in
+  WITHDRAWAL // owner took money out
+  REIMBURSEMENT // business paying an owner back for personal spend
+  DISTRIBUTION // profit distribution to an owner
+  PERSONAL_PURCHASE // business purchase made with an owner's personal money (reimbursable)
+}
+
+enum ApprovalStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+enum LeadSource {
+  GOOGLE
+  FACEBOOK
+  INSTAGRAM
+  DOOR_HANGER
+  YARD_SIGN
+  REFERRAL
+  CRAIGSLIST
+  OFFERUP
+  RETURNING_CUSTOMER
+  WEBSITE
+  OTHER
+}
+
+enum LeadStatus {
+  NEW
+  CONTACTED
+  QUOTE_SENT
+  FOLLOW_UP
+  BOOKED
+  LOST
+}
+
+enum LeadLostReason {
+  PRICE_TOO_HIGH
+  NO_RESPONSE
+  DATE_UNAVAILABLE
+  CHOSE_COMPETITOR
+  NEEDED_IMMEDIATE
+  OUTSIDE_SERVICE_AREA
+  OTHER
+}
+
+enum CrewPayStatus {
+  SCHEDULED
+  CHECKED_IN
+  WORKING
+  COMPLETED
+  PAY_APPROVED
+  PAID
 }
 
 // ── MODELS ────────────────────────────────────────────────────
@@ -127,8 +244,18 @@ model User {
   discordId    String?  @map("discord_id")
   phone        String?
   active       Boolean  @default(true)
-  createdAt    DateTime @default(now()) @map("created_at")
-  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  // ── HR / payroll (admin OS, owner spec 2026-07-13) — all nullable ──
+  //    payRate is the DEFAULT cents/hour; a JobCrew row can override it per job.
+  payRate               Int?    @map("pay_rate") // cents per hour
+  preferredRole         String? @map("preferred_role")
+  emergencyContact      String? @map("emergency_contact")
+  emergencyContactPhone String? @map("emergency_contact_phone")
+  reliabilityRating     Int?    @map("reliability_rating") // 1-5
+  performanceNotes      String? @map("performance_notes")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
 
   // Relations
   availability Availability[]
@@ -139,18 +266,18 @@ model User {
 }
 
 model Customer {
-  id              String   @id @default(cuid())
-  email           String   @unique
+  id              String  @id @default(cuid())
+  email           String  @unique
   name            String
   phone           String
-  isFirstTime     Boolean  @default(true) @map("is_first_time")
+  isFirstTime     Boolean @default(true) @map("is_first_time")
   // Preferred language for all customer-facing email + SMS ("en" | "es").
   // Captured from the marketing site's EN/ES toggle at booking time.
-  locale          String   @default("en")
+  locale          String  @default("en")
   // TCPA marketing opt-out — set true when a customer texts STOP (inbound SMS
   // webhook). Phase-3 follow-ups are suppressed for opted-out customers. The 4
   // transactional booking messages are unaffected (they're not marketing).
-  marketingOptOut Boolean  @default(false) @map("marketing_opt_out")
+  marketingOptOut Boolean @default(false) @map("marketing_opt_out")
 
   // ── Extended contact (admin operations, owner spec 2026-07-12) — all nullable ──
   preferredName         String? @map("preferred_name")
@@ -158,8 +285,8 @@ model Customer {
   emergencyContact      String? @map("emergency_contact")
   emergencyContactPhone String? @map("emergency_contact_phone")
 
-  createdAt       DateTime @default(now()) @map("created_at")
-  updatedAt       DateTime @updatedAt @map("updated_at")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
 
   // Relations
   bookings Booking[]
@@ -168,14 +295,14 @@ model Customer {
 }
 
 model Booking {
-  id          String        @id @default(cuid())
-  displayId   String        @unique @default(cuid()) @map("display_id") // human-friendly
-  status      BookingStatus @default(DRAFT)
-  outboxState BookingState? @map("outbox_state") // src/outbox email state machine (additive, nullable)
+  id             String        @id @default(cuid())
+  displayId      String        @unique @default(cuid()) @map("display_id") // human-friendly
+  status         BookingStatus @default(DRAFT)
+  outboxState    BookingState? @map("outbox_state") // src/outbox email state machine (additive, nullable)
   // Owner checkout tests (mirrors Payment.isInternalTest). EXCLUDED from every
   // operational count + revenue report. Flagged by scripts/flag-test-bookings.ts.
-  isInternalTest Boolean    @default(false) @map("is_internal_test")
-  customerId  String        @map("customer_id")
+  isInternalTest Boolean       @default(false) @map("is_internal_test")
+  customerId     String        @map("customer_id")
 
   // Location
   originAddress String  @map("origin_address")
@@ -349,19 +476,19 @@ model Booking {
   //    The fee is COLLECTED ON MOVE DAY like the travel fee / truck add-on — it
   //    is NEVER added to the $49 Stripe deposit and never auto-charged.
   //    Crew log these four timestamps by tapping the Discord job-card buttons.
-  crewArrivedAt   DateTime? @map("crew_arrived_at")
-  customerReadyAt DateTime? @map("customer_ready_at")
-  waitingStartedAt DateTime? @map("waiting_started_at")
-  waitingEndedAt   DateTime? @map("waiting_ended_at")
+  crewArrivedAt       DateTime? @map("crew_arrived_at")
+  customerReadyAt     DateTime? @map("customer_ready_at")
+  waitingStartedAt    DateTime? @map("waiting_started_at")
+  waitingEndedAt      DateTime? @map("waiting_ended_at")
   //    waitingMinutes / waitingFee are DERIVED (waiting-time.ts) and persisted
   //    at waiting-end so the receipt/report is a stable record. waitingFeeOverride
   //    (cents, nullable) lets staff hand-set the charge; waived zeroes it out.
-  waitingMinutes       Int?     @map("waiting_minutes")
-  waitingFee           Int?     @map("waiting_fee") // cents; derived unless overridden
-  waitingFeeOverride   Int?     @map("waiting_fee_override") // cents; staff manual override
-  waitingFeeWaived     Boolean  @default(false) @map("waiting_fee_waived")
-  waitingWaiverReason  String?  @map("waiting_waiver_reason")
-  waitingFeeCollected  Boolean  @default(false) @map("waiting_fee_collected")
+  waitingMinutes      Int?      @map("waiting_minutes")
+  waitingFee          Int?      @map("waiting_fee") // cents; derived unless overridden
+  waitingFeeOverride  Int?      @map("waiting_fee_override") // cents; staff manual override
+  waitingFeeWaived    Boolean   @default(false) @map("waiting_fee_waived")
+  waitingWaiverReason String?   @map("waiting_waiver_reason")
+  waitingFeeCollected Boolean   @default(false) @map("waiting_fee_collected")
 
   // ── Internal operations (staff-entered via the admin edit panel) ──
   arrivalWindow      String? @map("arrival_window") // e.g. "8:00–10:00 AM"
@@ -410,6 +537,7 @@ model Booking {
   auditLogs     AuditLog[]
   review        Review?
   followUps     FollowUpLedger[]
+  expenses      Expense[] // job-linked expenses (admin OS) — reduce this job's profit
 
   @@index([status])
   @@index([customerId])
@@ -491,6 +619,26 @@ model JobCrew {
   jobId      String   @map("job_id")
   userId     String   @map("user_id")
   assignedAt DateTime @default(now()) @map("assigned_at")
+
+  // ── Payroll & time tracking (admin OS, owner spec 2026-07-13) — all nullable/
+  //    defaulted so existing crew rows read cleanly. amountOwed is DERIVED in
+  //    src/lib/profit.ts (never stored): flatPay if set, else payRate*actualHours,
+  //    plus tips + bonus - deductions. payRate here overrides the User default. ──
+  crewLeader     Boolean        @default(false) @map("crew_leader")
+  scheduledHours Float?         @map("scheduled_hours")
+  actualHours    Float?         @map("actual_hours")
+  clockIn        DateTime?      @map("clock_in")
+  clockOut       DateTime?      @map("clock_out")
+  breakMinutes   Int?           @map("break_minutes")
+  payRate        Int?           @map("pay_rate") // cents/hour; null => User.payRate
+  flatPay        Int?           @map("flat_pay") // cents; overrides hourly when set
+  tips           Int? // cents
+  bonus          Int? // cents
+  deductions     Int? // cents
+  payMethod      PaymentMethod? @map("pay_method")
+  payStatus      CrewPayStatus  @default(SCHEDULED) @map("pay_status")
+  paidAt         DateTime?      @map("paid_at")
+  payNotes       String?        @map("pay_notes")
 
   job  Job  @relation(fields: [jobId], references: [id])
   user User @relation(fields: [userId], references: [id])
@@ -740,4 +888,120 @@ model Review {
 
   @@index([bookingId])
   @@map("reviews")
+}
+
+// ============================================================
+// ADMIN OPERATING SYSTEM — the money spine (owner spec 2026-07-13)
+// Rule: every dollar connects to a JOB (Expense.bookingId set), an OWNER
+// transaction (OwnerTransaction), or a GENERAL business expense (Expense with
+// no bookingId). This keeps revenue, real profit, worker pay, and personal
+// money from ever mixing together.
+// ============================================================
+
+/// A cost the business paid. bookingId set => a JOB expense that reduces THAT
+/// job's profit. bookingId null => a GENERAL business expense (Railway, ads,
+/// insurance…) that reduces monthly business profit without touching one job.
+/// Receipt is stored as the Cloudinary URL from /api/files/upload (no File FK,
+/// mirroring EmailJob's plain-reference decoupling). createdBy is denormalized
+/// (id + name) like AuditLog details — no relation churn on User.
+model Expense {
+  id              String          @id @default(cuid())
+  amount          Int // cents
+  incurredOn      DateTime        @map("incurred_on")
+  category        ExpenseCategory
+  vendor          String?
+  paymentMethod   PaymentMethod?  @map("payment_method")
+  paidBy          String?         @map("paid_by") // owner name / worker / "business"
+  bookingId       String?         @map("booking_id") // null = general business expense
+  purpose         String? // business purpose
+  receiptUrl      String?         @map("receipt_url")
+  receiptPublicId String?         @map("receipt_public_id")
+  reimbursable    Boolean         @default(false)
+  status          ExpenseStatus   @default(SUBMITTED)
+  notes           String?
+  createdById     String?         @map("created_by_id")
+  createdByName   String?         @map("created_by_name")
+  createdAt       DateTime        @default(now()) @map("created_at")
+  updatedAt       DateTime        @updatedAt @map("updated_at")
+
+  booking Booking? @relation(fields: [bookingId], references: [id])
+
+  @@index([bookingId])
+  @@index([category])
+  @@index([status])
+  @@index([incurredOn])
+  @@map("expenses")
+}
+
+/// Diego / Sebastian owner money — kept OUT of business expenses on purpose so
+/// personal cash never contaminates job profit. Reuses TaskOwner (DIEGO |
+/// SEBASTIAN). bookingId is an optional plain reference (e.g. a distribution
+/// tied to a specific job); no FK by design.
+model OwnerTransaction {
+  id              String               @id @default(cuid())
+  owner           TaskOwner
+  amount          Int // cents
+  type            OwnerTransactionType
+  occurredOn      DateTime             @map("occurred_on")
+  paymentMethod   PaymentMethod?       @map("payment_method")
+  explanation     String?
+  receiptUrl      String?              @map("receipt_url")
+  receiptPublicId String?              @map("receipt_public_id")
+  approvalStatus  ApprovalStatus       @default(PENDING) @map("approval_status")
+  bookingId       String?              @map("booking_id") // optional plain reference
+  createdById     String?              @map("created_by_id")
+  createdByName   String?              @map("created_by_name")
+  createdAt       DateTime             @default(now()) @map("created_at")
+  updatedAt       DateTime             @updatedAt @map("updated_at")
+
+  @@index([owner])
+  @@index([type])
+  @@index([occurredOn])
+  @@map("owner_transactions")
+}
+
+/// A sales lead in the pipeline (NEW -> CONTACTED -> QUOTE_SENT -> FOLLOW_UP ->
+/// BOOKED | LOST). Standalone from ManualEvent (field-log) and Booking — this is
+/// the funnel + marketing-source attribution. convertedBookingId is a plain
+/// reference set when a lead becomes a real booking (revenue-by-source report).
+model Lead {
+  id                 String          @id @default(cuid())
+  name               String
+  phone              String?
+  email              String?
+  source             LeadSource      @default(OTHER)
+  status             LeadStatus      @default(NEW)
+  lostReason         LeadLostReason? @map("lost_reason")
+  estimatedValue     Int?            @map("estimated_value") // cents
+  jobType            String?         @map("job_type")
+  moveDate           DateTime?       @map("move_date")
+  zip                String?
+  notes              String?
+  assignedTo         String?         @map("assigned_to")
+  convertedBookingId String?         @map("converted_booking_id") // plain reference
+  contactedAt        DateTime?       @map("contacted_at")
+  quotedAt           DateTime?       @map("quoted_at")
+  bookedAt           DateTime?       @map("booked_at")
+  lostAt             DateTime?       @map("lost_at")
+  createdAt          DateTime        @default(now()) @map("created_at")
+  updatedAt          DateTime        @updatedAt @map("updated_at")
+
+  @@index([status])
+  @@index([source])
+  @@index([createdAt])
+  @@map("leads")
+}
+
+/// Single-row business configuration (ownership split + cash reserves). The
+/// ownership split NEVER means all cash is distributable — the Owner Money page
+/// subtracts upcoming worker pay + bills + tax/emergency reserves first.
+model BusinessConfig {
+  id                    String   @id @default("singleton")
+  diegoSplitPercent     Int      @default(50) @map("diego_split_percent")
+  sebastianSplitPercent Int      @default(50) @map("sebastian_split_percent")
+  taxReservePercent     Int      @default(25) @map("tax_reserve_percent") // % of profit held for taxes
+  emergencyReserveCents Int      @default(0) @map("emergency_reserve_cents")
+  updatedAt             DateTime @updatedAt @map("updated_at")
+
+  @@map("business_config")
 }
