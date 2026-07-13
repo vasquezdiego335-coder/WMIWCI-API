@@ -1,6 +1,7 @@
 import { prisma } from '@/lib/db'
 import { getSession } from '@/lib/auth'
 import { fmtCents, crewPayOwedCents, safeToDistributeCents } from '@/lib/profit'
+import { rollupOwner, estimateBusinessCash } from '@/lib/owner-ledger'
 import { PageHeader, StatCard, StatGrid, Card, COLORS, Empty, MoneyRow, tableStyles as T, Badge } from '../_ui'
 import { OWNER_TX_TYPE_LABELS, OWNER_LABELS, PAYMENT_METHOD_LABELS, APPROVAL_STATUS_COLORS } from '../_labels'
 import OwnerMoneyForm from './OwnerMoneyForm'
@@ -10,9 +11,6 @@ import BusinessConfigPanel from './BusinessConfigPanel'
 export const dynamic = 'force-dynamic'
 
 const dateOnly = (d: Date) => new Date(d).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'America/New_York' })
-
-// Money OUT to an owner (reduces business cash): withdrawals + distributions.
-const OUT_TYPES = ['WITHDRAWAL', 'DISTRIBUTION']
 
 export default async function OwnerMoneyPage() {
   const session = await getSession()
@@ -32,29 +30,15 @@ export default async function OwnerMoneyPage() {
 
   const cfg = { diego: config?.diegoSplitPercent ?? 50, sebastian: config?.sebastianSplitPercent ?? 50, taxPct: config?.taxReservePercent ?? 25, emergencyCents: config?.emergencyReserveCents ?? 0 }
 
-  // Per-owner rollup (approved + pending count as real; rejected excluded).
-  const live = transactions.filter((t) => t.approvalStatus !== 'REJECTED')
-  function rollup(owner: string) {
-    const rows = live.filter((t) => t.owner === owner)
-    const sum = (type: string) => rows.filter((t) => t.type === type).reduce((s, t) => s + t.amount, 0)
-    const contributed = sum('CONTRIBUTION')
-    const withdrawn = sum('WITHDRAWAL') + sum('DISTRIBUTION')
-    const reimbursementOwed = Math.max(0, sum('PERSONAL_PURCHASE') - sum('REIMBURSEMENT'))
-    return { contributed, withdrawn, reimbursementOwed }
-  }
-  const diego = rollup('DIEGO')
-  const sebastian = rollup('SEBASTIAN')
+  // Per-owner rollup + cash estimate — pure math in src/lib/owner-ledger.ts
+  // (unit-tested: contributions are never revenue, withdrawals never expenses,
+  // rejected transactions never count, personal purchases don't touch cash).
+  const diego = rollupOwner(transactions, 'DIEGO')
+  const sebastian = rollupOwner(transactions, 'SEBASTIAN')
 
-  // Estimated business cash from the recorded ledger (labeled as an estimate —
-  // there is no bank reconciliation). Personal purchases don't touch business
-  // cash until reimbursed, so only reimbursements/withdrawals/distributions +
-  // business expenses reduce it; contributions + revenue add.
   const revenue = revenueAgg._sum.amount ?? 0
   const expenses = expenseAgg._sum.amount ?? 0
-  const contributionsAll = live.filter((t) => t.type === 'CONTRIBUTION').reduce((s, t) => s + t.amount, 0)
-  const outAll = live.filter((t) => OUT_TYPES.includes(t.type)).reduce((s, t) => s + t.amount, 0)
-  const reimbursedAll = live.filter((t) => t.type === 'REIMBURSEMENT').reduce((s, t) => s + t.amount, 0)
-  const cashEstimate = contributionsAll + revenue - expenses - outAll - reimbursedAll
+  const cashEstimate = estimateBusinessCash({ revenueCents: revenue, expenseCents: expenses, ownerTxs: transactions })
 
   const unpaidCrew = liveJobs.reduce((s, b) => s + (b.job?.crew ?? [])
     .filter((c) => c.payStatus !== 'PAID')

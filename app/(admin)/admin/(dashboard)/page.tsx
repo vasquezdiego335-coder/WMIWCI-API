@@ -20,6 +20,7 @@ async function getDashboardData() {
     thisMonthExpenses,
     totalBookings,
     liveJobs,
+    attentionReminders,
   ] = await Promise.all([
     prisma.booking.findMany({
       where: { scheduledStart: { gte: todayStart, lte: todayEnd }, status: { in: ['SCHEDULED', 'IN_PROGRESS', 'CONFIRMED'] }, isInternalTest: false },
@@ -49,6 +50,13 @@ async function getDashboardData() {
       },
       take: 500,
     }),
+    // Needs Attention: top open reminders (critical → overdue → due today → rest).
+    prisma.reminder.findMany({
+      where: { status: { in: ['OPEN', 'ACKNOWLEDGED', 'IN_PROGRESS'] } },
+      orderBy: [{ severity: 'asc' }, { dueAt: { sort: 'asc', nulls: 'last' } }, { createdAt: 'desc' }],
+      take: 5,
+      select: { id: true, title: true, severity: true, dueAt: true, assignedOwner: true, sourceUrl: true },
+    }),
   ])
 
   const outstandingBalances = liveJobs.reduce((s, b) => s + moveDayDueCents(b as never), 0)
@@ -56,12 +64,14 @@ async function getDashboardData() {
     .filter((c) => c.payStatus !== 'PAID')
     .reduce((cs, c) => cs + crewPayOwedCents({ actualHours: c.actualHours, scheduledHours: c.scheduledHours, payRate: c.payRate, userPayRate: c.user?.payRate, flatPay: c.flatPay, tips: c.tips, bonus: c.bonus, deductions: c.deductions }), 0), 0)
 
-  return { todayBookings, pendingApproval, pendingDiscounts, thisMonthRevenue, thisMonthExpenses, totalBookings, outstandingBalances, unpaidCrew }
+  return { todayBookings, pendingApproval, pendingDiscounts, thisMonthRevenue, thisMonthExpenses, totalBookings, outstandingBalances, unpaidCrew, attentionReminders }
 }
+
+const SEVERITY_ICON: Record<string, string> = { CRITICAL: '🚨', HIGH: '⚠️', MEDIUM: '🟠', LOW: '🔹', INFO: 'ℹ️' }
 
 export default async function AdminDashboard() {
   const session = await getSession()
-  const { todayBookings, pendingApproval, pendingDiscounts, thisMonthRevenue, thisMonthExpenses, totalBookings, outstandingBalances, unpaidCrew } = await getDashboardData()
+  const { todayBookings, pendingApproval, pendingDiscounts, thisMonthRevenue, thisMonthExpenses, totalBookings, outstandingBalances, unpaidCrew, attentionReminders } = await getDashboardData()
 
   const revenueCents = thisMonthRevenue._sum.amount ?? 0
   const expenseCents = thisMonthExpenses._sum.amount ?? 0
@@ -90,7 +100,33 @@ export default async function AdminDashboard() {
         <Link href="/admin/expenses" style={quickAction}>🧾 Add expense</Link>
         <Link href="/admin/owner-money" style={quickAction}>🏦 Owner money</Link>
         <Link href="/admin/bookings" style={quickAction}>📋 Bookings</Link>
+        <Link href="/admin/action-center" style={quickAction}>🔔 Action Center</Link>
       </div>
+
+      {/* Needs Attention — top open reminders from the Action Center */}
+      {attentionReminders.length > 0 && (
+        <div style={{ backgroundColor: '#FFFFFF', border: '1px solid #EFEFEF', borderRadius: '12px', padding: '16px 18px', marginBottom: '28px', boxShadow: '0 1px 4px rgba(0,0,0,0.06)' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
+            <h2 style={{ fontSize: '14px', fontWeight: 700, color: '#0A1628', margin: 0 }}>🔔 Needs Attention</h2>
+            <Link href="/admin/action-center" style={{ fontSize: '12px', color: '#FF5A1F', fontWeight: 700, textDecoration: 'none' }}>View all →</Link>
+          </div>
+          <div style={{ display: 'flex', flexDirection: 'column' }}>
+            {attentionReminders.map((r, i) => (
+              <div key={r.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '12px', padding: '8px 0', borderBottom: i < attentionReminders.length - 1 ? '1px solid #F3F4F6' : 'none' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', minWidth: 0 }}>
+                  <span title={r.severity}>{SEVERITY_ICON[r.severity] ?? '🔹'}</span>
+                  <span style={{ fontSize: '13px', color: '#374151', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{r.title}</span>
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexShrink: 0, fontSize: '11px', color: '#9CA3AF' }}>
+                  {r.dueAt && <span>due {new Date(r.dueAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'America/New_York' })}</span>}
+                  {r.assignedOwner && <span>{r.assignedOwner === 'DIEGO' ? 'Diego' : 'Sebastian'}</span>}
+                  <Link href={r.sourceUrl ?? '/admin/action-center'} style={{ color: '#FF5A1F', fontWeight: 700, textDecoration: 'none' }}>Open →</Link>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Alerts */}
       {pendingApproval > 0 && (

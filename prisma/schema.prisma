@@ -130,6 +130,84 @@ enum AuditAction {
   LEAD_STATUS_CHANGED
   PRICE_CHANGED
   BUSINESS_CONFIG_UPDATED
+  // ── Action Center + Ideas & Roadmap (increment 2, owner spec 2026-07-13) ──
+  REMINDER_UPDATED
+  ROADMAP_CREATED
+  ROADMAP_UPDATED
+}
+
+// ── Action Center enums (increment 2). "Critical / Due Today / Upcoming /
+//    Completed" from the owner spec are computed GROUPINGS in the UI (severity,
+//    dueAt, status) — not stored categories. ──────────────────────────────────
+
+enum ReminderSeverity {
+  CRITICAL
+  HIGH
+  MEDIUM
+  LOW
+  INFO
+}
+
+enum ReminderStatus {
+  OPEN
+  ACKNOWLEDGED
+  IN_PROGRESS
+  SNOOZED
+  RESOLVED
+  DISMISSED
+}
+
+enum ReminderCategory {
+  BOOKING_DATA
+  JOBS_SCHEDULING
+  FINANCIAL
+  CUSTOMER_BALANCE
+  CREW_PAYROLL
+  LEADS
+  DATA_QUALITY
+}
+
+// ── Ideas & Roadmap enums (increment 2) ──────────────────────────────────────
+
+enum RoadmapStatus {
+  IDEA
+  RESEARCHING
+  PLANNED
+  READY
+  IN_PROGRESS
+  BLOCKED
+  COMPLETED
+  REJECTED
+  ARCHIVED
+}
+
+enum RoadmapPriority {
+  CRITICAL
+  HIGH
+  MEDIUM
+  LOW
+}
+
+enum RoadmapCategory {
+  FINANCIAL
+  REPORTS
+  JOBS
+  SCHEDULING
+  PAYROLL
+  LEADS
+  MARKETING
+  CUSTOMERS
+  PAYMENTS
+  EQUIPMENT
+  FLEET
+  DOCUMENTS
+  NOTIFICATIONS
+  SECURITY
+  AI
+  WEBSITE
+  BOOKING_FORM
+  SYSTEM
+  OTHER
 }
 
 // ── Admin operating system enums (owner spec 2026-07-13) ──────────────────────
@@ -990,6 +1068,83 @@ model Lead {
   @@index([source])
   @@index([createdAt])
   @@map("leads")
+}
+
+/// Action Center reminder (increment 2, owner spec 2026-07-13). Rows are
+/// created by DETERMINISTIC rules in src/lib/reminder-rules.ts (no AI) via the
+/// sync in src/lib/reminder-sync.ts. dedupeKey (rule + entity) is the anti-spam
+/// guarantee: a rule re-run updates the existing row instead of duplicating it.
+/// System reminders auto-RESOLVE when the underlying condition clears and can
+/// REOPEN if it returns; DISMISSED is a human decision the scanner respects.
+/// History is never hard-deleted through owner actions.
+model Reminder {
+  id               String           @id @default(cuid())
+  reminderType     String           @map("reminder_type") // stable rule id, e.g. "job-24h-no-crew"
+  category         ReminderCategory
+  title            String
+  description      String
+  severity         ReminderSeverity
+  status           ReminderStatus   @default(OPEN)
+  sourceEntityType String?          @map("source_entity_type") // booking | expense | lead | customer | crew
+  sourceEntityId   String?          @map("source_entity_id")
+  sourceUrl        String?          @map("source_url") // admin deep link
+  dedupeKey        String           @unique @map("dedupe_key")
+  dueAt            DateTime?        @map("due_at")
+  snoozedUntil     DateTime?        @map("snoozed_until")
+  assignedOwner    TaskOwner?       @map("assigned_owner")
+  createdBy        String           @default("system") @map("created_by")
+  internalNote     String?          @map("internal_note") // owner note; preserved across rule re-runs
+  resolutionNote   String?          @map("resolution_note")
+  metadata         Json?
+  acknowledgedAt   DateTime?        @map("acknowledged_at")
+  startedAt        DateTime?        @map("started_at")
+  resolvedAt       DateTime?        @map("resolved_at")
+  dismissedAt      DateTime?        @map("dismissed_at")
+  createdAt        DateTime         @default(now()) @map("created_at")
+  updatedAt        DateTime         @updatedAt @map("updated_at")
+
+  @@index([status])
+  @@index([severity])
+  @@index([category])
+  @@index([dueAt])
+  @@index([assignedOwner])
+  @@map("reminders")
+}
+
+/// Ideas & Roadmap item (increment 2). Structured product/business planning —
+/// not a notes page. seedKey makes the preloaded gap items idempotent (the seed
+/// endpoint skips keys that already exist). comments is an append-only JSON
+/// array of {by, at, text}. No hard delete — REJECTED/ARCHIVED instead.
+model RoadmapItem {
+  id              String          @id @default(cuid())
+  seedKey         String?         @unique @map("seed_key")
+  title           String
+  summary         String?
+  problem         String? // business problem
+  solution        String? // proposed solution
+  benefit         String? // expected benefit
+  risks           String?
+  priority        RoadmapPriority @default(MEDIUM)
+  status          RoadmapStatus   @default(IDEA)
+  category        RoadmapCategory @default(OTHER)
+  impact          Int? // 1-5
+  effort          Int? // 1-5
+  dependencies    String?
+  blockers        String?
+  assignedOwner   TaskOwner?      @map("assigned_owner")
+  targetIncrement String?         @map("target_increment")
+  notes           String?
+  comments        Json? // [{by, at, text}]
+  rejectionReason String?         @map("rejection_reason")
+  completedAt     DateTime?       @map("completed_at")
+  createdBy       String?         @map("created_by")
+  createdAt       DateTime        @default(now()) @map("created_at")
+  updatedAt       DateTime        @updatedAt @map("updated_at")
+
+  @@index([status])
+  @@index([category])
+  @@index([priority])
+  @@map("roadmap_items")
 }
 
 /// Single-row business configuration (ownership split + cash reserves). The

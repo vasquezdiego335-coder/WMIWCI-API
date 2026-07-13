@@ -18,8 +18,8 @@ const GROUPS: Group[] = [
     title: 'Overview',
     items: [
       { href: '/admin', label: 'Dashboard', icon: '🏠' },
+      { href: '/admin/action-center', label: 'Action Center', icon: '🔔' },
       { href: '/admin/schedule', label: 'Calendar', icon: '📅' },
-      { label: 'Notifications', icon: '🔔', soon: true },
     ],
   },
   {
@@ -55,6 +55,7 @@ const GROUPS: Group[] = [
   {
     title: 'System',
     items: [
+      { href: '/admin/roadmap', label: 'Ideas & Roadmap', icon: '🗺️' },
       { href: '/admin/logs', label: 'Activity Log', icon: '📜' },
       { label: 'Documents', icon: '📁', soon: true },
       { href: '/admin/queues', label: 'Queues', icon: '⚙️' },

@@ -114,6 +114,12 @@ export default function ExpenseForm({ presetBookingId, presetJobLabel, compact }
           <select value={f.category} onChange={(e) => set('category', e.target.value)} style={input}>
             {EXPENSE_CATEGORY_ORDER.map((c) => <option key={c} value={c}>{EXPENSE_CATEGORY_LABELS[c]}</option>)}
           </select>
+          {f.category === 'WORKER_PAY' && (
+            <span style={{ fontSize: '11px', color: '#B45309', backgroundColor: '#FFFBEB', border: '1px solid #FDE68A', borderRadius: '6px', padding: '5px 8px', marginTop: '4px', lineHeight: 1.4 }}>
+              ⚠ Crew labor is tracked in payroll on the job page — use “Worker pay” ONLY for
+              helpers who are not in the crew system, or the same labor will be counted twice.
+            </span>
+          )}
         </Field>
         <Field label="Payment method">
           <select value={f.paymentMethod} onChange={(e) => set('paymentMethod', e.target.value)} style={input}>
