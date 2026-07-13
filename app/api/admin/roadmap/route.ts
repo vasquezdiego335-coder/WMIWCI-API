@@ -3,6 +3,7 @@ import { getSession } from '@/lib/auth'
 import { prisma } from '@/lib/db'
 import { apiLogger } from '@/lib/logger'
 import { RoadmapCategory, RoadmapPriority, RoadmapStatus, TaskOwner } from '@prisma/client'
+import { can, type Role } from '@/lib/permissions'
 import { z } from 'zod'
 
 // Ideas & Roadmap create (increment 2). Structured planning records — no hard
@@ -29,24 +30,19 @@ const CreateSchema = z.object({
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
   const session = await getSession()
-  if (!session || !['OWNER', 'MANAGER'].includes(session.role)) {
-    return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
-  }
+  if (!session) return NextResponse.json({ error: 'Authentication required' }, { status: 401 })
+  if (!can(session.role as Role, 'roadmap.create')) return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
 
   const parsed = CreateSchema.safeParse(await req.json().catch(() => ({})))
   if (!parsed.success) return NextResponse.json({ error: 'Invalid request', issues: parsed.error.flatten() }, { status: 422 })
 
-  const item = await prisma.roadmapItem.create({
-    data: { ...parsed.data, createdBy: session.name },
-  })
-
-  await prisma.auditLog.create({
-    data: {
-      action: 'ROADMAP_CREATED',
-      userId: session.userId,
-      details: { roadmapItemId: item.id, title: item.title, category: item.category, priority: item.priority, by: session.name },
-    },
-  })
+  // Create + audit in one transaction — the log never claims a create that rolled back.
+  const [item] = await prisma.$transaction([
+    prisma.roadmapItem.create({ data: { ...parsed.data, createdBy: session.name } }),
+    prisma.auditLog.create({
+      data: { action: 'ROADMAP_CREATED', userId: session.userId, details: { title: parsed.data.title, category: parsed.data.category ?? 'OTHER', priority: parsed.data.priority ?? 'MEDIUM', by: session.name } },
+    }),
+  ])
 
   apiLogger.info({ roadmapItemId: item.id }, 'Roadmap item created')
   return NextResponse.json(item, { status: 201 })

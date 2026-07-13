@@ -1,6 +1,7 @@
 import Link from 'next/link'
 import { prisma } from '@/lib/db'
-import { syncReminders } from '@/lib/reminder-sync'
+import { getSession } from '@/lib/auth'
+import { runScan, getScanStatus } from '@/lib/reminder-sync'
 import { PageHeader, StatCard, StatGrid, COLORS, Empty, Badge, SoftBadge } from '../_ui'
 import {
   REMINDER_SEVERITY_LABELS, REMINDER_SEVERITY_ICONS, REMINDER_SEVERITY_COLORS, REMINDER_SEVERITY_ORDER,
@@ -21,14 +22,19 @@ const sevRank = (s: string) => { const i = REMINDER_SEVERITY_ORDER.indexOf(s); r
 type Search = { status?: string; severity?: string; category?: string; owner?: string; q?: string; group?: string }
 
 export default async function ActionCenterPage({ searchParams }: { searchParams: Search }) {
-  // Sync first so the page always reflects current reality. Fail open: a
-  // scanner bug must never take the Action Center down.
+  // Opportunistic sync (PAGE_LOAD, cooldown-gated so a refresh never rescans in
+  // a loop, advisory-locked so concurrent loads never overlap). Fail OPEN: the
+  // page reads and renders existing reminders even if the scan throws — the
+  // Action Center never goes down because a scan failed.
   let scanError = false
   try {
-    await syncReminders()
+    await runScan({ trigger: 'PAGE_LOAD', force: false })
   } catch {
     scanError = true
   }
+  const scan = await getScanStatus().catch(() => null)
+  const session = await getSession()
+  const isOwner = session?.role === 'OWNER'
 
   const now = new Date()
   const todayEnd = new Date(now); todayEnd.setHours(23, 59, 59, 999)
@@ -97,11 +103,18 @@ export default async function ActionCenterPage({ searchParams }: { searchParams:
         actions={<RescanButton />}
       />
 
-      {scanError && (
-        <div style={{ backgroundColor: '#FEF2F2', border: '1px solid #FECACA', borderRadius: '8px', padding: '10px 14px', fontSize: '13px', color: '#991B1B', marginBottom: '16px' }}>
-          The automatic scan hit an error — the reminders below may be stale. Try “Rescan now”.
-        </div>
-      )}
+      {/* Scan health line — last successful scan, running state, last failure. */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: '14px', flexWrap: 'wrap', fontSize: '12px', color: COLORS.muted, margin: '0 0 16px' }}>
+        {scan?.running ? (
+          <span style={{ color: COLORS.blue, fontWeight: 600 }}>● Scan running…</span>
+        ) : (
+          <span>Last scan: {scan?.lastSuccessAt ? dateTime(scan.lastSuccessAt) : 'never'}</span>
+        )}
+        {scan?.lastFailureAt && (!scan.lastSuccessAt || scan.lastFailureAt > scan.lastSuccessAt) && (
+          <span style={{ color: COLORS.red }}>⚠ Last scan failed{scan.lastError ? ` — ${scan.lastError}` : ''}. Existing reminders are still shown.</span>
+        )}
+        {scanError && <span style={{ color: COLORS.amber }}>The scan on this load was blocked or failed; showing the latest saved reminders.</span>}
+      </div>
 
       <StatGrid min={150}>
         <StatCard label="Critical" value={String(counts.critical)} accent={counts.critical > 0 ? COLORS.red : COLORS.green} href="/admin/action-center?severity=CRITICAL" />
@@ -178,7 +191,7 @@ export default async function ActionCenterPage({ searchParams }: { searchParams:
                       </div>
                       <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', alignItems: 'flex-end' }}>
                         {r.sourceUrl && <Link href={r.sourceUrl} style={{ fontSize: '12px', color: COLORS.orange, fontWeight: 700, textDecoration: 'none' }}>Open record →</Link>}
-                        <ReminderActions id={r.id} status={r.status} assignedOwner={r.assignedOwner} />
+                        <ReminderActions id={r.id} status={r.status} assignedOwner={r.assignedOwner} isOwner={isOwner} />
                       </div>
                     </div>
                   </div>

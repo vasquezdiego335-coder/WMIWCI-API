@@ -3,12 +3,15 @@ import { getSession } from '@/lib/auth'
 import { prisma } from '@/lib/db'
 import { apiLogger } from '@/lib/logger'
 import { ExpenseCategory, ExpenseStatus, PaymentMethod } from '@prisma/client'
+import { can, type Role } from '@/lib/permissions'
+import { isFinalizedExpenseStatus, financialFieldChanged } from '@/lib/financial-adjust'
 import { z } from 'zod'
 
-// Update / delete a single expense (owner spec 2026-07-13). Status changes and
-// deletions are logged to the audit trail (who / what / when). Deletion is
-// OWNER-only — it's on the "require confirmation" list; the client confirms and
-// only owners may remove a money record.
+// Update / delete a single expense (owner spec 2026-07-13; hardened 2.1).
+// Status changes and deletions are audited. 2.1: editing the AMOUNT or CATEGORY
+// of a FINALIZED expense (APPROVED/REIMBURSED) is an owner-only adjustment that
+// requires a reason and records the before→after values (FINANCIAL_ADJUSTMENT).
+// Every write + its audit commit in one transaction. Deletion stays OWNER-only.
 
 const PatchSchema = z.object({
   status: z.nativeEnum(ExpenseStatus).optional(),
@@ -21,13 +24,13 @@ const PatchSchema = z.object({
   purpose: z.string().trim().max(500).nullable().optional(),
   reimbursable: z.boolean().optional(),
   notes: z.string().trim().max(2000).nullable().optional(),
+  adjustmentReason: z.string().trim().max(500).optional(),
 })
 
 export async function PATCH(req: NextRequest, { params }: { params: { id: string } }): Promise<NextResponse> {
   const session = await getSession()
-  if (!session || !['OWNER', 'MANAGER'].includes(session.role)) {
-    return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
-  }
+  if (!session) return NextResponse.json({ error: 'Authentication required' }, { status: 401 })
+  if (!can(session.role as Role, 'money.approve_expense')) return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
 
   const existing = await prisma.expense.findUnique({ where: { id: params.id } })
   if (!existing) return NextResponse.json({ error: 'Not found' }, { status: 404 })
@@ -54,41 +57,71 @@ export async function PATCH(req: NextRequest, { params }: { params: { id: string
 
   if (Object.keys(data).length === 0) return NextResponse.json(existing)
 
-  const updated = await prisma.expense.update({ where: { id: params.id }, data })
+  // Finalized-record integrity: changing the money on an APPROVED/REIMBURSED
+  // expense is an owner-only adjustment that preserves history.
+  const editsFinancials =
+    (d.amountCents !== undefined && financialFieldChanged(existing.amount, d.amountCents)) ||
+    (d.category !== undefined && existing.category !== d.category)
+  const isAdjustment = isFinalizedExpenseStatus(existing.status) && editsFinancials
+  if (isAdjustment) {
+    if (!can(session.role as Role, 'money.edit_finalized_expense')) {
+      return NextResponse.json({ error: 'This expense is finalized. Only an owner can adjust its amount or category, with a reason.' }, { status: 403 })
+    }
+    if (!d.adjustmentReason?.trim()) {
+      return NextResponse.json({ error: 'A reason is required to adjust a finalized expense.' }, { status: 422 })
+    }
+  }
 
-  const action =
-    d.status === 'APPROVED' ? 'EXPENSE_APPROVED' : d.status === 'REJECTED' ? 'EXPENSE_REJECTED' : 'EXPENSE_UPDATED'
-  await prisma.auditLog.create({
-    data: {
-      action,
-      userId: session.userId,
-      bookingId: existing.bookingId,
-      details: { expenseId: existing.id, changed: Object.keys(data), from: { status: existing.status, amountCents: existing.amount }, by: session.name },
-    },
-  })
+  const action = isAdjustment
+    ? 'FINANCIAL_ADJUSTMENT' as const
+    : d.status === 'APPROVED' ? 'EXPENSE_APPROVED' as const
+    : d.status === 'REJECTED' ? 'EXPENSE_REJECTED' as const
+    : 'EXPENSE_UPDATED' as const
 
-  apiLogger.info({ expenseId: existing.id, action }, 'Expense updated')
+  const [updated] = await prisma.$transaction([
+    prisma.expense.update({ where: { id: params.id }, data }),
+    prisma.auditLog.create({
+      data: {
+        action,
+        userId: session.userId,
+        bookingId: existing.bookingId,
+        details: {
+          expenseId: existing.id,
+          changed: Object.keys(data),
+          // before → after for the money fields, so history is recoverable.
+          before: { status: existing.status, amountCents: existing.amount, category: existing.category },
+          after: { status: (data.status as string) ?? existing.status, amountCents: (data.amount as number) ?? existing.amount, category: (data.category as string) ?? existing.category },
+          reason: d.adjustmentReason ?? undefined,
+          by: session.name,
+        },
+      },
+    }),
+  ])
+
+  apiLogger.info({ expenseId: existing.id, action, adjustment: isAdjustment }, 'Expense updated')
   return NextResponse.json(updated)
 }
 
 export async function DELETE(_req: NextRequest, { params }: { params: { id: string } }): Promise<NextResponse> {
   const session = await getSession()
-  if (!session || session.role !== 'OWNER') {
+  if (!session || !can(session.role as Role, 'money.delete_expense')) {
     return NextResponse.json({ error: 'Only an owner can delete an expense' }, { status: 403 })
   }
 
   const existing = await prisma.expense.findUnique({ where: { id: params.id } })
   if (!existing) return NextResponse.json({ error: 'Not found' }, { status: 404 })
 
-  await prisma.expense.delete({ where: { id: params.id } })
-  await prisma.auditLog.create({
-    data: {
-      action: 'EXPENSE_DELETED',
-      userId: session.userId,
-      bookingId: existing.bookingId,
-      details: { expenseId: existing.id, amountCents: existing.amount, category: existing.category, by: session.name },
-    },
-  })
+  await prisma.$transaction([
+    prisma.expense.delete({ where: { id: params.id } }),
+    prisma.auditLog.create({
+      data: {
+        action: 'EXPENSE_DELETED',
+        userId: session.userId,
+        bookingId: existing.bookingId,
+        details: { expenseId: existing.id, amountCents: existing.amount, category: existing.category, by: session.name },
+      },
+    }),
+  ])
 
   apiLogger.info({ expenseId: existing.id }, 'Expense deleted')
   return NextResponse.json({ ok: true })

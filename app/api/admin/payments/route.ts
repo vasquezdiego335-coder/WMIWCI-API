@@ -3,6 +3,7 @@ import { getSession } from '@/lib/auth'
 import { prisma } from '@/lib/db'
 import { apiLogger } from '@/lib/logger'
 import { PaymentMethod } from '@prisma/client'
+import { can, type Role } from '@/lib/permissions'
 import { z } from 'zod'
 
 // Record a manual (cash / Zelle / move-day) payment against a booking (owner
@@ -21,9 +22,8 @@ const Schema = z.object({
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
   const session = await getSession()
-  if (!session || !['OWNER', 'MANAGER'].includes(session.role)) {
-    return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
-  }
+  if (!session) return NextResponse.json({ error: 'Authentication required' }, { status: 401 })
+  if (!can(session.role as Role, 'money.record_payment')) return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
 
   const parsed = Schema.safeParse(await req.json().catch(() => ({})))
   if (!parsed.success) return NextResponse.json({ error: 'Invalid request', issues: parsed.error.flatten() }, { status: 422 })
@@ -36,24 +36,26 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   if (Number.isNaN(createdAt.getTime())) return NextResponse.json({ error: 'Invalid date' }, { status: 422 })
 
   const method = d.method ?? PaymentMethod.CASH
-  const payment = await prisma.payment.create({
-    data: {
-      bookingId: d.bookingId,
-      amount: d.amountCents,
-      status: 'COMPLETED',
-      description: `${method} payment${d.note ? ` — ${d.note}` : ''}`,
-      metadata: { manual: true, method, recordedBy: session.name, recordedById: session.userId },
-      createdAt,
-    },
-  })
-
-  await prisma.auditLog.create({
-    data: {
-      action: 'PAYMENT_RECEIVED',
-      userId: session.userId,
-      bookingId: d.bookingId,
-      details: { paymentId: payment.id, amountCents: payment.amount, method, manual: true, by: session.name },
-    },
+  const payment = await prisma.$transaction(async (tx) => {
+    const p = await tx.payment.create({
+      data: {
+        bookingId: d.bookingId,
+        amount: d.amountCents,
+        status: 'COMPLETED',
+        description: `${method} payment${d.note ? ` — ${d.note}` : ''}`,
+        metadata: { manual: true, method, recordedBy: session.name, recordedById: session.userId },
+        createdAt,
+      },
+    })
+    await tx.auditLog.create({
+      data: {
+        action: 'PAYMENT_RECEIVED',
+        userId: session.userId,
+        bookingId: d.bookingId,
+        details: { paymentId: p.id, amountCents: p.amount, method, manual: true, by: session.name },
+      },
+    })
+    return p
   })
 
   apiLogger.info({ paymentId: payment.id, bookingId: d.bookingId, amount: payment.amount }, 'Manual payment recorded')

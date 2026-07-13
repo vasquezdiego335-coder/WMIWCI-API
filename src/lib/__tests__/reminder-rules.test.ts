@@ -237,3 +237,41 @@ test('sync: snooze holds until expiry, then wakes', () => {
   const woken = computeSyncActions([existing({ status: 'SNOOZED', snoozedUntil: past })], [cand()], NOW)
   assert.equal(woken.wake.length, 1)
 })
+
+// ── Dismissal scopes (increment 2.1) ─────────────────────────────────────────
+
+test('sync: PERMANENT_RULE_ENTITY dismissal never reopens, even if state changes', () => {
+  const dismissed = existing({ status: 'DISMISSED', dismissalScope: 'PERMANENT_RULE_ENTITY', entityFingerprint: 'old' })
+  const a = computeSyncActions([dismissed], [cand({ fingerprint: 'brand-new' })], NOW)
+  assert.equal(a.reopen.length, 0)
+  assert.equal(a.create.length, 0)
+})
+
+test('sync: legacy dismissal (null scope) is treated as permanent', () => {
+  const legacy = existing({ status: 'DISMISSED', dismissalScope: null, entityFingerprint: null })
+  const a = computeSyncActions([legacy], [cand({ fingerprint: 'anything' })], NOW)
+  assert.equal(a.reopen.length, 0)
+})
+
+test('sync: UNTIL_ENTITY_CHANGES reopens only when the fingerprint changes', () => {
+  const dismissed = existing({ status: 'DISMISSED', dismissalScope: 'UNTIL_ENTITY_CHANGES', entityFingerprint: 'fp-1' })
+  // Same fingerprint → stays dismissed.
+  assert.equal(computeSyncActions([dismissed], [cand({ fingerprint: 'fp-1' })], NOW).reopen.length, 0)
+  // Changed fingerprint → reopens.
+  assert.equal(computeSyncActions([dismissed], [cand({ fingerprint: 'fp-2' })], NOW).reopen.length, 1)
+})
+
+test('sync: OCCURRENCE reopens when the material state changed', () => {
+  const dismissed = existing({ status: 'DISMISSED', dismissalScope: 'OCCURRENCE', entityFingerprint: 'fp-1' })
+  assert.equal(computeSyncActions([dismissed], [cand({ fingerprint: 'fp-1' })], NOW).reopen.length, 0)
+  assert.equal(computeSyncActions([dismissed], [cand({ fingerprint: 'fp-9' })], NOW).reopen.length, 1)
+})
+
+test('evaluateAll stamps a fingerprint on every candidate', () => {
+  const { evaluateAll } = require('../reminder-rules') as typeof import('../reminder-rules')
+  const cands = evaluateAll({ bookings: [], expenses: [], ownerTransactions: [], leads: [
+    { id: 'l1', name: 'X', status: 'NEW', lostReason: null, createdAt: new Date(NOW.getTime() - 2 * DAY), quotedAt: null, updatedAt: NOW },
+  ], customers: [] }, NOW)
+  assert.ok(cands.length > 0)
+  assert.ok(cands.every((c) => typeof c.fingerprint === 'string' && c.fingerprint.length > 0))
+})

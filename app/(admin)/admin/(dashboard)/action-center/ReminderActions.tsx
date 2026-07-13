@@ -7,12 +7,22 @@ import { csrfHeader } from '../_client'
 // Per-reminder actions (increment 2): acknowledge / start / resolve / dismiss /
 // reopen / snooze / assign. Every action is audited server-side.
 
-export default function ReminderActions({ id, status, assignedOwner }: { id: string; status: string; assignedOwner: string | null }) {
+export default function ReminderActions({ id, status, assignedOwner, isOwner }: { id: string; status: string; assignedOwner: string | null; isOwner: boolean }) {
   const router = useRouter()
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState('')
   const [snoozing, setSnoozing] = useState(false)
   const [snoozeUntil, setSnoozeUntil] = useState('')
+
+  async function dismiss(scope: 'OCCURRENCE' | 'PERMANENT_RULE_ENTITY') {
+    let note: string | undefined
+    if (scope === 'PERMANENT_RULE_ENTITY') {
+      const reason = prompt('Permanently dismiss this reminder for this record. Why? (required — owners only)')
+      if (!reason?.trim()) return
+      note = reason
+    }
+    await act({ action: 'dismiss', scope, note })
+  }
 
   async function act(body: Record<string, unknown>) {
     setBusy(true)
@@ -51,23 +61,28 @@ export default function ReminderActions({ id, status, assignedOwner }: { id: str
 
   return (
     <div style={{ display: 'flex', gap: '6px', alignItems: 'center', flexWrap: 'wrap' }}>
+      {live && <button onClick={() => act({ action: 'claim' })} disabled={busy} style={btn}>Claim</button>}
       {status === 'OPEN' && <button onClick={() => act({ action: 'acknowledge' })} disabled={busy} style={btn}>Acknowledge</button>}
       {['OPEN', 'ACKNOWLEDGED'].includes(status) && <button onClick={() => act({ action: 'start' })} disabled={busy} style={{ ...btn, color: '#3B82F6', borderColor: '#BFDBFE' }}>Start</button>}
       {live && <button onClick={() => act({ action: 'resolve' })} disabled={busy} style={{ ...btn, color: '#10B981', borderColor: '#A7F3D0' }}>Resolve</button>}
       {live && <button onClick={() => setSnoozing(true)} disabled={busy} style={btn}>Snooze…</button>}
-      {live && <button onClick={() => act({ action: 'dismiss' })} disabled={busy} style={{ ...btn, color: '#9CA3AF' }}>Dismiss</button>}
-      {(closed || status === 'SNOOZED') && <button onClick={() => act({ action: 'reopen' })} disabled={busy} style={btn}>Reopen</button>}
-      <select
-        value={assignedOwner ?? ''}
-        onChange={(e) => act({ action: 'assign', assignedOwner: e.target.value || null })}
-        disabled={busy}
-        style={{ padding: '4px 7px', border: '1px solid #E5E7EB', borderRadius: '6px', fontSize: '11px', fontWeight: 700, color: assignedOwner ? '#0A1628' : '#9CA3AF', backgroundColor: '#fff' }}
-        title="Assign owner"
-      >
-        <option value="">Unassigned</option>
-        <option value="DIEGO">Diego</option>
-        <option value="SEBASTIAN">Sebastian</option>
-      </select>
+      {live && <button onClick={() => dismiss('OCCURRENCE')} disabled={busy} style={{ ...btn, color: '#9CA3AF' }} title="Dismiss this occurrence — it can return if the record materially changes">Dismiss</button>}
+      {live && isOwner && <button onClick={() => dismiss('PERMANENT_RULE_ENTITY')} disabled={busy} style={{ ...btn, color: '#9CA3AF' }} title="Permanently dismiss for this record (owner only)">Dismiss permanently</button>}
+      {closed && isOwner && <button onClick={() => act({ action: 'restore' })} disabled={busy} style={btn}>Restore</button>}
+      {status === 'SNOOZED' && <button onClick={() => act({ action: 'reopen' })} disabled={busy} style={btn}>Reopen</button>}
+      {live && (
+        <select
+          value={assignedOwner ?? ''}
+          onChange={(e) => act({ action: 'assign', assignedOwner: e.target.value || null })}
+          disabled={busy}
+          style={{ padding: '4px 7px', border: '1px solid #E5E7EB', borderRadius: '6px', fontSize: '11px', fontWeight: 700, color: assignedOwner ? '#0A1628' : '#9CA3AF', backgroundColor: '#fff' }}
+          title="Assign owner"
+        >
+          <option value="">Unassigned</option>
+          <option value="DIEGO">Diego</option>
+          <option value="SEBASTIAN">Sebastian</option>
+        </select>
+      )}
       {err && <span style={errStyle}>{err}</span>}
     </div>
   )

@@ -12,6 +12,12 @@
 // reminder or overriding a human DISMISSED decision.
 // ============================================================================
 
+import {
+  severityByLeadTime, computeFingerprint, unpaidBalanceSeverity, negativeProfitSeverity,
+  ADDRESS_TIERS, ADDRESS_FALLBACK, MISSING_ADDRESS_TIERS, MISSING_ADDRESS_FALLBACK,
+} from './reminder-severity'
+import { entityLink } from './entity-links'
+
 export type Severity = 'CRITICAL' | 'HIGH' | 'MEDIUM' | 'LOW' | 'INFO'
 export type Category =
   | 'BOOKING_DATA'
@@ -33,6 +39,9 @@ export interface ReminderCandidate {
   sourceUrl: string | null
   dedupeKey: string
   dueAt: Date | null
+  // Deterministic hash of the material state; filled by evaluateAll. Drives
+  // dismissal reopen (OCCURRENCE / UNTIL_ENTITY_CHANGES) when it changes.
+  fingerprint?: string
 }
 
 // ── Input shapes (loader fills these from Prisma + job-money) ────────────────
@@ -134,7 +143,8 @@ const et = (d: Date) =>
   d.toLocaleString('en-US', { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', timeZone: 'America/New_York' })
 const key = (rule: string, type: string, id: string, extra?: string) =>
   extra ? `${rule}:${type}:${id}:${extra}` : `${rule}:${type}:${id}`
-const jobUrl = (id: string) => `/admin/jobs/${id}`
+// Centralized so a booking link is never hand-built (and lead links stay null).
+const jobUrl = (id: string) => entityLink('booking', id)
 const digits = (s: string) => (s ?? '').replace(/\D/g, '').replace(/^1(?=\d{10}$)/, '')
 
 const ACTIVE_STATUSES = ['PENDING_APPROVAL', 'CONFIRMED', 'SCHEDULED', 'IN_PROGRESS']
@@ -173,7 +183,7 @@ export function evaluateBooking(b: RuleBooking, now: Date): ReminderCandidate[] 
       const which = !b.originAddress?.trim() ? 'pickup' : 'drop-off'
       out.push({
         reminderType: 'booking-missing-address', category: 'BOOKING_DATA',
-        severity: startsWithin(3 * DAY) ? 'CRITICAL' : 'HIGH',
+        severity: severityByLeadTime(start, now, MISSING_ADDRESS_TIERS, MISSING_ADDRESS_FALLBACK),
         title: `${b.customerName}: missing ${which} address`,
         description: `The ${which} address for this booking is blank${when}. The crew cannot be dispatched without it.`,
         sourceEntityType: 'booking', sourceEntityId: b.id, sourceUrl: jobUrl(b.id),
@@ -184,7 +194,8 @@ export function evaluateBooking(b: RuleBooking, now: Date): ReminderCandidate[] 
     if (b.manualReviewRequired || b.originVerification === 'unverified' || b.destVerification === 'unverified') {
       const which = b.originVerification === 'unverified' ? 'pickup' : b.destVerification === 'unverified' ? 'drop-off' : 'an'
       out.push({
-        reminderType: 'booking-address-unverified', category: 'BOOKING_DATA', severity: 'MEDIUM',
+        reminderType: 'booking-address-unverified', category: 'BOOKING_DATA',
+        severity: severityByLeadTime(start, now, ADDRESS_TIERS, ADDRESS_FALLBACK),
         title: `${b.customerName}: address needs verification`,
         description: `The ${which} address could not be verified automatically${when}. Confirm it with the customer before the crew is assigned.`,
         sourceEntityType: 'booking', sourceEntityId: b.id, sourceUrl: jobUrl(b.id),
@@ -281,8 +292,10 @@ export function evaluateBooking(b: RuleBooking, now: Date): ReminderCandidate[] 
   // FINANCIAL / CUSTOMER_BALANCE ------------------------------------------------
   if (b.status === 'COMPLETED') {
     if (b.moveDayDueCents > 0) {
+      const daysSince = b.completedAt ? (now.getTime() - b.completedAt.getTime()) / DAY : 0
       out.push({
-        reminderType: 'job-balance-unpaid', category: 'CUSTOMER_BALANCE', severity: 'HIGH',
+        reminderType: 'job-balance-unpaid', category: 'CUSTOMER_BALANCE',
+        severity: unpaidBalanceSeverity(b.moveDayDueCents, daysSince),
         title: `${b.customerName}: ${money(b.moveDayDueCents)} still owed after completed job`,
         description: `The job is complete but ${money(b.moveDayDueCents)} in move-day charges has not been recorded as collected. Collect it or record the payment on the job page.`,
         sourceEntityType: 'booking', sourceEntityId: b.id, sourceUrl: jobUrl(b.id),
@@ -293,7 +306,8 @@ export function evaluateBooking(b: RuleBooking, now: Date): ReminderCandidate[] 
 
     if (b.grossRevenueCents > 0 && b.netProfitCents < 0) {
       out.push({
-        reminderType: 'job-negative-profit', category: 'FINANCIAL', severity: 'HIGH',
+        reminderType: 'job-negative-profit', category: 'FINANCIAL',
+        severity: negativeProfitSeverity(b.netProfitCents),
         title: `${b.customerName}: job lost money (${money(b.netProfitCents)})`,
         description: `Recorded costs on this completed job exceed the revenue collected. Review the crew pay and expenses — or record the missing customer payment.`,
         sourceEntityType: 'booking', sourceEntityId: b.id, sourceUrl: jobUrl(b.id),
@@ -516,7 +530,7 @@ export function evaluateCustomers(customers: RuleCustomer[]): ReminderCandidate[
 // ── Top-level evaluation ──────────────────────────────────────────────────────
 
 export function evaluateAll(input: RuleInput, now: Date): ReminderCandidate[] {
-  return [
+  const raw = [
     ...input.bookings.flatMap((b) => evaluateBooking(b, now)),
     ...evaluateCrewOverlaps(input.bookings, now),
     ...evaluateExpenses(input.expenses, now),
@@ -524,6 +538,8 @@ export function evaluateAll(input: RuleInput, now: Date): ReminderCandidate[] {
     ...evaluateLeads(input.leads, now),
     ...evaluateCustomers(input.customers),
   ]
+  // Stamp the deterministic fingerprint once, centrally, so no rule has to.
+  return raw.map((c) => ({ ...c, fingerprint: computeFingerprint(c) }))
 }
 
 // ── Pure sync diff (the deduplication contract) ──────────────────────────────
@@ -541,6 +557,11 @@ export interface ExistingReminder {
   description: string
   severity: string
   dueAt: Date | null
+  // Increment 2.1: dismissal scope + fingerprint drive whether a DISMISSED
+  // reminder can reopen. A legacy dismissal (scope null) is treated as
+  // permanent — existing dismissed reminders never resurface unexpectedly.
+  dismissalScope?: string | null
+  entityFingerprint?: string | null
 }
 
 export interface SyncActions {
@@ -568,7 +589,17 @@ export function computeSyncActions(existing: ExistingReminder[], candidates: Rem
       actions.create.push(c)
       continue
     }
-    if (r.status === 'DISMISSED') continue // human decision — respect it
+    if (r.status === 'DISMISSED') {
+      // Dismissal scope decides whether the still-detected issue can return.
+      //  • PERMANENT_RULE_ENTITY (or legacy null scope): never reopens here.
+      //  • UNTIL_ENTITY_CHANGES / OCCURRENCE: reopen only when the material
+      //    state changed (fingerprint differs from what was dismissed).
+      const scope = r.dismissalScope ?? 'PERMANENT_RULE_ENTITY'
+      if (scope === 'PERMANENT_RULE_ENTITY') continue
+      const changed = !!c.fingerprint && c.fingerprint !== (r.entityFingerprint ?? null)
+      if (changed) actions.reopen.push({ id: r.id, candidate: c })
+      continue
+    }
     if (r.status === 'RESOLVED') {
       actions.reopen.push({ id: r.id, candidate: c })
       continue

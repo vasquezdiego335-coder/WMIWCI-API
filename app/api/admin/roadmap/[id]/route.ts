@@ -3,6 +3,7 @@ import { getSession } from '@/lib/auth'
 import { prisma } from '@/lib/db'
 import { apiLogger } from '@/lib/logger'
 import { Prisma, RoadmapCategory, RoadmapPriority, RoadmapStatus, TaskOwner } from '@prisma/client'
+import { can, type Role } from '@/lib/permissions'
 import { z } from 'zod'
 
 // Roadmap item update (increment 2): status/priority/owner/fields + append-only
@@ -32,9 +33,7 @@ const PatchSchema = z.object({
 
 export async function PATCH(req: NextRequest, { params }: { params: { id: string } }): Promise<NextResponse> {
   const session = await getSession()
-  if (!session || !['OWNER', 'MANAGER'].includes(session.role)) {
-    return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
-  }
+  if (!session) return NextResponse.json({ error: 'Authentication required' }, { status: 401 })
 
   const existing = await prisma.roadmapItem.findUnique({ where: { id: params.id } })
   if (!existing) return NextResponse.json({ error: 'Not found' }, { status: 404 })
@@ -42,6 +41,10 @@ export async function PATCH(req: NextRequest, { params }: { params: { id: string
   const parsed = PatchSchema.safeParse(await req.json().catch(() => ({})))
   if (!parsed.success) return NextResponse.json({ error: 'Invalid request', issues: parsed.error.flatten() }, { status: 422 })
   const { comment, ...fields } = parsed.data
+
+  // Permission depends on the transition (reject/archive vs. a normal edit).
+  const perm = fields.status === 'REJECTED' ? 'roadmap.reject' : fields.status === 'ARCHIVED' ? 'roadmap.archive' : 'roadmap.edit'
+  if (!can(session.role as Role, perm)) return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
 
   // Rejecting requires a reason (owner spec: lost/rejected always carries why).
   if (fields.status === 'REJECTED' && !fields.rejectionReason && !existing.rejectionReason) {
@@ -57,22 +60,22 @@ export async function PATCH(req: NextRequest, { params }: { params: { id: string
 
   if (Object.keys(data).length === 0) return NextResponse.json(existing)
 
-  const updated = await prisma.roadmapItem.update({ where: { id: params.id }, data })
-
-  await prisma.auditLog.create({
-    data: {
-      action: 'ROADMAP_UPDATED',
-      userId: session.userId,
-      details: {
-        roadmapItemId: existing.id,
-        title: existing.title,
-        changed: Object.keys(data),
-        from: { status: existing.status, priority: existing.priority, assignedOwner: existing.assignedOwner },
-        to: { status: updated.status, priority: updated.priority, assignedOwner: updated.assignedOwner },
-        by: session.name,
+  // Update + audit in one transaction.
+  const [updated] = await prisma.$transaction([
+    prisma.roadmapItem.update({ where: { id: params.id }, data }),
+    prisma.auditLog.create({
+      data: {
+        action: 'ROADMAP_UPDATED',
+        userId: session.userId,
+        details: {
+          roadmapItemId: existing.id, title: existing.title, changed: Object.keys(data),
+          from: { status: existing.status, priority: existing.priority, assignedOwner: existing.assignedOwner },
+          to: { status: fields.status ?? existing.status, priority: fields.priority ?? existing.priority },
+          reason: fields.rejectionReason ?? undefined, by: session.name,
+        },
       },
-    },
-  })
+    }),
+  ])
 
   apiLogger.info({ roadmapItemId: existing.id, changed: Object.keys(data) }, 'Roadmap item updated')
   return NextResponse.json(updated)

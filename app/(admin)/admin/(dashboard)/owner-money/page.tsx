@@ -16,6 +16,19 @@ export default async function OwnerMoneyPage() {
   const session = await getSession()
   const isOwner = session?.role === 'OWNER'
 
+  // Owner money is owner-only (personal cash is not manager business). Managers
+  // reaching this URL get a clear, non-leaky message instead of the ledger.
+  if (!isOwner) {
+    return (
+      <div>
+        <PageHeader title="Owner Money" subtitle="Diego & Sebastian personal money." />
+        <Card>
+          <Empty>This page is limited to owners. Ask Diego or Sebastian if you need something here.</Empty>
+        </Card>
+      </div>
+    )
+  }
+
   const [transactions, revenueAgg, expenseAgg, config, liveJobs] = await Promise.all([
     prisma.ownerTransaction.findMany({ orderBy: { occurredOn: 'desc' }, take: 200 }),
     prisma.payment.aggregate({ where: { status: 'COMPLETED', isInternalTest: false }, _sum: { amount: true } }),

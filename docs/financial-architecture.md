@@ -176,3 +176,63 @@ LLM *interprets* verified numbers into briefings → delivery via the existing
 Discord bot + admin page on a scheduled Railway job. **Read-only first release;
 every insight cites evidence; sensitive actions always require Diego or
 Sebastian; everything audited.**
+
+---
+
+## Increment 2.1 — enforcement hardening
+
+The increment-2 decisions above are unchanged. 2.1 turns the WORKER_PAY *hint*
+into server enforcement and adds finalized-record integrity.
+
+### WORKER_PAY is enforced server-side (not just a hint)
+`src/lib/worker-pay-guard.ts#evaluateWorkerPayExpense` (pure, tested) runs inside
+`POST /api/admin/expenses` on every create — a forged or scripted request cannot
+bypass it:
+- Non-`WORKER_PAY`, or `WORKER_PAY` on a job with **no** crew payroll (a real
+  non-crew helper) → allowed.
+- `WORKER_PAY` on a job that **already has crew payroll** → **blocked (422)** as
+  duplicate labor, unless an **OWNER** overrides with a **reason** (audited
+  `WORKER_PAY_OVERRIDE`). A MANAGER override is 403.
+
+The expense form also blocks submit + explains the rule, and the Action Center
+`worker-pay-double-count` reminder still flags any that predate enforcement.
+
+### Payroll settlement never touches profit (tested)
+Marking a `JobCrew` row `PAY_APPROVED → PAID` changes only cash-settlement state
+(status, paid date, method, reference). `computeJobProfit` does not read pay
+status, so job profit and the P&L are identical before and after payment —
+proven in `owner-ledger.test.ts` ("marking PAID must not create a second
+expense"). Labor is recognized once, when accrued.
+
+### Finalized financial records preserve history
+`src/lib/financial-adjust.ts` defines when a record is finalized. Today the only
+finalized financial record with an edit path is the **expense** (APPROVED /
+REIMBURSED). Changing its **amount or category** after finalization is an
+**owner-only adjustment** that **requires a reason** and writes a
+`FINANCIAL_ADJUSTMENT` audit row carrying **before → after** — never a silent
+overwrite. A no-op edit (same value) does not trigger the workflow. Crew-pay and
+payment edit UIs don't exist yet; their adjustment workflow lands here when they
+ship (roadmap: `payroll-editing-ui`, `payroll-payment-records`).
+
+### Refunds — current supported behavior
+`computeJobProfit` counts `REFUNDED` and `PARTIALLY_REFUNDED` payments as a cost
+(they reduce net profit) and excludes them from collected revenue. There is **no
+refund-initiation flow** in the admin — refunds are recorded as payment status
+in Stripe/webhooks, not issued from these pages. A full refund/authorization
+workflow (deposit refund, auth release, cash refund) is a roadmap item
+(`customers-balance-tracking`); it is **not** faked here.
+
+### Stripe states — what the app does and does not know
+The app knows a payment is captured revenue when it is `COMPLETED` and not an
+internal test (`isRealPayment`). It does **not** import Stripe payout/balance
+data, so "cash available" is an **estimate from the recorded ledger** (labeled as
+such on the Owner Money page), never a claim of the real bank or Stripe balance.
+Authorized-but-uncaptured holds are **not** counted as collected. Stripe payout
+reconciliation is a roadmap item.
+
+### Guardrail tests
+`owner-ledger.test.ts` + `worker-pay-guard.test.ts` + `financial-adjust.test.ts`
+assert: labor counted once, PAID creates no second expense, WORKER_PAY duplicate
+blocked, manager override forbidden, owner override needs a reason, contributions
+excluded from revenue, withdrawals excluded from expenses, rejected owner txns
+ignored, finalized-edit predicates.

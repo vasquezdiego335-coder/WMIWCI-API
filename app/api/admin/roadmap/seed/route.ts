@@ -4,15 +4,18 @@ import { prisma } from '@/lib/db'
 import { apiLogger } from '@/lib/logger'
 import { ROADMAP_SEED } from '@/lib/roadmap-seed'
 import { RoadmapCategory, RoadmapPriority, RoadmapStatus } from '@prisma/client'
+import { can, type Role } from '@/lib/permissions'
 
-// Idempotent roadmap seeding (increment 2): loads the known admin gaps as
-// structured items. seedKey uniqueness means re-running NEVER duplicates and
-// NEVER overwrites owner edits — only missing keys are inserted.
+// Idempotent roadmap seeding (increment 2, owner-only in 2.1): loads the known
+// admin gaps as structured items. seedKey uniqueness means re-running NEVER
+// duplicates and NEVER overwrites owner edits — only missing keys are inserted.
+// createMany(skipDuplicates) makes concurrent seed requests safe too.
 
 export async function POST(): Promise<NextResponse> {
   const session = await getSession()
-  if (!session || !['OWNER', 'MANAGER'].includes(session.role)) {
-    return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
+  if (!session) return NextResponse.json({ error: 'Authentication required' }, { status: 401 })
+  if (!can(session.role as Role, 'roadmap.seed')) {
+    return NextResponse.json({ error: 'Only an owner can load the roadmap seed.' }, { status: 403 })
   }
 
   const existing = await prisma.roadmapItem.findMany({

@@ -134,6 +134,37 @@ enum AuditAction {
   REMINDER_UPDATED
   ROADMAP_CREATED
   ROADMAP_UPDATED
+  // ── Hardening (increment 2.1, owner spec 2026-07-13) ──
+  REMINDER_DISMISSED
+  REMINDER_RESTORED
+  FINANCIAL_ADJUSTMENT
+  WORKER_PAY_OVERRIDE
+}
+
+// ── Hardening enums (increment 2.1) ──────────────────────────────────────────
+
+enum ScanStatus {
+  RUNNING
+  COMPLETED
+  FAILED
+  SKIPPED
+}
+
+enum ScanTrigger {
+  MANUAL
+  SCHEDULED
+  API
+  PAGE_LOAD
+}
+
+// Dismissal scope (owner spec 2.1): OCCURRENCE reopens if the condition clears
+// and returns OR the entity materially changes; UNTIL_ENTITY_CHANGES reopens
+// only when the fingerprint changes; PERMANENT_RULE_ENTITY never reopens
+// automatically (owner-only, reason required, restorable).
+enum DismissalScope {
+  OCCURRENCE
+  UNTIL_ENTITY_CHANGES
+  PERMANENT_RULE_ENTITY
 }
 
 // ── Action Center enums (increment 2). "Critical / Due Today / Upcoming /
@@ -1100,15 +1131,64 @@ model Reminder {
   startedAt        DateTime?        @map("started_at")
   resolvedAt       DateTime?        @map("resolved_at")
   dismissedAt      DateTime?        @map("dismissed_at")
-  createdAt        DateTime         @default(now()) @map("created_at")
-  updatedAt        DateTime         @updatedAt @map("updated_at")
+
+  // ── Lifecycle & accountability (increment 2.1) — all nullable/defaulted ──
+  //    entityFingerprint = deterministic hash of the candidate's material state
+  //    (severity + dueAt + description). A dismissal with OCCURRENCE or
+  //    UNTIL_ENTITY_CHANGES scope reopens when it changes. dismissalScope drives
+  //    whether a dismissed reminder can ever return.
+  assignedAt        DateTime?       @map("assigned_at")
+  assignedByName    String?         @map("assigned_by_name")
+  claimedById       String?         @map("claimed_by_id")
+  claimedByName     String?         @map("claimed_by_name")
+  claimedAt         DateTime?       @map("claimed_at")
+  completedById     String?         @map("completed_by_id")
+  completedByName   String?         @map("completed_by_name")
+  dismissalScope    DismissalScope? @map("dismissal_scope")
+  dismissedById     String?         @map("dismissed_by_id")
+  dismissedByName   String?         @map("dismissed_by_name")
+  entityFingerprint String?         @map("entity_fingerprint")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
 
   @@index([status])
   @@index([severity])
   @@index([category])
   @@index([dueAt])
   @@index([assignedOwner])
+  @@index([sourceEntityType, sourceEntityId])
   @@map("reminders")
+}
+
+/// Reminder scan run metadata (increment 2.1). Every full Action Center scan
+/// records a row so the UI can show the last successful / last failed scan, the
+/// current running state, and per-scan counts. A Postgres advisory lock (see
+/// src/lib/scan-lock.ts) prevents two scans from overlapping; a RUNNING row
+/// older than the stale timeout is treated as crashed.
+model ScanRun {
+  id                String      @id @default(cuid())
+  status            ScanStatus  @default(RUNNING)
+  trigger           ScanTrigger
+  startedAt         DateTime    @default(now()) @map("started_at")
+  completedAt       DateTime?   @map("completed_at")
+  durationMs        Int?        @map("duration_ms")
+  triggeredById     String?     @map("triggered_by_id")
+  triggeredByName   String?     @map("triggered_by_name")
+  rulesEvaluated    Int?        @map("rules_evaluated")
+  entitiesEvaluated Int?        @map("entities_evaluated")
+  remindersCreated  Int?        @map("reminders_created")
+  remindersUpdated  Int?        @map("reminders_updated")
+  remindersReopened Int?        @map("reminders_reopened")
+  remindersResolved Int?        @map("reminders_resolved")
+  remindersSkipped  Int?        @map("reminders_skipped")
+  errorCount        Int         @default(0) @map("error_count")
+  errorSummary      String?     @map("error_summary") // sanitized — never secrets/PII
+  worker            String? // process/service identifier when known
+
+  @@index([status])
+  @@index([startedAt])
+  @@map("scan_runs")
 }
 
 /// Ideas & Roadmap item (increment 2). Structured product/business planning —
