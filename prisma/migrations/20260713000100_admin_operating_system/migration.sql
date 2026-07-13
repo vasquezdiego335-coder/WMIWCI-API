@@ -74,31 +74,33 @@ ALTER TABLE "job_crew"
   ADD COLUMN IF NOT EXISTS "pay_notes" TEXT;
 
 -- ── expenses (job-linked OR general business) ───────────────────────────────
-CREATE TABLE IF NOT EXISTS "expenses" (
-    "id" TEXT NOT NULL,
-    "amount" INTEGER NOT NULL,
-    "incurred_on" TIMESTAMP(3) NOT NULL,
-    "category" "ExpenseCategory" NOT NULL,
-    "vendor" TEXT,
-    "payment_method" "PaymentMethod",
-    "paid_by" TEXT,
-    "booking_id" TEXT,
-    "purpose" TEXT,
-    "receipt_url" TEXT,
-    "receipt_public_id" TEXT,
-    "reimbursable" BOOLEAN NOT NULL DEFAULT false,
-    "status" "ExpenseStatus" NOT NULL DEFAULT 'SUBMITTED',
-    "notes" TEXT,
-    "created_by_id" TEXT,
-    "created_by_name" TEXT,
-    "created_at" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    "updated_at" TIMESTAMP(3) NOT NULL,
-    CONSTRAINT "expenses_pkey" PRIMARY KEY ("id")
-);
-CREATE INDEX IF NOT EXISTS "expenses_booking_id_idx" ON "expenses"("booking_id");
-CREATE INDEX IF NOT EXISTS "expenses_category_idx" ON "expenses"("category");
-CREATE INDEX IF NOT EXISTS "expenses_status_idx" ON "expenses"("status");
-CREATE INDEX IF NOT EXISTS "expenses_incurred_on_idx" ON "expenses"("incurred_on");
+DO $$ BEGIN
+  CREATE TABLE "expenses" (
+      "id" TEXT NOT NULL,
+      "amount" INTEGER NOT NULL,
+      "incurred_on" TIMESTAMP(3) NOT NULL,
+      "category" "ExpenseCategory" NOT NULL,
+      "vendor" TEXT,
+      "payment_method" "PaymentMethod",
+      "paid_by" TEXT,
+      "booking_id" TEXT,
+      "purpose" TEXT,
+      "receipt_url" TEXT,
+      "receipt_public_id" TEXT,
+      "reimbursable" BOOLEAN NOT NULL DEFAULT false,
+      "status" "ExpenseStatus" NOT NULL DEFAULT 'SUBMITTED',
+      "notes" TEXT,
+      "created_by_id" TEXT,
+      "created_by_name" TEXT,
+      "created_at" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      "updated_at" TIMESTAMP(3) NOT NULL,
+      CONSTRAINT "expenses_pkey" PRIMARY KEY ("id")
+  );
+  CREATE INDEX "expenses_booking_id_idx" ON "expenses"("booking_id");
+  CREATE INDEX "expenses_category_idx" ON "expenses"("category");
+  CREATE INDEX "expenses_status_idx" ON "expenses"("status");
+  CREATE INDEX "expenses_incurred_on_idx" ON "expenses"("incurred_on");
+EXCEPTION WHEN duplicate_table THEN null; END $$;
 
 DO $$ BEGIN
   ALTER TABLE "expenses" ADD CONSTRAINT "expenses_booking_id_fkey"
@@ -106,63 +108,69 @@ DO $$ BEGIN
 EXCEPTION WHEN duplicate_object THEN null; END $$;
 
 -- ── owner_transactions (Diego / Sebastian personal money) ───────────────────
-CREATE TABLE IF NOT EXISTS "owner_transactions" (
-    "id" TEXT NOT NULL,
-    "owner" "TaskOwner" NOT NULL,
-    "amount" INTEGER NOT NULL,
-    "type" "OwnerTransactionType" NOT NULL,
-    "occurred_on" TIMESTAMP(3) NOT NULL,
-    "payment_method" "PaymentMethod",
-    "explanation" TEXT,
-    "receipt_url" TEXT,
-    "receipt_public_id" TEXT,
-    "approval_status" "ApprovalStatus" NOT NULL DEFAULT 'PENDING',
-    "booking_id" TEXT,
-    "created_by_id" TEXT,
-    "created_by_name" TEXT,
-    "created_at" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    "updated_at" TIMESTAMP(3) NOT NULL,
-    CONSTRAINT "owner_transactions_pkey" PRIMARY KEY ("id")
-);
-CREATE INDEX IF NOT EXISTS "owner_transactions_owner_idx" ON "owner_transactions"("owner");
-CREATE INDEX IF NOT EXISTS "owner_transactions_type_idx" ON "owner_transactions"("type");
-CREATE INDEX IF NOT EXISTS "owner_transactions_occurred_on_idx" ON "owner_transactions"("occurred_on");
+DO $$ BEGIN
+  CREATE TABLE "owner_transactions" (
+      "id" TEXT NOT NULL,
+      "owner" "TaskOwner" NOT NULL,
+      "amount" INTEGER NOT NULL,
+      "type" "OwnerTransactionType" NOT NULL,
+      "occurred_on" TIMESTAMP(3) NOT NULL,
+      "payment_method" "PaymentMethod",
+      "explanation" TEXT,
+      "receipt_url" TEXT,
+      "receipt_public_id" TEXT,
+      "approval_status" "ApprovalStatus" NOT NULL DEFAULT 'PENDING',
+      "booking_id" TEXT,
+      "created_by_id" TEXT,
+      "created_by_name" TEXT,
+      "created_at" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      "updated_at" TIMESTAMP(3) NOT NULL,
+      CONSTRAINT "owner_transactions_pkey" PRIMARY KEY ("id")
+  );
+  CREATE INDEX "owner_transactions_owner_idx" ON "owner_transactions"("owner");
+  CREATE INDEX "owner_transactions_type_idx" ON "owner_transactions"("type");
+  CREATE INDEX "owner_transactions_occurred_on_idx" ON "owner_transactions"("occurred_on");
+EXCEPTION WHEN duplicate_table THEN null; END $$;
 
 -- ── leads (sales pipeline + marketing-source attribution) ───────────────────
-CREATE TABLE IF NOT EXISTS "leads" (
-    "id" TEXT NOT NULL,
-    "name" TEXT NOT NULL,
-    "phone" TEXT,
-    "email" TEXT,
-    "source" "LeadSource" NOT NULL DEFAULT 'OTHER',
-    "status" "LeadStatus" NOT NULL DEFAULT 'NEW',
-    "lost_reason" "LeadLostReason",
-    "estimated_value" INTEGER,
-    "job_type" TEXT,
-    "move_date" TIMESTAMP(3),
-    "zip" TEXT,
-    "notes" TEXT,
-    "assigned_to" TEXT,
-    "converted_booking_id" TEXT,
-    "contacted_at" TIMESTAMP(3),
-    "quoted_at" TIMESTAMP(3),
-    "booked_at" TIMESTAMP(3),
-    "lost_at" TIMESTAMP(3),
-    "created_at" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    "updated_at" TIMESTAMP(3) NOT NULL,
-    CONSTRAINT "leads_pkey" PRIMARY KEY ("id")
-);
-CREATE INDEX IF NOT EXISTS "leads_status_idx" ON "leads"("status");
-CREATE INDEX IF NOT EXISTS "leads_source_idx" ON "leads"("source");
-CREATE INDEX IF NOT EXISTS "leads_created_at_idx" ON "leads"("created_at");
+DO $$ BEGIN
+  CREATE TABLE "leads" (
+      "id" TEXT NOT NULL,
+      "name" TEXT NOT NULL,
+      "phone" TEXT,
+      "email" TEXT,
+      "source" "LeadSource" NOT NULL DEFAULT 'OTHER',
+      "status" "LeadStatus" NOT NULL DEFAULT 'NEW',
+      "lost_reason" "LeadLostReason",
+      "estimated_value" INTEGER,
+      "job_type" TEXT,
+      "move_date" TIMESTAMP(3),
+      "zip" TEXT,
+      "notes" TEXT,
+      "assigned_to" TEXT,
+      "converted_booking_id" TEXT,
+      "contacted_at" TIMESTAMP(3),
+      "quoted_at" TIMESTAMP(3),
+      "booked_at" TIMESTAMP(3),
+      "lost_at" TIMESTAMP(3),
+      "created_at" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      "updated_at" TIMESTAMP(3) NOT NULL,
+      CONSTRAINT "leads_pkey" PRIMARY KEY ("id")
+  );
+  CREATE INDEX "leads_status_idx" ON "leads"("status");
+  CREATE INDEX "leads_source_idx" ON "leads"("source");
+  CREATE INDEX "leads_created_at_idx" ON "leads"("created_at");
+EXCEPTION WHEN duplicate_table THEN null; END $$;
 
 -- ── business_config (single row: ownership split + cash reserves) ───────────
-CREATE TABLE IF NOT EXISTS "business_config" (
-    "id" TEXT NOT NULL DEFAULT 'singleton',
-    "diego_split_percent" INTEGER NOT NULL DEFAULT 50,
-    "sebastian_split_percent" INTEGER NOT NULL DEFAULT 50,
-    "tax_reserve_percent" INTEGER NOT NULL DEFAULT 25,
-    "emergency_reserve_cents" INTEGER NOT NULL DEFAULT 0,
-    "updated_at" TIMESTAMP(3) NOT NULL,
-    CONSTRAINT "business_config_pkey" PRIMARY KEY ("id")
-);
+DO $$ BEGIN
+  CREATE TABLE "business_config" (
+      "id" TEXT NOT NULL DEFAULT 'singleton',
+      "diego_split_percent" INTEGER NOT NULL DEFAULT 50,
+      "sebastian_split_percent" INTEGER NOT NULL DEFAULT 50,
+      "tax_reserve_percent" INTEGER NOT NULL DEFAULT 25,
+      "emergency_reserve_cents" INTEGER NOT NULL DEFAULT 0,
+      "updated_at" TIMESTAMP(3) NOT NULL,
+      CONSTRAINT "business_config_pkey" PRIMARY KEY ("id")
+  );
+EXCEPTION WHEN duplicate_table THEN null; END $$;
