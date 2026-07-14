@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { getSession } from '@/lib/auth'
 import { prisma } from '@/lib/db'
 import { z } from 'zod'
+import { normalizeBookingReference } from '@/lib/booking-reference'
 
 const QuerySchema = z.object({
   status: z.string().optional(),
@@ -29,13 +30,25 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
   const where: any = {}
   if (q.status) where.status = q.status
   if (q.customer) {
-    where.customer = {
-      OR: [
-        { name: { contains: q.customer, mode: 'insensitive' } },
-        { email: { contains: q.customer, mode: 'insensitive' } },
-        { phone: { contains: q.customer } },
-      ],
+    // One search box → matches customer name/email/phone, the public reference
+    // (WMIC-####, with or without dash/case/prefix), the legacy display id, and
+    // the internal cuid. Reference match is exact; a bare number like "1042" is
+    // normalised to WMIC-1042 before lookup.
+    const term = q.customer.trim()
+    const ref = normalizeBookingReference(term)
+    const or: any[] = [
+      { customer: { name: { contains: term, mode: 'insensitive' } } },
+      { customer: { email: { contains: term, mode: 'insensitive' } } },
+      { customer: { phone: { contains: term } } },
+      { displayId: { equals: term } },
+      { id: { equals: term } },
+    ]
+    if (ref) {
+      or.push({ bookingReference: { equals: ref } }, { displayId: { equals: ref } })
+    } else if (/wmic/i.test(term)) {
+      or.push({ bookingReference: { contains: term.toUpperCase() } })
     }
+    where.OR = or
   }
   if (q.date) {
     const d = new Date(q.date)

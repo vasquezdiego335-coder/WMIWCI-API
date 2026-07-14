@@ -405,7 +405,13 @@ model Customer {
 
 model Booking {
   id             String        @id @default(cuid())
-  displayId      String        @unique @default(cuid()) @map("display_id") // human-friendly
+  displayId      String        @unique @default(cuid()) @map("display_id") // mirrors bookingReference for back-compat
+  // Public, human-friendly booking reference (WMIC-####). Backed by an atomic
+  // Postgres sequence (booking_reference_seq) so concurrent inserts can never
+  // collide; assigned once at creation and never changed. The internal cuid `id`
+  // stays the private key used for all relationships/joins/webhooks. Nullable so
+  // historical/internal-test rows may stay unreferenced. See src/lib/booking-reference.ts.
+  bookingReference String?     @unique @map("booking_reference")
   status         BookingStatus @default(DRAFT)
   outboxState    BookingState? @map("outbox_state") // src/outbox email state machine (additive, nullable)
   // Owner checkout tests (mirrors Payment.isInternalTest). EXCLUDED from every

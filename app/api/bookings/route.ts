@@ -10,6 +10,8 @@ import { verifyAddress, type VerifiedAddress } from '@/lib/address-verify'
 import { assessAddress } from '@/lib/address'
 import { ELEVATOR_LABELS, PARKING_LABELS, BUILDING_LABELS } from '@/lib/booking-display'
 import { etDateTimeToInstant } from '@/lib/scheduling'
+import { computeEstimate, MOVE_SIZES } from '@/lib/estimate'
+import { nextBookingReference } from '@/lib/booking-reference'
 
 const TRUCK_PICKUP_RETURN_AMOUNT_CENTS = 5000
 
@@ -201,17 +203,10 @@ const BookingSchema = z.object({
     .optional(),
 })
 
-const SERVICE_MAP: Record<string, { label: string; price: number }> = {
-  'little-studio': { label: 'Little Studio', price: 359 },
-  'half-studio': { label: 'Half Studio', price: 409 },
-  'full-studio': { label: 'Full Studio', price: 509 },
-  '1br': { label: '1 Bedroom', price: 599 },
-  '2br': { label: '2 Bedrooms', price: 699 },
-  '3br': { label: '3 Bedrooms', price: 949 },
-  '4br': { label: '4 Bedrooms', price: 1249 },
-  '5br': { label: '5 Bedrooms', price: 1549 },
-  'not-sure': { label: 'Need a Quote', price: 0 },
-}
+// Move-size flat prices live in the canonical estimate module (the ONE table
+// the form mirrors + the estimate tests pin). Aliased so existing references
+// keep working without a second copy that could drift.
+const SERVICE_MAP = MOVE_SIZES
 
 const TRUCK_LABELS: Record<string, string> = {
   'own-truck': 'Customer provides truck ($0)',
@@ -268,13 +263,13 @@ function buildDescription(
   }
   if (accessLines.length) {
     lines.push(...accessLines)
-    lines.push('Note: Stairs, long walks, and heavy items may add an extra fee.')
+    lines.push('Note: access conditions above are included in the estimated total.')
   }
-  // Owner-facing snapshot of the estimate the CUSTOMER saw (display only —
-  // pricing stays server-computed in baseRate/totalEstimate).
+  // The SERVER-computed estimate (source of truth, identical to the form headline
+  // and every downstream surface). Access add-ons are already folded into total.
   if (typeof estimate?.total === 'number' && estimate.total > 0) {
-    const addons = typeof estimate.addons === 'number' && estimate.addons > 0 ? ` (includes $${estimate.addons} access add-ons)` : ''
-    lines.push(`Customer-side estimate: $${estimate.total}${addons}`)
+    const addons = typeof estimate.addons === 'number' && estimate.addons > 0 ? ` (incl. $${estimate.addons} access add-ons)` : ''
+    lines.push(`Estimated moving total: $${estimate.total}${addons}`)
   }
   if (jobDetails?.trim()) lines.push(`Notes: ${jobDetails.trim()}`)
   return lines.join('\n')
@@ -426,6 +421,27 @@ async function handleBooking(req: NextRequest): Promise<NextResponse> {
 
   const requestedDate = buildRequestedDate(data.date, data.time)
   const truckAddonDueOnMoveDay = data.truckOption === 'truck-pickup-return'
+  const svc = SERVICE_MAP[data.serviceType]
+
+  // ── SERVER-COMPUTED estimate (source of truth). The client-submitted
+  //    estimateTotal/estimateAddons are IGNORED for pricing — recomputed here
+  //    from validated inputs so the form headline, DB, admin, Discord, emails,
+  //    SMS and Stripe metadata all show the SAME number. Access add-ons are
+  //    INCLUDED in the total (labor difficulty); travel + truck are labelled
+  //    due-on-move-day. This is the fix for the "$699 form vs $599 email" bug. ──
+  const est = computeEstimate({
+    serviceType: data.serviceType,
+    stairs: data.stairs,
+    longWalk: data.longWalk,
+    heavyItems: data.heavyItems,
+    elevatorAccess: data.elevatorAccess,
+    parkingDistance: data.parkingDistance,
+    buildingYear: data.buildingYear,
+    travelFeeCents,
+    truckAddonDueOnMoveDay,
+  })
+  const totalEstimateValue = svc ? est.estimatedTotal : est.estimatedTotal > 0 ? est.estimatedTotal : null
+
   const itemsDescription = buildDescription(
     data.serviceType,
     data.truckOption,
@@ -438,7 +454,7 @@ async function handleBooking(req: NextRequest): Promise<NextResponse> {
       parkingDistance: data.parkingDistance,
       buildingYear: data.buildingYear,
     },
-    { total: data.estimateTotal, addons: data.estimateAddons },
+    { total: est.estimatedTotal, addons: est.accessAddons },
   )
     + (data.source ? `\nSource: ${data.source}` : '')
     + (data.photos?.length ? `\n📷 ${data.photos.length} job photo(s) attached — view in admin/portal` : '')
@@ -448,12 +464,18 @@ async function handleBooking(req: NextRequest): Promise<NextResponse> {
     + ((data.pickupAddresses ?? []).slice(1).map(formatAddr).filter(Boolean).length
         ? `\nAdditional pickup(s): ${(data.pickupAddresses ?? []).slice(1).map(formatAddr).filter(Boolean).join(' | ')}`
         : '')
-  const svc = SERVICE_MAP[data.serviceType]
   const tokenExpiry = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000)
+
+  // Public reference (WMIC-####) from the atomic sequence — assigned once, never
+  // changes. Mirrored into displayId so every existing customer/owner surface
+  // shows the friendly reference; the internal cuid `id` is untouched.
+  const bookingReference = await nextBookingReference()
 
   const booking = await prisma.booking.create({
     data: {
       customerId: customer.id,
+      bookingReference,
+      displayId: bookingReference,
       status: 'DRAFT',
       originAddress: originDisplay || 'Provided at confirmation',
       destAddress: destDisplay || 'Provided at confirmation',
@@ -494,8 +516,11 @@ async function handleBooking(req: NextRequest): Promise<NextResponse> {
       truckAddonDueOnMoveDay,
       truckAddonAmount: truckAddonDueOnMoveDay ? TRUCK_PICKUP_RETURN_AMOUNT_CENTS : 0,
       baseRate: svc?.price ?? null,
-      // Move-day total = base labor + travel fee (NY/manual stay pending -> fee 0 here).
-      totalEstimate: svc?.price != null ? svc.price + travelFeeUsd : travelFeeUsd || null,
+      // Estimated moving total = base labor + access add-ons + travel fee — the
+      // SAME value the form headline shows (computeEstimate). Access add-ons used
+      // to be dropped here, which is what made the email/DB read $599 while the
+      // form showed $699.
+      totalEstimate: totalEstimateValue,
       // ── Service area (server-computed; travel fee is due on move day, not in Stripe) ──
       serviceAreaZone: (sa?.zone ?? null) as any,
       travelFee: travelFeeCents,
@@ -536,6 +561,16 @@ async function handleBooking(req: NextRequest): Promise<NextResponse> {
       agreementAccepted: true,
       agreementVersion: AGREEMENT_VERSION,
       agreementName: data.agreementName,
+      // Server-computed estimate on the payment (owner/finance traceability).
+      // bookingReference is added below once the booking row exists.
+      extraMetadata: {
+        bookingReference: booking.bookingReference ?? '',
+        estimatedTotal: String(est.estimatedTotal),
+        accessAddons: String(est.accessAddons),
+        travelFeeDollars: String(est.travel),
+        truckAddonDollars: String(est.truckAddon),
+        dueOnMoveDayDollars: String(est.dueOnMoveDay),
+      },
     })
   } catch (err) {
     apiLogger.error({ err, bookingId: booking.id }, 'Failed to create Stripe checkout')
@@ -612,6 +647,8 @@ async function handleBooking(req: NextRequest): Promise<NextResponse> {
 
   return NextResponse.json({
     bookingId: booking.id,
+    // Public reference (WMIC-####) — the id customers/owners/support should use.
+    bookingReference: booking.bookingReference,
     displayId: booking.displayId,
     // Stripe Checkout URL — returned under every key any caller might read,
     // so a frontend expecting `url`, `checkoutUrl`, or `stripeUrl` all redirect.

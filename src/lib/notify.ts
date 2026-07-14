@@ -25,8 +25,10 @@ import { normalizeLocale, t, BIZ_NAME, type Locale } from './i18n'
 
 const log = apiLogger.child({ mod: 'notify' })
 
-// Internal recipients (the business). E.164 phone + an inbox you watch.
-const OWNER_PHONE = process.env.OWNER_PHONE?.trim() || ''
+// Owner alerts are delivered via DISCORD (the actionable approval card, posted
+// when payment completes) plus a lightweight email trail below. There is
+// intentionally NO owner SMS — Diego & Sebastian are notified on Discord, so
+// OWNER_PHONE is unused and NOT required (a missing value is not a defect).
 const OWNER_EMAIL = process.env.OWNER_EMAIL?.trim() || ''
 // Customer auto-reply is ON unless explicitly disabled.
 const CUSTOMER_AUTOREPLY = process.env.CUSTOMER_AUTOREPLY_ENABLED !== 'false'
@@ -98,10 +100,6 @@ function table(rows: Array<[string, string | undefined]>): string {
 }
 
 // ── message builders (pure — exported for unit tests) ─────────────────
-export function ownerLeadSms(l: LeadInput): string {
-  return `🟢 New lead: ${dash(l.name)} · ${dash(l.phone)} · ${attribution(l.source, l.foundUs)}`
-}
-
 export function ownerLeadEmailHtml(l: LeadInput): string {
   return (
     `<h2 style="font-family:system-ui,Arial,sans-serif">New lead</h2>` +
@@ -141,15 +139,6 @@ function travelFeeText(b: BookingInput): string {
   return b.travelFee > 0 ? `$${b.travelFee} (due on move day)` : 'none'
 }
 
-export function ownerBookingSms(b: BookingInput): string {
-  const zone = b.serviceAreaZone ? ` · ${zoneLabel(b.serviceAreaZone)}` : ''
-  const review = b.manualReviewRequired ? ' ⚠ MANUAL REVIEW' : ''
-  return (
-    `🟠 New booking started: ${dash(b.name)} · ${dash(b.serviceType)}` +
-    ` · ${dash(b.displayId)} · ${attribution(b.source, b.foundUs)}${zone}${review}`
-  )
-}
-
 export function ownerBookingEmailHtml(b: BookingInput): string {
   return (
     `<h2 style="font-family:system-ui,Arial,sans-serif">New booking started</h2>` +
@@ -182,11 +171,6 @@ async function sendEmail(to: string, subject: string, html: string, replyTo?: st
   if (error) throw new Error(`resend: ${error.message ?? JSON.stringify(error)}`)
 }
 
-async function ownerSms(message: string, label: string): Promise<void> {
-  if (!OWNER_PHONE) return void log.warn({ label }, 'OWNER_PHONE not set — skipping owner SMS')
-  await safe(`sms:${label}`, () => smsQueue.add(label, { to: OWNER_PHONE, message }))
-}
-
 async function ownerEmail(subject: string, html: string, label: string, replyTo?: string): Promise<void> {
   if (!OWNER_EMAIL) return void log.warn({ label }, 'OWNER_EMAIL not set — skipping owner email')
   await safe(`email:${label}`, () => sendEmail(OWNER_EMAIL, subject, html, replyTo))
@@ -198,8 +182,8 @@ async function ownerEmail(subject: string, html: string, label: string, replyTo?
 export async function notifyLead(input: LeadInput): Promise<void> {
   const locale = normalizeLocale(input.locale)
 
-  // Owner alert — reply-to is the lead's email so you can reply straight back.
-  await ownerSms(ownerLeadSms(input), 'owner-lead-alert')
+  // Owner alert — email trail only (owners act on Discord; no owner SMS).
+  // reply-to is the lead's email so you can reply straight back.
   await ownerEmail(`New lead: ${dash(input.name)}`, ownerLeadEmailHtml(input), 'owner-lead-alert', input.email)
 
   // Customer auto-reply (flag-gated; only when we have contact info).
@@ -220,7 +204,9 @@ export async function notifyLead(input: LeadInput): Promise<void> {
  *  the existing FINAL CONFIRMATION when payment completes, so we don't text
  *  people who are still mid-checkout. */
 export async function notifyBookingCreated(input: BookingInput): Promise<void> {
-  await ownerSms(ownerBookingSms(input), 'owner-booking-alert')
+  // Owner alert = email trail only. The actionable owner notification is the
+  // Discord approval card posted when payment completes (fulfillment.ts). There
+  // is no owner SMS — OWNER_PHONE is unused.
   await ownerEmail(
     `New booking: ${dash(input.name)} (${dash(input.displayId)})`,
     ownerBookingEmailHtml(input),

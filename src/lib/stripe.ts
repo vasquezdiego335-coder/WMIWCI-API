@@ -63,7 +63,11 @@ export async function createBookingCheckout(params: {
   agreementAccepted?: boolean
   agreementVersion?: string
   agreementName?: string
+  /** Extra string metadata mirrored onto BOTH the Checkout Session and the
+   *  PaymentIntent (e.g. bookingReference, the server-computed estimate). */
+  extraMetadata?: Record<string, string>
 }): Promise<Stripe.Checkout.Session> {
+  const extra = params.extraMetadata ?? {}
   return getStripeClient().checkout.sessions.create({
     mode: 'payment',
     customer_email: params.customerEmail,
@@ -75,6 +79,7 @@ export async function createBookingCheckout(params: {
       metadata: {
         bookingId: params.bookingId,
         customerName: params.customerName,
+        ...extra,
       },
     },
     line_items: [
@@ -97,6 +102,7 @@ export async function createBookingCheckout(params: {
       agreementAccepted: params.agreementAccepted ? 'true' : 'false',
       agreementVersion: params.agreementVersion ?? '',
       agreementName: (params.agreementName ?? '').slice(0, 200),
+      ...extra,
     },
     expires_at: Math.floor(Date.now() / 1000) + 30 * 60,
     success_url: params.successUrl,
