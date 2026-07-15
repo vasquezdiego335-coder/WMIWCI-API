@@ -102,6 +102,8 @@ enum AuditAction {
   BOOKING_DETAILS_UPDATED
   PAYMENT_RECEIVED
   PAYMENT_FAILED
+  PAYMENT_REFUNDED
+  PAYMENT_DISPUTED
   DISCOUNT_APPLIED
   DISCOUNT_APPROVED
   DISCOUNT_DENIED
@@ -698,6 +700,12 @@ model Payment {
   description           String?
   receiptUrl            String?       @map("receipt_url")
   metadata              Json?
+  // ── Refund + dispute tracking (additive; money truth stays in `status`).
+  //    Cumulative refunded cents (monotonic); dispute id + raw Stripe status. ──
+  refundedAmountCents   Int?          @map("refunded_amount_cents")
+  stripeRefundId        String?       @map("stripe_refund_id")
+  stripeDisputeId       String?       @map("stripe_dispute_id")
+  disputeStatus         String?       @map("dispute_status")
   createdAt             DateTime      @default(now()) @map("created_at")
   updatedAt             DateTime      @updatedAt @map("updated_at")
 
