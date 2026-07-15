@@ -4,6 +4,7 @@ import { timingSafeEqual } from 'crypto'
 import { notifyLead } from '@/lib/notify'
 import { apiLogger } from '@/lib/logger'
 import { rateLimit, tooManyRequests, LIMITS, clientIp } from '@/lib/rate-limit'
+import { ingestLeadSafe } from '@/lib/leads'
 
 // ════════════════════════════════════════════════════════════════════════
 //  POST /api/notify/lead — internal, server-to-server.
@@ -69,6 +70,11 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   }
 
   const d = parsed.data
+  // Persist to the admin Lead table BEFORE notifying (marketing tracker feed).
+  await ingestLeadSafe(
+    { name: d.name, phone: d.phone, email: d.email, message: d.message, source: d.source ?? 'marketing-tracker', foundUs: d.found_us },
+    'notify-lead',
+  )
   try {
     // notifyLead is internally guarded (each send is non-fatal); this await just
     // ensures the work is done before the serverless function freezes.

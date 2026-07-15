@@ -1094,6 +1094,22 @@ model Lead {
   notes              String?
   assignedTo         String?         @map("assigned_to")
   convertedBookingId String?         @map("converted_booking_id") // plain reference
+
+  // ── Ingestion + attribution (createOrUpdateLead, 2026-07-15) — all nullable,
+  //    additive. Populated by the shared lead-ingestion service from the contact
+  //    form, coupon popup, "not sure" bookings, and the marketing tracker. ──
+  message        String?
+  originCity     String?   @map("origin_city")
+  destCity       String?   @map("dest_city")
+  utmSource      String?   @map("utm_source")
+  utmMedium      String?   @map("utm_medium")
+  utmCampaign    String?   @map("utm_campaign")
+  utmContent     String?   @map("utm_content")
+  utmTerm        String?   @map("utm_term")
+  landingPage    String?   @map("landing_page")
+  referrer       String?
+  promoCode      String?   @map("promo_code")
+  lastActivityAt DateTime? @map("last_activity_at")
   contactedAt        DateTime?       @map("contacted_at")
   quotedAt           DateTime?       @map("quoted_at")
   bookedAt           DateTime?       @map("booked_at")
@@ -1104,6 +1120,9 @@ model Lead {
   @@index([status])
   @@index([source])
   @@index([createdAt])
+  @@index([email])
+  @@index([phone])
+  @@index([lastActivityAt])
   @@map("leads")
 }
 

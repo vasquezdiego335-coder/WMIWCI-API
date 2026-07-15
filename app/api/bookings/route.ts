@@ -13,6 +13,7 @@ import { etDateTimeToInstant } from '@/lib/scheduling'
 import { computeEstimate, MOVE_SIZES } from '@/lib/estimate'
 import { nextBookingReference } from '@/lib/booking-reference'
 import { rateLimit, tooManyRequests, LIMITS, clientIp } from '@/lib/rate-limit'
+import { ingestLeadSafe } from '@/lib/leads'
 
 const TRUCK_PICKUP_RETURN_AMOUNT_CENTS = 5000
 
@@ -651,6 +652,25 @@ async function handleBooking(req: NextRequest): Promise<NextResponse> {
     })
   } catch (err) {
     apiLogger.error({ err, bookingId: booking.id }, 'owner booking alert failed (non-fatal)')
+  }
+
+  // ── "Not sure which service" = a quote request. Also drop it into the Lead
+  //    pipeline so it is tracked as a lead, not just an unpriced booking. Non-fatal. ──
+  if (data.serviceType === 'not-sure') {
+    await ingestLeadSafe(
+      {
+        name: data.fullName,
+        email: data.email,
+        phone: data.phone,
+        source: data.source ?? 'website',
+        foundUs: data.foundUs,
+        jobType: 'quote-request',
+        moveDate: requestedDate,
+        originCity: data.pickupAddresses?.[0]?.city ?? undefined,
+        destCity: data.destinationAddress?.city ?? undefined,
+      },
+      'not-sure-booking',
+    )
   }
 
   return NextResponse.json({
