@@ -9,48 +9,15 @@ const PROTECTED_ROUTES: { pattern: RegExp; roles: UserRole[] }[] = [
   { pattern: /^\/api\/files\/upload/, roles: [UserRole.OWNER, UserRole.MANAGER, UserRole.CREW] },
 ]
 
-// ── Rate limiting — simple in-memory counter ──────────────────
-const ipCounts = new Map<string, { count: number; resetAt: number }>()
-
-function checkRateLimit(ip: string, max: number, windowMs: number): boolean {
-  const now = Date.now()
-  const entry = ipCounts.get(ip)
-
-  if (!entry || entry.resetAt < now) {
-    ipCounts.set(ip, { count: 1, resetAt: now + windowMs })
-    return true
-  }
-  if (entry.count >= max) return false
-  entry.count++
-  return true
-}
-
-// ── Rate limit configs per route type ────────────────────────
-function getRateLimitConfig(pathname: string): { max: number; window: number } | null {
-  if (pathname.startsWith('/api/auth/login')) {
-    return { max: parseInt(process.env.RATE_LIMIT_LOGIN ?? '10', 10), window: 15 * 60 * 1000 }
-  }
-  if (pathname.startsWith('/api/bookings') && !pathname.includes('/admin')) {
-    return { max: parseInt(process.env.RATE_LIMIT_BOOKING ?? '5', 10), window: 60 * 60 * 1000 }
-  }
-  return null
-}
+// ── Rate limiting ─────────────────────────────────────────────
+// Distributed, per-route rate limiting now lives in src/lib/rate-limit.ts and is
+// enforced INSIDE each sensitive route handler (login, bookings, contact,
+// notify/lead). The old in-memory limiter here was dead: its configured paths
+// (/api/auth/login, /api/bookings) were never in the `matcher` below, and a
+// per-instance Map does not hold across Railway/serverless instances anyway.
 
 export async function middleware(req: NextRequest): Promise<NextResponse> {
   const { pathname } = req.nextUrl
-  const ip = req.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ?? '127.0.0.1'
-
-  // ── Rate limiting ─────────────────────────────────────────
-  const rateConfig = getRateLimitConfig(pathname)
-  if (rateConfig) {
-    const allowed = checkRateLimit(ip, rateConfig.max, rateConfig.window)
-    if (!allowed) {
-      return NextResponse.json(
-        { error: 'Too many requests. Please slow down.' },
-        { status: 429, headers: { 'Retry-After': '60' } }
-      )
-    }
-  }
 
   // ── Skip webhooks entirely ────────────────────────────────
   if (

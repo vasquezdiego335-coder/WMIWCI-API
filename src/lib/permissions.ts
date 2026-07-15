@@ -48,6 +48,10 @@ export type Action =
   | 'payroll.edit_hours'
   | 'payroll.approve'
   | 'payroll.mark_paid'
+  // Bookings
+  | 'booking.approve' // approve a PENDING_APPROVAL booking (captures the $49 hold)
+  | 'booking.decline' // decline/deny before capture (releases the hold)
+  | 'booking.test_payment' // create a controlled internal test booking (staging only)
   // System
   | 'audit.view'
 
@@ -66,6 +70,14 @@ const OWNER_ONLY: Action[] = [
   'payroll.approve',
   'payroll.mark_paid',
   'audit.view',
+  // Approving a booking CAPTURES the $49 hold — that is moving money, so it is
+  // OWNER-only by decision (owner spec 2026-07-15: do not automatically grant
+  // future MANAGER users capture authority). Diego and Sebastian are both OWNER,
+  // so this restricts nobody today. To let managers approve, remove this line.
+  // `booking.decline` is intentionally NOT here: releasing an uncaptured hold
+  // moves no money, so it stays OWNER + MANAGER (operations).
+  'booking.approve',
+  'booking.test_payment',
 ]
 
 // Everything not owner-only is available to OWNER + MANAGER. CREW has no admin

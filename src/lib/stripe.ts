@@ -66,8 +66,16 @@ export async function createBookingCheckout(params: {
   /** Extra string metadata mirrored onto BOTH the Checkout Session and the
    *  PaymentIntent (e.g. bookingReference, the server-computed estimate). */
   extraMetadata?: Record<string, string>
+  /** CONTROLLED-TEST ONLY. When set, this exact cent amount is authorized instead
+   *  of BOOKING_FEE_CENTS — deliberately bypassing the $49 floor. This is passed
+   *  ONLY by the owner-only, env-gated /api/admin/test-booking endpoint; the
+   *  public booking flow never sets it, so a real customer is always the $49 floor. */
+  amountCentsOverride?: number
 }): Promise<Stripe.Checkout.Session> {
   const extra = params.extraMetadata ?? {}
+  const unitAmount = params.amountCentsOverride && params.amountCentsOverride > 0 ? params.amountCentsOverride : BOOKING_FEE_CENTS
+  const isTest = !!params.amountCentsOverride
+  const amountLabel = `$${(unitAmount / 100).toFixed(2)}`
   return getStripeClient().checkout.sessions.create({
     mode: 'payment',
     customer_email: params.customerEmail,
@@ -87,17 +95,17 @@ export async function createBookingCheckout(params: {
         quantity: 1,
         price_data: {
           currency: 'usd',
-          unit_amount: BOOKING_FEE_CENTS,
+          unit_amount: unitAmount,
           product_data: {
-            name: 'Moving Service Booking Hold',
-            description: `$49 authorized today — held, not charged until we approve - ${params.description}`,
+            name: isTest ? 'CONTROLLED TEST — Booking Hold' : 'Moving Service Booking Hold',
+            description: `${amountLabel} authorized today — held, not charged until we approve - ${params.description}`,
           },
         },
       },
     ],
     metadata: {
       bookingId: params.bookingId,
-      amountType: 'booking_fee',
+      amountType: isTest ? 'controlled_test' : 'booking_fee',
       // ── Moving Service Agreement (legal traceability on the payment) ──
       agreementAccepted: params.agreementAccepted ? 'true' : 'false',
       agreementVersion: params.agreementVersion ?? '',

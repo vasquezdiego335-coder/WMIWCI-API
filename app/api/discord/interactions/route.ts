@@ -12,11 +12,10 @@ import {
   overdueTasks,
   type Embed,
 } from "@/bot/task-service";
-import { captureDeposit, cancelDeposit, retrieveChargeForIntent } from "@/lib/stripe";
-import { emailQueue, smsQueue } from "@/lib/queues";
+import { approveBooking, declineBooking } from "@/lib/booking-approval";
 import { offerRescheduleToCustomer } from "@/lib/reschedule";
 import { t } from "@/lib/i18n";
-import { formatEastern, confirmationScheduleData } from "@/lib/scheduling";
+import { formatEastern } from "@/lib/scheduling";
 import { authorizeOwnerAction, type DiscordActor } from "@/lib/discord-auth";
 import { decideDiscount, type DiscountAction } from "@/lib/discount-decision";
 import { accessSections } from "@/lib/booking-access";
@@ -29,7 +28,7 @@ import {
 } from "@/lib/booking-display";
 import { resolveWaiting, feeDollars, WAITING_GRACE_MINUTES } from "@/lib/waiting-time";
 import { apiLogger } from "@/lib/logger";
-import { outboxEnabled, emitApproved, emitRescheduleRequested } from "@/outbox/integration";
+import { outboxEnabled, emitRescheduleRequested } from "@/outbox/integration";
 
 export const runtime = "nodejs";
 
@@ -65,14 +64,6 @@ function verifyDiscordSignature(
 
 const ephemeral = (content: string) =>
   NextResponse.json({ type: RES_REPLY, data: { content, flags: FLAG_EPHEMERAL } });
-
-// Don't let a Redis stall blow Discord's 3-second interaction deadline.
-function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
-  return Promise.race([
-    p,
-    new Promise<T>((_, reject) => setTimeout(() => reject(new Error(`timeout after ${ms}ms`)), ms)),
-  ]);
-}
 
 type CardBooking = {
   displayId: string;
@@ -164,324 +155,51 @@ function offeredCard(
 }
 
 // ── approve_booking:<id> → capture the $49 hold → CONFIRMED → notify ───────
+// Delegates to the ONE shared approval service (src/lib/booking-approval.ts) so
+// Discord and the admin portal capture + confirm through byte-identical logic.
 async function handleApprove(bookingId: string | undefined, messageId: string | undefined, actor: DiscordActor) {
   const approverName = actor.username;
-  // Load by the clicked card's message id (canonical), falling back to the id
-  // carried in the button's custom_id.
-  const booking = await prisma.booking.findFirst({
-    where: {
-      OR: [
-        ...(messageId ? [{ discordApprovalMessageId: messageId }] : []),
-        ...(bookingId ? [{ id: bookingId }] : []),
-      ],
-    },
-    include: { customer: true },
+  const result = await approveBooking({
+    bookingId,
+    discordMessageId: messageId,
+    // discord-auth already gated this interaction to owners.
+    actor: { name: approverName, discordUserId: actor.userId, role: "OWNER" },
+    source: "discord",
   });
 
-  if (!booking) return ephemeral("⚠️ Booking not found for this card.");
-
-  // Idempotent: a second click just re-shows the confirmed card.
-  if (booking.status === "CONFIRMED") {
-    return NextResponse.json({ type: RES_UPDATE_MESSAGE, data: confirmedCard(booking, approverName) });
-  }
-  if (booking.status !== "PENDING_APPROVAL") {
-    return ephemeral(`⚠️ Can't approve a booking in ${booking.status}.`);
-  }
-  if (!booking.stripePaymentIntentId) {
-    return ephemeral("⚠️ No payment hold attached — nothing to capture.");
-  }
-
-  // 1) CONCURRENCY GUARD — atomically CLAIM the PENDING_APPROVAL → CONFIRMED
-  //    transition BEFORE touching Stripe. Postgres serializes this conditional
-  //    UPDATE, so of two simultaneous approvals exactly one gets count === 1 and
-  //    proceeds to capture; the loser gets count === 0 and bails out. This is
-  //    what guarantees the $49 is captured at most once. The move-date fields are
-  //    written in the same claim so a CONFIRMED booking is immediately schedulable
-  //    (scheduledStart is what the daily digest + dashboards query on).
-  const sched = confirmationScheduleData(booking);
-  const claim = await prisma.booking.updateMany({
-    where: { id: booking.id, status: "PENDING_APPROVAL" },
-    data: { status: "CONFIRMED", depositPaid: true, ...(sched ?? {}) },
-  });
-  if (claim.count === 0) {
-    // Lost the race (or the booking moved). Re-read and respond honestly.
-    const fresh = await prisma.booking.findUnique({ where: { id: booking.id }, include: { customer: true } });
-    if (fresh?.status === "CONFIRMED") {
-      return NextResponse.json({ type: RES_UPDATE_MESSAGE, data: confirmedCard(fresh, approverName) });
+  if (!result.ok) {
+    if (result.code === "raced") {
+      return ephemeral("⏳ This booking was just handled by another owner — no action taken.");
     }
-    return ephemeral("⏳ This booking was just handled by another owner — no action taken.");
+    return ephemeral(`⚠️ ${result.message}`);
   }
 
-  // 2) We own the transition — capture the held $49. The idempotency key (keyed
-  //    on the payment intent) means even a pathological double-run collapses into
-  //    a single charge at Stripe.
-  let pi;
-  try {
-    pi = await captureDeposit(booking.stripePaymentIntentId, `capture:${booking.stripePaymentIntentId}`);
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    apiLogger.error({ bookingId: booking.id, err: msg }, "captureDeposit failed — rolling back approval claim");
-    // Roll the claim back so the booking can be approved again once Stripe is
-    // healthy. Guarded on status === CONFIRMED so we never stomp a later change.
-    await prisma.booking
-      .updateMany({
-        where: { id: booking.id, status: "CONFIRMED" },
-        data: { status: "PENDING_APPROVAL", depositPaid: false, confirmedDate: null, scheduledStart: null, scheduledEnd: null },
-      })
-      .catch((rbErr) =>
-        apiLogger.error(
-          { bookingId: booking.id, err: rbErr instanceof Error ? rbErr.message : String(rbErr) },
-          "✖ CRITICAL: failed to roll back approval claim after Stripe error — booking may be CONFIRMED without capture"
-        )
-      );
-    return ephemeral(`⚠️ Stripe capture failed: ${msg}. The hold was NOT captured — try again.`);
-  }
-  const capturedCents = pi.amount_received ?? pi.amount ?? booking.depositAmount;
-
-  // 2b) Pull the resulting Charge for the hosted receipt URL + charge id +
-  //     payment method. Best-effort (never blocks approval): the record is nicer
-  //     with it, and it unlocks the "🧾 Customer Receipt" button + View Full
-  //     Booking. Stripe also emails the customer their receipt from this charge.
-  const charge = await retrieveChargeForIntent(pi).catch(() => null);
-  const receiptUrl = charge?.receipt_url ?? null;
-  const stripeChargeId =
-    charge?.id ?? (typeof pi.latest_charge === "string" ? pi.latest_charge : pi.latest_charge?.id) ?? null;
-  const paymentMethodType = charge?.payment_method_details?.type ?? null;
-  const stripeCustomerId =
-    typeof pi.customer === "string" ? pi.customer : pi.customer?.id ?? null;
-  // Only present values (string-only) so this is a clean Prisma JSON input.
-  const paymentMeta: Record<string, string> = { capturedBy: approverName };
-  if (paymentMethodType) paymentMeta.paymentMethodType = paymentMethodType;
-  if (stripeCustomerId) paymentMeta.stripeCustomerId = stripeCustomerId;
-  if (booking.stripeCheckoutId) paymentMeta.stripeCheckoutId = booking.stripeCheckoutId;
-  // Mirror the PaymentIntent's own metadata (esp. internal_test) so revenue
-  // reporting classifies owner checkout tests without a manual backfill.
-  for (const [k, v] of Object.entries(pi.metadata ?? {})) {
-    if (typeof v === "string" && paymentMeta[k] == null) paymentMeta[k] = v;
-  }
-  const isInternalTest = (pi.metadata?.internal_test ?? "") === "true";
-
-  // 3) Record the payment + create the Job record + audit (atomic). The booking
-  //    status/date fields were already set by the claim in step 1.
-  await prisma.$transaction([
-    prisma.payment.create({
-      data: {
-        bookingId: booking.id,
-        stripePaymentIntentId: pi.id,
-        stripeChargeId,
-        amount: capturedCents,
-        status: "COMPLETED",
-        description: "Booking deposit captured on approval",
-        receiptUrl,
-        metadata: paymentMeta,
-        isInternalTest,
-      },
-    }),
-    prisma.job.upsert({
-      where: { bookingId: booking.id },
-      update: { status: "SCHEDULED" },
-      create: { bookingId: booking.id, status: "SCHEDULED" },
-    }),
-    prisma.auditLog.create({
-      data: {
-        action: "PAYMENT_RECEIVED",
-        bookingId: booking.id,
-        details: {
-          event: "approve_booking",
-          discordUserId: actor.userId ?? null,
-          approvedBy: approverName,
-          previousStatus: "PENDING_APPROVAL",
-          newStatus: "CONFIRMED",
-          captured: capturedCents,
-          paymentIntentId: pi.id,
-          stripeResult: "captured",
-          result: "success",
-        },
-      },
-    }),
-  ]);
-
-  // 4) Queue the approval customer messages — the premium FINAL CONFIRMATION
-  //    email ("your booking is approved") + the approval SMS. This fires only
-  //    now, after the owner approved and the $49 was captured, so the message
-  //    matches the true booking state. Non-fatal + timeout-guarded so a Redis
-  //    stall can't blow Discord's 3s interaction window.
-  const locale = booking.customer.locale;
-  const when = booking.requestedDate;
-  const dateStr = when ? formatEastern(when) : "your move date";
-  const appUrl = process.env.APP_URL ?? "https://wmiwci-api.vercel.app";
-  const portalUrl = `${appUrl}/my-booking/${booking.customerToken}`;
-  try {
-    await withTimeout(
-      (async () => {
-        // OUTBOX_ENABLED → emit APPROVED to the outbox (which sends the email)
-        // and SKIP the legacy email here, so the customer never gets both.
-        if (outboxEnabled()) {
-          apiLogger.info({ bookingId: booking.id, to: booking.customer.email }, "[outbox] emitting APPROVED (legacy approval email skipped)");
-          await emitApproved({
-            bookingId: booking.id,
-            approvedBy: approverName,
-            customerName: booking.customer.name,
-            customerEmail: booking.customer.email,
-            requestedDate: when?.toISOString() ?? null,
-            items: booking.itemsDescription ?? undefined,
-          });
-        } else {
-          apiLogger.info({ bookingId: booking.id, to: booking.customer.email }, "[messaging] queueing FINAL CONFIRMATION email");
-          await emailQueue.add("final-confirmation", {
-            template: "final-confirmation",
-            to: booking.customer.email,
-            bookingId: booking.id,
-            payload: {
-              customerName: booking.customer.name,
-              displayId: booking.displayId,
-              date: when?.toISOString(),
-              timeLabel: booking.arrivalWindow ?? undefined,
-              amountPaid: String(Math.round(capturedCents / 100)),
-              originAddress: booking.originAddress ?? undefined,
-              destAddress: booking.destAddress ?? undefined,
-              estimate: booking.totalEstimate != null ? `$${Math.round(booking.totalEstimate).toLocaleString("en-US")}` : undefined,
-              portalUrl,
-              serviceAreaZone: booking.serviceAreaZone ?? undefined,
-              travelFee: booking.travelFee ? booking.travelFee / 100 : undefined,
-              manualReviewRequired: booking.manualReviewRequired ?? undefined,
-              locale,
-            },
-          });
-        }
-        if (booking.customer.phone) {
-          apiLogger.info({ bookingId: booking.id }, "[messaging] queueing PRE-APPROVAL sms");
-          await smsQueue.add("pre-approval-sms", {
-            to: booking.customer.phone,
-            message: t(locale, "preApproval", {
-              name: booking.customer.name,
-              displayId: booking.displayId,
-              date: dateStr,
-            }),
-            bookingId: booking.id,
-          });
-        }
-      })(),
-      2500
-    );
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    apiLogger.error({ bookingId: booking.id, err: msg }, "pre-approval notifications failed/timeout (non-fatal)");
-  }
-
-  apiLogger.info(
-    { bookingId: booking.id, captured: capturedCents, approvedBy: approverName },
-    "Booking approved → $49 captured → CONFIRMED"
-  );
-
-  // 5) Edit the Discord card in place (with a receipt link when Stripe gave one).
+  // Render the confirmed card from the (pre-claim) booking snapshot.
   return NextResponse.json({
     type: RES_UPDATE_MESSAGE,
-    data: confirmedCard(booking, approverName, capturedCents, receiptUrl),
+    data: confirmedCard(result.booking, approverName, result.capturedCents ?? undefined, result.receiptUrl),
   });
 }
 
 // ── deny_booking:<id> → release the hold → CANCELLED → notify ──────────────
+// Delegates to the ONE shared declineBooking service so Discord and the admin
+// portal release the hold + cancel + send the declined email identically.
 async function handleDeny(bookingId: string | undefined, messageId: string | undefined, actor: DiscordActor) {
   const approverName = actor.username;
-  const booking = await prisma.booking.findFirst({
-    where: {
-      OR: [
-        ...(messageId ? [{ discordApprovalMessageId: messageId }] : []),
-        ...(bookingId ? [{ id: bookingId }] : []),
-      ],
-    },
-    include: { customer: true },
+  const result = await declineBooking({
+    bookingId,
+    discordMessageId: messageId,
+    actor: { name: approverName, discordUserId: actor.userId, role: "OWNER" },
+    source: "discord",
   });
 
-  if (!booking) return ephemeral("⚠️ Booking not found for this card.");
-
-  // Idempotent: a second click just re-shows the denied card.
-  if (booking.status === "CANCELLED") {
-    return NextResponse.json({ type: RES_UPDATE_MESSAGE, data: deniedCard(booking, approverName) });
-  }
-  if (booking.status === "CONFIRMED") {
-    return ephemeral("⚠️ Already approved & captured — issue a refund instead of denying.");
-  }
-  if (!["PENDING_APPROVAL", "PENDING_PAYMENT", "DRAFT"].includes(booking.status)) {
-    return ephemeral(`⚠️ Can't deny a booking in ${booking.status}.`);
-  }
-
-  // CONCURRENCY GUARD — atomically CLAIM the transition to CANCELLED among the
-  // deny-able statuses. Of two simultaneous clicks exactly one wins; the loser is
-  // told it was already handled (so a deny can't race an approve into a bad mix).
-  const previousStatus = booking.status;
-  const claim = await prisma.booking.updateMany({
-    where: { id: booking.id, status: { in: ["PENDING_APPROVAL", "PENDING_PAYMENT", "DRAFT"] } },
-    data: { status: "CANCELLED" },
-  });
-  if (claim.count === 0) {
-    const fresh = await prisma.booking.findUnique({ where: { id: booking.id }, include: { customer: true } });
-    if (fresh?.status === "CANCELLED") {
-      return NextResponse.json({ type: RES_UPDATE_MESSAGE, data: deniedCard(fresh, approverName) });
+  if (!result.ok) {
+    if (result.code === "raced") {
+      return ephemeral("⏳ This booking was just handled by another owner — no action taken.");
     }
-    return ephemeral("⏳ This booking was just handled by another owner — no action taken.");
+    return ephemeral(`⚠️ ${result.message}`);
   }
-
-  // Release the authorization (no money moves). Tolerate an already-void PI.
-  let stripeResult = "no_hold";
-  if (booking.stripePaymentIntentId) {
-    try {
-      await cancelDeposit(booking.stripePaymentIntentId);
-      stripeResult = "hold_released";
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      stripeResult = `release_failed: ${msg.slice(0, 80)}`;
-      apiLogger.warn({ bookingId: booking.id, err: msg }, "cancelDeposit failed (continuing — hold may already be void)");
-    }
-  }
-
-  await prisma.auditLog.create({
-    data: {
-      action: "BOOKING_STATE_CHANGED",
-      bookingId: booking.id,
-      details: {
-        event: "deny_booking",
-        discordUserId: actor.userId ?? null,
-        deniedBy: approverName,
-        previousStatus,
-        newStatus: "CANCELLED",
-        stripeResult,
-        result: "success",
-      },
-    },
-  });
-
-  // MESSAGING: send the BOOKING DECLINED email — the hold was released above, so
-  // the customer is told honestly that their request wasn't accepted and they
-  // were not charged. Guarded so a Redis stall can't blow Discord's 3s window.
-  if (booking.customer.email) {
-    try {
-      await withTimeout(
-        emailQueue.add("booking-declined", {
-          template: "booking-declined",
-          to: booking.customer.email,
-          bookingId: booking.id,
-          payload: {
-            customerName: booking.customer.name,
-            displayId: booking.displayId,
-            requestedDate: booking.requestedDate?.toISOString(),
-            amountHold: String(Math.round(booking.depositAmount / 100)),
-            rebookUrl: `${(process.env.APP_URL ?? "https://moveitclearit.com").replace(/\/+$/, "")}/book`,
-            locale: booking.customer.locale,
-          },
-        }),
-        2500
-      );
-    } catch (err) {
-      apiLogger.error({ bookingId: booking.id, err: err instanceof Error ? err.message : String(err) }, "declined email enqueue failed (non-fatal)");
-    }
-  }
-  apiLogger.info(
-    { bookingId: booking.id, deniedBy: approverName },
-    "Booking denied → hold released → CANCELLED → declined email queued"
-  );
-  return NextResponse.json({ type: RES_UPDATE_MESSAGE, data: deniedCard(booking, approverName) });
+  return NextResponse.json({ type: RES_UPDATE_MESSAGE, data: deniedCard(result.booking, approverName) });
 }
 
 // ── offer_reschedule:<id> → reuse the shared offer logic → update card ─────
