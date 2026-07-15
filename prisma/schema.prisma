@@ -102,6 +102,8 @@ enum AuditAction {
   BOOKING_DETAILS_UPDATED
   PAYMENT_RECEIVED
   PAYMENT_FAILED
+  PAYMENT_REFUNDED
+  PAYMENT_DISPUTED
   DISCOUNT_APPLIED
   DISCOUNT_APPROVED
   DISCOUNT_DENIED
@@ -698,6 +700,12 @@ model Payment {
   description           String?
   receiptUrl            String?       @map("receipt_url")
   metadata              Json?
+  // ── Refund + dispute tracking (additive; money truth stays in `status`).
+  //    Cumulative refunded cents (monotonic); dispute id + raw Stripe status. ──
+  refundedAmountCents   Int?          @map("refunded_amount_cents")
+  stripeRefundId        String?       @map("stripe_refund_id")
+  stripeDisputeId       String?       @map("stripe_dispute_id")
+  disputeStatus         String?       @map("dispute_status")
   createdAt             DateTime      @default(now()) @map("created_at")
   updatedAt             DateTime      @updatedAt @map("updated_at")
 
@@ -1094,6 +1102,22 @@ model Lead {
   notes              String?
   assignedTo         String?         @map("assigned_to")
   convertedBookingId String?         @map("converted_booking_id") // plain reference
+
+  // ── Ingestion + attribution (createOrUpdateLead, 2026-07-15) — all nullable,
+  //    additive. Populated by the shared lead-ingestion service from the contact
+  //    form, coupon popup, "not sure" bookings, and the marketing tracker. ──
+  message        String?
+  originCity     String?   @map("origin_city")
+  destCity       String?   @map("dest_city")
+  utmSource      String?   @map("utm_source")
+  utmMedium      String?   @map("utm_medium")
+  utmCampaign    String?   @map("utm_campaign")
+  utmContent     String?   @map("utm_content")
+  utmTerm        String?   @map("utm_term")
+  landingPage    String?   @map("landing_page")
+  referrer       String?
+  promoCode      String?   @map("promo_code")
+  lastActivityAt DateTime? @map("last_activity_at")
   contactedAt        DateTime?       @map("contacted_at")
   quotedAt           DateTime?       @map("quoted_at")
   bookedAt           DateTime?       @map("booked_at")
@@ -1104,6 +1128,9 @@ model Lead {
   @@index([status])
   @@index([source])
   @@index([createdAt])
+  @@index([email])
+  @@index([phone])
+  @@index([lastActivityAt])
   @@map("leads")
 }
 

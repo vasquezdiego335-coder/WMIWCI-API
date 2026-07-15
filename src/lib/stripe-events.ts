@@ -24,11 +24,13 @@
 //     • src/worker-host.ts                (Railway worker — optional endpoint)
 // ════════════════════════════════════════════════════════════════════════
 import Stripe from 'stripe'
+import type { PaymentStatus } from '@prisma/client'
 import { constructWebhookEvent } from './stripe'
 import { prisma } from './db'
 import { discordQueue, webhookRetryQueue } from './queues'
 import { fulfillPaidCheckout } from './fulfillment'
 import { webhookLogger } from './logger'
+import { refundPatch, disputeOutcome, disputeIsAlertable } from './payment-events'
 
 export type StripeWebhookResult = {
   status: 200 | 400 | 500
@@ -160,6 +162,19 @@ export async function processStripeEventJob(event: Stripe.Event): Promise<void> 
   }
 }
 
+/** Locate a Payment by its Stripe intent id (preferred) or charge id. */
+async function findPaymentByStripeIds(intentId: string | null, chargeId: string | null) {
+  if (intentId) {
+    const p = await prisma.payment.findUnique({ where: { stripePaymentIntentId: intentId } })
+    if (p) return p
+  }
+  if (chargeId) {
+    const p = await prisma.payment.findUnique({ where: { stripeChargeId: chargeId } })
+    if (p) return p
+  }
+  return null
+}
+
 /**
  * The business switch: turn a verified Stripe event into side-effects.
  */
@@ -224,6 +239,98 @@ export async function handleStripeEvent(event: Stripe.Event): Promise<void> {
       const bookingId = session.metadata?.bookingId
       if (!bookingId) return
       webhookLogger.info({ bookingId }, 'Checkout session expired')
+      break
+    }
+
+    case 'charge.refunded': {
+      const charge = event.data.object as Stripe.Charge
+      const intentId = typeof charge.payment_intent === 'string' ? charge.payment_intent : charge.payment_intent?.id ?? null
+      const payment = await findPaymentByStripeIds(intentId, charge.id)
+      if (!payment) {
+        webhookLogger.warn({ chargeId: charge.id, intentId }, 'charge.refunded for an unknown payment — logged only')
+        break
+      }
+      const latestRefundId = charge.refunds?.data?.[0]?.id ?? null
+      // amount_refunded is CUMULATIVE — refundPatch is monotonic + replay-safe.
+      const patch = refundPatch(
+        { amount: payment.amount, refundedAmountCents: payment.refundedAmountCents, status: payment.status },
+        charge.amount_refunded,
+        latestRefundId,
+      )
+      await prisma.payment.update({ where: { id: payment.id }, data: { ...patch, status: patch.status as PaymentStatus } })
+      await prisma.auditLog.create({
+        data: {
+          action: 'PAYMENT_REFUNDED',
+          bookingId: payment.bookingId,
+          details: {
+            chargeId: charge.id,
+            paymentIntentId: intentId,
+            amountRefunded: charge.amount_refunded,
+            capturedAmount: payment.amount,
+            newStatus: patch.status,
+            refundId: latestRefundId,
+          },
+        },
+      })
+      webhookLogger.info({ paymentId: payment.id, amountRefunded: charge.amount_refunded, status: patch.status }, 'refund recorded')
+      break
+    }
+
+    case 'charge.dispute.created':
+    case 'charge.dispute.updated':
+    case 'charge.dispute.closed': {
+      const dispute = event.data.object as Stripe.Dispute
+      const intentId = typeof dispute.payment_intent === 'string' ? dispute.payment_intent : dispute.payment_intent?.id ?? null
+      const chargeId = typeof dispute.charge === 'string' ? dispute.charge : dispute.charge?.id ?? null
+      const payment = await findPaymentByStripeIds(intentId, chargeId)
+      const phase = event.type === 'charge.dispute.created' ? 'created' : event.type === 'charge.dispute.closed' ? 'closed' : 'updated'
+      const outcome = disputeOutcome(dispute.status)
+      if (payment) {
+        // Dispute state is tracked ALONGSIDE money truth — status is untouched.
+        await prisma.payment.update({
+          where: { id: payment.id },
+          data: { stripeDisputeId: dispute.id, disputeStatus: dispute.status },
+        })
+        await prisma.auditLog.create({
+          data: {
+            action: 'PAYMENT_DISPUTED',
+            bookingId: payment.bookingId,
+            details: { disputeId: dispute.id, phase, status: dispute.status, outcome, amount: dispute.amount, chargeId, paymentIntentId: intentId },
+          },
+        })
+      } else {
+        webhookLogger.warn({ disputeId: dispute.id, intentId, chargeId }, 'dispute for an unknown payment — logged only')
+      }
+      // Surface disputes prominently — owners act in Discord.
+      if (disputeIsAlertable(dispute.status, phase)) {
+        const title = phase === 'closed'
+          ? (outcome === 'won' ? '✅ Dispute WON' : outcome === 'lost' ? '🚨 Dispute LOST' : '⚖️ Dispute closed')
+          : '🚨 Payment Dispute Opened'
+        await discordQueue
+          .add('failure-alert', {
+            type: 'failure-alert',
+            bookingId: payment?.bookingId,
+            payload: {
+              title,
+              message: `${title}\n${payment ? `Booking payment ${payment.bookingId}` : `Charge ${chargeId ?? dispute.id}`}\nStatus: ${dispute.status}\nAmount: $${(dispute.amount / 100).toFixed(2)}\nDispute: ${dispute.id}`,
+            },
+          })
+          .catch((err) => webhookLogger.error({ err: err instanceof Error ? err.message : String(err) }, 'dispute Discord alert enqueue failed (non-fatal)'))
+      }
+      break
+    }
+
+    case 'payment_intent.canceled': {
+      const pi = event.data.object as Stripe.PaymentIntent
+      const payment = await findPaymentByStripeIds(pi.id, null)
+      // A released authorization (deny-before-capture) usually has NO Payment row.
+      if (payment && payment.status !== 'COMPLETED' && payment.status !== 'REFUNDED') {
+        await prisma.auditLog.create({
+          data: { action: 'PAYMENT_FAILED', bookingId: payment.bookingId, details: { paymentIntentId: pi.id, reason: 'payment_intent.canceled (authorization released)' } },
+        })
+      } else {
+        webhookLogger.info({ paymentIntentId: pi.id }, 'payment_intent.canceled (no captured payment to update)')
+      }
       break
     }
 

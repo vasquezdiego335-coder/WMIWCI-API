@@ -37,8 +37,14 @@ export default async function AdminStaff() {
           <h1 style={h1}>Staff</h1>
           <p style={subtitle}>{staff.length} team members</p>
         </div>
+        {/* The secure invite flow (expiring one-time token, owner-only, single
+            use, audit-logged) is not built yet. Until then this shows a disabled
+            chip instead of a link to a 404. Team members are currently added via
+            the `npm run hash-password` + seed script. */}
         {isOwner && (
-          <a href="/admin/staff/invite" style={inviteBtn}>+ Invite team member</a>
+          <span style={{ ...inviteBtn, opacity: 0.5, cursor: 'not-allowed' }} title="Invite flow coming soon — add team members via the setup script for now" aria-disabled="true">
+            + Invite team member (soon)
+          </span>
         )}
       </div>
 

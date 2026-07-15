@@ -5,6 +5,7 @@ import { emailQueue } from '@/lib/queues'
 import { apiLogger } from '@/lib/logger'
 import { onBookingCompleted } from '@/lib/followups'
 import { confirmationScheduleData } from '@/lib/scheduling'
+import { approveBooking, declineBooking } from '@/lib/booking-approval'
 import { z } from 'zod'
 
 const VALID_TRANSITIONS: Record<string, string[]> = {
@@ -36,6 +37,45 @@ export async function POST(req: NextRequest, { params }: { params: { id: string 
   const allowed = VALID_TRANSITIONS[booking.status] ?? []
   if (!allowed.includes(newStatus)) {
     return NextResponse.json({ error: `Cannot transition from ${booking.status} to ${newStatus}` }, { status: 422 })
+  }
+
+  // ── PENDING_APPROVAL → CONFIRMED goes through the ONE shared approval service
+  //    (src/lib/booking-approval.ts). It CAPTURES the $49 hold, records the
+  //    Payment, upserts the Job, writes the audit log, and sends the customer
+  //    confirmation — byte-identical to the Discord approve path. A bare status
+  //    flip here used to skip the capture entirely, so an admin-confirmed
+  //    booking could leave the authorization to expire (money lost). ──
+  if (booking.status === 'PENDING_APPROVAL' && newStatus === 'CONFIRMED') {
+    const result = await approveBooking({
+      bookingId: params.id,
+      actor: { name: session.name, userId: session.userId, role: session.role },
+      source: 'admin',
+    })
+    if (!result.ok) {
+      const status = result.code === 'forbidden' ? 403 : result.code === 'capture_failed' ? 502 : 409
+      return NextResponse.json({ error: result.message }, { status })
+    }
+    const updated = await prisma.booking.findUnique({ where: { id: params.id } })
+    return NextResponse.json(updated)
+  }
+
+  // ── PENDING_APPROVAL → CANCELLED goes through the shared decline service so the
+  //    uncaptured $49 hold is RELEASED (not left to expire) and the customer gets
+  //    the booking-declined email — identical to the Discord "Deny" button. Other
+  //    cancellations (e.g. CONFIRMED → CANCELLED, already captured) fall through to
+  //    the generic path below, which sends the cancellation email. ──
+  if (booking.status === 'PENDING_APPROVAL' && newStatus === 'CANCELLED') {
+    const result = await declineBooking({
+      bookingId: params.id,
+      actor: { name: session.name, userId: session.userId, role: session.role },
+      source: 'admin',
+    })
+    if (!result.ok) {
+      const status = result.code === 'forbidden' ? 403 : 409
+      return NextResponse.json({ error: result.message }, { status })
+    }
+    const updated = await prisma.booking.findUnique({ where: { id: params.id } })
+    return NextResponse.json(updated)
   }
 
   const data: Record<string, unknown> = { status: newStatus }

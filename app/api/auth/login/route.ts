@@ -4,6 +4,7 @@ import { z } from 'zod'
 import { prisma } from '@/lib/db'
 import { signToken, setSessionCookie } from '@/lib/auth'
 import { authLogger } from '@/lib/logger'
+import { rateLimit, tooManyRequests, LIMITS, clientIp } from '@/lib/rate-limit'
 import { prisma as db } from '@/lib/db'
 
 const LoginSchema = z.object({
@@ -13,6 +14,13 @@ const LoginSchema = z.object({
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
   const ip = req.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ?? 'unknown'
+
+  const rl = await rateLimit(LIMITS.login, [clientIp(req)])
+  if (!rl.ok) {
+    authLogger.warn({ ip, degraded: rl.degraded }, 'login rate-limited')
+    return tooManyRequests(rl)
+  }
+
 
   let body: unknown
   try {
