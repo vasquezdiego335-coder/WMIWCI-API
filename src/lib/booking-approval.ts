@@ -37,7 +37,7 @@
 // ════════════════════════════════════════════════════════════════════════
 import type { BookingStatus } from '@prisma/client'
 import { prisma } from './db'
-import { captureDeposit, retrieveChargeForIntent } from './stripe'
+import { captureDeposit, cancelDeposit, retrieveChargeForIntent } from './stripe'
 import { emailQueue, smsQueue } from './queues'
 import { confirmationScheduleData, formatEastern } from './scheduling'
 import { t } from './i18n'
@@ -159,15 +159,29 @@ export interface ApprovalStore {
   reloadStatus(bookingId: string): Promise<ApprovableBooking | null>
   /** Payment upsert + Job upsert + AuditLog in ONE transaction. */
   commitApproval(args: CommitArgs): Promise<void>
+  /** Atomic claim of a deny-able booking → CANCELLED; returns rows changed. */
+  claimCancel(bookingId: string): Promise<number>
+  /** AuditLog for a decline (BOOKING_STATE_CHANGED). */
+  recordDecline(args: DeclineCommitArgs): Promise<void>
 }
 
 export interface ApprovalStripeGateway {
   capture(paymentIntentId: string, idempotencyKey: string): Promise<CapturedIntent>
   retrieveCharge(intent: CapturedIntent): Promise<ChargeInfo | null>
+  /** Cancel (release) an uncaptured authorization. Tolerates an already-void PI. */
+  releaseHold(paymentIntentId: string): Promise<void>
 }
 
 export interface ApprovalNotifier {
   sendApproved(booking: ApprovableBooking, capturedCents: number, approvedBy: string): Promise<void>
+  /** Booking-declined email: hold released, customer not charged. */
+  sendDeclined(booking: ApprovableBooking): Promise<void>
+}
+
+export type DeclineCommitArgs = {
+  bookingId: string
+  auditUserId: string | null
+  auditDetails: Record<string, unknown>
 }
 
 export interface ApprovalLogger {
@@ -337,6 +351,118 @@ function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
   ])
 }
 
+// ── Decline (release the uncaptured hold) ─────────────────────────────────────
+//    The mirror of approveBooking. Both the Discord "Deny" button and the admin
+//    portal's cancel-of-a-pending-booking call this so a declined booking ALWAYS
+//    releases the Stripe authorization instead of leaving the customer's card on
+//    hold for ~7 days. A CONFIRMED (already-captured) booking is NOT declinable
+//    here — that needs a refund, not a hold release.
+
+export type DeclineErrorCode = 'not_found' | 'forbidden' | 'invalid_status' | 'raced'
+
+export type DeclineResult =
+  | { ok: true; outcome: 'declined' | 'already_cancelled'; booking: ApprovableBooking; holdReleased: boolean }
+  | { ok: false; code: DeclineErrorCode; message: string; booking?: ApprovableBooking | null }
+
+export type DeclineInput = {
+  bookingId?: string
+  discordMessageId?: string
+  actor: ApprovalActor
+  source: ApprovalSource
+  notify?: boolean
+  notifyTimeoutMs?: number
+}
+
+const DENYABLE = ['PENDING_APPROVAL', 'PENDING_PAYMENT', 'DRAFT']
+
+/** Pure guard: may a booking in `status` be declined (hold released)? CANCELLED
+ *  is handled by the caller as an idempotent replay. CONFIRMED = already captured
+ *  → refund, not decline. */
+export function checkDeclinable(
+  status: BookingStatus | string,
+): { ok: true } | { ok: false; code: DeclineErrorCode; message: string } {
+  if (status === 'CONFIRMED') {
+    return { ok: false, code: 'invalid_status', message: 'Already approved & captured — issue a refund instead of declining.' }
+  }
+  if (!DENYABLE.includes(status)) {
+    return { ok: false, code: 'invalid_status', message: `Can't decline a booking in ${status}.` }
+  }
+  return { ok: true }
+}
+
+export async function declineBooking(
+  input: DeclineInput,
+  deps: ApprovalDeps = defaultApprovalDeps(),
+): Promise<DeclineResult> {
+  const { store, stripe, notifier, logger } = deps
+  const { actor, source } = input
+
+  const booking = await store.loadBooking({ bookingId: input.bookingId, discordMessageId: input.discordMessageId })
+  if (!booking) return { ok: false, code: 'not_found', message: 'Booking not found.' }
+
+  if (actor.role && !can(actor.role, 'booking.decline')) {
+    return { ok: false, code: 'forbidden', message: 'You do not have permission to decline bookings.', booking }
+  }
+
+  if (booking.status === 'CANCELLED') {
+    return { ok: true, outcome: 'already_cancelled', booking, holdReleased: false }
+  }
+
+  const guard = checkDeclinable(booking.status)
+  if (!guard.ok) return { ok: false, code: guard.code, message: guard.message, booking }
+
+  // Atomic claim of the transition to CANCELLED among the deny-able statuses.
+  const claimed = await store.claimCancel(booking.id)
+  if (claimed === 0) {
+    const fresh = await store.reloadStatus(booking.id)
+    if (fresh?.status === 'CANCELLED') return { ok: true, outcome: 'already_cancelled', booking: fresh, holdReleased: false }
+    return { ok: false, code: 'raced', message: 'This booking was just handled by someone else — no action taken.', booking: fresh ?? booking }
+  }
+
+  // Release the authorization (no money moves). Non-fatal — the hold may already
+  // be void; the decline still stands.
+  let holdReleased = false
+  let stripeResult = 'no_hold'
+  if (booking.stripePaymentIntentId) {
+    try {
+      await stripe.releaseHold(booking.stripePaymentIntentId)
+      holdReleased = true
+      stripeResult = 'hold_released'
+    } catch (e) {
+      stripeResult = `release_failed: ${asMessage(e).slice(0, 80)}`
+      logger.warn({ bookingId: booking.id, err: asMessage(e) }, 'releaseHold failed (continuing — hold may already be void)')
+    }
+  }
+
+  await store.recordDecline({
+    bookingId: booking.id,
+    auditUserId: actor.userId ?? null,
+    auditDetails: {
+      event: 'decline_booking',
+      source,
+      deniedBy: actor.name,
+      discordUserId: actor.discordUserId ?? null,
+      userId: actor.userId ?? null,
+      previousStatus: booking.status,
+      newStatus: 'CANCELLED',
+      stripeResult,
+      result: 'success',
+    },
+  })
+
+  logger.info({ bookingId: booking.id, source, deniedBy: actor.name, holdReleased }, 'Booking declined → hold released → CANCELLED')
+
+  if (input.notify !== false) {
+    try {
+      await withTimeout(notifier.sendDeclined(booking), input.notifyTimeoutMs ?? 2500)
+    } catch (e) {
+      logger.error({ bookingId: booking.id, err: asMessage(e) }, 'declined notification failed/timeout (non-fatal)')
+    }
+  }
+
+  return { ok: true, outcome: 'declined', booking, holdReleased }
+}
+
 // ── Production wiring (never imported by the offline unit test) ────────────────
 
 let _cachedDeps: ApprovalDeps | undefined
@@ -351,6 +477,9 @@ export function defaultApprovalDeps(): ApprovalDeps {
     stripe: {
       capture: (pi, key) => captureDeposit(pi, key) as unknown as Promise<CapturedIntent>,
       retrieveCharge: (intent) => retrieveChargeForIntent(intent as never) as unknown as Promise<ChargeInfo | null>,
+      releaseHold: async (pi) => {
+        await cancelDeposit(pi)
+      },
     },
     notifier: queueApprovalNotifier(),
     logger: apiLogger,
@@ -419,6 +548,18 @@ function prismaApprovalStore(): ApprovalStore {
         }),
       ])
     },
+    async claimCancel(bookingId) {
+      const res = await prisma.booking.updateMany({
+        where: { id: bookingId, status: { in: DENYABLE as BookingStatus[] } },
+        data: { status: 'CANCELLED' },
+      })
+      return res.count
+    },
+    async recordDecline(a) {
+      await prisma.auditLog.create({
+        data: { action: 'BOOKING_STATE_CHANGED', bookingId: a.bookingId, userId: a.auditUserId, details: a.auditDetails as never },
+      })
+    },
   }
 }
 
@@ -472,6 +613,23 @@ function queueApprovalNotifier(): ApprovalNotifier {
           bookingId: booking.id,
         })
       }
+    },
+    async sendDeclined(booking) {
+      if (!booking.customer.email) return
+      const appBase = (process.env.APP_URL ?? 'https://moveitclearit.com').replace(/\/+$/, '')
+      await emailQueue.add('booking-declined', {
+        template: 'booking-declined',
+        to: booking.customer.email,
+        bookingId: booking.id,
+        payload: {
+          customerName: booking.customer.name,
+          displayId: booking.displayId,
+          requestedDate: booking.requestedDate?.toISOString(),
+          amountHold: String(Math.round(booking.depositAmount / 100)),
+          rebookUrl: `${appBase}/book`,
+          locale: booking.customer.locale,
+        },
+      })
     },
   }
 }

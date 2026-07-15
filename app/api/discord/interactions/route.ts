@@ -12,9 +12,7 @@ import {
   overdueTasks,
   type Embed,
 } from "@/bot/task-service";
-import { cancelDeposit } from "@/lib/stripe";
-import { approveBooking } from "@/lib/booking-approval";
-import { emailQueue } from "@/lib/queues";
+import { approveBooking, declineBooking } from "@/lib/booking-approval";
 import { offerRescheduleToCustomer } from "@/lib/reschedule";
 import { t } from "@/lib/i18n";
 import { formatEastern } from "@/lib/scheduling";
@@ -66,14 +64,6 @@ function verifyDiscordSignature(
 
 const ephemeral = (content: string) =>
   NextResponse.json({ type: RES_REPLY, data: { content, flags: FLAG_EPHEMERAL } });
-
-// Don't let a Redis stall blow Discord's 3-second interaction deadline.
-function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
-  return Promise.race([
-    p,
-    new Promise<T>((_, reject) => setTimeout(() => reject(new Error(`timeout after ${ms}ms`)), ms)),
-  ]);
-}
 
 type CardBooking = {
   displayId: string;
@@ -192,106 +182,24 @@ async function handleApprove(bookingId: string | undefined, messageId: string | 
 }
 
 // ── deny_booking:<id> → release the hold → CANCELLED → notify ──────────────
+// Delegates to the ONE shared declineBooking service so Discord and the admin
+// portal release the hold + cancel + send the declined email identically.
 async function handleDeny(bookingId: string | undefined, messageId: string | undefined, actor: DiscordActor) {
   const approverName = actor.username;
-  const booking = await prisma.booking.findFirst({
-    where: {
-      OR: [
-        ...(messageId ? [{ discordApprovalMessageId: messageId }] : []),
-        ...(bookingId ? [{ id: bookingId }] : []),
-      ],
-    },
-    include: { customer: true },
+  const result = await declineBooking({
+    bookingId,
+    discordMessageId: messageId,
+    actor: { name: approverName, discordUserId: actor.userId, role: "OWNER" },
+    source: "discord",
   });
 
-  if (!booking) return ephemeral("⚠️ Booking not found for this card.");
-
-  // Idempotent: a second click just re-shows the denied card.
-  if (booking.status === "CANCELLED") {
-    return NextResponse.json({ type: RES_UPDATE_MESSAGE, data: deniedCard(booking, approverName) });
-  }
-  if (booking.status === "CONFIRMED") {
-    return ephemeral("⚠️ Already approved & captured — issue a refund instead of denying.");
-  }
-  if (!["PENDING_APPROVAL", "PENDING_PAYMENT", "DRAFT"].includes(booking.status)) {
-    return ephemeral(`⚠️ Can't deny a booking in ${booking.status}.`);
-  }
-
-  // CONCURRENCY GUARD — atomically CLAIM the transition to CANCELLED among the
-  // deny-able statuses. Of two simultaneous clicks exactly one wins; the loser is
-  // told it was already handled (so a deny can't race an approve into a bad mix).
-  const previousStatus = booking.status;
-  const claim = await prisma.booking.updateMany({
-    where: { id: booking.id, status: { in: ["PENDING_APPROVAL", "PENDING_PAYMENT", "DRAFT"] } },
-    data: { status: "CANCELLED" },
-  });
-  if (claim.count === 0) {
-    const fresh = await prisma.booking.findUnique({ where: { id: booking.id }, include: { customer: true } });
-    if (fresh?.status === "CANCELLED") {
-      return NextResponse.json({ type: RES_UPDATE_MESSAGE, data: deniedCard(fresh, approverName) });
+  if (!result.ok) {
+    if (result.code === "raced") {
+      return ephemeral("⏳ This booking was just handled by another owner — no action taken.");
     }
-    return ephemeral("⏳ This booking was just handled by another owner — no action taken.");
+    return ephemeral(`⚠️ ${result.message}`);
   }
-
-  // Release the authorization (no money moves). Tolerate an already-void PI.
-  let stripeResult = "no_hold";
-  if (booking.stripePaymentIntentId) {
-    try {
-      await cancelDeposit(booking.stripePaymentIntentId);
-      stripeResult = "hold_released";
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      stripeResult = `release_failed: ${msg.slice(0, 80)}`;
-      apiLogger.warn({ bookingId: booking.id, err: msg }, "cancelDeposit failed (continuing — hold may already be void)");
-    }
-  }
-
-  await prisma.auditLog.create({
-    data: {
-      action: "BOOKING_STATE_CHANGED",
-      bookingId: booking.id,
-      details: {
-        event: "deny_booking",
-        discordUserId: actor.userId ?? null,
-        deniedBy: approverName,
-        previousStatus,
-        newStatus: "CANCELLED",
-        stripeResult,
-        result: "success",
-      },
-    },
-  });
-
-  // MESSAGING: send the BOOKING DECLINED email — the hold was released above, so
-  // the customer is told honestly that their request wasn't accepted and they
-  // were not charged. Guarded so a Redis stall can't blow Discord's 3s window.
-  if (booking.customer.email) {
-    try {
-      await withTimeout(
-        emailQueue.add("booking-declined", {
-          template: "booking-declined",
-          to: booking.customer.email,
-          bookingId: booking.id,
-          payload: {
-            customerName: booking.customer.name,
-            displayId: booking.displayId,
-            requestedDate: booking.requestedDate?.toISOString(),
-            amountHold: String(Math.round(booking.depositAmount / 100)),
-            rebookUrl: `${(process.env.APP_URL ?? "https://moveitclearit.com").replace(/\/+$/, "")}/book`,
-            locale: booking.customer.locale,
-          },
-        }),
-        2500
-      );
-    } catch (err) {
-      apiLogger.error({ bookingId: booking.id, err: err instanceof Error ? err.message : String(err) }, "declined email enqueue failed (non-fatal)");
-    }
-  }
-  apiLogger.info(
-    { bookingId: booking.id, deniedBy: approverName },
-    "Booking denied → hold released → CANCELLED → declined email queued"
-  );
-  return NextResponse.json({ type: RES_UPDATE_MESSAGE, data: deniedCard(booking, approverName) });
+  return NextResponse.json({ type: RES_UPDATE_MESSAGE, data: deniedCard(result.booking, approverName) });
 }
 
 // ── offer_reschedule:<id> → reuse the shared offer logic → update card ─────

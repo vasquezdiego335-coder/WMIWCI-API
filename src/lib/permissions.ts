@@ -69,6 +69,13 @@ const OWNER_ONLY: Action[] = [
   'payroll.approve',
   'payroll.mark_paid',
   'audit.view',
+  // Approving a booking CAPTURES the $49 hold — that is moving money, so it is
+  // OWNER-only by decision (owner spec 2026-07-15: do not automatically grant
+  // future MANAGER users capture authority). Diego and Sebastian are both OWNER,
+  // so this restricts nobody today. To let managers approve, remove this line.
+  // `booking.decline` is intentionally NOT here: releasing an uncaptured hold
+  // moves no money, so it stays OWNER + MANAGER (operations).
+  'booking.approve',
 ]
 
 // Everything not owner-only is available to OWNER + MANAGER. CREW has no admin

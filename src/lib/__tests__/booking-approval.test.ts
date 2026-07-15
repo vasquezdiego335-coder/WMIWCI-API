@@ -2,7 +2,9 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
   approveBooking,
+  declineBooking,
   checkApprovable,
+  checkDeclinable,
   type ApprovableBooking,
   type ApprovalDeps,
   type ApprovalStore,
@@ -54,6 +56,11 @@ type Harness = {
     captureError?: string
     claimForceZero?: boolean
     racedInto?: ApprovableBooking['status']
+    // decline-flow tracking
+    declines: unknown[]
+    releases: string[]
+    declinedNotified: number
+    releaseError?: string
   }
 }
 
@@ -64,6 +71,9 @@ function makeHarness(initial?: ApprovableBooking | null): Harness {
     commits: [],
     notifications: [],
     rollbacks: 0,
+    declines: [],
+    releases: [],
+    declinedNotified: 0,
   }
 
   const store: ApprovalStore = {
@@ -92,6 +102,21 @@ function makeHarness(initial?: ApprovableBooking | null): Harness {
     async commitApproval(args) {
       state.commits.push(args)
     },
+    async claimCancel(_id) {
+      if (state.claimForceZero) {
+        if (state.racedInto && state.booking) state.booking = { ...state.booking, status: state.racedInto }
+        return 0
+      }
+      const DENYABLE = ['PENDING_APPROVAL', 'PENDING_PAYMENT', 'DRAFT']
+      if (state.booking && DENYABLE.includes(state.booking.status)) {
+        state.booking = { ...state.booking, status: 'CANCELLED' }
+        return 1
+      }
+      return 0
+    },
+    async recordDecline(args) {
+      state.declines.push(args)
+    },
   }
 
   const deps: ApprovalDeps = {
@@ -106,10 +131,17 @@ function makeHarness(initial?: ApprovableBooking | null): Harness {
       async retrieveCharge() {
         return { id: 'ch_1', receipt_url: 'https://receipt.example/ch_1', payment_method_details: { type: 'card' } }
       },
+      async releaseHold(pi) {
+        state.releases.push(pi)
+        if (state.releaseError) throw new Error(state.releaseError)
+      },
     },
     notifier: {
       async sendApproved(_booking, cents, by) {
         state.notifications.push({ cents, by })
+      },
+      async sendDeclined(_booking) {
+        state.declinedNotified++
       },
     },
     logger: { info() {}, warn() {}, error() {} },
@@ -251,13 +283,6 @@ test('CREW cannot approve (forbidden), no capture', async () => {
   assert.equal(h.state.captures.length, 0)
 })
 
-test('MANAGER is allowed to approve (operations authority)', async () => {
-  const h = makeHarness()
-  const res = await approveBooking({ bookingId: 'bk_1', actor: { name: 'Mia Manager', role: 'MANAGER' }, source: 'admin' }, h.deps)
-  assert.equal(res.ok, true)
-  assert.equal(h.state.captures.length, 1)
-})
-
 // ── Notifications happen after truth, never before, and never block ──────────
 
 test('notification fires after commit with the captured amount', async () => {
@@ -287,4 +312,75 @@ test('a notification failure does NOT undo the capture', async () => {
   assert.equal(res.ok, true)
   assert.equal((res as { outcome: string }).outcome, 'captured')
   assert.equal(h.state.commits.length, 1) // payment still recorded
+})
+
+// ── Permission tightening: capture is OWNER-only ──────────────────────────────
+
+test('MANAGER can NO LONGER approve (capture is OWNER-only now)', async () => {
+  const h = makeHarness()
+  const res = await approveBooking({ bookingId: 'bk_1', actor: { name: 'Mia Manager', role: 'MANAGER' }, source: 'admin' }, h.deps)
+  assert.equal(res.ok, false)
+  assert.equal((res as { code: string }).code, 'forbidden')
+  assert.equal(h.state.captures.length, 0)
+})
+
+// ── declineBooking (release the uncaptured hold) ──────────────────────────────
+
+test('checkDeclinable: deny-able statuses vs confirmed', () => {
+  assert.deepEqual(checkDeclinable('PENDING_APPROVAL'), { ok: true })
+  assert.equal(checkDeclinable('CONFIRMED').ok, false) // captured → refund, not decline
+  assert.equal(checkDeclinable('COMPLETED').ok, false)
+})
+
+test('admin decline of a pending booking releases the hold and cancels', async () => {
+  const h = makeHarness()
+  const res = await declineBooking({ bookingId: 'bk_1', actor: { name: 'Diego', role: 'OWNER' }, source: 'admin' }, h.deps)
+  assert.equal(res.ok, true)
+  assert.equal((res as { outcome: string }).outcome, 'declined')
+  assert.equal((res as { holdReleased: boolean }).holdReleased, true)
+  assert.equal(h.state.releases.length, 1)
+  assert.equal(h.state.releases[0], 'pi_1')
+  assert.equal(h.state.booking?.status, 'CANCELLED')
+  assert.equal(h.state.declines.length, 1)
+  assert.equal(h.state.declinedNotified, 1)
+})
+
+test('discord decline uses the same service', async () => {
+  const h = makeHarness()
+  const res = await declineBooking({ discordMessageId: 'msg_1', actor: { name: 'Sebastian', role: 'OWNER' }, source: 'discord' }, h.deps)
+  assert.equal(res.ok, true)
+  assert.equal(h.state.releases.length, 1)
+})
+
+test('MANAGER CAN decline (releasing a hold moves no money)', async () => {
+  const h = makeHarness()
+  const res = await declineBooking({ bookingId: 'bk_1', actor: { name: 'Mia Manager', role: 'MANAGER' }, source: 'admin' }, h.deps)
+  assert.equal(res.ok, true)
+  assert.equal(h.state.releases.length, 1)
+})
+
+test('cannot decline a CONFIRMED (captured) booking — refund instead', async () => {
+  const h = makeHarness(makeBooking({ status: 'CONFIRMED' }))
+  const res = await declineBooking({ bookingId: 'bk_1', actor: { name: 'Diego', role: 'OWNER' }, source: 'admin' }, h.deps)
+  assert.equal(res.ok, false)
+  assert.equal((res as { code: string }).code, 'invalid_status')
+  assert.equal(h.state.releases.length, 0)
+})
+
+test('declining an already-CANCELLED booking is an idempotent no-op', async () => {
+  const h = makeHarness(makeBooking({ status: 'CANCELLED' }))
+  const res = await declineBooking({ bookingId: 'bk_1', actor: { name: 'Diego', role: 'OWNER' }, source: 'admin' }, h.deps)
+  assert.equal(res.ok, true)
+  assert.equal((res as { outcome: string }).outcome, 'already_cancelled')
+  assert.equal(h.state.releases.length, 0)
+})
+
+test('decline still cancels even if the hold release fails (non-fatal)', async () => {
+  const h = makeHarness()
+  h.state.releaseError = 'PI already canceled'
+  const res = await declineBooking({ bookingId: 'bk_1', actor: { name: 'Diego', role: 'OWNER' }, source: 'admin' }, h.deps)
+  assert.equal(res.ok, true)
+  assert.equal((res as { holdReleased: boolean }).holdReleased, false)
+  assert.equal(h.state.booking?.status, 'CANCELLED') // still cancelled
+  assert.equal(h.state.declines.length, 1)
 })
