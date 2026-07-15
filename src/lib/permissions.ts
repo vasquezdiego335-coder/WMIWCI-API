@@ -48,6 +48,9 @@ export type Action =
   | 'payroll.edit_hours'
   | 'payroll.approve'
   | 'payroll.mark_paid'
+  // Bookings
+  | 'booking.approve' // approve a PENDING_APPROVAL booking (captures the $49 hold)
+  | 'booking.decline' // decline/deny before capture (releases the hold)
   // System
   | 'audit.view'
 
