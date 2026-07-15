@@ -175,6 +175,21 @@ export default async function JobDetail({ params }: { params: { id: string } }) 
           <Stat label="Service type" value={items.find((i) => i.label === 'Service')?.value ?? '—'} />
           <Stat label="Estimated total" value={money(booking.totalEstimate) ?? '—'} />
           <Stat label="Source" value={[booking.foundUs, booking.source].filter(Boolean).join(' · ') || '—'} />
+          <Stat
+            label="Ad attribution"
+            value={
+              [
+                booking.gclid ? `gclid:${booking.gclid}` : null,
+                booking.gbraid ? `gbraid:${booking.gbraid}` : null,
+                booking.wbraid ? `wbraid:${booking.wbraid}` : null,
+                booking.utmSource || booking.utmMedium || booking.utmCampaign
+                  ? [booking.utmSource, booking.utmMedium, booking.utmCampaign].filter(Boolean).join('/')
+                  : null,
+              ]
+                .filter(Boolean)
+                .join(' · ') || '—'
+            }
+          />
           <Stat label="Customer type" value={c.isFirstTime ? 'First-time' : 'Returning'} />
           <Stat label="Language" value={c.locale === 'es' ? 'Spanish' : 'English'} />
           <Stat label="Dispatcher" value={booking.assignedDispatcher ?? '—'} />

@@ -816,7 +816,17 @@ async function handleViewFullBooking(bookingId: string | undefined, messageId: s
   add("🌐 Attribution", [
     `Source: ${s(booking.source)}`,
     `Found us: ${s(booking.foundUs)}`,
+    booking.gclid ? `gclid: ${booking.gclid}` : null,
+    booking.gbraid ? `gbraid: ${booking.gbraid}` : null,
+    booking.wbraid ? `wbraid: ${booking.wbraid}` : null,
+    (booking.utmSource || booking.utmMedium || booking.utmCampaign)
+      ? `UTM: ${[booking.utmSource, booking.utmMedium, booking.utmCampaign].filter(Boolean).join(" / ")}`
+      : null,
+    booking.utmTerm ? `UTM term: ${booking.utmTerm}` : null,
+    booking.utmContent ? `UTM content: ${booking.utmContent}` : null,
+    booking.landingPage ? `Landing: ${booking.landingPage}` : null,
     booking.referrer ? `Referrer: ${booking.referrer}` : null,
+    booking.initialReferrer ? `First referrer: ${booking.initialReferrer}` : null,
     booking.ipAddress ? `IP: ${booking.ipAddress}` : null,
   ], true);
 

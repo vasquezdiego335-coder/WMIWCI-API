@@ -635,6 +635,20 @@ model Booking {
   source  String? // QR src / tracking code carried by the booking URL
   foundUs String? @map("found_us") // "Where did you find us?" self-report
 
+  // ── First-party ad attribution (captured client-side; see src/lib/attribution.ts).
+  //    First-touch wins; never sent to GA4. Ready for Google Ads offline import. ──
+  gclid           String?
+  gbraid          String?
+  wbraid          String?
+  utmSource       String?   @map("utm_source")
+  utmMedium       String?   @map("utm_medium")
+  utmCampaign     String?   @map("utm_campaign")
+  utmTerm         String?   @map("utm_term")
+  utmContent      String?   @map("utm_content")
+  landingPage     String?   @map("landing_page")
+  initialReferrer String?   @map("initial_referrer")
+  firstTouchAt    DateTime? @map("first_touch_at")
+
   // ── Job completion (Phase 3) — set when the booking transitions to COMPLETED;
   //    the anchor time for the post-move follow-up sequence. ──
   completedAt DateTime? @map("completed_at")
@@ -1094,6 +1108,21 @@ model Lead {
   notes              String?
   assignedTo         String?         @map("assigned_to")
   convertedBookingId String?         @map("converted_booking_id") // plain reference
+
+  // ── First-party ad attribution (captured client-side; see src/lib/attribution.ts).
+  //    `source` above is the CRM channel enum; these are the raw click/UTM values. ──
+  gclid              String?
+  gbraid             String?
+  wbraid             String?
+  utmSource          String?         @map("utm_source")
+  utmMedium          String?         @map("utm_medium")
+  utmCampaign        String?         @map("utm_campaign")
+  utmTerm            String?         @map("utm_term")
+  utmContent         String?         @map("utm_content")
+  landingPage        String?         @map("landing_page")
+  initialReferrer    String?         @map("initial_referrer")
+  firstTouchAt       DateTime?       @map("first_touch_at")
+
   contactedAt        DateTime?       @map("contacted_at")
   quotedAt           DateTime?       @map("quoted_at")
   bookedAt           DateTime?       @map("booked_at")

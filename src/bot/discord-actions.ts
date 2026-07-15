@@ -635,7 +635,14 @@ export async function postContactMessage(payload: Record<string, unknown>): Prom
       },
       {
         name: 'ℹ️ Meta',
-        value: [`Lang: ${langFlag}`, `Source: ${payload.source ?? 'direct'}`].join('\n'),
+        value: [
+          `Lang: ${langFlag}`,
+          `Source: ${payload.source ?? 'direct'}`,
+          payload.attribution && payload.attribution !== '—' ? `Ads: ${payload.attribution}` : null,
+          payload.landingPage ? `Landing: ${String(payload.landingPage).slice(0, 200)}` : null,
+        ]
+          .filter(Boolean)
+          .join('\n'),
         inline: true,
       },
       { name: '📌 Subject', value: String(payload.subject || '(no subject)').slice(0, 256) },
