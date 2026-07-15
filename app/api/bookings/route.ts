@@ -12,6 +12,7 @@ import { ELEVATOR_LABELS, PARKING_LABELS, BUILDING_LABELS } from '@/lib/booking-
 import { etDateTimeToInstant } from '@/lib/scheduling'
 import { computeEstimate, MOVE_SIZES } from '@/lib/estimate'
 import { nextBookingReference } from '@/lib/booking-reference'
+import { rateLimit, tooManyRequests, LIMITS, clientIp } from '@/lib/rate-limit'
 
 const TRUCK_PICKUP_RETURN_AMOUNT_CENTS = 5000
 
@@ -305,6 +306,13 @@ function formatAddr(a?: { street?: string; city?: string; state?: string; zip?: 
 
 async function handleBooking(req: NextRequest): Promise<NextResponse> {
   const ip = req.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ?? 'unknown'
+
+  const rl = await rateLimit(LIMITS.booking, [clientIp(req)])
+  if (!rl.ok) {
+    apiLogger.warn({ ip }, 'booking rate-limited')
+    return tooManyRequests(rl) // CORS headers are added by the POST wrapper
+  }
+
   const ua = req.headers.get('user-agent') ?? ''
   // APP_URL must point at THIS backend (where /api/stripe/checkout/success lives).
   // Default to the live API domain — NOT the dead wmiwci-backend.vercel.app, which

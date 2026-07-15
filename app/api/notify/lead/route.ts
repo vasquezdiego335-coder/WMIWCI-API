@@ -3,6 +3,7 @@ import { z } from 'zod'
 import { timingSafeEqual } from 'crypto'
 import { notifyLead } from '@/lib/notify'
 import { apiLogger } from '@/lib/logger'
+import { rateLimit, tooManyRequests, LIMITS, clientIp } from '@/lib/rate-limit'
 
 // ════════════════════════════════════════════════════════════════════════
 //  POST /api/notify/lead — internal, server-to-server.
@@ -47,6 +48,10 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   if (!tokenOk(req)) {
     return NextResponse.json({ ok: false, error: 'unauthorized' }, { status: 401 })
   }
+
+  const rl = await rateLimit(LIMITS.notifyLead, [clientIp(req)])
+  if (!rl.ok) return tooManyRequests(rl)
+
 
   let json: unknown
   try {
