@@ -1021,12 +1021,14 @@ model Review {
 /// (id + name) like AuditLog details — no relation churn on User.
 model Expense {
   id              String          @id @default(cuid())
+  itemTitle       String?         @map("item_title") // short specific name ("Moving Blankets")
   amount          Int // cents
   incurredOn      DateTime        @map("incurred_on")
   category        ExpenseCategory
+  subcategory     String? // optional finer split ("Blankets", "Dollies")
   vendor          String?
   paymentMethod   PaymentMethod?  @map("payment_method")
-  paidBy          String?         @map("paid_by") // owner name / worker / "business"
+  paidBy          String?         @map("paid_by") // Diego / Sebastian / Business
   bookingId       String?         @map("booking_id") // null = general business expense
   purpose         String? // business purpose
   receiptUrl      String?         @map("receipt_url")
@@ -1036,6 +1038,8 @@ model Expense {
   notes           String?
   createdById     String?         @map("created_by_id")
   createdByName   String?         @map("created_by_name")
+  updatedById     String?         @map("updated_by_id") // owner who last edited
+  updatedByName   String?         @map("updated_by_name")
   createdAt       DateTime        @default(now()) @map("created_at")
   updatedAt       DateTime        @updatedAt @map("updated_at")
 

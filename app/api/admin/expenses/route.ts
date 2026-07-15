@@ -16,7 +16,9 @@ import { z } from 'zod'
 
 const CreateSchema = z.object({
   amountCents: z.number().int().positive().max(100_000_00), // <= $100k sanity cap
+  itemTitle: z.string().trim().max(120).optional(), // short specific name
   category: z.nativeEnum(ExpenseCategory),
+  subcategory: z.string().trim().max(80).optional(),
   incurredOn: z.string().optional(), // 'YYYY-MM-DD' or ISO; default now
   vendor: z.string().trim().max(200).optional(),
   paymentMethod: z.nativeEnum(PaymentMethod).optional(),
@@ -82,7 +84,9 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     const e = await tx.expense.create({
       data: {
         amount: d.amountCents,
+        itemTitle: d.itemTitle || null,
         category: d.category,
+        subcategory: d.subcategory || null,
         incurredOn,
         vendor: d.vendor || null,
         paymentMethod: d.paymentMethod ?? null,
@@ -103,7 +107,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         action: 'EXPENSE_CREATED',
         userId: session.userId,
         bookingId,
-        details: { expenseId: e.id, amountCents: e.amount, category: e.category, vendor: e.vendor, createdBy: session.name },
+        details: { expenseId: e.id, itemTitle: e.itemTitle, amountCents: e.amount, category: e.category, vendor: e.vendor, createdBy: session.name },
       },
     })
     if (overrideUsed) {

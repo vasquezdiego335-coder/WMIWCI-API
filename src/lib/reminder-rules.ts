@@ -92,6 +92,7 @@ export interface RuleBooking {
 
 export interface RuleExpense {
   id: string
+  itemTitle?: string | null
   category: string
   amount: number // cents
   status: string
@@ -433,7 +434,8 @@ export function evaluateCrewOverlaps(bookings: RuleBooking[], now: Date): Remind
 export function evaluateExpenses(expenses: RuleExpense[], now: Date): ReminderCandidate[] {
   const out: ReminderCandidate[] = []
   for (const e of expenses) {
-    const label = `${e.vendor ? `${e.vendor} — ` : ''}${money(e.amount)}`
+    const name = e.itemTitle?.trim() || e.vendor || ''
+    const label = `${name ? `${name} — ` : ''}${money(e.amount)}`
     if (['SUBMITTED', 'NEEDS_REVIEW'].includes(e.status) && now.getTime() - e.createdAt.getTime() > 3 * DAY) {
       out.push({
         reminderType: 'expense-needs-review', category: 'FINANCIAL', severity: 'MEDIUM',

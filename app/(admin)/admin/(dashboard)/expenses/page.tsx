@@ -2,10 +2,11 @@ import Link from 'next/link'
 import { prisma } from '@/lib/db'
 import { getSession } from '@/lib/auth'
 import { fmtCents } from '@/lib/profit'
-import { PageHeader, StatCard, StatGrid, COLORS, Empty, tableStyles as T, Badge } from '../_ui'
-import { EXPENSE_CATEGORY_LABELS, EXPENSE_CATEGORY_ORDER, EXPENSE_STATUS_LABELS, EXPENSE_STATUS_COLORS, PAYMENT_METHOD_LABELS } from '../_labels'
+import { categoryGroupKey, EXPENSE_CATEGORY_GROUPS, PAID_BY_OPTIONS, PAYMENT_METHOD_LABELS, PAYMENT_METHOD_ORDER } from '@/lib/expense-format'
+import { PageHeader, StatCard, StatGrid, COLORS, Empty, tableStyles as T } from '../_ui'
+import { EXPENSE_STATUS_LABELS } from '../_labels'
 import ExpenseForm from '../ExpenseForm'
-import ExpenseActions from './ExpenseActions'
+import ExpenseTable, { type ExpenseRow } from './ExpenseTable'
 
 export const dynamic = 'force-dynamic'
 
@@ -21,9 +22,12 @@ function monthRange(monthParam?: string) {
   const key = `${y}-${String(m).padStart(2, '0')}`
   return { start, end, label, key }
 }
-const dateOnly = (d: Date) => new Date(d).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'America/New_York' })
 
-export default async function ExpensesPage({ searchParams }: { searchParams: { month?: string; category?: string; status?: string; scope?: string } }) {
+interface Params {
+  month?: string; group?: string; status?: string; scope?: string; paidBy?: string; vendor?: string; method?: string
+}
+
+export default async function ExpensesPage({ searchParams }: { searchParams: Params }) {
   const session = await getSession()
   const isOwner = session?.role === 'OWNER'
   const { start, end, label, key } = monthRange(searchParams.month)
@@ -40,13 +44,42 @@ export default async function ExpensesPage({ searchParams }: { searchParams: { m
   const generalTotal = monthTotal - jobTotal
   const needsReview = monthExpenses.filter((e) => e.status === 'SUBMITTED' || e.status === 'NEEDS_REVIEW').length
 
+  const vendorQuery = searchParams.vendor?.trim().toLowerCase()
   const filtered = monthExpenses.filter((e) => {
-    if (searchParams.category && e.category !== searchParams.category) return false
+    if (searchParams.group && categoryGroupKey(e.category) !== searchParams.group) return false
     if (searchParams.status && e.status !== searchParams.status) return false
     if (searchParams.scope === 'job' && !e.bookingId) return false
     if (searchParams.scope === 'general' && e.bookingId) return false
+    if (searchParams.paidBy && (e.paidBy ?? '') !== searchParams.paidBy) return false
+    if (searchParams.method && (e.paymentMethod ?? '') !== searchParams.method) return false
+    if (vendorQuery && !(e.vendor ?? '').toLowerCase().includes(vendorQuery)) return false
     return true
   })
+
+  const rows: ExpenseRow[] = filtered.map((e) => ({
+    id: e.id,
+    itemTitle: e.itemTitle,
+    amount: e.amount,
+    incurredOn: e.incurredOn.toISOString(),
+    category: e.category,
+    subcategory: e.subcategory,
+    vendor: e.vendor,
+    paymentMethod: e.paymentMethod,
+    paidBy: e.paidBy,
+    bookingId: e.bookingId,
+    purpose: e.purpose,
+    receiptUrl: e.receiptUrl,
+    receiptPublicId: e.receiptPublicId,
+    reimbursable: e.reimbursable,
+    status: e.status,
+    notes: e.notes,
+    createdByName: e.createdByName,
+    updatedByName: e.updatedByName,
+    createdAt: e.createdAt.toISOString(),
+    updatedAt: e.updatedAt.toISOString(),
+    job: e.booking ? { id: e.booking.id, label: e.booking.customer?.name ?? e.booking.displayId } : null,
+    jobLabel: e.booking ? (e.booking.customer?.name ?? e.booking.displayId) : null,
+  }))
 
   return (
     <div>
@@ -72,58 +105,31 @@ export default async function ExpensesPage({ searchParams }: { searchParams: { m
           <option value="job">Job-linked only</option>
           <option value="general">General only</option>
         </select>
-        <select name="category" defaultValue={searchParams.category ?? ''} style={filterInput}>
+        <select name="group" defaultValue={searchParams.group ?? ''} style={filterInput}>
           <option value="">All categories</option>
-          {EXPENSE_CATEGORY_ORDER.map((c) => <option key={c} value={c}>{EXPENSE_CATEGORY_LABELS[c]}</option>)}
+          {EXPENSE_CATEGORY_GROUPS.map((g) => <option key={g.key} value={g.key}>{g.label}</option>)}
+        </select>
+        <select name="paidBy" defaultValue={searchParams.paidBy ?? ''} style={filterInput}>
+          <option value="">Anyone paid</option>
+          {PAID_BY_OPTIONS.map((p) => <option key={p} value={p}>{p}</option>)}
+        </select>
+        <select name="method" defaultValue={searchParams.method ?? ''} style={filterInput}>
+          <option value="">Any method</option>
+          {PAYMENT_METHOD_ORDER.map((m) => <option key={m} value={m}>{PAYMENT_METHOD_LABELS[m]}</option>)}
         </select>
         <select name="status" defaultValue={searchParams.status ?? ''} style={filterInput}>
           <option value="">Any status</option>
           {Object.entries(EXPENSE_STATUS_LABELS).map(([v, l]) => <option key={v} value={v}>{l}</option>)}
         </select>
+        <input name="vendor" defaultValue={searchParams.vendor ?? ''} placeholder="Vendor…" style={{ ...filterInput, minWidth: 120 }} />
         <button type="submit" style={filterBtn}>Apply</button>
         <Link href="/admin/expenses" style={{ fontSize: '12px', color: COLORS.muted, alignSelf: 'center' }}>Reset</Link>
       </form>
 
-      {filtered.length === 0 ? (
+      {rows.length === 0 ? (
         <div style={{ ...T.wrap, padding: '28px' }}><Empty>No expenses match these filters for {label}.</Empty></div>
       ) : (
-        <div style={T.wrap}>
-          <div style={T.scroll}>
-            <table style={T.table}>
-              <thead>
-                <tr>
-                  {['Date', 'Category', 'Vendor', 'Amount', 'Method', 'Paid by', 'Job', 'Receipt', 'Status', ''].map((h) => (
-                    <th key={h} style={T.th}>{h}</th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {filtered.map((e) => (
-                  <tr key={e.id}>
-                    <td style={T.td}>{dateOnly(e.incurredOn)}</td>
-                    <td style={T.td}>{EXPENSE_CATEGORY_LABELS[e.category] ?? e.category}</td>
-                    <td style={T.td}>{e.vendor ?? '—'}</td>
-                    <td style={{ ...T.td, fontWeight: 700, fontVariantNumeric: 'tabular-nums' }}>{fmtCents(e.amount)}</td>
-                    <td style={T.td}>{e.paymentMethod ? PAYMENT_METHOD_LABELS[e.paymentMethod] : '—'}</td>
-                    <td style={T.td}>{e.paidBy ?? '—'}</td>
-                    <td style={T.td}>
-                      {e.booking ? (
-                        <Link href={`/admin/jobs/${e.booking.id}`} style={{ color: COLORS.orange, textDecoration: 'none' }}>
-                          {e.booking.customer?.name ?? e.booking.displayId}
-                        </Link>
-                      ) : (
-                        <span style={{ color: COLORS.faint }}>General</span>
-                      )}
-                    </td>
-                    <td style={T.td}>{e.receiptUrl ? <a href={e.receiptUrl} target="_blank" rel="noreferrer" style={{ color: COLORS.orange }}>🧾</a> : '—'}</td>
-                    <td style={T.td}><Badge color={EXPENSE_STATUS_COLORS[e.status] ?? COLORS.muted}>{EXPENSE_STATUS_LABELS[e.status] ?? e.status}</Badge></td>
-                    <td style={T.td}><ExpenseActions id={e.id} status={e.status} reimbursable={e.reimbursable} canDelete={!!isOwner} /></td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </div>
+        <ExpenseTable rows={rows} isOwner={!!isOwner} />
       )}
     </div>
   )

@@ -4,7 +4,8 @@ import { useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { dollarsToCents } from '@/lib/profit'
 import { csrfHeader, uploadReceipt } from './_client'
-import { EXPENSE_CATEGORY_LABELS, EXPENSE_CATEGORY_ORDER, PAYMENT_METHOD_LABELS, PAYMENT_METHOD_ORDER } from './_labels'
+import { PAYMENT_METHOD_LABELS, PAYMENT_METHOD_ORDER } from './_labels'
+import { EXPENSE_CATEGORY_GROUPS, EXPENSE_CATEGORY_LABELS, SUBCATEGORY_SUGGESTIONS, ALL_SUBCATEGORY_SUGGESTIONS, PAID_BY_OPTIONS } from '@/lib/expense-format'
 
 // Add-expense form (owner spec 2026-07-13). Reusable: on the Expenses page it
 // adds a general/business expense; embed with `presetBookingId` on a job page to
@@ -23,9 +24,11 @@ export default function ExpenseForm({ presetBookingId, presetJobLabel, compact }
   const [file, setFile] = useState<File | null>(null)
 
   const [f, setF] = useState({
+    itemTitle: '',
     amount: '',
     incurredOn: today(),
     category: 'GAS',
+    subcategory: '',
     vendor: '',
     paymentMethod: 'CASH',
     paidBy: '',
@@ -38,6 +41,10 @@ export default function ExpenseForm({ presetBookingId, presetJobLabel, compact }
 
   async function submit() {
     setMsg('')
+    if (!f.itemTitle.trim()) {
+      setMsg('Add an item title (e.g. “Moving Blankets”)')
+      return
+    }
     const amountCents = dollarsToCents(f.amount)
     if (!amountCents) {
       setMsg('Enter a valid amount')
@@ -57,8 +64,10 @@ export default function ExpenseForm({ presetBookingId, presetJobLabel, compact }
         headers: { 'Content-Type': 'application/json', ...csrfHeader() },
         body: JSON.stringify({
           amountCents,
+          itemTitle: f.itemTitle.trim(),
           incurredOn: f.incurredOn,
           category: f.category,
+          subcategory: f.subcategory || undefined,
           vendor: f.vendor || undefined,
           paymentMethod: f.paymentMethod || undefined,
           paidBy: f.paidBy || undefined,
@@ -76,7 +85,7 @@ export default function ExpenseForm({ presetBookingId, presetJobLabel, compact }
         return
       }
       setMsg('Saved ✓')
-      setF((p) => ({ ...p, amount: '', vendor: '', paidBy: '', purpose: '', notes: '' }))
+      setF((p) => ({ ...p, itemTitle: '', amount: '', subcategory: '', vendor: '', paidBy: '', purpose: '', notes: '' }))
       setFile(null)
       router.refresh()
       if (compact) setOpen(false)
@@ -100,6 +109,12 @@ export default function ExpenseForm({ presetBookingId, presetJobLabel, compact }
         <button onClick={() => setOpen(false)} style={closeBtn}>✕</button>
       </div>
 
+      <div style={{ marginBottom: '10px' }}>
+        <Field label="Item title *" hint="short & specific — e.g. “Moving Blankets”, “Crew Lunch — July 13 Job”">
+          <input value={f.itemTitle} onChange={(e) => set('itemTitle', e.target.value)} placeholder="Name this expense" style={{ ...input, fontSize: '15px', fontWeight: 600, padding: '10px 12px' }} />
+        </Field>
+      </div>
+
       <div style={grid}>
         <Field label="Amount *">
           <div style={{ display: 'flex', alignItems: 'center', border: '1px solid #D1D5DB', borderRadius: '7px', overflow: 'hidden' }}>
@@ -112,7 +127,11 @@ export default function ExpenseForm({ presetBookingId, presetJobLabel, compact }
         </Field>
         <Field label="Category *">
           <select value={f.category} onChange={(e) => set('category', e.target.value)} style={input}>
-            {EXPENSE_CATEGORY_ORDER.map((c) => <option key={c} value={c}>{EXPENSE_CATEGORY_LABELS[c]}</option>)}
+            {EXPENSE_CATEGORY_GROUPS.map((g) => (
+              <optgroup key={g.key} label={g.label}>
+                {g.categories.map((c) => <option key={c} value={c}>{EXPENSE_CATEGORY_LABELS[c]}</option>)}
+              </optgroup>
+            ))}
           </select>
           {f.category === 'WORKER_PAY' && (
             <span style={{ fontSize: '11px', color: '#B45309', backgroundColor: '#FFFBEB', border: '1px solid #FDE68A', borderRadius: '6px', padding: '5px 8px', marginTop: '4px', lineHeight: 1.4 }}>
@@ -121,16 +140,25 @@ export default function ExpenseForm({ presetBookingId, presetJobLabel, compact }
             </span>
           )}
         </Field>
+        <Field label="Subcategory" hint="optional">
+          <input list="expense-subcats" value={f.subcategory} onChange={(e) => set('subcategory', e.target.value)} placeholder="e.g. Blankets, Dollies" style={input} />
+          <datalist id="expense-subcats">
+            {(SUBCATEGORY_SUGGESTIONS[f.category] ?? ALL_SUBCATEGORY_SUGGESTIONS).map((s) => <option key={s} value={s} />)}
+          </datalist>
+        </Field>
         <Field label="Payment method">
           <select value={f.paymentMethod} onChange={(e) => set('paymentMethod', e.target.value)} style={input}>
             {PAYMENT_METHOD_ORDER.map((m) => <option key={m} value={m}>{PAYMENT_METHOD_LABELS[m]}</option>)}
           </select>
         </Field>
         <Field label="Vendor">
-          <input value={f.vendor} onChange={(e) => set('vendor', e.target.value)} placeholder="e.g. Shell, U-Haul" style={input} />
+          <input value={f.vendor} onChange={(e) => set('vendor', e.target.value)} placeholder="e.g. Amazon, Home Depot, Shell" style={input} />
         </Field>
-        <Field label="Who paid">
-          <input value={f.paidBy} onChange={(e) => set('paidBy', e.target.value)} placeholder="Diego / Sebastian / business" style={input} />
+        <Field label="Paid by">
+          <select value={f.paidBy} onChange={(e) => set('paidBy', e.target.value)} style={input}>
+            <option value="">—</option>
+            {PAID_BY_OPTIONS.map((p) => <option key={p} value={p}>{p}</option>)}
+          </select>
         </Field>
         {!presetBookingId && (
           <Field label="Link to job (booking ID)" hint="leave blank for a general business expense">

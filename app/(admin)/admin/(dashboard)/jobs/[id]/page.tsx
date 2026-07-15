@@ -16,7 +16,7 @@ import {
 import { crewPayOwedCents } from '@/lib/profit'
 import { jobProfit } from '@/lib/job-money'
 import ExpenseForm from '../../ExpenseForm'
-import { EXPENSE_CATEGORY_LABELS } from '../../_labels'
+import { expenseDisplayTitle, categoryGroupLabel } from '@/lib/expense-format'
 
 export const revalidate = 0
 
@@ -345,8 +345,8 @@ export default async function JobDetail({ params }: { params: { id: string } }) 
               booking.expenses.map((e, i) => (
                 <div key={e.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '12px', padding: '8px 0', borderBottom: i < booking.expenses.length - 1 ? '1px solid #F3F4F6' : 'none' }}>
                   <div style={{ minWidth: 0 }}>
-                    <div style={{ fontSize: '13px', fontWeight: 600 }}>{EXPENSE_CATEGORY_LABELS[e.category] ?? e.category}{e.vendor ? ` · ${e.vendor}` : ''}</div>
-                    <div style={{ fontSize: '11px', color: '#9CA3AF' }}>{new Date(e.incurredOn).toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'America/New_York' })}{e.receiptUrl ? ' · ' : ''}{e.receiptUrl && <a href={e.receiptUrl} target="_blank" rel="noreferrer" style={{ color: '#FF5A1F' }}>receipt</a>}</div>
+                    <div style={{ fontSize: '13px', fontWeight: 600 }}>{expenseDisplayTitle(e)}</div>
+                    <div style={{ fontSize: '11px', color: '#9CA3AF' }}>{categoryGroupLabel(e.category)}{e.vendor ? ` · ${e.vendor}` : ''} · {new Date(e.incurredOn).toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'America/New_York' })}{e.receiptUrl ? ' · ' : ''}{e.receiptUrl && <a href={e.receiptUrl} target="_blank" rel="noreferrer" style={{ color: '#FF5A1F' }}>receipt</a>}</div>
                   </div>
                   <div style={{ fontSize: '14px', fontWeight: 700, fontVariantNumeric: 'tabular-nums' }}>{cents(e.amount)}</div>
                 </div>
