@@ -48,6 +48,10 @@ export type LeadInput = {
   utmTerm?: string | null
   landingPage?: string | null
   referrer?: string | null
+  gclid?: string | null
+  gbraid?: string | null
+  wbraid?: string | null
+  firstTouchAt?: Date | null
   promoCode?: string | null
   estimatedValue?: number | null // cents
 }
@@ -130,6 +134,10 @@ export function buildLeadCreate(input: LeadInput, now: Date) {
     utmTerm: clean(input.utmTerm),
     landingPage: clean(input.landingPage),
     referrer: clean(input.referrer),
+    gclid: clean(input.gclid),
+    gbraid: clean(input.gbraid),
+    wbraid: clean(input.wbraid),
+    firstTouchAt: input.firstTouchAt ?? null,
     promoCode: clean(input.promoCode),
     estimatedValue: input.estimatedValue ?? null,
     lastActivityAt: now,

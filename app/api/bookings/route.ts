@@ -14,6 +14,7 @@ import { computeEstimate, MOVE_SIZES } from '@/lib/estimate'
 import { nextBookingReference } from '@/lib/booking-reference'
 import { rateLimit, tooManyRequests, LIMITS, clientIp } from '@/lib/rate-limit'
 import { ingestLeadSafe } from '@/lib/leads'
+import { attributionSchemaFields, attributionColumns, attributionLeadInput } from '@/lib/attribution'
 
 const TRUCK_PICKUP_RETURN_AMOUNT_CENTS = 5000
 
@@ -177,6 +178,8 @@ const BookingSchema = z.object({
   source: z.string().transform(sanitizeText).pipe(z.string().max(60)).optional(),
   // "Where did you find us?" self-report from the booking-form dropdown.
   foundUs: z.string().transform(sanitizeText).pipe(z.string().max(40)).optional(),
+  // First-party ad attribution (gclid/gbraid/wbraid + utm_* + first-touch).
+  ...attributionSchemaFields,
 
   // ── Moving Service Agreement (hard-required) ──
   // Must be literally true — booking + Stripe session are refused otherwise.
@@ -546,6 +549,8 @@ async function handleBooking(req: NextRequest): Promise<NextResponse> {
       // for the Discord card; these power the marketing-tracker revenue merge.
       source: data.source,
       foundUs: data.foundUs,
+      // First-party ad attribution (gclid/gbraid/wbraid + utm_* + first-touch).
+      ...attributionColumns(data),
       customerTokenExpiry: tokenExpiry,
       // ── Moving Service Agreement acceptance record ──
       agreementAccepted: true,
@@ -668,6 +673,7 @@ async function handleBooking(req: NextRequest): Promise<NextResponse> {
         moveDate: requestedDate,
         originCity: data.pickupAddresses?.[0]?.city ?? undefined,
         destCity: data.destinationAddress?.city ?? undefined,
+        ...attributionLeadInput(data),
       },
       'not-sure-booking',
     )

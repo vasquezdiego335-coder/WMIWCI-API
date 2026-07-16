@@ -635,6 +635,18 @@ model Booking {
   // ── Marketing attribution (Phase 2) — pushed to the marketing-tracker funnel
   //    on payment so booking revenue is attributed to its source / found-us. ──
   source  String? // QR src / tracking code carried by the booking URL
+  // First-party ad attribution (captured client-side; first-touch; never GA4).
+  // Ready for Google Ads offline-conversion import keyed by gclid.
+  gclid        String?
+  gbraid       String?
+  wbraid       String?
+  utmSource    String?   @map("utm_source")
+  utmMedium    String?   @map("utm_medium")
+  utmCampaign  String?   @map("utm_campaign")
+  utmTerm      String?   @map("utm_term")
+  utmContent   String?   @map("utm_content")
+  landingPage  String?   @map("landing_page")
+  firstTouchAt DateTime? @map("first_touch_at")
   foundUs String? @map("found_us") // "Where did you find us?" self-report
 
   // ── Job completion (Phase 3) — set when the booking transitions to COMPLETED;
@@ -1116,6 +1128,12 @@ model Lead {
   utmTerm        String?   @map("utm_term")
   landingPage    String?   @map("landing_page")
   referrer       String?
+  // Google ad click identifiers + first-touch time (added by attribution work;
+  // utm*/landing/referrer above already existed). First-party only, never GA4.
+  gclid          String?
+  gbraid         String?
+  wbraid         String?
+  firstTouchAt   DateTime? @map("first_touch_at")
   promoCode      String?   @map("promo_code")
   lastActivityAt DateTime? @map("last_activity_at")
   contactedAt        DateTime?       @map("contacted_at")
