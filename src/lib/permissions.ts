@@ -52,6 +52,9 @@ export type Action =
   | 'booking.approve' // approve a PENDING_APPROVAL booking (captures the $49 hold)
   | 'booking.decline' // decline/deny before capture (releases the hold)
   | 'booking.test_payment' // create a controlled internal test booking (staging only)
+  // Leads (operational funnel — OWNER + MANAGER; not owner-financial)
+  | 'leads.view'
+  | 'leads.manage'
   // System
   | 'audit.view'
 

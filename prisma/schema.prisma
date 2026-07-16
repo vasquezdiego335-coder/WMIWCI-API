@@ -323,6 +323,7 @@ enum LeadStatus {
   FOLLOW_UP
   BOOKED
   LOST
+  SPAM
 }
 
 enum LeadLostReason {
@@ -1114,6 +1115,8 @@ model Lead {
   notes              String?
   assignedTo         String?         @map("assigned_to")
   convertedBookingId String?         @map("converted_booking_id") // plain reference
+  followUpAt         DateTime?       @map("follow_up_at")   // owner-set next-touch date
+  archivedAt         DateTime?       @map("archived_at")    // soft-archive (never hard-deleted)
 
   // ── Ingestion + attribution (createOrUpdateLead, 2026-07-15) — all nullable,
   //    additive. Populated by the shared lead-ingestion service from the contact

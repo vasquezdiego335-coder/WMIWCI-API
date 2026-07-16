@@ -28,7 +28,7 @@ const GROUPS: Group[] = [
       { href: '/admin/jobs', label: 'Jobs', icon: '🚚' },
       { href: '/admin/bookings', label: 'Bookings', icon: '📋' },
       { href: '/admin/customers', label: 'Customers', icon: '👤' },
-      { label: 'Leads', icon: '📈', soon: true },
+      { href: '/admin/leads', label: 'Leads', icon: '📈' },
       { href: '/admin/staff', label: 'Crew', icon: '👥' },
     ],
   },
