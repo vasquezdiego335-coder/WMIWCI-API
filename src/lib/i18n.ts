@@ -14,7 +14,8 @@
 export type Locale = 'en' | 'es'
 
 export const BIZ_PHONE = '862-640-0625'
-export const BIZ_NAME = 'We Move It. We Clear It.'
+// Brand line retired 2026-07-17: "We Move It. We Clear It." → "Move It Clear It."
+export const BIZ_NAME = 'Move It Clear It.'
 
 // Normalize anything that comes off the wire ("EN", "es-US", undefined…) to a
 // supported Locale. Defaults to English.
