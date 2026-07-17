@@ -13,7 +13,7 @@ import {
   Divider,
   Spacer,
   PrimaryButton,
-  ContactRow,
+  SupportBlock,
   Footer,
   VSteps,
   IconChip,
@@ -323,10 +323,7 @@ export default function FinalConfirmationEmail({
       <Spacer h={26} />
 
       {/* ── 8 · SUPPORT ──────────────────────────────────────── */}
-      <Card>
-        <Eyebrow icon="phone" title={t.supportTitle} tone="navy" />
-        <ContactRow phone={phone} email={email} website={website} websiteLabel={websiteLabel} labels={t.contactLabels} />
-      </Card>
+      <SupportBlock title={t.supportTitle} phone={phone} email={email} website={website} websiteLabel={websiteLabel} labels={t.contactLabels} />
 
       {/* ── 9 · FOOTER ───────────────────────────────────────── */}
       <Footer

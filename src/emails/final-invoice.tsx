@@ -4,18 +4,17 @@ import {
   LogoHeader,
   Card,
   Eyebrow,
-  Pill,
+  HeroBlock,
   KVTable,
   Callout,
   Spacer,
   Divider,
   PrimaryButton,
-  ContactRow,
+  SupportBlock,
   Footer,
   IconChip,
   C,
   FONT,
-  P,
   money,
 } from './_ui'
 
@@ -169,17 +168,16 @@ export default function FinalInvoiceEmail({
       <LogoHeader />
 
       {/* ── 1 · HERO ─────────────────────────────────────────── */}
-      <Card style={{ borderTop: `3px solid ${hasBalance ? C.orange : C.gold}` }}>
-        <div className="heropad" style={{ textAlign: 'center' as const }}>
-          <IconChip icon="clipboard" color={hasBalance ? C.orangeInk : C.goldInk} size={26} dim={64} bg={hasBalance ? C.orangeTint : C.goldTint} border="none" radius={18} />
-          <Spacer h={16} />
-          <Pill tone={hasBalance ? 'orange' : 'gold'}>{t.pill}</Pill>
-          <h1 className="h1" style={{ fontFamily: FONT, fontSize: '26px', lineHeight: '33px', fontWeight: 800, letterSpacing: '-0.4px', color: C.navy, margin: '16px 0 10px' }}>
-            {t.h1}
-          </h1>
-          <p style={{ ...P, marginBottom: 0, maxWidth: '430px', marginLeft: 'auto', marginRight: 'auto' }}>{t.sub}</p>
-        </div>
-      </Card>
+      <HeroBlock
+        accent={hasBalance ? C.orange : C.gold}
+        hero={<IconChip icon="clipboard" color={hasBalance ? C.orangeInk : C.goldInk} size={26} dim={64} bg={hasBalance ? C.orangeTint : C.goldTint} border="none" radius={18} />}
+        pill={t.pill}
+        pillTone={hasBalance ? 'orange' : 'gold'}
+        title={t.h1}
+        sub={t.sub}
+        titleSize={26}
+        subMaxWidth={430}
+      />
 
       <Spacer h={16} />
 
@@ -233,10 +231,7 @@ export default function FinalInvoiceEmail({
       <Spacer h={26} />
 
       {/* ── 5 · SUPPORT ──────────────────────────────────────── */}
-      <Card>
-        <Eyebrow icon="phone" title={t.supportTitle} tone="navy" />
-        <ContactRow phone={phone} email={email} website={website} websiteLabel={websiteLabel} labels={t.contactLabels} />
-      </Card>
+      <SupportBlock title={t.supportTitle} phone={phone} email={email} website={website} websiteLabel={websiteLabel} labels={t.contactLabels} />
 
       {/* ── 6 · FOOTER (transactional) ───────────────────────── */}
       <Footer

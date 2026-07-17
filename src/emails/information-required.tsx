@@ -5,12 +5,12 @@ import {
   IconChip,
   Card,
   Eyebrow,
-  Pill,
+  HeroBlock,
   Callout,
   Checklist,
   Spacer,
   PrimaryButton,
-  ContactRow,
+  SupportBlock,
   Footer,
   C,
   FONT,
@@ -93,17 +93,16 @@ export default function InformationRequiredEmail({
       <LogoHeader />
 
       {/* ── 1 · HERO ─────────────────────────────────────────── */}
-      <Card style={{ borderTop: `3px solid ${C.orange}` }}>
-        <div className="heropad" style={{ textAlign: 'center' as const }}>
-          <IconChip icon="clipboard" color={C.orangeInk} size={26} dim={64} bg={C.orangeTint} border="none" radius={18} />
-          <Spacer h={16} />
-          <Pill tone="orange">{t.pill}</Pill>
-          <h1 className="h1" style={{ fontFamily: FONT, fontSize: '25px', lineHeight: '32px', fontWeight: 800, letterSpacing: '-0.4px', color: C.navy, margin: '16px 0 10px' }}>
-            {t.h1}
-          </h1>
-          <p style={{ ...P, marginBottom: 0, maxWidth: '440px', marginLeft: 'auto', marginRight: 'auto' }}>{t.sub}</p>
-        </div>
-      </Card>
+      <HeroBlock
+        accent={C.orange}
+        hero={<IconChip icon="clipboard" color={C.orangeInk} size={26} dim={64} bg={C.orangeTint} border="none" radius={18} />}
+        pill={t.pill}
+        pillTone="orange"
+        title={t.h1}
+        sub={t.sub}
+        titleSize={25}
+        subMaxWidth={440}
+      />
 
       <Spacer h={16} />
 
@@ -130,10 +129,7 @@ export default function InformationRequiredEmail({
       <Spacer h={16} />
 
       {/* ── 5 · SUPPORT ──────────────────────────────────────── */}
-      <Card>
-        <Eyebrow icon="phone" title={t.supportTitle} tone="navy" />
-        <ContactRow phone={phone} email={email} website={website} websiteLabel={websiteLabel} labels={t.contactLabels} />
-      </Card>
+      <SupportBlock title={t.supportTitle} phone={phone} email={email} website={website} websiteLabel={websiteLabel} labels={t.contactLabels} />
 
       {/* ── 6 · FOOTER (transactional) ───────────────────────── */}
       <Footer

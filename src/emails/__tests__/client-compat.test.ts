@@ -34,7 +34,7 @@ const common = { customerName: 'Diego', displayId: 'WMIC-1017', locale: 'en' as 
 
 const all: Array<[string, React.ReactElement]> = [
   ['pre-approval', React.createElement(PreApproval, { ...common, amountHold: '1' })],
-  ['final-confirmation', React.createElement(FinalConfirmation, { ...common, amountPaid: '1', bookingStatus: 'CONFIRMED', date: '2026-08-01T15:00:00Z', timeLabel: '8–10 AM' })],
+  ['final-confirmation', React.createElement(FinalConfirmation, { ...common, amountPaid: '1', date: '2026-08-01T15:00:00Z', timeLabel: '8–10 AM' })],
   ['booking-declined', React.createElement(BookingDeclined, { ...common, amountHold: '1' })],
   ['booking-cancellation', React.createElement(BookingCancellation, { ...common, refundStatus: 'partial', amountCharged: '49', nonRefundable: '20', refundedAmount: '29' })],
   ['booking-updated', React.createElement(BookingUpdated, { ...common, amountHold: '1', changedLabel: 'the date' })],

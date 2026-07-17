@@ -860,6 +860,76 @@ export function ContactRow({
   )
 }
 
+// ═════════════════════════════════════════════════════════════════════════
+//  COMPOSITE BLOCKS (Phase 8 — shared component library).
+//  Every template repeated the same hero card and the same support card. These
+//  two primitives consolidate that. `HeroBlock` is fully parameterized so a
+//  template passes its exact accent/hero/title sizing (no visual drift on
+//  adoption); `SupportBlock` is the byte-identical phone+contact card.
+// ═════════════════════════════════════════════════════════════════════════
+export function HeroBlock({
+  accent = C.orange,
+  hero,
+  pill,
+  pillTone = 'orange',
+  title,
+  sub,
+  titleSize = 26,
+  subMaxWidth = 430,
+}: {
+  /** borderTop accent color for the card. */
+  accent?: string
+  /** The hero visual — an <IconChip/> or <AnimatedHero/>. */
+  hero: React.ReactNode
+  pill?: React.ReactNode
+  pillTone?: 'gold' | 'orange' | 'navy'
+  title: React.ReactNode
+  sub: React.ReactNode
+  /** h1 font-size in px (line-height derives as size + 7). */
+  titleSize?: number
+  subMaxWidth?: number
+}) {
+  return (
+    <Card style={{ borderTop: `3px solid ${accent}` }}>
+      <div className="heropad" style={{ textAlign: 'center' as const }}>
+        {hero}
+        <Spacer h={16} />
+        {pill ? <Pill tone={pillTone}>{pill}</Pill> : null}
+        <h1
+          className="h1"
+          style={{ fontFamily: FONT, fontSize: `${titleSize}px`, lineHeight: `${titleSize + 7}px`, fontWeight: 800, letterSpacing: '-0.4px', color: C.navy, margin: '16px 0 10px' }}
+        >
+          {title}
+        </h1>
+        <p style={{ ...P, marginBottom: 0, maxWidth: `${subMaxWidth}px`, marginLeft: 'auto', marginRight: 'auto' }}>{sub}</p>
+      </div>
+    </Card>
+  )
+}
+
+export function SupportBlock({
+  title,
+  phone,
+  email,
+  website,
+  websiteLabel,
+  labels,
+}: {
+  title: string
+  phone: string
+  email: string
+  website: string
+  websiteLabel: string
+  labels?: { phone?: string; email?: string; website?: string }
+}) {
+  return (
+    <Card>
+      <Eyebrow icon="phone" title={title} tone="navy" />
+      <ContactRow phone={phone} email={email} website={website} websiteLabel={websiteLabel} labels={labels} />
+    </Card>
+  )
+}
+
 // ─────────────────────────────────────────────────────────────────────────
 //  CONTACT STRIP  —  prominent phone + website pills (stack on mobile)
 // ─────────────────────────────────────────────────────────────────────────

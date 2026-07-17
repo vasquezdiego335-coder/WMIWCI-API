@@ -9,7 +9,7 @@ import {
   Callout,
   Spacer,
   PrimaryButton,
-  ContactRow,
+  SupportBlock,
   Footer,
   money,
   C,
@@ -128,10 +128,7 @@ export default function PaymentFailedEmail({
       <Spacer h={26} />
 
       {/* ── 4 · SUPPORT ──────────────────────────────────────── */}
-      <Card>
-        <Eyebrow icon="phone" title={t.supportTitle} tone="navy" />
-        <ContactRow phone={phone} email={email} website={website} websiteLabel={websiteLabel} labels={t.contactLabels} />
-      </Card>
+      <SupportBlock title={t.supportTitle} phone={phone} email={email} website={website} websiteLabel={websiteLabel} labels={t.contactLabels} />
 
       {/* ── 5 · FOOTER (transactional/operational) ───────────── */}
       <Footer
