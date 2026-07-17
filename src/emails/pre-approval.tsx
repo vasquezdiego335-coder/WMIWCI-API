@@ -21,6 +21,7 @@ import {
   C,
   FONT,
   P,
+  money,
 } from './_ui'
 
 // ════════════════════════════════════════════════════════════════════════
@@ -79,7 +80,7 @@ export default function PreApprovalEmail({
   heavyItems,
   notes,
   photoCount,
-  amountHold = '49',
+  amountHold,
   portalUrl = '#',
   phone = '862-640-0625',
   email = 'hello@moveitclearit.com',
@@ -113,7 +114,7 @@ export default function PreApprovalEmail({
           { label: 'Reserva aprobada', micro: 'Sigue', state: 'todo' as const },
           { label: 'Pago procesado', micro: 'Tras aprobar', state: 'todo' as const },
         ],
-        payBig: `Retención de $${amountHold}`,
+        payBig: `Retención de ${money(amountHold, es)}`,
         payBadge: 'No es un cargo',
         pay: ['Autorización temporal en tu tarjeta.', 'Se libera si no podemos realizar la mudanza.', 'Solo se cobra después de la aprobación.'],
         sumTitle: 'Resumen de la reserva',
@@ -135,7 +136,7 @@ export default function PreApprovalEmail({
         supportTitle: '¿Necesitas ayuda?',
         contactLabels: { phone: 'Llama o escribe', email: 'Correo', website: 'Sitio web' },
         disclaimer:
-          `Este correo confirma que recibimos tu solicitud — no es una confirmación final. El precio es un estimado y puede ajustarse tras revisar acceso y detalles. La autorización de $${amountHold} es una retención, no un cargo, y se libera si tu reserva no se aprueba.`,
+          `Este correo confirma que recibimos tu solicitud — no es una confirmación final. El precio es un estimado y puede ajustarse tras revisar acceso y detalles. La autorización de ${money(amountHold, es)} es una retención, no un cargo, y se libera si tu reserva no se aprueba.`,
         footerLabels: { manage: 'Administrar preferencias', unsubscribe: 'Cancelar suscripción', rights: 'Todos los derechos reservados.' },
         defTruck: 'U-Haul — a tu nombre',
       }
@@ -151,7 +152,7 @@ export default function PreApprovalEmail({
           { label: 'Booking approved', micro: 'Up next', state: 'todo' as const },
           { label: 'Payment processed', micro: 'After approval', state: 'todo' as const },
         ],
-        payBig: `$${amountHold} hold`,
+        payBig: `${money(amountHold, es)} hold`,
         payBadge: 'Not a charge',
         pay: ['Temporary authorization on your card.', 'Released if we can’t take the move.', 'Only captured after approval.'],
         sumTitle: 'Booking summary',
@@ -173,7 +174,7 @@ export default function PreApprovalEmail({
         supportTitle: 'Need a hand?',
         contactLabels: { phone: 'Call or text', email: 'Email', website: 'Website' },
         disclaimer:
-          `This email confirms we’ve received your booking request — it is not a final confirmation. Pricing is an estimate and may adjust after we review access and details. The $${amountHold} authorization is a hold, not a charge, and is released if your booking isn’t approved.`,
+          `This email confirms we’ve received your booking request — it is not a final confirmation. Pricing is an estimate and may adjust after we review access and details. The ${money(amountHold, es)} authorization is a hold, not a charge, and is released if your booking isn’t approved.`,
         footerLabels: { manage: 'Manage preferences', unsubscribe: 'Unsubscribe', rights: 'All rights reserved.' },
         defTruck: 'U-Haul — rented in your name',
       }

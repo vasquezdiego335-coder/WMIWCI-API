@@ -17,6 +17,7 @@ import {
   C,
   FONT,
   P,
+  money,
 } from './_ui'
 
 // ════════════════════════════════════════════════════════════════════════
@@ -65,7 +66,7 @@ export default function BookingUpdatedEmail({
   website = 'https://moveitclearit.com',
   websiteLabel = 'moveitclearit.com',
   social,
-  amountHold = '49',
+  amountHold,
   locale = 'en',
 }: Props) {
   const es = (locale ?? 'en').toLowerCase().startsWith('es')
@@ -89,7 +90,7 @@ export default function BookingUpdatedEmail({
         cta: 'Ver mi reserva',
         supportTitle: 'Estamos para ayudarte',
         contactLabels: { phone: 'Llama o escribe', email: 'Correo', website: 'Sitio web' },
-        disclaimer: `Este correo confirma un cambio en tu reserva. Tu depósito de $${amountHold} permanece aplicado a tu mudanza.`,
+        disclaimer: `Este correo confirma un cambio en tu reserva. Tu depósito de ${money(amountHold, es)} permanece aplicado a tu mudanza.`,
         footerLabels: { manage: 'Administrar preferencias', unsubscribe: 'Cancelar suscripción', rights: 'Todos los derechos reservados.' },
       }
     : {
@@ -105,7 +106,7 @@ export default function BookingUpdatedEmail({
         cta: 'View booking',
         supportTitle: "We're here to help",
         contactLabels: { phone: 'Call or text', email: 'Email', website: 'Website' },
-        disclaimer: `This email confirms a change to your booking. Your $${amountHold} deposit stays applied to your move.`,
+        disclaimer: `This email confirms a change to your booking. Your ${money(amountHold, es)} deposit stays applied to your move.`,
         footerLabels: { manage: 'Manage preferences', unsubscribe: 'Unsubscribe', rights: 'All rights reserved.' },
       }
 

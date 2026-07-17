@@ -46,6 +46,13 @@ export const FONT =
 //  Layout: {ASSET_BASE}/hero.gif, {ASSET_BASE}/icons/{name}-{tone}.png,
 //          {ASSET_BASE}/icons/{name}-{tone}@2x.png, {ASSET_BASE}/social/{name}.png
 export const ASSET_BASE = (process.env.EMAIL_ASSET_BASE_URL || 'https://moveitclearit.com/email').replace(/\/+$/, '')
+
+// Safe money phrase. Prints "$X" ONLY when a real amount is supplied; otherwise a
+// neutral phrase — so a missing prop can NEVER silently render a guessed "$49".
+export function money(amount?: string | number | null, es = false): string {
+  const s = amount == null ? '' : String(amount).trim()
+  return s ? `$${s}` : es ? 'el monto indicado arriba' : 'the amount shown above'
+}
 // Static PNG hero (renders in every client incl. Gmail/Outlook). An animated GIF
 // can be dropped in later at the same path via scripts/make-hero-gif.mjs.
 export const HERO_IMG_URL = `${ASSET_BASE}/hero.png`
