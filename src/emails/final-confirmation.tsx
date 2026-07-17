@@ -83,7 +83,8 @@ export default function FinalConfirmationEmail({
   heavyItems,
   notes,
   portalUrl = '#',
-  heroGifUrl = '',
+  // No empty default — fall through to AnimatedHero's shared animated truck GIF.
+  heroGifUrl,
   phone = '862-640-0625',
   email = 'hello@moveitclearit.com',
   website = 'https://moveitclearit.com',

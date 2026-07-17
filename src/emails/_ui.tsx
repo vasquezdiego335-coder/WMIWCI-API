@@ -53,9 +53,12 @@ export function money(amount?: string | number | null, es = false): string {
   const s = amount == null ? '' : String(amount).trim()
   return s ? `$${s}` : es ? 'el monto indicado arriba' : 'the amount shown above'
 }
-// Static PNG hero (renders in every client incl. Gmail/Outlook). An animated GIF
-// can be dropped in later at the same path via scripts/make-hero-gif.mjs.
-export const HERO_IMG_URL = `${ASSET_BASE}/hero.png`
+// Animated truck hero GIF — the brand's signature booking-flow animation
+// (320×123, 15 frames: wheels rotate + road flows, ~1s infinite loop). GIF
+// renders in every client incl. Gmail/Outlook (animated where supported, first
+// frame elsewhere). Regenerate via scripts/make-hero-gif.mjs. A static hero.png
+// is also hosted at ${ASSET_BASE}/hero.png as a still fallback if ever needed.
+export const HERO_IMG_URL = `${ASSET_BASE}/truck-hero.gif`
 
 // ── Animation-compat CSS: Apple Mail / iOS render the inline SMIL <svg>;
 //    Gmail / Outlook / most mobile get the animated GIF. Shared by <Shell>'s
@@ -996,7 +999,7 @@ export function Footer({
   return (
     <Section style={{ padding: '30px 22px 8px', textAlign: 'center' as const }}>
       <div style={{ fontFamily: FONT, fontSize: '14px', fontWeight: 800, letterSpacing: '0.5px', color: C.navy }}>
-        We Move It. We Clear It.
+        Move It Clear It.
       </div>
       <div style={{ fontFamily: FONT, fontSize: '12px', color: C.muted, margin: '8px 0 16px' }}>
         {phone} &nbsp;&middot;&nbsp; {email} &nbsp;&middot;&nbsp; {websiteLabel}
@@ -1017,7 +1020,7 @@ export function Footer({
       ) : null}
 
       <div style={{ fontFamily: FONT, fontSize: '11px', color: C.label, marginTop: '14px' }}>
-        &copy; {year} We Move It. We Clear It. {L.rights}
+        &copy; {year} Move It Clear It. {L.rights}
       </div>
       <div style={{ marginTop: '8px' }}>
         <a href={manageUrl} style={{ fontFamily: FONT, fontSize: '11px', color: C.muted, textDecoration: 'underline' }}>
