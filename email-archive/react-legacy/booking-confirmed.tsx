@@ -48,7 +48,7 @@ export default function BookingConfirmedEmail({
       <Body style={body}>
         <Container style={container}>
           <Section style={header}>
-            <Text style={brandName}>We Move It. We Clear It.</Text>
+            <Text style={brandName}>Move It Clear It.</Text>
           </Section>
           <Section style={content}>
             <Heading style={h1}>{c.h1}</Heading>

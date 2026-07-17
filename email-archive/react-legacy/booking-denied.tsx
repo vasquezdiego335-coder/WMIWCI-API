@@ -45,7 +45,7 @@ export default function BookingDeniedEmail({
     <Html lang={c.lang}><Head />
       <Body style={body}>
         <Container style={container}>
-          <Section style={header}><Text style={brand}>We Move It. We Clear It.</Text></Section>
+          <Section style={header}><Text style={brand}>Move It Clear It.</Text></Section>
           <Section style={content}>
             <Heading style={h1}>{c.h1}</Heading>
             <Text style={p}>{c.intro}</Text>
