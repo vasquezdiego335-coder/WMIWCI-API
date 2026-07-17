@@ -69,7 +69,7 @@ export default function BookingDeclinedEmail({
         help: 'Si crees que fue un error o quieres encontrar otra fecha, llámanos o escríbenos — con gusto te ayudamos.',
         supportTitle: '¿Hablamos?',
         contactLabels: { phone: 'Llama o escribe', email: 'Correo', website: 'Sitio web' },
-        disclaimer: 'Este correo confirma que tu solicitud no fue aprobada y que la autorización de $49 fue liberada.',
+        disclaimer: `Este correo confirma que tu solicitud no fue aprobada y que la autorización de $${amountHold} fue liberada.`,
         footerLabels: { manage: 'Administrar preferencias', unsubscribe: 'Cancelar suscripción', rights: 'Todos los derechos reservados.' },
       }
     : {
@@ -83,7 +83,7 @@ export default function BookingDeclinedEmail({
         help: "If you think this was a mistake or you'd like to find another date, call or text us — we're happy to help.",
         supportTitle: 'Let’s talk',
         contactLabels: { phone: 'Call or text', email: 'Email', website: 'Website' },
-        disclaimer: 'This email confirms your request was not approved and the $49 authorization was released.',
+        disclaimer: `This email confirms your request was not approved and the $${amountHold} authorization was released.`,
         footerLabels: { manage: 'Manage preferences', unsubscribe: 'Unsubscribe', rights: 'All rights reserved.' },
       }
 

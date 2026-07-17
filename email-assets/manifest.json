@@ -1,0 +1,643 @@
+{
+  "base": "https://moveitclearit.com/email",
+  "generatedAt": "2026-07-17T15:47:32.213Z",
+  "assets": [
+    {
+      "file": "icons/clipboard-navy.png",
+      "width": 24,
+      "height": 24,
+      "url": "https://moveitclearit.com/email/icons/clipboard-navy.png",
+      "alt": "Clipboard"
+    },
+    {
+      "file": "icons/clipboard-navy@2x.png",
+      "width": 48,
+      "height": 48,
+      "url": "https://moveitclearit.com/email/icons/clipboard-navy@2x.png",
+      "alt": "Clipboard"
+    },
+    {
+      "file": "icons/clipboard-orange.png",
+      "width": 24,
+      "height": 24,
+      "url": "https://moveitclearit.com/email/icons/clipboard-orange.png",
+      "alt": "Clipboard"
+    },
+    {
+      "file": "icons/clipboard-orange@2x.png",
+      "width": 48,
+      "height": 48,
+      "url": "https://moveitclearit.com/email/icons/clipboard-orange@2x.png",
+      "alt": "Clipboard"
+    },
+    {
+      "file": "icons/clipboard-gold.png",
+      "width": 24,
+      "height": 24,
+      "url": "https://moveitclearit.com/email/icons/clipboard-gold.png",
+      "alt": "Clipboard"
+    },
+    {
+      "file": "icons/clipboard-gold@2x.png",
+      "width": 48,
+      "height": 48,
+      "url": "https://moveitclearit.com/email/icons/clipboard-gold@2x.png",
+      "alt": "Clipboard"
+    },
+    {
+      "file": "icons/route-navy.png",
+      "width": 24,
+      "height": 24,
+      "url": "https://moveitclearit.com/email/icons/route-navy.png",
+      "alt": "Route pin"
+    },
+    {
+      "file": "icons/route-navy@2x.png",
+      "width": 48,
+      "height": 48,
+      "url": "https://moveitclearit.com/email/icons/route-navy@2x.png",
+      "alt": "Route pin"
+    },
+    {
+      "file": "icons/route-orange.png",
+      "width": 24,
+      "height": 24,
+      "url": "https://moveitclearit.com/email/icons/route-orange.png",
+      "alt": "Route pin"
+    },
+    {
+      "file": "icons/route-orange@2x.png",
+      "width": 48,
+      "height": 48,
+      "url": "https://moveitclearit.com/email/icons/route-orange@2x.png",
+      "alt": "Route pin"
+    },
+    {
+      "file": "icons/route-gold.png",
+      "width": 24,
+      "height": 24,
+      "url": "https://moveitclearit.com/email/icons/route-gold.png",
+      "alt": "Route pin"
+    },
+    {
+      "file": "icons/route-gold@2x.png",
+      "width": 48,
+      "height": 48,
+      "url": "https://moveitclearit.com/email/icons/route-gold@2x.png",
+      "alt": "Route pin"
+    },
+    {
+      "file": "icons/shield-navy.png",
+      "width": 24,
+      "height": 24,
+      "url": "https://moveitclearit.com/email/icons/shield-navy.png",
+      "alt": "Shield"
+    },
+    {
+      "file": "icons/shield-navy@2x.png",
+      "width": 48,
+      "height": 48,
+      "url": "https://moveitclearit.com/email/icons/shield-navy@2x.png",
+      "alt": "Shield"
+    },
+    {
+      "file": "icons/shield-orange.png",
+      "width": 24,
+      "height": 24,
+      "url": "https://moveitclearit.com/email/icons/shield-orange.png",
+      "alt": "Shield"
+    },
+    {
+      "file": "icons/shield-orange@2x.png",
+      "width": 48,
+      "height": 48,
+      "url": "https://moveitclearit.com/email/icons/shield-orange@2x.png",
+      "alt": "Shield"
+    },
+    {
+      "file": "icons/shield-gold.png",
+      "width": 24,
+      "height": 24,
+      "url": "https://moveitclearit.com/email/icons/shield-gold.png",
+      "alt": "Shield"
+    },
+    {
+      "file": "icons/shield-gold@2x.png",
+      "width": 48,
+      "height": 48,
+      "url": "https://moveitclearit.com/email/icons/shield-gold@2x.png",
+      "alt": "Shield"
+    },
+    {
+      "file": "icons/clock-navy.png",
+      "width": 24,
+      "height": 24,
+      "url": "https://moveitclearit.com/email/icons/clock-navy.png",
+      "alt": "Clock"
+    },
+    {
+      "file": "icons/clock-navy@2x.png",
+      "width": 48,
+      "height": 48,
+      "url": "https://moveitclearit.com/email/icons/clock-navy@2x.png",
+      "alt": "Clock"
+    },
+    {
+      "file": "icons/clock-orange.png",
+      "width": 24,
+      "height": 24,
+      "url": "https://moveitclearit.com/email/icons/clock-orange.png",
+      "alt": "Clock"
+    },
+    {
+      "file": "icons/clock-orange@2x.png",
+      "width": 48,
+      "height": 48,
+      "url": "https://moveitclearit.com/email/icons/clock-orange@2x.png",
+      "alt": "Clock"
+    },
+    {
+      "file": "icons/clock-gold.png",
+      "width": 24,
+      "height": 24,
+      "url": "https://moveitclearit.com/email/icons/clock-gold.png",
+      "alt": "Clock"
+    },
+    {
+      "file": "icons/clock-gold@2x.png",
+      "width": 48,
+      "height": 48,
+      "url": "https://moveitclearit.com/email/icons/clock-gold@2x.png",
+      "alt": "Clock"
+    },
+    {
+      "file": "icons/steps-navy.png",
+      "width": 24,
+      "height": 24,
+      "url": "https://moveitclearit.com/email/icons/steps-navy.png",
+      "alt": "Steps"
+    },
+    {
+      "file": "icons/steps-navy@2x.png",
+      "width": 48,
+      "height": 48,
+      "url": "https://moveitclearit.com/email/icons/steps-navy@2x.png",
+      "alt": "Steps"
+    },
+    {
+      "file": "icons/steps-orange.png",
+      "width": 24,
+      "height": 24,
+      "url": "https://moveitclearit.com/email/icons/steps-orange.png",
+      "alt": "Steps"
+    },
+    {
+      "file": "icons/steps-orange@2x.png",
+      "width": 48,
+      "height": 48,
+      "url": "https://moveitclearit.com/email/icons/steps-orange@2x.png",
+      "alt": "Steps"
+    },
+    {
+      "file": "icons/steps-gold.png",
+      "width": 24,
+      "height": 24,
+      "url": "https://moveitclearit.com/email/icons/steps-gold.png",
+      "alt": "Steps"
+    },
+    {
+      "file": "icons/steps-gold@2x.png",
+      "width": 48,
+      "height": 48,
+      "url": "https://moveitclearit.com/email/icons/steps-gold@2x.png",
+      "alt": "Steps"
+    },
+    {
+      "file": "icons/phone-navy.png",
+      "width": 24,
+      "height": 24,
+      "url": "https://moveitclearit.com/email/icons/phone-navy.png",
+      "alt": "Phone"
+    },
+    {
+      "file": "icons/phone-navy@2x.png",
+      "width": 48,
+      "height": 48,
+      "url": "https://moveitclearit.com/email/icons/phone-navy@2x.png",
+      "alt": "Phone"
+    },
+    {
+      "file": "icons/phone-orange.png",
+      "width": 24,
+      "height": 24,
+      "url": "https://moveitclearit.com/email/icons/phone-orange.png",
+      "alt": "Phone"
+    },
+    {
+      "file": "icons/phone-orange@2x.png",
+      "width": 48,
+      "height": 48,
+      "url": "https://moveitclearit.com/email/icons/phone-orange@2x.png",
+      "alt": "Phone"
+    },
+    {
+      "file": "icons/phone-gold.png",
+      "width": 24,
+      "height": 24,
+      "url": "https://moveitclearit.com/email/icons/phone-gold.png",
+      "alt": "Phone"
+    },
+    {
+      "file": "icons/phone-gold@2x.png",
+      "width": 48,
+      "height": 48,
+      "url": "https://moveitclearit.com/email/icons/phone-gold@2x.png",
+      "alt": "Phone"
+    },
+    {
+      "file": "icons/mail-navy.png",
+      "width": 24,
+      "height": 24,
+      "url": "https://moveitclearit.com/email/icons/mail-navy.png",
+      "alt": "Envelope"
+    },
+    {
+      "file": "icons/mail-navy@2x.png",
+      "width": 48,
+      "height": 48,
+      "url": "https://moveitclearit.com/email/icons/mail-navy@2x.png",
+      "alt": "Envelope"
+    },
+    {
+      "file": "icons/mail-orange.png",
+      "width": 24,
+      "height": 24,
+      "url": "https://moveitclearit.com/email/icons/mail-orange.png",
+      "alt": "Envelope"
+    },
+    {
+      "file": "icons/mail-orange@2x.png",
+      "width": 48,
+      "height": 48,
+      "url": "https://moveitclearit.com/email/icons/mail-orange@2x.png",
+      "alt": "Envelope"
+    },
+    {
+      "file": "icons/mail-gold.png",
+      "width": 24,
+      "height": 24,
+      "url": "https://moveitclearit.com/email/icons/mail-gold.png",
+      "alt": "Envelope"
+    },
+    {
+      "file": "icons/mail-gold@2x.png",
+      "width": 48,
+      "height": 48,
+      "url": "https://moveitclearit.com/email/icons/mail-gold@2x.png",
+      "alt": "Envelope"
+    },
+    {
+      "file": "icons/globe-navy.png",
+      "width": 24,
+      "height": 24,
+      "url": "https://moveitclearit.com/email/icons/globe-navy.png",
+      "alt": "Globe"
+    },
+    {
+      "file": "icons/globe-navy@2x.png",
+      "width": 48,
+      "height": 48,
+      "url": "https://moveitclearit.com/email/icons/globe-navy@2x.png",
+      "alt": "Globe"
+    },
+    {
+      "file": "icons/globe-orange.png",
+      "width": 24,
+      "height": 24,
+      "url": "https://moveitclearit.com/email/icons/globe-orange.png",
+      "alt": "Globe"
+    },
+    {
+      "file": "icons/globe-orange@2x.png",
+      "width": 48,
+      "height": 48,
+      "url": "https://moveitclearit.com/email/icons/globe-orange@2x.png",
+      "alt": "Globe"
+    },
+    {
+      "file": "icons/globe-gold.png",
+      "width": 24,
+      "height": 24,
+      "url": "https://moveitclearit.com/email/icons/globe-gold.png",
+      "alt": "Globe"
+    },
+    {
+      "file": "icons/globe-gold@2x.png",
+      "width": 48,
+      "height": 48,
+      "url": "https://moveitclearit.com/email/icons/globe-gold@2x.png",
+      "alt": "Globe"
+    },
+    {
+      "file": "icons/calendar-navy.png",
+      "width": 24,
+      "height": 24,
+      "url": "https://moveitclearit.com/email/icons/calendar-navy.png",
+      "alt": "Calendar"
+    },
+    {
+      "file": "icons/calendar-navy@2x.png",
+      "width": 48,
+      "height": 48,
+      "url": "https://moveitclearit.com/email/icons/calendar-navy@2x.png",
+      "alt": "Calendar"
+    },
+    {
+      "file": "icons/calendar-orange.png",
+      "width": 24,
+      "height": 24,
+      "url": "https://moveitclearit.com/email/icons/calendar-orange.png",
+      "alt": "Calendar"
+    },
+    {
+      "file": "icons/calendar-orange@2x.png",
+      "width": 48,
+      "height": 48,
+      "url": "https://moveitclearit.com/email/icons/calendar-orange@2x.png",
+      "alt": "Calendar"
+    },
+    {
+      "file": "icons/calendar-gold.png",
+      "width": 24,
+      "height": 24,
+      "url": "https://moveitclearit.com/email/icons/calendar-gold.png",
+      "alt": "Calendar"
+    },
+    {
+      "file": "icons/calendar-gold@2x.png",
+      "width": 48,
+      "height": 48,
+      "url": "https://moveitclearit.com/email/icons/calendar-gold@2x.png",
+      "alt": "Calendar"
+    },
+    {
+      "file": "icons/crew-navy.png",
+      "width": 24,
+      "height": 24,
+      "url": "https://moveitclearit.com/email/icons/crew-navy.png",
+      "alt": "Crew"
+    },
+    {
+      "file": "icons/crew-navy@2x.png",
+      "width": 48,
+      "height": 48,
+      "url": "https://moveitclearit.com/email/icons/crew-navy@2x.png",
+      "alt": "Crew"
+    },
+    {
+      "file": "icons/crew-orange.png",
+      "width": 24,
+      "height": 24,
+      "url": "https://moveitclearit.com/email/icons/crew-orange.png",
+      "alt": "Crew"
+    },
+    {
+      "file": "icons/crew-orange@2x.png",
+      "width": 48,
+      "height": 48,
+      "url": "https://moveitclearit.com/email/icons/crew-orange@2x.png",
+      "alt": "Crew"
+    },
+    {
+      "file": "icons/crew-gold.png",
+      "width": 24,
+      "height": 24,
+      "url": "https://moveitclearit.com/email/icons/crew-gold.png",
+      "alt": "Crew"
+    },
+    {
+      "file": "icons/crew-gold@2x.png",
+      "width": 48,
+      "height": 48,
+      "url": "https://moveitclearit.com/email/icons/crew-gold@2x.png",
+      "alt": "Crew"
+    },
+    {
+      "file": "icons/checklist-navy.png",
+      "width": 24,
+      "height": 24,
+      "url": "https://moveitclearit.com/email/icons/checklist-navy.png",
+      "alt": "Checklist"
+    },
+    {
+      "file": "icons/checklist-navy@2x.png",
+      "width": 48,
+      "height": 48,
+      "url": "https://moveitclearit.com/email/icons/checklist-navy@2x.png",
+      "alt": "Checklist"
+    },
+    {
+      "file": "icons/checklist-orange.png",
+      "width": 24,
+      "height": 24,
+      "url": "https://moveitclearit.com/email/icons/checklist-orange.png",
+      "alt": "Checklist"
+    },
+    {
+      "file": "icons/checklist-orange@2x.png",
+      "width": 48,
+      "height": 48,
+      "url": "https://moveitclearit.com/email/icons/checklist-orange@2x.png",
+      "alt": "Checklist"
+    },
+    {
+      "file": "icons/checklist-gold.png",
+      "width": 24,
+      "height": 24,
+      "url": "https://moveitclearit.com/email/icons/checklist-gold.png",
+      "alt": "Checklist"
+    },
+    {
+      "file": "icons/checklist-gold@2x.png",
+      "width": 48,
+      "height": 48,
+      "url": "https://moveitclearit.com/email/icons/checklist-gold@2x.png",
+      "alt": "Checklist"
+    },
+    {
+      "file": "icons/truck-navy.png",
+      "width": 24,
+      "height": 24,
+      "url": "https://moveitclearit.com/email/icons/truck-navy.png",
+      "alt": "Truck"
+    },
+    {
+      "file": "icons/truck-navy@2x.png",
+      "width": 48,
+      "height": 48,
+      "url": "https://moveitclearit.com/email/icons/truck-navy@2x.png",
+      "alt": "Truck"
+    },
+    {
+      "file": "icons/truck-orange.png",
+      "width": 24,
+      "height": 24,
+      "url": "https://moveitclearit.com/email/icons/truck-orange.png",
+      "alt": "Truck"
+    },
+    {
+      "file": "icons/truck-orange@2x.png",
+      "width": 48,
+      "height": 48,
+      "url": "https://moveitclearit.com/email/icons/truck-orange@2x.png",
+      "alt": "Truck"
+    },
+    {
+      "file": "icons/truck-gold.png",
+      "width": 24,
+      "height": 24,
+      "url": "https://moveitclearit.com/email/icons/truck-gold.png",
+      "alt": "Truck"
+    },
+    {
+      "file": "icons/truck-gold@2x.png",
+      "width": 48,
+      "height": 48,
+      "url": "https://moveitclearit.com/email/icons/truck-gold@2x.png",
+      "alt": "Truck"
+    },
+    {
+      "file": "icons/sparkle-navy.png",
+      "width": 24,
+      "height": 24,
+      "url": "https://moveitclearit.com/email/icons/sparkle-navy.png",
+      "alt": "Sparkle"
+    },
+    {
+      "file": "icons/sparkle-navy@2x.png",
+      "width": 48,
+      "height": 48,
+      "url": "https://moveitclearit.com/email/icons/sparkle-navy@2x.png",
+      "alt": "Sparkle"
+    },
+    {
+      "file": "icons/sparkle-orange.png",
+      "width": 24,
+      "height": 24,
+      "url": "https://moveitclearit.com/email/icons/sparkle-orange.png",
+      "alt": "Sparkle"
+    },
+    {
+      "file": "icons/sparkle-orange@2x.png",
+      "width": 48,
+      "height": 48,
+      "url": "https://moveitclearit.com/email/icons/sparkle-orange@2x.png",
+      "alt": "Sparkle"
+    },
+    {
+      "file": "icons/sparkle-gold.png",
+      "width": 24,
+      "height": 24,
+      "url": "https://moveitclearit.com/email/icons/sparkle-gold.png",
+      "alt": "Sparkle"
+    },
+    {
+      "file": "icons/sparkle-gold@2x.png",
+      "width": 48,
+      "height": 48,
+      "url": "https://moveitclearit.com/email/icons/sparkle-gold@2x.png",
+      "alt": "Sparkle"
+    },
+    {
+      "file": "icons/weight-navy.png",
+      "width": 24,
+      "height": 24,
+      "url": "https://moveitclearit.com/email/icons/weight-navy.png",
+      "alt": "Weight"
+    },
+    {
+      "file": "icons/weight-navy@2x.png",
+      "width": 48,
+      "height": 48,
+      "url": "https://moveitclearit.com/email/icons/weight-navy@2x.png",
+      "alt": "Weight"
+    },
+    {
+      "file": "icons/weight-orange.png",
+      "width": 24,
+      "height": 24,
+      "url": "https://moveitclearit.com/email/icons/weight-orange.png",
+      "alt": "Weight"
+    },
+    {
+      "file": "icons/weight-orange@2x.png",
+      "width": 48,
+      "height": 48,
+      "url": "https://moveitclearit.com/email/icons/weight-orange@2x.png",
+      "alt": "Weight"
+    },
+    {
+      "file": "icons/weight-gold.png",
+      "width": 24,
+      "height": 24,
+      "url": "https://moveitclearit.com/email/icons/weight-gold.png",
+      "alt": "Weight"
+    },
+    {
+      "file": "icons/weight-gold@2x.png",
+      "width": 48,
+      "height": 48,
+      "url": "https://moveitclearit.com/email/icons/weight-gold@2x.png",
+      "alt": "Weight"
+    },
+    {
+      "file": "icons/search-navy.png",
+      "width": 24,
+      "height": 24,
+      "url": "https://moveitclearit.com/email/icons/search-navy.png",
+      "alt": "Search"
+    },
+    {
+      "file": "icons/search-navy@2x.png",
+      "width": 48,
+      "height": 48,
+      "url": "https://moveitclearit.com/email/icons/search-navy@2x.png",
+      "alt": "Search"
+    },
+    {
+      "file": "icons/search-orange.png",
+      "width": 24,
+      "height": 24,
+      "url": "https://moveitclearit.com/email/icons/search-orange.png",
+      "alt": "Search"
+    },
+    {
+      "file": "icons/search-orange@2x.png",
+      "width": 48,
+      "height": 48,
+      "url": "https://moveitclearit.com/email/icons/search-orange@2x.png",
+      "alt": "Search"
+    },
+    {
+      "file": "icons/search-gold.png",
+      "width": 24,
+      "height": 24,
+      "url": "https://moveitclearit.com/email/icons/search-gold.png",
+      "alt": "Search"
+    },
+    {
+      "file": "icons/search-gold@2x.png",
+      "width": 48,
+      "height": 48,
+      "url": "https://moveitclearit.com/email/icons/search-gold@2x.png",
+      "alt": "Search"
+    },
+    {
+      "file": "hero.png",
+      "width": 640,
+      "height": 246,
+      "url": "https://moveitclearit.com/email/hero.png",
+      "alt": "Move It Clear It — your movers are on the way"
+    }
+  ]
+}

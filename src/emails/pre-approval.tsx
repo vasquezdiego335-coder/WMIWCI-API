@@ -2,6 +2,7 @@ import * as React from 'react'
 import {
   Shell,
   LogoHeader,
+  AnimatedHero,
   Card,
   Eyebrow,
   Pill,
@@ -134,7 +135,7 @@ export default function PreApprovalEmail({
         supportTitle: '¿Necesitas ayuda?',
         contactLabels: { phone: 'Llama o escribe', email: 'Correo', website: 'Sitio web' },
         disclaimer:
-          'Este correo confirma que recibimos tu solicitud — no es una confirmación final. El precio es un estimado y puede ajustarse tras revisar acceso y detalles. La autorización de $49 es una retención, no un cargo, y se libera si tu reserva no se aprueba.',
+          `Este correo confirma que recibimos tu solicitud — no es una confirmación final. El precio es un estimado y puede ajustarse tras revisar acceso y detalles. La autorización de $${amountHold} es una retención, no un cargo, y se libera si tu reserva no se aprueba.`,
         footerLabels: { manage: 'Administrar preferencias', unsubscribe: 'Cancelar suscripción', rights: 'Todos los derechos reservados.' },
         defTruck: 'U-Haul — a tu nombre',
       }
@@ -172,7 +173,7 @@ export default function PreApprovalEmail({
         supportTitle: 'Need a hand?',
         contactLabels: { phone: 'Call or text', email: 'Email', website: 'Website' },
         disclaimer:
-          'This email confirms we’ve received your booking request — it is not a final confirmation. Pricing is an estimate and may adjust after we review access and details. The $49 authorization is a hold, not a charge, and is released if your booking isn’t approved.',
+          `This email confirms we’ve received your booking request — it is not a final confirmation. Pricing is an estimate and may adjust after we review access and details. The $${amountHold} authorization is a hold, not a charge, and is released if your booking isn’t approved.`,
         footerLabels: { manage: 'Manage preferences', unsubscribe: 'Unsubscribe', rights: 'All rights reserved.' },
         defTruck: 'U-Haul — rented in your name',
       }
@@ -191,7 +192,7 @@ export default function PreApprovalEmail({
       {/* ── 1 · HERO ─────────────────────────────────────────── */}
       <Card style={{ borderTop: `3px solid ${C.gold}` }}>
         <div className="heropad" style={{ textAlign: 'center' as const }}>
-          <HeroArt />
+          <AnimatedHero />
           <Spacer h={18} />
           <Pill tone="gold">{t.pill}</Pill>
           <h1 className="h1" style={{ fontFamily: FONT, fontSize: '26px', lineHeight: '33px', fontWeight: 800, letterSpacing: '-0.4px', color: C.navy, margin: '16px 0 10px' }}>
@@ -361,55 +362,5 @@ export default function PreApprovalEmail({
         labels={t.footerLabels}
       />
     </Shell>
-  )
-}
-
-// ── Hero illustration — flat, geometric, brand-colored moving scene.
-// Renders in Apple Mail / iOS (inline SVG). Gmail/Outlook strip inline SVG and
-// simply show the copy below; host a PNG of this art and add it as an <img>
-// fallback for pixel-parity in every client (see component notes).
-function HeroArt() {
-  return (
-    <table role="presentation" cellPadding={0} cellSpacing={0} border={0} align="center" style={{ margin: '0 auto' }}>
-      <tbody>
-        <tr>
-          <td align="center" style={{ padding: '4px 0' }}>
-            <svg width="300" height="128" viewBox="0 0 520 200" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Move It Clear It — moving in progress" style={{ display: 'block', maxWidth: '100%' }}>
-              {/* ground */}
-              <rect x="44" y="168" width="432" height="4" rx="2" fill="#EDE6D9" />
-              {/* dashed route to destination pin */}
-              <path d="M300 170 H436" stroke="#D4A24C" strokeWidth="4" strokeLinecap="round" strokeDasharray="2 12" />
-              {/* boxes being loaded */}
-              <rect x="20" y="118" width="46" height="42" rx="7" fill="#D4A24C" />
-              <path d="M43 118 V160 M20 132 H66" stroke="#F7F1E4" strokeWidth="3" />
-              <rect x="30" y="86" width="40" height="36" rx="7" fill="#FF6A00" />
-              <path d="M50 86 V122 M30 100 H70" stroke="#FFE3CE" strokeWidth="3" />
-              {/* truck cargo */}
-              <rect x="86" y="72" width="150" height="76" rx="13" fill="#0D1A2D" />
-              <rect x="86" y="120" width="150" height="11" fill="#FF6A00" />
-              {/* chevron badge on cargo */}
-              <path d="M138 88 L170 105 L138 122" stroke="#FF6A00" strokeWidth="13" strokeLinecap="round" strokeLinejoin="round" fill="none" />
-              {/* cab */}
-              <path d="M236 92 h34 l20 20 v36 a4 4 0 0 1 -4 4 h-50 z" fill="#0D1A2D" />
-              <rect x="252" y="100" width="26" height="20" rx="4" fill="#FF6A00" opacity="0.9" />
-              <rect x="288" y="140" width="8" height="12" rx="2" fill="#D4A24C" />
-              {/* wheels */}
-              <circle cx="132" cy="150" r="18" fill="#0D1A2D" />
-              <circle cx="132" cy="150" r="8" fill="#F7F7F2" />
-              <circle cx="256" cy="150" r="18" fill="#0D1A2D" />
-              <circle cx="256" cy="150" r="8" fill="#F7F7F2" />
-              {/* destination pin */}
-              <circle cx="452" cy="118" r="18" fill="#0D1A2D" />
-              <path d="M436 130 L452 158 L468 130 Z" fill="#0D1A2D" />
-              <circle cx="452" cy="116" r="7" fill="#FF6A00" />
-              {/* gold accent dots */}
-              <circle cx="330" cy="150" r="3" fill="#D4A24C" />
-              <circle cx="360" cy="150" r="3" fill="#D4A24C" />
-              <circle cx="390" cy="150" r="3" fill="#D4A24C" />
-            </svg>
-          </td>
-        </tr>
-      </tbody>
-    </table>
   )
 }

@@ -94,8 +94,8 @@ export default function PaymentReceiptEmail({
         estTitle: 'Desglose de tu mudanza',
         est: { total: 'Total de la mudanza (mano de obra)', deposit: 'Menos depósito pagado hoy', remain: 'Saldo de mano de obra', truck: 'Cargo por camión (día de mudanza)', travel: 'Cargo por viaje (día de mudanza)', waiting: `Tiempo de espera${waitingMinutes ? ` (${waitingMinutes} min tras la cortesía)` : ''} (día de mudanza)`, due: 'A pagar el día de la mudanza' },
         note: captured
-          ? 'El depósito de $49 se cobró para asegurar tu reserva y se aplica al total de tu mudanza. El saldo restante se paga el día de la mudanza.'
-          : 'El depósito de $49 es una autorización (retención) en tu tarjeta — solo se cobra cuando se aprueba tu reserva. Se aplica al total de tu mudanza.',
+          ? `El depósito de $${amountPaid} se cobró para asegurar tu reserva y se aplica al total de tu mudanza. El saldo restante se paga el día de la mudanza.`
+          : `El depósito de $${amountPaid} es una autorización (retención) en tu tarjeta — solo se cobra cuando se aprueba tu reserva. Se aplica al total de tu mudanza.`,
         cta: 'Ver mi reserva',
         supportTitle: 'Estamos para ayudarte',
         contactLabels: { phone: 'Llama o escribe', email: 'Correo', website: 'Sitio web' },
@@ -116,8 +116,8 @@ export default function PaymentReceiptEmail({
         estTitle: 'Your move breakdown',
         est: { total: 'Move total (labor)', deposit: 'Less deposit paid today', remain: 'Labor balance', truck: 'Truck add-on (move day)', travel: 'Travel fee (move day)', waiting: `Waiting time${waitingMinutes ? ` (${waitingMinutes} min past grace)` : ''} (move day)`, due: 'Due on move day' },
         note: captured
-          ? 'The $49 deposit was charged to secure your booking and applies to your move total. Any remaining balance is settled on move day.'
-          : 'The $49 deposit is an authorization hold on your card — it is only charged once your booking is approved. It applies to your move total.',
+          ? `The $${amountPaid} deposit was charged to secure your booking and applies to your move total. Any remaining balance is settled on move day.`
+          : `The $${amountPaid} deposit is an authorization hold on your card — it is only charged once your booking is approved. It applies to your move total.`,
         cta: 'View booking',
         supportTitle: "We're here to help",
         contactLabels: { phone: 'Call or text', email: 'Email', website: 'Website' },

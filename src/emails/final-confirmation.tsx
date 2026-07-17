@@ -131,7 +131,7 @@ export default function FinalConfirmationEmail({
         supportTitle: 'Estamos para ayudarte',
         contactLabels: { phone: 'Llama o escribe', email: 'Correo', website: 'Sitio web' },
         disclaimer:
-          '¿Necesitas hacer un cambio? Llámanos o escríbenos cuando quieras — con gusto te ayudamos. Tu depósito de $49 se aplica a tu mudanza; cualquier saldo restante se paga el día de la mudanza.',
+          `¿Necesitas hacer un cambio? Llámanos o escríbenos cuando quieras — con gusto te ayudamos. Tu depósito de $${amountPaid ?? '49'} se aplica a tu mudanza; cualquier saldo restante se paga el día de la mudanza.`,
         footerLabels: { manage: 'Administrar preferencias', unsubscribe: 'Cancelar suscripción', rights: 'Todos los derechos reservados.' },
         defTruck: 'U-Haul — a tu nombre',
       }
@@ -164,7 +164,7 @@ export default function FinalConfirmationEmail({
         supportTitle: 'We’re here to help',
         contactLabels: { phone: 'Call or text', email: 'Email', website: 'Website' },
         disclaimer:
-          'Need to make a change? Call or text us any time — we’re always happy to help. Your $49 deposit is applied to your move; any remaining balance is settled on move day.',
+          `Need to make a change? Call or text us any time — we’re always happy to help. Your $${amountPaid ?? '49'} deposit is applied to your move; any remaining balance is settled on move day.`,
         footerLabels: { manage: 'Manage preferences', unsubscribe: 'Unsubscribe', rights: 'All rights reserved.' },
         defTruck: 'U-Haul — rented in your name',
       }
