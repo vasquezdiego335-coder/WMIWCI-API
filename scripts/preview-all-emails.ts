@@ -27,7 +27,7 @@ const templates: Array<[string, React.ReactElement]> = [
   ['pre-approval', React.createElement(PreApproval, { ...common, amountHold: '1', originAddress: '1 A St', destAddress: '2 B St' })],
   ['final-confirmation', React.createElement(FinalConfirmation, { ...common, amountPaid: '1' })],
   ['booking-declined', React.createElement(BookingDeclined, { ...common, amountHold: '1' })],
-  ['booking-cancellation', React.createElement(BookingCancellation, { ...common })],
+  ['booking-cancellation', React.createElement(BookingCancellation, { ...common, amount: '1', kind: 'released' })],
   ['booking-updated', React.createElement(BookingUpdated, { ...common, amountHold: '1', changedLabel: 'the date' })],
   ['job-reminder', React.createElement(JobReminder, { ...common })],
   ['job-completion', React.createElement(JobCompletion, { ...common })],
