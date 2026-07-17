@@ -33,6 +33,7 @@ const templates: Array<[string, React.ReactElement]> = [
   ['final-confirmation', React.createElement(FinalConfirmation, { ...common, amountPaid: '1' })],
   ['booking-declined', React.createElement(BookingDeclined, { ...common, amountHold: '1' })],
   ['booking-cancellation', React.createElement(BookingCancellation, { ...common, amount: '1', refundStatus: 'released' })],
+  ['booking-cancellation-partial', React.createElement(BookingCancellation, { ...common, refundStatus: 'partial', amountCharged: '49', nonRefundable: '20', refundedAmount: '29', refundMethod: 'Visa ending in 4242', refundEta: '5–10 business days' })],
   ['booking-updated', React.createElement(BookingUpdated, { ...common, amountHold: '1', changedLabel: 'the date' })],
   ['job-reminder', React.createElement(JobReminder, { ...common })],
   ['job-completion', React.createElement(JobCompletion, { ...common })],
