@@ -58,6 +58,11 @@ export const REQUIRED_FIELDS = {
   'payment-receipt': ['displayId', 'date', 'amountPaid', 'portalUrl'],
   'review-request': ['googleReviewUrl'],
   'payment-failed': ['updatePaymentUrl'],
+  // A pending-details ask / final invoice must carry a real link back to act on.
+  'information-required': ['portalUrl'],
+  'final-invoice': ['portalUrl'],
+  // The referral reward is meaningless without a link to redeem it.
+  'referral-reward': ['redeemUrl'],
 } as const satisfies Record<string, readonly string[]>
 
 export type ValidatedTemplate = keyof typeof REQUIRED_FIELDS

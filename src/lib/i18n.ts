@@ -150,6 +150,10 @@ const EMAIL_SUBJECTS: Record<string, { en: string; es: string }> = {
   'review-request':      { en: 'How did we do? Leave us a review',          es: '¿Cómo lo hicimos? Deja tu reseña' },
   'abandoned-checkout':  { en: 'Your date is still available',              es: 'Tu fecha sigue disponible' },
   'referral':            { en: 'Give 15%. Get 15%.',                        es: 'Da 15%. Recibe 15%.' },
+  'information-required':{ en: 'We need a few details to schedule your move', es: 'Necesitamos algunos datos para agendar tu mudanza' },
+  'operational-alert':   { en: 'An update about your move',                 es: 'Una actualización sobre tu mudanza' },
+  'final-invoice':       { en: 'Your final invoice',                        es: 'Tu factura final' },
+  'referral-reward':     { en: 'Your referral reward is here',              es: 'Tu recompensa por recomendarnos ya está aquí' },
 }
 
 export function emailSubject(template: string, locale?: string): string {

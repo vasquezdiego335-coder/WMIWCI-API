@@ -1,4 +1,4 @@
-// Renders all 11 email templates to HTML to verify they render without error
+// Renders all 15 email templates to HTML to verify they render without error
 // after the overhaul. Writes email-previews/<name>.html and reports OK/FAIL.
 //   npx tsx scripts/preview-all-emails.ts
 import { render } from '@react-email/render'
@@ -18,6 +18,10 @@ import AbandonedCheckout from '../src/emails/abandoned-checkout'
 import Referral from '../src/emails/referral'
 import ReviewRequest from '../src/emails/review-request'
 import PaymentFailed from '../src/emails/payment-failed'
+import InformationRequired from '../src/emails/information-required'
+import OperationalAlert from '../src/emails/operational-alert'
+import FinalInvoice from '../src/emails/final-invoice'
+import ReferralReward from '../src/emails/referral-reward'
 
 const OUT = resolve('email-previews')
 mkdirSync(OUT, { recursive: true })
@@ -37,6 +41,10 @@ const templates: Array<[string, React.ReactElement]> = [
   ['referral', React.createElement(Referral, { ...common })],
   ['review-request', React.createElement(ReviewRequest, { ...common })],
   ['payment-failed', React.createElement(PaymentFailed, { ...common, failureType: 'authorization', amount: '49', updatePaymentUrl: 'https://moveitclearit.com/pay/tok', dateHeld: true })],
+  ['information-required', React.createElement(InformationRequired, { ...common, portalUrl: 'https://moveitclearit.com/my-booking/tok', deadline: 'within 48 hours', missing: ['Exact pickup address', 'Apartment / floor & elevator access', 'Approximate item list'] })],
+  ['operational-alert', React.createElement(OperationalAlert, { ...common, alertType: 'reschedule', message: 'A job before yours ran long and our crew won’t make your window today. We’re sorry for the disruption — here’s the soonest we can get to you.', newDate: '2026-08-02T15:00:00Z', newTimeLabel: '9–11 AM', portalUrl: 'https://moveitclearit.com/my-booking/tok' })],
+  ['final-invoice', React.createElement(FinalInvoice, { ...common, date: '2026-08-01T15:00:00Z', invoiceNumber: 'INV-1017', laborTotal: '420', truckAddon: '60', grandTotal: '480', amountPaid: '1', balanceDue: '479', payUrl: 'https://moveitclearit.com/pay/tok', portalUrl: 'https://moveitclearit.com/my-booking/tok' })],
+  ['referral-reward', React.createElement(ReferralReward, { ...common, friendName: 'Marcus', rewardLabel: '$25 credit', rewardCode: 'THANKS25', expiresLabel: 'through Sept 30', redeemUrl: 'https://moveitclearit.com/book?code=THANKS25' })],
 ]
 
 async function main() {

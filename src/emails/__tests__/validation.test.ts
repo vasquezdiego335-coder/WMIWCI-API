@@ -16,6 +16,10 @@ import AbandonedCheckout from '../abandoned-checkout'
 import Referral from '../referral'
 import ReviewRequest from '../review-request'
 import PaymentFailed from '../payment-failed'
+import InformationRequired from '../information-required'
+import OperationalAlert from '../operational-alert'
+import FinalInvoice from '../final-invoice'
+import ReferralReward from '../referral-reward'
 
 // ── Link safety ───────────────────────────────────────────────────────────────
 test('unsafeUrlReason flags placeholder + unsafe URLs', () => {
@@ -79,6 +83,10 @@ const all: Array<[string, React.ReactElement]> = [
   ['referral', React.createElement(Referral, { ...common })],
   ['review-request', React.createElement(ReviewRequest, { ...common })],
   ['payment-failed', React.createElement(PaymentFailed, { ...common, updatePaymentUrl: URL })],
+  ['information-required', React.createElement(InformationRequired, { ...common, missing: ['Exact pickup address', 'Apartment / access details'] })],
+  ['operational-alert', React.createElement(OperationalAlert, { ...common, alertType: 'reschedule', message: 'Our crew hit a delay on an earlier job.', newDate: '2026-08-02T15:00:00Z', newTimeLabel: '9–11 AM' })],
+  ['final-invoice', React.createElement(FinalInvoice, { ...common, laborTotal: '420', grandTotal: '420', amountPaid: '1', balanceDue: '419', payUrl: URL })],
+  ['referral-reward', React.createElement(ReferralReward, { ...common, rewardLabel: '$25 credit', rewardCode: 'THANKS25', redeemUrl: URL })],
 ]
 
 for (const [name, el] of all) {

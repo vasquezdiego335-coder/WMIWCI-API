@@ -22,6 +22,10 @@ import ReviewRequestEmail from '../emails/review-request'
 import AbandonedCheckoutEmail from '../emails/abandoned-checkout'
 import ReferralEmail from '../emails/referral'
 import PaymentFailedEmail from '../emails/payment-failed'
+import InformationRequiredEmail from '../emails/information-required'
+import OperationalAlertEmail from '../emails/operational-alert'
+import FinalInvoiceEmail from '../emails/final-invoice'
+import ReferralRewardEmail from '../emails/referral-reward'
 import { emailSubject } from '../lib/i18n'
 
 // ════════════════════════════════════════════════════════════════════════
@@ -56,6 +60,10 @@ const ALLOWED_TEMPLATES = new Set<EmailJobData['template']>([
   'abandoned-checkout',
   'referral',
   'payment-failed',
+  'information-required',
+  'operational-alert',
+  'final-invoice',
+  'referral-reward',
 ])
 
 const TEMPLATES: Record<
@@ -74,6 +82,10 @@ const TEMPLATES: Record<
   'abandoned-checkout': (p) => AbandonedCheckoutEmail(p as any),
   'referral': (p) => ReferralEmail(p as any),
   'payment-failed': (p) => PaymentFailedEmail(p as any),
+  'information-required': (p) => InformationRequiredEmail(p as any),
+  'operational-alert': (p) => OperationalAlertEmail(p as any),
+  'final-invoice': (p) => FinalInvoiceEmail(p as any),
+  'referral-reward': (p) => ReferralRewardEmail(p as any),
 }
 
 // English fallbacks. Bilingual subjects come from emailSubject(template, locale)
@@ -91,6 +103,10 @@ const SUBJECTS: Record<EmailJobData['template'], string> = {
   'abandoned-checkout': 'Your date is still available',
   'referral': 'Give 15%. Get 15%.',
   'payment-failed': 'Action required — update your payment method',
+  'information-required': 'We need a few details to schedule your move',
+  'operational-alert': 'An update about your move',
+  'final-invoice': 'Your final invoice',
+  'referral-reward': 'Your referral reward is here',
 }
 
 /** Insert a 1x1 open-tracking pixel just before </body> (or append if none). */

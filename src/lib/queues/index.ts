@@ -134,7 +134,7 @@ export const marketingQueue = lazyQueue(getMarketingQueue)
 
 // ── Job type definitions ──────────────────────────────────────
 export type EmailJobData = {
-  // The 11 active React customer emails. Enforced by ALLOWED_TEMPLATES in
+  // The active React customer emails. Enforced by ALLOWED_TEMPLATES in
   // src/workers/email.worker.ts. (Marketing lead emails live in Leadtracking.)
   template:
     | 'pre-approval'         // payment step — pre-confirmation
@@ -149,6 +149,10 @@ export type EmailJobData = {
     | 'abandoned-checkout'   // started a booking, no deposit
     | 'referral'             // post-move referral ask
     | 'payment-failed'       // authorization/capture/final-payment failure — action required
+    | 'information-required' // pending request needs more details before scheduling
+    | 'operational-alert'    // operational notice (delay/reschedule/weather)
+    | 'final-invoice'        // post-job final invoice / balance due
+    | 'referral-reward'      // a referral converted — reward earned (promotional)
   to: string
   bookingId?: string
   notificationId?: string
