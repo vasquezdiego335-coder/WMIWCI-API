@@ -122,8 +122,8 @@ export default function FinalConfirmationEmail({
         expect: [
           { title: 'Llega el equipo', desc: 'Puntuales y listos. Te avisamos cuando vamos en camino.' },
           { title: 'Recorrido', desc: 'Revisamos juntos tus artículos, el acceso y el plan.' },
-          { title: 'Carga', desc: 'Acolchamos, envolvemos y cargamos todo con seguridad.' },
-          { title: 'Transporte', desc: 'Nos dirigimos a tu destino y mantenemos todo a tiempo.' },
+          { title: 'Carga', desc: 'Cargamos todo con cuidado y seguridad.' },
+          { title: 'Al destino', desc: 'Tú conduces el camión de alquiler al destino y nuestro equipo te encuentra allí.' },
           { title: 'Descarga', desc: 'Colocamos cada artículo donde lo quieras.' },
           { title: 'Recorrido final', desc: 'Confirmamos que no falte nada antes de irnos.' },
         ],
@@ -155,8 +155,8 @@ export default function FinalConfirmationEmail({
         expect: [
           { title: 'Crew arrives', desc: 'On time and ready. We’ll text you when we’re en route.' },
           { title: 'Walkthrough', desc: 'We review your items, access, and the plan together.' },
-          { title: 'Loading', desc: 'We pad, wrap, and load everything securely.' },
-          { title: 'Transport', desc: 'We head to your destination and keep things on schedule.' },
+          { title: 'Loading', desc: 'We load everything carefully and securely.' },
+          { title: 'To the destination', desc: 'You drive the rental truck to your destination, and our crew meets you there.' },
           { title: 'Unload', desc: 'We place every item exactly where you want it.' },
           { title: 'Final walkthrough', desc: 'We confirm nothing’s missed before we go.' },
         ],

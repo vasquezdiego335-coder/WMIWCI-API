@@ -96,7 +96,7 @@ export default function BookingUpdatedEmail({
     : {
         preview: `We've updated your booking${displayId ? ` (${displayId})` : ''}. Here are the current details.`,
         pill: 'Booking updated',
-        h1: changedLabel ? `We've updated your booking ${changedLabel}.` : "We've updated your booking.",
+        h1: changedLabel ? `We've updated ${changedLabel} on your booking.` : "We've updated your booking.",
         sub: `Hi ${customerName}, the change is done. Here are the current details for your move.`,
         changeTitle: "What changed",
         detTitle: 'Updated details',

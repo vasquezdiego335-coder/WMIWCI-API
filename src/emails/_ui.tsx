@@ -266,7 +266,7 @@ export function HeroTruckArt() {
       <tbody>
         <tr>
           <td align="center" style={{ padding: '4px 0' }}>
-            <svg width="320" height="123" viewBox="0 0 520 200" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Move It Clear It — your movers are on the way" style={{ display: 'block', maxWidth: '100%' }}>
+            <svg width="320" height="123" viewBox="0 0 520 200" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Move It Clear It moving truck" style={{ display: 'block', maxWidth: '100%' }}>
               {/* celebration sparkles */}
               <path d="M118 67 L121 74 L128 76 L121 78 L118 85 L115 78 L108 76 L115 74 Z" fill="#D4A24C" />
               <path d="M404 60 L408 68 L416 71 L408 74 L404 82 L400 74 L392 71 L400 68 Z" fill="#D4A24C" />
@@ -312,7 +312,7 @@ export function HeroTruckArt() {
 // ─────────────────────────────────────────────────────────────────────────
 export function AnimatedHero({
   heroGifUrl = HERO_IMG_URL,
-  alt = 'Your movers are on the way',
+  alt = 'Move It Clear It',
   width = 320,
   height = 123,
   children,
@@ -747,7 +747,9 @@ export function PrimaryButton({ href, label }: { href: string; label: string }) 
               className="cta"
               style={{
                 background: C.orange,
-                color: '#FFFFFF',
+                // Ink-navy label on Ember-orange: ~5.8:1 contrast (passes WCAG AA),
+                // higher than white-on-orange (~3:1). (a11y, owner spec 2026-07-17)
+                color: C.navy,
                 fontFamily: FONT,
                 fontSize: '16px',
                 fontWeight: 700,
@@ -927,7 +929,10 @@ export function SocialChips({
   tiktok?: string
   google?: string
 }) {
-  const chip = (letter: string, href: string) => (
+  // Phase 3: hide a social chip when its real profile URL isn't configured
+  // (placeholder '#' / empty) — never render a dead social link.
+  const chip = (letter: string, href: string) =>
+    !href || href === '#' ? null : (
     <td style={{ padding: '0 5px' }}>
       <a
         href={href}
