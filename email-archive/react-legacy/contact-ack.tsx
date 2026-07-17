@@ -34,7 +34,7 @@ export default function ContactAckEmail({ customerName = 'Friend', messagePrevie
       <Body style={{ backgroundColor: '#F5F1EA', fontFamily: 'Inter, sans-serif' }}>
         <Container style={{ maxWidth: '560px', margin: '0 auto', padding: '24px 16px' }}>
           <Section style={{ backgroundColor: '#0A1628', padding: '20px', borderRadius: '12px 12px 0 0', textAlign: 'center' }}>
-            <Text style={{ color: '#FF5A1F', fontSize: '16px', fontWeight: '700', margin: '0' }}>We Move It. We Clear It.</Text>
+            <Text style={{ color: '#FF5A1F', fontSize: '16px', fontWeight: '700', margin: '0' }}>Move It Clear It.</Text>
           </Section>
           <Section style={{ backgroundColor: '#FFFFFF', padding: '32px 28px', borderRadius: '0 0 12px 12px' }}>
             <Heading style={{ fontSize: '20px', fontWeight: '700', color: '#0A1628', margin: '0 0 16px' }}>{copy.heading}</Heading>
