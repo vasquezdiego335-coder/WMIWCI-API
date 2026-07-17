@@ -14,6 +14,7 @@ import {
   C,
   FONT,
   P,
+  money,
 } from './_ui'
 
 // ════════════════════════════════════════════════════════════════════════
@@ -47,7 +48,7 @@ export default function BookingCancellationEmail({
   customerName = 'there',
   displayId,
   date,
-  amount = '49',
+  amount,
   refundStatus = 'released',
   statusText,
   rebookUrl = 'https://moveitclearit.com/book',
@@ -66,15 +67,15 @@ export default function BookingCancellationEmail({
 
   const statusMap = es
     ? {
-        released: { title: 'No se te cobró', body: `La retención de $${amount} en tu tarjeta fue liberada. Tu banco puede tardar unos días en reflejarlo.` },
-        refunded: { title: `Reembolso de $${amount} emitido`, body: 'Emitimos el reembolso a tu método de pago original. Puede tardar 5–10 días hábiles en aparecer.' },
-        retained: { title: 'Sobre tu depósito', body: `Según nuestra política, el depósito de $${amount} no es reembolsable. Si tienes preguntas, contáctanos.` },
+        released: { title: 'No se te cobró', body: `La retención de ${money(amount, es)} en tu tarjeta fue liberada. Tu banco puede tardar unos días en reflejarlo.` },
+        refunded: { title: `Reembolso de ${money(amount, es)} emitido`, body: 'Emitimos el reembolso a tu método de pago original. Puede tardar 5–10 días hábiles en aparecer.' },
+        retained: { title: 'Sobre tu depósito', body: `Según nuestra política, el depósito de ${money(amount, es)} no es reembolsable. Si tienes preguntas, contáctanos.` },
         custom: { title: 'Estado del pago', body: statusText || '' },
       }
     : {
-        released: { title: 'You were not charged', body: `The $${amount} hold on your card was released. Your bank may take a few days to reflect it.` },
-        refunded: { title: `$${amount} refund issued`, body: 'We issued the refund to your original payment method. It can take 5–10 business days to appear.' },
-        retained: { title: 'About your deposit', body: `Per our policy, the $${amount} deposit is non-refundable. If you have questions, reach out any time.` },
+        released: { title: 'You were not charged', body: `The ${money(amount, es)} hold on your card was released. Your bank may take a few days to reflect it.` },
+        refunded: { title: `${money(amount, es)} refund issued`, body: 'We issued the refund to your original payment method. It can take 5–10 business days to appear.' },
+        retained: { title: 'About your deposit', body: `Per our policy, the ${money(amount, es)} deposit is non-refundable. If you have questions, reach out any time.` },
         custom: { title: 'Payment status', body: statusText || '' },
       }
   const status = statusMap[refundStatus]

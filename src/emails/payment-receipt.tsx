@@ -16,6 +16,7 @@ import {
   C,
   FONT,
   P,
+  money,
 } from './_ui'
 
 // ════════════════════════════════════════════════════════════════════════
@@ -58,7 +59,7 @@ export default function PaymentReceiptEmail({
   date,
   method,
   captured = true,
-  amountPaid = '49.00',
+  amountPaid,
   moveTotal,
   remainingBalance,
   truckAddon,
@@ -82,7 +83,7 @@ export default function PaymentReceiptEmail({
 
   const t = es
     ? {
-        preview: `Recibo de tu pago de $${amountPaid} — Move It Clear It.`,
+        preview: `Recibo de tu pago de ${money(amountPaid, es)} — Move It Clear It.`,
         pill: captured ? 'Pago recibido' : 'Autorización (retención)',
         h1: 'Recibo de pago',
         sub: `Gracias, ${customerName}. Aquí está el desglose de tu pago y lo que queda para el día de la mudanza.`,
@@ -94,8 +95,8 @@ export default function PaymentReceiptEmail({
         estTitle: 'Desglose de tu mudanza',
         est: { total: 'Total de la mudanza (mano de obra)', deposit: 'Menos depósito pagado hoy', remain: 'Saldo de mano de obra', truck: 'Cargo por camión (día de mudanza)', travel: 'Cargo por viaje (día de mudanza)', waiting: `Tiempo de espera${waitingMinutes ? ` (${waitingMinutes} min tras la cortesía)` : ''} (día de mudanza)`, due: 'A pagar el día de la mudanza' },
         note: captured
-          ? 'El depósito de $49 se cobró para asegurar tu reserva y se aplica al total de tu mudanza. El saldo restante se paga el día de la mudanza.'
-          : 'El depósito de $49 es una autorización (retención) en tu tarjeta — solo se cobra cuando se aprueba tu reserva. Se aplica al total de tu mudanza.',
+          ? `El depósito de ${money(amountPaid, es)} se cobró para asegurar tu reserva y se aplica al total de tu mudanza. El saldo restante se paga el día de la mudanza.`
+          : `El depósito de ${money(amountPaid, es)} es una autorización (retención) en tu tarjeta — solo se cobra cuando se aprueba tu reserva. Se aplica al total de tu mudanza.`,
         cta: 'Ver mi reserva',
         supportTitle: 'Estamos para ayudarte',
         contactLabels: { phone: 'Llama o escribe', email: 'Correo', website: 'Sitio web' },
@@ -104,7 +105,7 @@ export default function PaymentReceiptEmail({
         methodDefault: 'Tarjeta (Stripe)',
       }
     : {
-        preview: `Receipt for your $${amountPaid} payment — Move It Clear It.`,
+        preview: `Receipt for your ${money(amountPaid, es)} payment — Move It Clear It.`,
         pill: captured ? 'Payment received' : 'Authorization (hold)',
         h1: 'Payment receipt',
         sub: `Thanks, ${customerName}. Here's the breakdown of what you paid and what's left for move day.`,
@@ -116,8 +117,8 @@ export default function PaymentReceiptEmail({
         estTitle: 'Your move breakdown',
         est: { total: 'Move total (labor)', deposit: 'Less deposit paid today', remain: 'Labor balance', truck: 'Truck add-on (move day)', travel: 'Travel fee (move day)', waiting: `Waiting time${waitingMinutes ? ` (${waitingMinutes} min past grace)` : ''} (move day)`, due: 'Due on move day' },
         note: captured
-          ? 'The $49 deposit was charged to secure your booking and applies to your move total. Any remaining balance is settled on move day.'
-          : 'The $49 deposit is an authorization hold on your card — it is only charged once your booking is approved. It applies to your move total.',
+          ? `The ${money(amountPaid, es)} deposit was charged to secure your booking and applies to your move total. Any remaining balance is settled on move day.`
+          : `The ${money(amountPaid, es)} deposit is an authorization hold on your card — it is only charged once your booking is approved. It applies to your move total.`,
         cta: 'View booking',
         supportTitle: "We're here to help",
         contactLabels: { phone: 'Call or text', email: 'Email', website: 'Website' },
@@ -129,7 +130,7 @@ export default function PaymentReceiptEmail({
   // Move-breakdown rows (render only what we have).
   const estRows = [
     { label: t.est.total, value: moveTotal ? `$${moveTotal}` : '' },
-    { label: t.est.deposit, value: `-$${amountPaid}` },
+    { label: t.est.deposit, value: `-${money(amountPaid, es)}` },
     { label: t.est.remain, value: remainingBalance ? `$${remainingBalance}` : '' },
     { label: t.est.truck, value: truckAddon ? `$${truckAddon}` : '' },
     { label: t.est.travel, value: travelFee ? `$${travelFee}` : '' },
@@ -183,7 +184,7 @@ export default function PaymentReceiptEmail({
             { label: t.kv.ref, value: ref },
             { label: t.kv.date, value: dateStr },
             { label: t.kv.method, value: method || t.methodDefault },
-            { label: t.kv.paid, value: `$${amountPaid}`, strong: true },
+            { label: t.kv.paid, value: `${money(amountPaid, es)}`, strong: true },
           ]}
         />
 

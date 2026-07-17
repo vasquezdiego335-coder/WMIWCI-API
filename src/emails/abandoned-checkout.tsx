@@ -15,6 +15,7 @@ import {
   C,
   FONT,
   P,
+  money,
 } from './_ui'
 
 // ════════════════════════════════════════════════════════════════════════
@@ -42,7 +43,7 @@ export default function AbandonedCheckoutEmail({
   customerName = 'there',
   checkoutUrl = '#',
   requestedDate,
-  amountHold = '49',
+  amountHold,
   portalUrl = '#',
   heroGifUrl,
   phone = '862-640-0625',
@@ -59,10 +60,10 @@ export default function AbandonedCheckoutEmail({
 
   const t = es
     ? {
-        preview: `Tu fecha sigue disponible — termina tu reserva con un depósito de $${amountHold}.`,
+        preview: `Tu fecha sigue disponible — termina tu reserva con un depósito de ${money(amountHold, es)}.`,
         pill: 'Casi listo',
         h1: 'Tu fecha sigue disponible.',
-        sub: `Hola ${customerName}, empezaste tu reserva pero no completaste el depósito de $${amountHold}${dateStr ? ` para el ${dateStr}` : ''}. Asegúrala antes de que alguien más la tome.`,
+        sub: `Hola ${customerName}, empezaste tu reserva pero no completaste el depósito de ${money(amountHold, es)}${dateStr ? ` para el ${dateStr}` : ''}. Asegúrala antes de que alguien más la tome.`,
         whyTitle: 'Por qué reservar con nosotros',
         why: [
           'Solo mano de obra — pagas por músculo, no por el margen del intermediario.',
@@ -71,17 +72,17 @@ export default function AbandonedCheckoutEmail({
           'Más de 50 mudanzas completadas en Nueva Jersey.',
         ],
         cta: 'Completar mi reserva',
-        holdNote: `El depósito de $${amountHold} es una retención — solo asegura tu lugar y se aplica al total de tu mudanza.`,
+        holdNote: `El depósito de ${money(amountHold, es)} es una retención — solo asegura tu lugar y se aplica al total de tu mudanza.`,
         supportTitle: '¿Preguntas?',
         contactLabels: { phone: 'Llama o escribe', email: 'Correo', website: 'Sitio web' },
         disclaimer: 'Te escribimos porque comenzaste una reserva con nosotros. ¿Ya no la necesitas? Puedes ignorar este correo.',
         footerLabels: { manage: 'Administrar preferencias', unsubscribe: 'Cancelar suscripción', rights: 'Todos los derechos reservados.' },
       }
     : {
-        preview: `Your date is still open — finish your booking with a $${amountHold} deposit.`,
+        preview: `Your date is still open — finish your booking with a ${money(amountHold, es)} deposit.`,
         pill: 'Almost there',
         h1: 'Your date is still available.',
-        sub: `Hi ${customerName}, you started your booking but didn't finish the $${amountHold} deposit${dateStr ? ` for ${dateStr}` : ''}. Lock it in before someone else takes the slot.`,
+        sub: `Hi ${customerName}, you started your booking but didn't finish the ${money(amountHold, es)} deposit${dateStr ? ` for ${dateStr}` : ''}. Lock it in before someone else takes the slot.`,
         whyTitle: 'Why book with us',
         why: [
           'Labor-only — you pay for muscle, not a middleman markup.',
@@ -90,7 +91,7 @@ export default function AbandonedCheckoutEmail({
           '50+ completed moves across New Jersey.',
         ],
         cta: 'Complete my booking',
-        holdNote: `The $${amountHold} deposit is a hold — it just secures your slot and applies to your move total.`,
+        holdNote: `The ${money(amountHold, es)} deposit is a hold — it just secures your slot and applies to your move total.`,
         supportTitle: 'Questions?',
         contactLabels: { phone: 'Call or text', email: 'Email', website: 'Website' },
         disclaimer: "You're receiving this because you started a booking with us. Changed your mind? You can ignore this email.",

@@ -14,6 +14,7 @@ import {
   C,
   FONT,
   P,
+  money,
 } from './_ui'
 
 // ════════════════════════════════════════════════════════════════════════
@@ -42,7 +43,7 @@ export default function BookingDeclinedEmail({
   customerName = 'there',
   displayId,
   requestedDate,
-  amountHold = '49',
+  amountHold,
   reason,
   rebookUrl = 'https://moveitclearit.com/book',
   phone = '862-640-0625',
@@ -59,31 +60,31 @@ export default function BookingDeclinedEmail({
 
   const t = es
     ? {
-        preview: `Sobre tu solicitud de reserva${displayId ? ` (${displayId})` : ''} — tu retención de $${amountHold} fue liberada.`,
+        preview: `Sobre tu solicitud de reserva${displayId ? ` (${displayId})` : ''} — tu retención de ${money(amountHold, es)} fue liberada.`,
         pill: 'Actualización',
         h1: 'No pudimos aceptar esta mudanza.',
         sub: `Hola ${customerName}, gracias por pensar en nosotros${dateStr ? ` para el ${dateStr}` : ''}. Lamentablemente no podemos realizar esta mudanza${reason ? ` — ${reason}` : ''}.`,
-        releaseTitle: `Tu retención de $${amountHold} fue liberada`,
+        releaseTitle: `Tu retención de ${money(amountHold, es)} fue liberada`,
         releaseBody: 'No se te cobró nada. La autorización temporal en tu tarjeta se libera automáticamente (tu banco puede tardar unos días en mostrarlo).',
         cta: 'Reservar otra fecha',
         help: 'Si crees que fue un error o quieres encontrar otra fecha, llámanos o escríbenos — con gusto te ayudamos.',
         supportTitle: '¿Hablamos?',
         contactLabels: { phone: 'Llama o escribe', email: 'Correo', website: 'Sitio web' },
-        disclaimer: 'Este correo confirma que tu solicitud no fue aprobada y que la autorización de $49 fue liberada.',
+        disclaimer: `Este correo confirma que tu solicitud no fue aprobada y que la autorización de ${money(amountHold, es)} fue liberada.`,
         footerLabels: { manage: 'Administrar preferencias', unsubscribe: 'Cancelar suscripción', rights: 'Todos los derechos reservados.' },
       }
     : {
-        preview: `About your booking request${displayId ? ` (${displayId})` : ''} — your $${amountHold} hold was released.`,
+        preview: `About your booking request${displayId ? ` (${displayId})` : ''} — your ${money(amountHold, es)} hold was released.`,
         pill: 'Update',
         h1: "We couldn't take this move.",
         sub: `Hi ${customerName}, thank you for thinking of us${dateStr ? ` for ${dateStr}` : ''}. Unfortunately we're not able to take this one on${reason ? ` — ${reason}` : ''}.`,
-        releaseTitle: `Your $${amountHold} hold was released`,
+        releaseTitle: `Your ${money(amountHold, es)} hold was released`,
         releaseBody: 'You were not charged. The temporary authorization on your card is released automatically (your bank may take a few days to drop it).',
         cta: 'Book another date',
         help: "If you think this was a mistake or you'd like to find another date, call or text us — we're happy to help.",
         supportTitle: 'Let’s talk',
         contactLabels: { phone: 'Call or text', email: 'Email', website: 'Website' },
-        disclaimer: 'This email confirms your request was not approved and the $49 authorization was released.',
+        disclaimer: `This email confirms your request was not approved and the ${money(amountHold, es)} authorization was released.`,
         footerLabels: { manage: 'Manage preferences', unsubscribe: 'Unsubscribe', rights: 'All rights reserved.' },
       }
 
