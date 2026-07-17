@@ -8,6 +8,8 @@
 //  fails the build when any rendered link is unsafe.
 // ════════════════════════════════════════════════════════════════════════
 
+import { statusMismatchReason } from './status'
+
 export class EmailValidationError extends Error {
   constructor(message: string) {
     super(message)
@@ -81,6 +83,13 @@ export function assertEmailPayload(template: string, payload: Record<string, unk
     const hasChange = Array.isArray(changes) ? changes.length > 0 : !isBlank(payload.changedLabel)
     if (!hasChange) throw new EmailValidationError('booking-updated: no changed fields supplied')
   }
+
+  // Phase 4 — typed status gate (opt-in). When the sender includes the booking's
+  // real status, a state-dependent template (e.g. final-confirmation) must be
+  // truthful for it: a confirmation can never go out for a pending booking.
+  const bookingStatus = (payload.bookingStatus ?? payload.status) as string | undefined
+  const mismatch = statusMismatchReason(template, bookingStatus)
+  if (mismatch) throw new EmailValidationError(mismatch)
 
   // Any *_url / *Url field must be a safe production URL (skip unset optionals).
   const urlFields: Record<string, string | undefined | null> = {}
