@@ -9,7 +9,7 @@ import {
   Spacer,
   PrimaryButton,
   ContactRow,
-  Footer,
+  MarketingFooter,
   C,
   FONT,
   P,
@@ -26,6 +26,10 @@ interface Props {
   googleReviewUrl?: string
   portalUrl?: string
   heroGifUrl?: string
+  /** Promotional unsubscribe URL (NEVER the booking page). Optional until the
+      unsubscribe route ships — omitted rather than faked. */
+  unsubscribeUrl?: string
+  postalAddress?: string
   phone?: string
   email?: string
   website?: string
@@ -38,6 +42,8 @@ export default function ReviewRequestEmail({
   customerName = 'there',
   googleReviewUrl = '#',
   portalUrl = '#',
+  unsubscribeUrl,
+  postalAddress,
   phone = '862-640-0625',
   email = 'hello@moveitclearit.com',
   website = 'https://moveitclearit.com',
@@ -115,14 +121,14 @@ export default function ReviewRequestEmail({
       </Card>
 
       {/* ── 5 · FOOTER ───────────────────────────────────────── */}
-      <Footer
+      <MarketingFooter
         disclaimer={t.disclaimer}
         phone={phone}
         email={email}
         websiteLabel={websiteLabel}
         social={social}
-        manageUrl={portalUrl}
-        unsubscribeUrl={portalUrl}
+        unsubscribeUrl={unsubscribeUrl}
+        postalAddress={postalAddress}
         labels={t.footerLabels}
       />
     </Shell>

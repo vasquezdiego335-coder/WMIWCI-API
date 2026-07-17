@@ -972,18 +972,12 @@ export function SocialChips({
 // ─────────────────────────────────────────────────────────────────────────
 //  FOOTER
 // ─────────────────────────────────────────────────────────────────────────
-export function Footer({
-  disclaimer,
-  legalExtra,
-  year = new Date().getFullYear(),
-  phone,
-  email,
-  websiteLabel,
-  manageUrl = '#',
-  unsubscribeUrl = '#',
-  social,
-  labels,
-}: {
+// A link is renderable only if it is a real destination — never a placeholder
+// '#' / empty / javascript: URL. Keeps the footer from shipping a dead link.
+const footerLinkOk = (u?: string): u is string =>
+  !!u && u.trim() !== '' && u.trim() !== '#' && !/^javascript:/i.test(u.trim())
+
+export interface FooterProps {
   disclaimer: React.ReactNode
   legalExtra?: React.ReactNode
   year?: number
@@ -992,15 +986,42 @@ export function Footer({
   websiteLabel: string
   manageUrl?: string
   unsubscribeUrl?: string
+  /** Physical postal address (CAN-SPAM requires it on promotional mail). */
+  postalAddress?: string
+  /**
+   * 'transactional' (default) — a receipt / confirmation / reminder tied to a
+   * booking. CAN-SPAM-exempt: NO unsubscribe row (and we never point unsubscribe
+   * at the booking page). 'marketing' — a promotional nudge: renders the
+   * unsubscribe link (when a real URL is supplied) + the postal address.
+   */
+  kind?: 'transactional' | 'marketing'
   social?: { instagram?: string; facebook?: string; tiktok?: string; google?: string }
   labels?: { manage?: string; unsubscribe?: string; rights?: string }
-}) {
+}
+
+export function Footer({
+  disclaimer,
+  legalExtra,
+  year = new Date().getFullYear(),
+  phone,
+  email,
+  websiteLabel,
+  manageUrl,
+  unsubscribeUrl,
+  postalAddress,
+  kind = 'transactional',
+  social,
+  labels,
+}: FooterProps) {
   const L = {
     manage: 'Manage preferences',
     unsubscribe: 'Unsubscribe',
     rights: 'All rights reserved.',
     ...(labels || {}),
   }
+  // Marketing mail only: show unsubscribe/manage, and only for real URLs.
+  const showUnsub = kind === 'marketing' && footerLinkOk(unsubscribeUrl)
+  const showManage = kind === 'marketing' && footerLinkOk(manageUrl)
   return (
     <Section style={{ padding: '30px 22px 8px', textAlign: 'center' as const }}>
       <div style={{ fontFamily: FONT, fontSize: '14px', fontWeight: 800, letterSpacing: '0.5px', color: C.navy }}>
@@ -1027,18 +1048,34 @@ export function Footer({
       <div style={{ fontFamily: FONT, fontSize: '11px', color: C.label, marginTop: '14px' }}>
         &copy; {year} Move It Clear It. {L.rights}
       </div>
-      <div style={{ marginTop: '8px' }}>
-        <a href={manageUrl} style={{ fontFamily: FONT, fontSize: '11px', color: C.muted, textDecoration: 'underline' }}>
-          {L.manage}
-        </a>
-        <span style={{ color: C.label }}> &nbsp;&middot;&nbsp; </span>
-        <a href={unsubscribeUrl} style={{ fontFamily: FONT, fontSize: '11px', color: C.muted, textDecoration: 'underline' }}>
-          {L.unsubscribe}
-        </a>
-      </div>
+
+      {postalAddress && postalAddress.trim() ? (
+        <div style={{ fontFamily: FONT, fontSize: '11px', color: C.label, marginTop: '6px' }}>{postalAddress}</div>
+      ) : null}
+
+      {showManage || showUnsub ? (
+        <div style={{ marginTop: '8px' }}>
+          {showManage ? (
+            <a href={manageUrl} style={{ fontFamily: FONT, fontSize: '11px', color: C.muted, textDecoration: 'underline' }}>
+              {L.manage}
+            </a>
+          ) : null}
+          {showManage && showUnsub ? <span style={{ color: C.label }}> &nbsp;&middot;&nbsp; </span> : null}
+          {showUnsub ? (
+            <a href={unsubscribeUrl} style={{ fontFamily: FONT, fontSize: '11px', color: C.muted, textDecoration: 'underline' }}>
+              {L.unsubscribe}
+            </a>
+          ) : null}
+        </div>
+      ) : null}
     </Section>
   )
 }
+
+// Named intent wrappers (Phase 3). Prefer these at call sites so the email's
+// class is explicit and can't drift: a receipt can never render an unsubscribe.
+export const TransactionalFooter = (props: Omit<FooterProps, 'kind'>) => <Footer {...props} kind="transactional" />
+export const MarketingFooter = (props: Omit<FooterProps, 'kind'>) => <Footer {...props} kind="marketing" />
 
 // ═════════════════════════════════════════════════════════════════════════
 //  ICONS  —  inline SVG (renders in Apple Mail / iOS / Gmail; degrades to the
