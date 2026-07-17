@@ -154,6 +154,8 @@ async function processEmailJob(job: Job<EmailJobData>): Promise<void> {
   }
 
   let html = render(component(payload))
+  // Plain-text multipart part — deliverability (spam score) + accessibility.
+  const text = render(component(payload), { plainText: true })
   // Embed the open-tracking pixel. Requires a Notification row to attribute the
   // open to + APP_URL to build the public pixel URL. The token is persisted
   // BEFORE the send, so an open landing the instant the email arrives resolves.
@@ -171,6 +173,16 @@ async function processEmailJob(job: Job<EmailJobData>): Promise<void> {
     (payload.subject as string) ||
     (payload.locale ? emailSubject(template, payload.locale as string) : SUBJECTS[template])
 
+  // List-Unsubscribe on PROMOTIONAL messages ONLY (never on transactional
+  // receipts/booking updates/move-day messages). Activates when the payload
+  // carries a real https unsubscribe URL (see blocker: unsubscribe route).
+  const PROMOTIONAL = new Set(['abandoned-checkout', 'review-request', 'referral', 'referral-reward'])
+  const unsub = payload.unsubscribeUrl as string | undefined
+  const headers =
+    PROMOTIONAL.has(template) && unsub && /^https:\/\//.test(unsub)
+      ? { 'List-Unsubscribe': `<${unsub}>`, 'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click' }
+      : undefined
+
   log.info({ subject }, '📤 Sending email via Resend…')
   const { data, error } = await resend.emails.send({
     from: EMAIL_FROM,
@@ -178,6 +190,8 @@ async function processEmailJob(job: Job<EmailJobData>): Promise<void> {
     reply_to: EMAIL_REPLY_TO,
     subject,
     html,
+    ...(text ? { text } : {}),
+    ...(headers ? { headers } : {}),
   })
 
   if (error) {
