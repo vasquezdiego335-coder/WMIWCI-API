@@ -49,11 +49,15 @@ export function requireFields(template: string, data: Record<string, unknown>, r
 
 // Per-template required fields (Phase 5). Reminders/confirmations must have a REAL
 // date + window — never "To be confirmed" / "Coming up soon".
+// Keys match the ACTUAL payloads the senders enqueue (verified against
+// booking-approval.ts / fulfillment.ts), so the gate blocks the real
+// "missing real date/window/link" case without blocking valid sends.
 export const REQUIRED_FIELDS = {
-  'final-confirmation': ['displayId', 'customerName', 'requestedDate', 'timeLabel', 'originAddress', 'destAddress', 'service', 'amountPaid', 'portalUrl'],
-  'job-reminder': ['requestedDate', 'timeLabel', 'service', 'originAddress', 'destAddress', 'portalUrl'],
+  'final-confirmation': ['displayId', 'date', 'timeLabel', 'amountPaid', 'portalUrl'],
+  'job-reminder': ['scheduledStart', 'timeLabel', 'originAddress', 'portalUrl'],
   'payment-receipt': ['displayId', 'date', 'amountPaid', 'portalUrl'],
   'review-request': ['googleReviewUrl'],
+  'payment-failed': ['updatePaymentUrl'],
 } as const satisfies Record<string, readonly string[]>
 
 export type ValidatedTemplate = keyof typeof REQUIRED_FIELDS

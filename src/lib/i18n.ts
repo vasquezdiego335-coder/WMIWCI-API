@@ -144,6 +144,7 @@ const EMAIL_SUBJECTS: Record<string, { en: string; es: string }> = {
   'payment-receipt':     { en: 'Payment received — receipt enclosed',       es: 'Pago recibido — recibo adjunto' },
   'booking-updated':     { en: 'Your booking has been updated',             es: 'Tu reserva ha sido actualizada' },
   'booking-cancellation':{ en: 'Your booking has been cancelled',           es: 'Tu reserva ha sido cancelada' },
+  'payment-failed':{ en: 'Action required — update your payment method', es: 'Acción requerida — actualiza tu método de pago' },
   'job-reminder':        { en: 'Your move is almost here',                  es: 'Tu mudanza ya casi llega' },
   'job-completion':      { en: 'Your move is complete — thank you',         es: 'Tu mudanza está completa — gracias' },
   'review-request':      { en: 'How did we do? Leave us a review',          es: '¿Cómo lo hicimos? Deja tu reseña' },

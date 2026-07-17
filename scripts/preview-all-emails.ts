@@ -17,6 +17,7 @@ import PaymentReceipt from '../src/emails/payment-receipt'
 import AbandonedCheckout from '../src/emails/abandoned-checkout'
 import Referral from '../src/emails/referral'
 import ReviewRequest from '../src/emails/review-request'
+import PaymentFailed from '../src/emails/payment-failed'
 
 const OUT = resolve('email-previews')
 mkdirSync(OUT, { recursive: true })
@@ -35,6 +36,7 @@ const templates: Array<[string, React.ReactElement]> = [
   ['abandoned-checkout', React.createElement(AbandonedCheckout, { ...common, amountHold: '1' })],
   ['referral', React.createElement(Referral, { ...common })],
   ['review-request', React.createElement(ReviewRequest, { ...common })],
+  ['payment-failed', React.createElement(PaymentFailed, { ...common, failureType: 'authorization', amount: '49', updatePaymentUrl: 'https://moveitclearit.com/pay/tok', dateHeld: true })],
 ]
 
 async function main() {

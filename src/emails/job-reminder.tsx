@@ -41,6 +41,8 @@ interface Props {
   website?: string
   websiteLabel?: string
   social?: { instagram?: string; facebook?: string; tiktok?: string; google?: string }
+  /** '72_hours' = prep reminder (movement OK); '24_hours' = imminent move-day (static). */
+  stage?: '72_hours' | '24_hours'
   locale?: string
 }
 
@@ -53,6 +55,7 @@ export default function JobReminderEmail({
   displayId,
   portalUrl = '#',
   heroGifUrl,
+  stage = '24_hours',
   phone = '862-640-0625',
   email = 'hello@moveitclearit.com',
   website = 'https://moveitclearit.com',
@@ -109,6 +112,13 @@ export default function JobReminderEmail({
         footerLabels: { manage: 'Manage preferences', unsubscribe: 'Unsubscribe', rights: 'All rights reserved.' },
       }
 
+  // Stage-specific: 72h = prep focus (truck movement OK); 24h = imminent, static.
+  const is72 = stage === '72_hours'
+  const h1Text = is72 ? (es ? 'Es hora de preparar tu mudanza.' : 'Time to prep for your move.') : t.h1
+  const ctaText = is72
+    ? es ? 'Ver lista de preparación' : 'Review preparation checklist'
+    : es ? 'Confirmar detalles de la mudanza' : 'Confirm move-day details'
+
   return (
     <Shell lang={es ? 'es' : 'en'} preview={t.preview}>
       <LogoHeader />
@@ -116,11 +126,15 @@ export default function JobReminderEmail({
       {/* ── 1 · HERO ─────────────────────────────────────────── */}
       <Card style={{ borderTop: `3px solid ${C.orange}` }}>
         <div className="heropad" style={{ textAlign: 'center' as const }}>
-          <AnimatedHero heroGifUrl={heroGifUrl} />
+          {is72 ? (
+            <AnimatedHero heroGifUrl={heroGifUrl} />
+          ) : (
+            <IconChip icon="calendar" color={C.orangeInk} size={26} dim={64} bg={C.orangeTint} border="none" radius={18} />
+          )}
           <Spacer h={16} />
           <Pill tone="orange">{t.pill}</Pill>
           <h1 className="h1" style={{ fontFamily: FONT, fontSize: '26px', lineHeight: '33px', fontWeight: 800, letterSpacing: '-0.4px', color: C.navy, margin: '16px 0 10px' }}>
-            {t.h1}
+            {h1Text}
           </h1>
           <p style={{ ...P, marginBottom: 0, maxWidth: '430px', marginLeft: 'auto', marginRight: 'auto' }}>{t.sub}</p>
         </div>
@@ -166,7 +180,7 @@ export default function JobReminderEmail({
 
       {/* ── 4 · CTA ──────────────────────────────────────────── */}
       <Spacer h={26} />
-      <PrimaryButton href={portalUrl} label={t.cta} />
+      <PrimaryButton href={portalUrl} label={ctaText} />
       <Spacer h={22} />
 
       {/* ── 5 · RESCHEDULE NOTE ──────────────────────────────── */}

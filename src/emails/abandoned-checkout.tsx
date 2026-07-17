@@ -2,7 +2,7 @@ import * as React from 'react'
 import {
   Shell,
   LogoHeader,
-  AnimatedHero,
+  IconChip,
   Card,
   Eyebrow,
   Pill,
@@ -105,7 +105,10 @@ export default function AbandonedCheckoutEmail({
       {/* ── 1 · HERO ─────────────────────────────────────────── */}
       <Card style={{ borderTop: `3px solid ${C.orange}` }}>
         <div className="heropad" style={{ textAlign: 'center' as const }}>
-          <AnimatedHero heroGifUrl={heroGifUrl} />
+          {/* Static booking-progress icon — NOT the truck animation (this is a
+              pre-deposit draft; a moving truck would imply the crew is dispatched). */}
+          <IconChip icon="clipboard" color={C.orangeInk} size={26} dim={64} bg={C.orangeTint} border="none" radius={18} />
+          <Spacer h={16} />
           <Spacer h={16} />
           <Pill tone="orange">{t.pill}</Pill>
           <h1 className="h1" style={{ fontFamily: FONT, fontSize: '26px', lineHeight: '33px', fontWeight: 800, letterSpacing: '-0.4px', color: C.navy, margin: '16px 0 10px' }}>

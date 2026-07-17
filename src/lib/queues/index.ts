@@ -148,6 +148,7 @@ export type EmailJobData = {
     | 'review-request'       // post-move review ask
     | 'abandoned-checkout'   // started a booking, no deposit
     | 'referral'             // post-move referral ask
+    | 'payment-failed'       // authorization/capture/final-payment failure — action required
   to: string
   bookingId?: string
   notificationId?: string

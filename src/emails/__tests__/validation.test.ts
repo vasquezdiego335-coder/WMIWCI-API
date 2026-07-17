@@ -15,6 +15,7 @@ import PaymentReceipt from '../payment-receipt'
 import AbandonedCheckout from '../abandoned-checkout'
 import Referral from '../referral'
 import ReviewRequest from '../review-request'
+import PaymentFailed from '../payment-failed'
 
 // ── Link safety ───────────────────────────────────────────────────────────────
 test('unsafeUrlReason flags placeholder + unsafe URLs', () => {
@@ -40,12 +41,12 @@ test('requireFields throws when a required field is blank', () => {
 })
 test('final-confirmation payload with no confirmed date fails', () => {
   assert.throws(
-    () => assertEmailPayload('final-confirmation', { displayId: 'W', customerName: 'D', timeLabel: '8-10', originAddress: 'a', destAddress: 'b', service: 's', amountPaid: '49', portalUrl: 'https://moveitclearit.com/x' }),
-    /requestedDate/,
+    () => assertEmailPayload('final-confirmation', { displayId: 'W', timeLabel: '8-10', amountPaid: '49', portalUrl: 'https://moveitclearit.com/x' }),
+    /date/,
   )
 })
 test('job-reminder payload with no arrival window fails', () => {
-  assert.throws(() => assertEmailPayload('job-reminder', { requestedDate: '2026-08-01', service: 's', originAddress: 'a', destAddress: 'b', portalUrl: 'https://moveitclearit.com/x' }), /timeLabel/)
+  assert.throws(() => assertEmailPayload('job-reminder', { scheduledStart: '2026-08-01', originAddress: 'a', portalUrl: 'https://moveitclearit.com/x' }), /timeLabel/)
 })
 test('booking-updated with no changed fields fails', () => {
   assert.throws(() => assertEmailPayload('booking-updated', { portalUrl: 'https://moveitclearit.com/x' }), /no changed fields/)
@@ -53,8 +54,8 @@ test('booking-updated with no changed fields fails', () => {
 test('a complete final-confirmation payload passes', () => {
   assert.doesNotThrow(() =>
     assertEmailPayload('final-confirmation', {
-      displayId: 'WMIC-1', customerName: 'D', requestedDate: '2026-08-01T15:00:00Z', timeLabel: '8:00–10:00 AM',
-      originAddress: '1 A St', destAddress: '2 B St', service: '1BR', amountPaid: '49', portalUrl: 'https://moveitclearit.com/my-booking/tok',
+      displayId: 'WMIC-1', date: '2026-08-01T15:00:00Z', timeLabel: '8:00–10:00 AM',
+      amountPaid: '49', portalUrl: 'https://moveitclearit.com/my-booking/tok',
     }),
   )
 })
@@ -77,6 +78,7 @@ const all: Array<[string, React.ReactElement]> = [
   ['abandoned-checkout', React.createElement(AbandonedCheckout, { ...common, amountHold: '1' })],
   ['referral', React.createElement(Referral, { ...common })],
   ['review-request', React.createElement(ReviewRequest, { ...common })],
+  ['payment-failed', React.createElement(PaymentFailed, { ...common, updatePaymentUrl: URL })],
 ]
 
 for (const [name, el] of all) {

@@ -1,6 +1,7 @@
 import { Worker, Job } from 'bullmq'
 import { randomUUID } from 'node:crypto'
 import { render } from '@react-email/render'
+import { assertEmailPayload, EmailValidationError } from '../emails/validation'
 import { bullConnection } from '../lib/redis'
 import { resend, EMAIL_FROM, EMAIL_REPLY_TO } from '../lib/resend'
 import { prisma } from '../lib/db'
@@ -20,6 +21,7 @@ import JobCompletionEmail from '../emails/job-completion'
 import ReviewRequestEmail from '../emails/review-request'
 import AbandonedCheckoutEmail from '../emails/abandoned-checkout'
 import ReferralEmail from '../emails/referral'
+import PaymentFailedEmail from '../emails/payment-failed'
 import { emailSubject } from '../lib/i18n'
 
 // ════════════════════════════════════════════════════════════════════════
@@ -53,6 +55,7 @@ const ALLOWED_TEMPLATES = new Set<EmailJobData['template']>([
   'review-request',
   'abandoned-checkout',
   'referral',
+  'payment-failed',
 ])
 
 const TEMPLATES: Record<
@@ -70,6 +73,7 @@ const TEMPLATES: Record<
   'review-request': (p) => ReviewRequestEmail(p as any),
   'abandoned-checkout': (p) => AbandonedCheckoutEmail(p as any),
   'referral': (p) => ReferralEmail(p as any),
+  'payment-failed': (p) => PaymentFailedEmail(p as any),
 }
 
 // English fallbacks. Bilingual subjects come from emailSubject(template, locale)
@@ -86,6 +90,7 @@ const SUBJECTS: Record<EmailJobData['template'], string> = {
   'review-request': 'How did we do? Leave us a review',
   'abandoned-checkout': 'Your date is still available',
   'referral': 'Give 15%. Get 15%.',
+  'payment-failed': 'Action required — update your payment method',
 }
 
 /** Insert a 1x1 open-tracking pixel just before </body> (or append if none). */
@@ -127,6 +132,25 @@ async function processEmailJob(job: Job<EmailJobData>): Promise<void> {
   const component = TEMPLATES[template]
   if (!component) {
     throw new Error(`Unknown email template: ${template}`)
+  }
+
+  // ── PRE-SEND VALIDATION GATE ────────────────────────────────────────────
+  // Fail SAFELY: never send a misleading placeholder (a "confirmation" with no
+  // real date, a '#'/localhost link, etc.). Log loudly + drop the job — no
+  // throw, because missing data won't heal on a retry.
+  try {
+    assertEmailPayload(template, payload as Record<string, unknown>)
+  } catch (err) {
+    if (err instanceof EmailValidationError) {
+      log.error({ err: err.message }, '🚫 Email BLOCKED by pre-send validation — not sent')
+      if (notificationId) {
+        await prisma.notification
+          .update({ where: { id: notificationId }, data: { status: 'FAILED', error: err.message.slice(0, 500) } })
+          .catch(() => undefined)
+      }
+      return
+    }
+    throw err
   }
 
   let html = render(component(payload))
