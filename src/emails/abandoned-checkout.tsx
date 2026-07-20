@@ -102,12 +102,12 @@ export default function AbandonedCheckoutEmail({
         whyTitle: 'Por qué reservar con nosotros',
         why: [
           'Solo mano de obra — pagas por músculo, no por el margen del intermediario.',
-          'Movers profesionales + equipo de mudanza incluido.',
-          'Precio fijo y transparente — sin cargos ocultos.',
-          'Más de 50 mudanzas completadas en Nueva Jersey.',
+          'Cargamos, descargamos, o las dos cosas — tú decides.',
+          'Tú pones el camión de alquiler; nosotros ponemos el equipo de trabajo.',
+          'Equipo local de Nueva Jersey, no un centro de llamadas nacional.',
         ],
         cta: 'Completar mi reserva',
-        holdNote: `El depósito de ${money(amountHold, es)} es una retención — solo asegura tu lugar y se aplica al total de tu mudanza.`,
+        holdNote: `El depósito de ${money(amountHold, es)} es una retención, no un cargo — se aplica al total de tu mudanza.`,
         supportTitle: '¿Preguntas?',
         contactLabels: { phone: 'Llama o escribe', email: 'Correo', website: 'Sitio web' },
         disclaimer: 'Te escribimos porque comenzaste una reserva con nosotros. ¿Ya no la necesitas? Puedes ignorar este correo.',
@@ -120,13 +120,24 @@ export default function AbandonedCheckoutEmail({
         sub: `Hi ${customerName}, you started your booking but didn't finish the ${money(amountHold, es)} deposit${dateStr ? ` for ${dateStr}` : ''}. ${sc.lead}`,
         whyTitle: 'Why book with us',
         why: [
+          // CLAIMS REMOVED (finding EMAIL-P1-14). Each of the following was
+          // asserted with nothing in configuration or data to back it:
+          //  • "moving equipment included" — not a verified service inclusion
+          //  • "flat-rate pricing — no hidden fees" — stairs, travel, truck
+          //    add-on and access fees can all apply, so this was untrue
+          //  • "50+ completed moves across New Jersey" — a hard-coded count
+          //    with no source and no counting rule
+          // What remains is only what the business model itself guarantees.
           'Labor-only — you pay for muscle, not a middleman markup.',
-          'Professional movers + moving equipment included.',
-          'Transparent flat-rate pricing — no hidden fees.',
-          '50+ completed moves across New Jersey.',
+          'We load, unload, or both — you tell us which.',
+          'You keep your own rental truck; we bring the crew.',
+          'Local New Jersey crew, not a national call centre.',
         ],
         cta: 'Complete my booking',
-        holdNote: `The ${money(amountHold, es)} deposit is a hold — it just secures your slot and applies to your move total.`,
+        // "secures your slot" removed (finding EMAIL-P1-14): the hold does not
+        // reserve capacity — the booking still needs owner approval, so the slot
+        // is not guaranteed at this point.
+        holdNote: `The ${money(amountHold, es)} deposit is a hold, not a charge — it applies to your move total.`,
         supportTitle: 'Questions?',
         contactLabels: { phone: 'Call or text', email: 'Email', website: 'Website' },
         disclaimer: "You're receiving this because you started a booking with us. Changed your mind? You can ignore this email.",

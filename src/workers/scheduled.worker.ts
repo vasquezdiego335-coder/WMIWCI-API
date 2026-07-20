@@ -6,6 +6,7 @@ import { queueLogger } from '../lib/logger'
 import { deleteFiles } from '../lib/cloudinary'
 import { runFollowup, type FollowupType } from '../lib/followups'
 import { quoteFollowupBlockReason } from '../lib/journeys'
+import { isSafeUrl } from '../emails/validation'
 import { etDayRange, moveDateInRange, effectiveMoveDate } from '../lib/scheduling'
 import { dayOfMoveSms } from '../lib/waiting-time'
 import type { ScheduledJobData } from '../lib/queues'
@@ -188,6 +189,17 @@ async function processScheduledJob(job: Job<ScheduledJobData>): Promise<void> {
     // ── 48h post-completion review request ────────────────────────
     case 'review-request-48h': {
       if (!bookingId) break
+      // CONFIGURATION GATE (finding EMAIL-P1-15): never queue a review request
+      // without a verified destination. The old default was a placeholder
+      // Google URL, so an unconfigured environment mailed customers a dead link.
+      const reviewDestination = process.env.GOOGLE_REVIEW_URL?.trim() ?? ''
+      if (!isSafeUrl(reviewDestination)) {
+        log.error(
+          { bookingId, configured: Boolean(reviewDestination) },
+          'GOOGLE_REVIEW_URL is missing or not a valid destination — review request NOT queued'
+        )
+        break
+      }
       const booking = await prisma.booking.findUnique({
         where: { id: bookingId },
         include: { customer: true },
@@ -199,7 +211,7 @@ async function processScheduledJob(job: Job<ScheduledJobData>): Promise<void> {
         bookingId,
         payload: {
           customerName: booking.customer.name,
-          googleReviewUrl: process.env.GOOGLE_REVIEW_URL || 'https://g.page/r/REPLACE_WITH_GOOGLE_REVIEW_LINK/review',
+          googleReviewUrl: reviewDestination,
           portalUrl: `${process.env.APP_URL}/my-booking/${booking.customerToken}`,
           heroGifUrl: process.env.EMAIL_HERO_GIF_URL || 'https://moveitclearit.com/email/truck-hero.gif',
           locale: booking.customer.locale,

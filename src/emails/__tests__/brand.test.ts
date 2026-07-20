@@ -319,3 +319,61 @@ test('the inline-HTML follow-up uses no off-palette colour literals', () => {
     'followups.ts hard-codes an off-palette colour — use the C tokens'
   )
 })
+
+// ── 5. UNSUPPORTED CLAIMS (finding EMAIL-P1-14) ─────────────────────────
+// Semantic claim FAMILIES, not exact strings, so a reworded version of the same
+// untrue promise still fails. Each family was a real claim that shipped.
+test('no template advertises junk removal or cleanout while that service is off', () => {
+  // Not enabled, not operationally available. Advertising it is an offer we
+  // cannot fulfil. Shipped in referral.tsx ("your next move or cleanout") and
+  // the repeat-reminder ("need furniture or junk cleared out").
+  const BANNED = [/cleanout/i, /clean[- ]?out/i, /junk removal/i, /junk cleared/i, /limpieza/i, /basura/i]
+  for (const [name, el] of all) {
+    const html = render(el)
+    for (const re of BANNED) {
+      assert.equal(re.test(html), false, `${name} advertises a disabled service (${re})`)
+    }
+  }
+})
+
+test('no template claims flat-rate pricing or an absence of extra fees', () => {
+  // Stairs, travel, truck add-on and access fees can all apply, so
+  // "transparent flat-rate pricing — no hidden fees" was untrue.
+  const BANNED = [/no hidden fees/i, /flat[- ]rate pricing/i, /sin cargos ocultos/i, /precio fijo y transparente/i]
+  for (const [name, el] of all) {
+    const html = render(el)
+    for (const re of BANNED) assert.equal(re.test(html), false, `${name} makes a pricing claim (${re})`)
+  }
+})
+
+test('no template hard-codes a completed-move count', () => {
+  // "50+ completed moves across New Jersey" had no source and no counting rule.
+  const BANNED = [/\d+\+?\s*(completed\s*)?moves/i, /\d+\+?\s*mudanzas/i]
+  for (const [name, el] of all) {
+    const html = render(el)
+    for (const re of BANNED) assert.equal(re.test(html), false, `${name} claims a move count (${re})`)
+  }
+})
+
+test('no template claims equipment, transport, packing, licensing or insurance', () => {
+  const BANNED = [
+    /equipment included/i,
+    /equipo de mudanza incluido/i,
+    /licensed and insured/i,
+    /fully insured/i,
+    /we (?:will )?(?:drive|transport)/i,
+  ]
+  for (const [name, el] of all) {
+    const html = render(el)
+    for (const re of BANNED) assert.equal(re.test(html), false, `${name} claims an unverified capability (${re})`)
+  }
+})
+
+test('no template claims the deposit reserves capacity', () => {
+  // The hold does not reserve a slot — the booking still needs owner approval.
+  const BANNED = [/secures your slot/i, /reserves your slot/i, /asegura tu lugar/i, /your slot is (?:held|reserved)/i]
+  for (const [name, el] of all) {
+    const html = render(el)
+    for (const re of BANNED) assert.equal(re.test(html), false, `${name} claims a reserved slot (${re})`)
+  }
+})

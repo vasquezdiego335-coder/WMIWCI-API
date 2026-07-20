@@ -29,6 +29,7 @@ import { prisma } from './db'
 import { smsQueue, scheduledQueue } from './queues'
 import { queueLogger } from './logger'
 import { guardedSend } from './email-guard'
+import { isSafeUrl } from '../emails/validation'
 import { unsubscribeUrl } from './email-tokens'
 import { checkReferralEligibility } from './referral-eligibility'
 import { normalizeLocale, t, BIZ_NAME, BIZ_PHONE, type Locale } from './i18n'
@@ -45,7 +46,12 @@ const GOOGLE_REVIEW_URL = process.env.GOOGLE_REVIEW_URL?.trim() || ''
 const BOOK_URL = (process.env.MARKETING_SITE_URL?.trim() || 'https://www.moveitclearit.com').replace(/\/+$/, '')
 const REFERRAL_URL = process.env.REFERRAL_URL?.trim() || BOOK_URL
 const REFERRAL_CODE = process.env.REFERRAL_CODE?.trim() || 'REFER15'
-const reviewUrl = () => GOOGLE_REVIEW_URL || BOOK_URL
+// NO FALLBACK (finding EMAIL-P1-15). This used to return BOOK_URL when
+// GOOGLE_REVIEW_URL was unset, so a "leave us a review" email sent the customer
+// to the booking form — a confusing, useless message that still counted as a
+// successful send. An unconfigured review destination now yields null, and the
+// caller SKIPS the send and records a configuration error.
+const reviewUrl = (): string | null => (isSafeUrl(GOOGLE_REVIEW_URL) ? GOOGLE_REVIEW_URL : null)
 
 // Quiet hours (America/New_York): send only when 08:00 <= hour < 21:00.
 const QUIET_END = 8 // first allowed hour
@@ -263,32 +269,43 @@ function withOptOut(sms: string, locale: Locale): string {
   return `${sms} ${t(locale, 'smsOptOut')}`
 }
 
-function buildMessage(type: FollowupType, name: string, locale: Locale): { sms: string; subject: string; html: string } {
+/** Returns null when the message CANNOT be built truthfully (missing config). */
+function buildMessage(
+  type: FollowupType,
+  name: string,
+  locale: Locale
+): { sms: string; subject: string; html: string } | null {
   const es = locale === 'es'
   switch (type) {
     case 'review-request':
     case 'review-reminder': {
       const key = type === 'review-request' ? 'reviewRequest' : 'reviewReminder'
+      // NO FALLBACK (finding EMAIL-P1-15). Without a verified review
+      // destination there is no honest review email to send.
+      const url = reviewUrl()
+      if (!url) return null
       return {
-        sms: withOptOut(t(locale, key, { name, url: reviewUrl() }), locale),
+        sms: withOptOut(t(locale, key, { name, url }), locale),
         subject: es ? '¿Cómo lo hicimos? Deja tu reseña' : 'How did we do? Leave us a review',
         // Premium branded review email (shared _ui kit), matching the rest of the
         // transactional set. Replaces the old inline emailHtml() card.
         html: render(
-          ReviewRequestEmail({ customerName: name, googleReviewUrl: reviewUrl(), locale })
+          ReviewRequestEmail({ customerName: name, googleReviewUrl: url, locale })
         ),
       }
     }
     case 'repeat-reminder':
       return {
         sms: withOptOut(t(locale, 'repeatReminder', { name, url: BOOK_URL }), locale),
-        subject: es ? '¿Otra mudanza o limpieza?' : 'Moving again or need a cleanout?',
+        // NO CLEANOUT / JUNK-REMOVAL COPY (finding EMAIL-P1-14). That service is
+        // not enabled, so advertising it is an offer we cannot fulfil.
+        subject: es ? '¿Otra mudanza?' : 'Moving again?',
         html: emailHtml({
           heading: es ? `Estamos aquí cuando nos necesites, ${esc(name)}` : `We're here whenever you need us, ${esc(name)}`,
           paras: [
             es
-              ? 'Si te mudas otra vez o necesitas retirar muebles o basura, nos encantaría ayudarte — con 10% de descuento para clientes que regresan.'
-              : "If you're moving again or need furniture or junk cleared out, we'd love to help — with 10% off for return customers.",
+              ? 'Si te mudas otra vez y necesitas ayuda para cargar o descargar, nos encantaría ayudarte — con 10% de descuento para clientes que regresan.'
+              : "If you're moving again and need help loading or unloading, we'd love to help — with 10% off for return customers.",
           ],
           ctaLabel: es ? 'Reservar de nuevo' : 'Book again',
           ctaUrl: BOOK_URL,
@@ -362,6 +379,11 @@ export async function runFollowup(bookingId: string, type: FollowupType): Promis
   }
 
   const msg = buildMessage(type, customer.name, locale)
+  if (!msg) {
+    // A configuration gap, not a customer-state problem. Recorded so the reason
+    // is visible instead of the send silently "succeeding" with a bad link.
+    return recordSkip(bookingId, type, 'missing-configuration:review-url')
+  }
   let anySent = false
   if (customer.phone) {
     try {

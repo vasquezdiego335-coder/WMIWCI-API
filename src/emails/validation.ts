@@ -23,8 +23,21 @@ export function unsafeUrlReason(url: string | undefined | null): string | null {
   const u = String(url).trim()
   if (u === '' || u === '#') return 'placeholder (empty/#)'
   if (/^javascript:/i.test(u)) return 'javascript: scheme'
+  // data: URLs can carry a whole HTML document (including script) — never a
+  // legitimate destination for an action link in a transactional email.
+  if (/^data:/i.test(u)) return 'data: scheme'
   if (/^(mailto:|tel:)/i.test(u)) return null // allowed
   if (/\b(localhost|127\.0\.0\.1|0\.0\.0\.0)\b/i.test(u)) return 'localhost'
+  // ── PLACEHOLDER MARKERS (finding EMAIL-P1-15) ────────────────────────────
+  // `https://g.page/r/REPLACE_WITH_GOOGLE_REVIEW_LINK/review` is a perfectly
+  // well-formed absolute https URL, so every structural check here passed it.
+  // It was the hard-coded default for GOOGLE_REVIEW_URL, so an unconfigured
+  // environment mailed customers a review link pointing at a dead Google page.
+  // A URL that still contains its own setup instructions is not configured.
+  if (/REPLACE_WITH|REPLACE_ME|YOUR[-_]?DOMAIN|CHANGE[-_]?ME|PLACEHOLDER|TEST[-_]?ONLY|INSERT[-_]?URL/i.test(u)) {
+    return 'placeholder marker in URL (not configured)'
+  }
+  if (/\b(example\.(com|org|net)|test\.test|foo\.bar)\b/i.test(u)) return 'example/test domain'
   if (/^https?:\/\/[^/]*\.(vercel|ngrok(-free)?|railway)\.app/i.test(u)) return 'preview/staging domain'
   if (!/^https:\/\//i.test(u)) return 'not an absolute https URL'
   return null
