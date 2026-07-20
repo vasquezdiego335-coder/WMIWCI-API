@@ -40,7 +40,7 @@ const GROUPS: Group[] = [
       { href: '/admin/expenses', label: 'Expenses', icon: '🧾' },
       { href: '/admin/owner-money', label: 'Owner Money', icon: '🏦' },
       { label: 'Payroll', icon: '💵', soon: true },
-      { label: 'Reports', icon: '📑', soon: true },
+      { href: '/admin/reports', label: 'Reports', icon: '📑' },
     ],
   },
   {

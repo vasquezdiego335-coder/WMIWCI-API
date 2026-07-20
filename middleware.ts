@@ -90,6 +90,10 @@ export const config = {
     '/admin/schedule',
     '/admin/queues/:path*',
     '/admin/queues',
+    // Stage 3B: reporting pages must be auth-gated by the middleware too, not
+    // only by the layout redirect.
+    '/admin/reports/:path*',
+    '/admin/reports',
     '/admin/payments/:path*',
     '/admin/payments',
     '/admin/discounts/:path*',

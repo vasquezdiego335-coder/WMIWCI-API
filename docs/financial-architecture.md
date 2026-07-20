@@ -13,6 +13,21 @@ match these definitions or cite this file when it deliberately differs.**
 
 ---
 
+> ## STAGE 3B UPDATE (2026-07-20) — reporting UI and routes
+>
+> See `docs/admin/stage3b-reporting-ui.md`.
+>
+> - Reporting pages and API routes now exist at `/admin/reports` and
+>   `/api/admin/reports/*`. Every response carries a `meta` block declaring
+>   accounting basis, reporting mode, timezone, period bounds and the
+>   finalized/provisional/unusable counts.
+> - Owner-only money is stripped from responses server-side by `shapeForRole()`;
+>   hiding a column in the UI is not a control.
+> - Exports reuse the SAME builder as the screen, so a file can never disagree
+>   with the report it came from.
+> - **DATABASE STILL UNAVAILABLE** (Neon compute quota). Stage 1, 2 and 3
+>   migrations remain unapplied and NO persistence has been verified.
+
 > ## STAGE 3 UPDATE (2026-07-20) — company reporting on top of snapshots
 >
 > See `docs/admin/stage3-reporting-analytics.md`.
