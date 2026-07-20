@@ -13,6 +13,31 @@ match these definitions or cite this file when it deliberately differs.**
 
 ---
 
+> ## PHASE 2 UPDATE (2026-07-20) — financial closeout + durable snapshots
+>
+> See `docs/admin/phase2-financial-closeout.md`. The hierarchy is now complete
+> and centralized in `src/lib/closeout-calc.ts`:
+>
+> ```
+> net collected − direct job costs        = CASH GROSS PROFIT
+>   − unpaid owner labor value            = ECONOMIC PROFIT
+> cash gross profit − allocated overhead  = COMPANY NET PROFIT
+>   − unpaid owner labor value            = ECONOMIC NET PROFIT
+> company net profit − tax reserve − business reserves
+>   − retained earnings − unresolved liabilities = DISTRIBUTABLE PROFIT
+> ```
+>
+> - **Profit comes only from COLLECTED money.** An outstanding balance is a
+>   receivable and can never reach an owner distribution.
+> - Finalizing writes an **immutable `FinancialSnapshot`**. Changing a rate, an
+>   ownership split, a reserve percentage or an overhead policy can no longer
+>   rewrite a move that was already closed. Reopening supersedes, never deletes.
+> - Blockers are HARD (wrong data — never overridable) or OVERRIDABLE (a
+>   judgement call an owner documents with a reason).
+> - Reimbursement / draw / distribution / labor pay remain four distinct things.
+> - Tax reserve is a % of company net profit, floored at $0 on a loss. Reserves
+>   are PLANNED allocations, not bank transfers.
+
 > ## PHASE 1 UPDATE (2026-07-20) — JobCrew now has a real write path
 >
 > The decision below is UNCHANGED and now enforced by working code. See

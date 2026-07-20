@@ -145,6 +145,24 @@ enum AuditAction {
   CREW_PAYMENT_VOIDED
   CREW_ZERO_LABOR_CONFIRMED
   CREW_OWNER_LABOR_VALUED
+  // ── Phase 2 financial closeout (owner spec 2026-07-20) ──
+  CLOSEOUT_STARTED
+  CLOSEOUT_SUBMITTED
+  CLOSEOUT_FINALIZED
+  CLOSEOUT_REOPENED
+  CLOSEOUT_OVERRIDE_USED
+  CLOSEOUT_TRUCK_SOURCE_CONFIRMED
+  CLOSEOUT_BALANCE_WRITTEN_OFF
+  CLOSEOUT_DISPUTE_ACKNOWLEDGED
+  OVERHEAD_METHOD_SELECTED
+  TAX_RESERVE_CHANGED
+  BUSINESS_RESERVE_CHANGED
+  OWNER_SPLIT_CHANGED
+  DISTRIBUTION_PLANNED
+  DISTRIBUTION_APPROVED
+  DISTRIBUTION_PAID
+  DISTRIBUTION_VOIDED
+  SNAPSHOT_SUPERSEDED
   LEAD_CREATED
   LEAD_STATUS_CHANGED
   PRICE_CHANGED
@@ -432,6 +450,73 @@ enum LaborPayModel {
   UNPAID_OWNER // owner works, no cash changes hands; economic value still recorded
   ZERO_CONFIRMED // explicitly confirmed $0 labor (owner + reason required)
   CUSTOM // owner-approved amount no formula produces
+}
+
+// ── Phase 2 financial closeout (owner spec 2026-07-20) ───────────────────────
+//    Turning a completed move into a DURABLE financial record. The governing
+//    rule: a finalized closeout must never change because a setting changed
+//    later — see FinancialSnapshot.
+
+enum CloseoutStatus {
+  NOT_STARTED
+  IN_PROGRESS
+  MISSING_INFORMATION
+  READY_FOR_REVIEW
+  READY_TO_FINALIZE
+  FINALIZED
+  REOPENED
+}
+
+/// How company overhead is charged to a move. The method AND the rate are
+/// snapshotted at finalization so changing policy never rewrites history.
+enum OverheadMethod {
+  NONE
+  PER_MOVE // fixed cents per completed move
+  PCT_REVENUE // percentage of net collected revenue
+  PER_LABOR_HOUR // cents per approved crew hour
+  MONTHLY_POOL // monthly pool / eligible completed moves
+  MANUAL // owner-entered amount + reason
+}
+
+enum ReserveKind {
+  TAX
+  GENERAL
+  EMERGENCY
+  TRUCK_FUND
+  EQUIPMENT_FUND
+  LICENSING_FUND
+  INSURANCE_FUND
+  MARKETING_FUND
+  GROWTH_FUND
+  RETAINED_EARNINGS
+  OTHER
+}
+
+/// How an owner split was decided. Recorded so a distribution can always be
+/// explained months later.
+enum SplitMethod {
+  EQUAL
+  OWNERSHIP_PERCENT
+  LABOR_FIRST
+  CUSTOM
+}
+
+enum DistributionStatus {
+  PLANNED
+  APPROVED
+  PARTIALLY_PAID
+  PAID
+  VOIDED
+}
+
+/// Where the truck came from. NOT_REQUIRED and CUSTOMER_PROVIDED must be chosen
+/// EXPLICITLY — a missing truck cost is never assumed to be zero.
+enum TruckSource {
+  CUSTOMER_PROVIDED
+  COMPANY_OWNED
+  RENTAL
+  THIRD_PARTY
+  NOT_REQUIRED
 }
 
 /// Is travel time paid, and how? Per assignment, because it varies by worker.
@@ -757,6 +842,7 @@ model Booking {
   review        Review?
   followUps     FollowUpLedger[]
   expenses      Expense[] // job-linked expenses (admin OS) — reduce this job's profit
+  closeout      MoveCloseout? // Phase 2 financial closeout
 
   @@index([status])
   @@index([customerId])
@@ -1530,7 +1616,214 @@ model BusinessConfig {
   /// rather than rejected — long move days are legitimate. Default 840 (14h).
   longShiftReviewMinutes   Int @default(840) @map("long_shift_review_minutes")
 
+  // ── Phase 2 closeout policy (owner spec 2026-07-20) ──
+  /// Default overhead method + rate. SNAPSHOT at finalization; changing these
+  /// must never alter an already-finalized move.
+  overheadMethod            OverheadMethod @default(NONE) @map("overhead_method")
+  overheadPerMoveCents      Int            @default(0) @map("overhead_per_move_cents")
+  overheadPctRevenueBp      Int            @default(0) @map("overhead_pct_revenue_bp") // basis points (500 = 5%)
+  overheadPerLaborHourCents Int            @default(0) @map("overhead_per_labor_hour_cents")
+  overheadMonthlyPoolCents  Int            @default(0) @map("overhead_monthly_pool_cents")
+  /// Receipts required at or above this amount. 0 disables the rule.
+  receiptRequiredAboveCents Int            @default(2500) @map("receipt_required_above_cents")
+  /// Default business reserve taken from company net profit, in basis points.
+  generalReserveBp          Int            @default(0) @map("general_reserve_bp")
+
   updatedAt DateTime @updatedAt @map("updated_at")
 
   @@map("business_config")
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+//  PHASE 2 — financial closeout (owner spec 2026-07-20)
+// ════════════════════════════════════════════════════════════════════════════
+
+/// The closeout workflow for ONE move. Exactly one row per booking (unique), so
+/// there can never be two competing closeouts. Money lives in FinancialSnapshot;
+/// this model owns WORKFLOW state, the checklist, and the confirmations that
+/// only a human can make (truck source, "$0 confirmed", write-offs).
+model MoveCloseout {
+  id        String         @id @default(cuid())
+  bookingId String         @unique @map("booking_id")
+  status    CloseoutStatus @default(NOT_STARTED)
+
+  startedAt     DateTime? @map("started_at")
+  startedById   String?   @map("started_by_id")
+  submittedAt   DateTime? @map("submitted_at")
+  submittedById String?   @map("submitted_by_id")
+  finalizedAt   DateTime? @map("finalized_at")
+  finalizedById String?   @map("finalized_by_id")
+  reopenedAt    DateTime? @map("reopened_at")
+  reopenedById  String?   @map("reopened_by_id")
+  reopenReason  String?   @map("reopen_reason")
+
+  /// Blockers an OWNER deliberately overrode, with the reason. Shape:
+  /// [{ code, reason, byId, byName, at }] — never a bare boolean.
+  overrides Json?
+  notes     String?
+
+  // ── Human confirmations. These exist because their ABSENCE is meaningful:
+  //    a missing truck cost is not $0 until somebody says so.
+  truckSource              TruckSource? @map("truck_source")
+  truckSourceConfirmedAt   DateTime?    @map("truck_source_confirmed_at")
+  truckSourceConfirmedById String?      @map("truck_source_confirmed_by_id")
+  /// Owner accepted that an outstanding customer balance will not be collected.
+  balanceWriteOffCents     Int?         @map("balance_write_off_cents")
+  balanceWriteOffReason    String?      @map("balance_write_off_reason")
+  /// Owner acknowledged an open dispute so it stops blocking finalization.
+  disputeAcknowledgedAt    DateTime?    @map("dispute_acknowledged_at")
+
+  // ── Reserve + split decisions for THIS move (applied at finalization) ──
+  overheadMethod      OverheadMethod? @map("overhead_method")
+  overheadAmountCents Int?            @map("overhead_amount_cents")
+  overheadReason      String?         @map("overhead_reason")
+  taxReserveBp        Int?            @map("tax_reserve_bp") // basis points of company net profit
+  taxReserveCents     Int?            @map("tax_reserve_cents")
+  taxReserveReason    String?         @map("tax_reserve_reason")
+  splitMethod         SplitMethod?    @map("split_method")
+  splitReason         String?         @map("split_reason")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  booking   Booking             @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  snapshots FinancialSnapshot[]
+  reserves  ReserveAllocation[]
+
+  @@index([status])
+  @@index([finalizedAt])
+  @@map("move_closeouts")
+}
+
+/// An IMMUTABLE record of the numbers used at one finalization. Never updated —
+/// reopening creates version N+1 and marks the previous one superseded.
+///
+/// THIS IS THE POINT OF PHASE 2: changing a worker rate, an ownership split, a
+/// reserve percentage or an overhead policy must NOT silently rewrite a move
+/// that was already closed. Historical truth reads from here, not from live
+/// configuration.
+model FinancialSnapshot {
+  id         String @id @default(cuid())
+  closeoutId String @map("closeout_id")
+  bookingId  String @map("booking_id")
+  version    Int
+
+  // revenue
+  netBilledRevenueCents    Int @map("net_billed_revenue_cents")
+  netCollectedRevenueCents Int @map("net_collected_revenue_cents")
+  outstandingBalanceCents  Int @map("outstanding_balance_cents")
+  refundedCents            Int @map("refunded_cents")
+  chargebackCents          Int @map("chargeback_cents")
+  disputedOpenCents        Int @map("disputed_open_cents")
+
+  // costs
+  directExpenseCents      Int @map("direct_expense_cents")
+  crewLaborCents          Int @map("crew_labor_cents")
+  ownerCashLaborCents     Int @map("owner_cash_labor_cents")
+  ownerEconomicLaborCents Int @map("owner_economic_labor_cents")
+  processingFeeCents      Int @map("processing_fee_cents")
+  truckCostCents          Int @map("truck_cost_cents")
+  directJobCostCents      Int @map("direct_job_cost_cents")
+
+  // profit
+  cashGrossProfitCents   Int  @map("cash_gross_profit_cents")
+  economicProfitCents    Int  @map("economic_profit_cents")
+  allocatedOverheadCents Int  @map("allocated_overhead_cents")
+  companyNetProfitCents  Int  @map("company_net_profit_cents")
+  economicNetProfitCents Int  @map("economic_net_profit_cents")
+  marginBp               Int? @map("margin_bp") // basis points; null when no revenue
+
+  // reserves + distribution
+  taxReserveCents          Int   @map("tax_reserve_cents")
+  businessReserveCents     Int   @map("business_reserve_cents")
+  retainedEarningsCents    Int   @map("retained_earnings_cents")
+  unresolvedLiabilityCents Int   @map("unresolved_liability_cents")
+  distributableProfitCents Int   @map("distributable_profit_cents")
+  /// [{ owner, amountCents, percentBp }] — what each owner was allocated.
+  ownerAllocations         Json? @map("owner_allocations")
+
+  // provenance
+  overheadMethod     OverheadMethod @map("overhead_method")
+  overheadRateRaw    Int?           @map("overhead_rate_raw")
+  taxReserveBp       Int?           @map("tax_reserve_bp")
+  splitMethod        SplitMethod?   @map("split_method")
+  /// Flags for anything still incomplete when this was taken.
+  incompleteFlags    Json?          @map("incomplete_flags")
+  calculationVersion String         @map("calculation_version")
+
+  supersededAt   DateTime? @map("superseded_at")
+  supersededById String?   @map("superseded_by_id")
+  createdById    String?   @map("created_by_id")
+  createdByName  String?   @map("created_by_name")
+  createdAt      DateTime  @default(now()) @map("created_at")
+
+  closeout MoveCloseout @relation(fields: [closeoutId], references: [id], onDelete: Cascade)
+
+  @@unique([closeoutId, version])
+  @@index([bookingId])
+  @@index([supersededAt])
+  @@map("financial_snapshots")
+}
+
+/// Money the business is holding back. PLANNED by default — this records an
+/// accounting decision, NOT a bank transfer. `transferredAt` is only set when a
+/// real movement is confirmed by a human.
+model ReserveAllocation {
+  id            String      @id @default(cuid())
+  closeoutId    String?     @map("closeout_id")
+  bookingId     String?     @map("booking_id")
+  kind          ReserveKind
+  amountCents   Int
+  reason        String?
+  /// True only when the money actually moved somewhere. Never inferred.
+  transferred   Boolean     @default(false)
+  transferredAt DateTime?   @map("transferred_at")
+  createdById   String?     @map("created_by_id")
+  createdByName String?     @map("created_by_name")
+  createdAt     DateTime    @default(now()) @map("created_at")
+  updatedAt     DateTime    @updatedAt @map("updated_at")
+
+  closeout MoveCloseout? @relation(fields: [closeoutId], references: [id], onDelete: Cascade)
+
+  @@index([closeoutId])
+  @@index([kind])
+  @@map("reserve_allocations")
+}
+
+/// An owner profit distribution. Distinct from a WITHDRAWAL (a draw), a
+/// REIMBURSEMENT (money already the owner's), and labor pay. Allocation and
+/// actual payment are separate: `approvedCents` is the decision, `paidCents` is
+/// the cash. A distribution can NEVER exceed the distributable profit that was
+/// snapshotted.
+model OwnerDistribution {
+  id         String             @id @default(cuid())
+  owner      TaskOwner
+  bookingId  String?            @map("booking_id") // plain reference; null = period distribution
+  snapshotId String?            @map("snapshot_id") // the snapshot it was authorized against
+  status     DistributionStatus @default(PLANNED)
+
+  approvedCents Int            @map("approved_cents")
+  paidCents     Int            @default(0) @map("paid_cents")
+  percentBp     Int?           @map("percent_bp")
+  method        PaymentMethod?
+  paidOn        DateTime?      @map("paid_on")
+  reference     String?
+  notes         String?
+
+  approvedById   String?   @map("approved_by_id")
+  approvedByName String?   @map("approved_by_name")
+  approvedAt     DateTime? @map("approved_at")
+  recordedById   String?   @map("recorded_by_id")
+  voided         Boolean   @default(false)
+  voidedById     String?   @map("voided_by_id")
+  voidedAt       DateTime? @map("voided_at")
+  voidReason     String?   @map("void_reason")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@index([owner])
+  @@index([bookingId])
+  @@index([status])
+  @@map("owner_distributions")
 }

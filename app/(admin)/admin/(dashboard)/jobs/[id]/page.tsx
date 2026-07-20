@@ -19,6 +19,9 @@ import { completenessLabel, LABOR_STATE_LABELS } from '@/lib/financial-completen
 import { computeLaborPay, paidCentsOf } from '@/lib/labor-calc'
 import { isOnBreak } from '@/lib/labor-time'
 import CrewLaborPanel from './CrewLaborPanel'
+import FinancialCloseoutPanel from './FinancialCloseoutPanel'
+import { buildCloseoutView } from '@/lib/closeout-service'
+import { isSettledForMoney } from '@/lib/financial-completeness'
 import { isEligibleExpense } from '@/lib/money-rules'
 import { Callout, CompletenessBadge } from '../../_ui'
 import ExpenseForm from '../../ExpenseForm'
@@ -112,6 +115,11 @@ export default async function JobDetail({ params }: { params: { id: string } }) 
   const refunded = profit.refundedCents
   const crewRows = booking.job?.crew ?? []
   const labor = jobLabor(booking as never)
+
+  // PHASE 2: the full closeout picture — revenue, costs, profit, reserves,
+  // blockers and snapshots — from the ONE centralized derivation. Only for
+  // moves that have actually been worked; a pending quote has nothing to close.
+  const closeout = isSettledForMoney(booking.status) ? await buildCloseoutView(booking.id) : null
 
   // Staff roster for the assign form (active users only).
   const staff = await prisma.user.findMany({
@@ -627,6 +635,58 @@ export default async function JobDetail({ params }: { params: { id: string } }) 
           </Card>
         </div>
       </div>
+
+      {/* ── Financial Closeout (Phase 2, owner spec 2026-07-20) ──
+          The move's durable financial record: revenue reconciled against cash,
+          costs, profit, reserves and what may actually be distributed. Rendered
+          full-width because it is the answer the whole admin exists to give. */}
+      {closeout && (
+        <Card
+          title="Financial Closeout"
+          icon="🧮"
+          wide
+          action={<span style={{ fontSize: '11px', color: '#9CA3AF' }}>{closeout.isFinalized ? 'finalized' : 'not finalized'}</span>}
+        >
+          <FinancialCloseoutPanel
+            bookingId={booking.id}
+            isOwner={isOwner}
+            data={{
+              status: closeout.status,
+              isFinalized: closeout.isFinalized,
+              canFinalize: closeout.decision.canFinalize,
+              financials: {
+                netBilledRevenueCents: closeout.financials.netBilledRevenueCents,
+                netCollectedRevenueCents: closeout.financials.netCollectedRevenueCents,
+                outstandingBalanceCents: closeout.financials.outstandingBalanceCents,
+                refundedCents: closeout.financials.refundedCents,
+                chargebackCents: closeout.financials.chargebackCents,
+                disputedOpenCents: closeout.financials.disputedOpenCents,
+                directJobCostCents: closeout.financials.directJobCostCents,
+                crewLaborCents: closeout.financials.crewLaborCents,
+                ownerEconomicLaborCents: closeout.financials.ownerEconomicLaborCents,
+                processingFeeCents: closeout.financials.processingFeeCents,
+                directExpenseCents: closeout.financials.directExpenseCents,
+                profit: closeout.financials.profit,
+                overhead: { amountCents: closeout.financials.overhead.amountCents, method: closeout.financials.overhead.method, basis: closeout.financials.overhead.basis },
+                reserves: closeout.financials.reserves,
+              },
+              blockers: closeout.blockers,
+              overrides: closeout.overrides,
+              split: closeout.split,
+              unpaidLaborCents: closeout.unpaidLaborCents,
+              ownerReimbursementOwedCents: closeout.ownerReimbursementOwedCents,
+              snapshots: closeout.snapshots.map((sn) => ({
+                id: sn.id, version: sn.version,
+                createdAt: sn.createdAt.toISOString(),
+                supersededAt: sn.supersededAt ? sn.supersededAt.toISOString() : null,
+                companyNetProfitCents: sn.companyNetProfitCents,
+                distributableProfitCents: sn.distributableProfitCents,
+              })),
+              distributions: closeout.distributions,
+            }}
+          />
+        </Card>
+      )}
 
       {/* Section 13: Timeline */}
       <Card title="Lifecycle Timeline" icon="🗓" wide>

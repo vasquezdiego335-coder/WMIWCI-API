@@ -74,6 +74,21 @@ export type Action =
   | 'labor.record_payment' // log a labor payment
   | 'labor.void_payment' // void a recorded labor payment — owner only
   | 'labor.finalize_override' // finalize a move with incomplete labor — owner only
+  // ── Phase 2 financial closeout (owner spec 2026-07-20) ──
+  | 'closeout.view' // see the closeout tab and its numbers
+  | 'closeout.edit' // reconcile expenses/receipts/truck source
+  | 'closeout.submit' // hand the closeout to an owner for review
+  | 'closeout.finalize' // lock the move + write the snapshot — owner only
+  | 'closeout.reopen' // reopen a finalized move — owner only
+  | 'closeout.override_blocker' // document an overridable blocker — owner only
+  | 'closeout.set_overhead' // choose the overhead method/amount — owner only
+  | 'closeout.set_reserves' // tax + business reserves — owner only
+  | 'closeout.set_owner_split' // decide the owner split — owner only
+  | 'distribution.view' // see owner distributions
+  | 'distribution.plan' // draft an allocation — owner only
+  | 'distribution.approve' // authorize a distribution — owner only
+  | 'distribution.record_payment' // record that a distribution was paid — owner only
+  | 'distribution.void' // void a distribution — owner only
   // Bookings
   | 'booking.approve' // approve a PENDING_APPROVAL booking (captures the $49 hold)
   | 'booking.decline' // decline/deny before capture (releases the hold)
@@ -116,6 +131,21 @@ const OWNER_ONLY: Action[] = [
   'labor.void_payment',
   // Finalizing a move whose labor is incomplete is the override Phase 0 defined.
   'labor.finalize_override',
+  // ── Phase 2 (owner spec 2026-07-20) ──
+  // Finalizing writes an immutable financial record; reopening rewrites
+  // history. Both are owner-financial authority, not operations.
+  'closeout.finalize',
+  'closeout.reopen',
+  'closeout.override_blocker',
+  // Overhead, reserves and the owner split decide how much money leaves the
+  // business and to whom. A manager runs moves; owners decide the money.
+  'closeout.set_overhead',
+  'closeout.set_reserves',
+  'closeout.set_owner_split',
+  'distribution.plan',
+  'distribution.approve',
+  'distribution.record_payment',
+  'distribution.void',
 ]
 
 // Everything not owner-only is available to OWNER + MANAGER. CREW is limited to
