@@ -275,3 +275,40 @@ export function quoteFollowupBlockReason(lead: LeadState | null, now: Date = new
   if (lead.moveDate && lead.moveDate.getTime() + DAY < now.getTime()) return 'move_date_passed'
   return null
 }
+
+/**
+ * LIVE lead eligibility — the send-time twin of `bookingEligibility`
+ * (finding EMAIL-P1-12).
+ *
+ * The scheduled worker already rechecked the lead before enqueueing, but the
+ * queued job carried no `leadId`, so the EMAIL worker — which runs later, and
+ * may run much later after a retry or a deferral — could not recheck anything.
+ * A lead that booked in between still received "still planning your move?".
+ *
+ * FAILS CLOSED: a read error blocks the send.
+ */
+export async function leadEligibility(leadId: string): Promise<string | null> {
+  try {
+    const lead = await prisma.lead.findUnique({
+      where: { id: leadId },
+      select: {
+        email: true,
+        status: true,
+        quotedAt: true,
+        bookedAt: true,
+        lostAt: true,
+        moveDate: true,
+        convertedBookingId: true,
+      },
+    })
+    const reason = quoteFollowupBlockReason(lead)
+    if (reason) log.info({ leadId, reason }, 'lead eligibility BLOCKED the send')
+    return reason
+  } catch (err) {
+    log.error(
+      { err: err instanceof Error ? err.message : String(err), leadId },
+      'lead eligibility read failed — failing closed'
+    )
+    return 'eligibility_read_failed'
+  }
+}

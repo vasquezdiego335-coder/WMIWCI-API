@@ -162,6 +162,12 @@ export type EmailJobData = {
     | 'quote-followup-final' // ~7d — still moving?
   to: string
   bookingId?: string
+  /** LEAD-scoped journeys (quote follow-up). Without this the email worker
+   *  cannot recheck the lead at send time (finding EMAIL-P1-12). */
+  leadId?: string
+  /** Stable business-event id for idempotency, e.g. `lead:<id>:quote-followup-1`.
+   *  Preferred over the generated queue job id, which changes on every retry. */
+  businessEventKey?: string
   notificationId?: string
   payload: Record<string, unknown>
 }

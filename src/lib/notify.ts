@@ -20,6 +20,7 @@
 // ════════════════════════════════════════════════════════════════════════
 import { smsQueue } from './queues'
 import { resend, EMAIL_FROM, EMAIL_REPLY_TO } from './resend'
+import { guardedSend } from './email-guard'
 import { apiLogger } from './logger'
 import { normalizeLocale, t, BIZ_NAME, type Locale } from './i18n'
 
@@ -159,8 +160,30 @@ export function ownerBookingEmailHtml(b: BookingInput): string {
   )
 }
 
-// ── low-level senders (guarded) ───────────────────────────────────────
-async function sendEmail(to: string, subject: string, html: string, replyTo?: string): Promise<void> {
+// ════════════════════════════════════════════════════════════════════════
+//  SENDERS — owner alerts vs CUSTOMER mail (the fourth send path)
+//  ---------------------------------------------------------------------
+//  This file was a FOURTH direct caller of `resend.emails.send()`, missed by
+//  the audit and by the first remediation pass, which only ever named three.
+//  It was found by the send-path conformance test rather than by reading.
+//
+//  It matters because line ~198 sends a CUSTOMER-facing lead acknowledgement.
+//  Going direct meant that email skipped suppression entirely: a person who had
+//  unsubscribed, hard-bounced, or filed a spam complaint would still be written
+//  to the moment they touched the quote form.
+//
+//  The two cases are now separated deliberately:
+//    • sendCustomerEmail() — routed through guardedSend, so it inherits
+//      suppression, address validation, idempotency and reporting.
+//    • sendInternalEmail() — owner/ops alerts to OWNER_EMAIL, the business's own
+//      inbox. These stay direct ON PURPOSE: they are not customer mail, they
+//      must fire even when the marketing system is disabled, and routing an
+//      internal alert through a customer-consent gate would be the wrong model.
+//      They are explicitly whitelisted in the conformance test.
+// ════════════════════════════════════════════════════════════════════════
+
+/** INTERNAL alerts to the business's own inbox. Never customer-facing. */
+async function sendInternalEmail(to: string, subject: string, html: string, replyTo?: string): Promise<void> {
   const { error } = await resend.emails.send({
     from: EMAIL_FROM,
     to,
@@ -171,9 +194,38 @@ async function sendEmail(to: string, subject: string, html: string, replyTo?: st
   if (error) throw new Error(`resend: ${error.message ?? JSON.stringify(error)}`)
 }
 
+/**
+ * CUSTOMER-facing mail from this module. Goes through the shared guard, so a
+ * suppressed address is not written to and the send is recorded like any other.
+ *
+ * Classified TRANSACTIONAL: it acknowledges an enquiry the person just made. It
+ * is not an offer, so it does not require the promotional compliance block —
+ * but it DOES require suppression, which is what was missing.
+ */
+async function sendCustomerEmail(opts: {
+  to: string
+  subject: string
+  html: string
+  /** Stable business-event id so a double-submit cannot double-send. */
+  eventId: string
+}): Promise<void> {
+  const outcome = await guardedSend({
+    to: opts.to,
+    subject: opts.subject,
+    html: opts.html,
+    template: 'lead-acknowledgement',
+    emailClass: 'transactional',
+    journey: 'lead-intake',
+    eventId: opts.eventId,
+  })
+  if (!outcome.sent) {
+    log.info({ reason: outcome.reason }, 'lead acknowledgement not sent')
+  }
+}
+
 async function ownerEmail(subject: string, html: string, label: string, replyTo?: string): Promise<void> {
   if (!OWNER_EMAIL) return void log.warn({ label }, 'OWNER_EMAIL not set — skipping owner email')
-  await safe(`email:${label}`, () => sendEmail(OWNER_EMAIL, subject, html, replyTo))
+  await safe(`email:${label}`, () => sendInternalEmail(OWNER_EMAIL, subject, html, replyTo))
 }
 
 // ── public API ────────────────────────────────────────────────────────
@@ -195,7 +247,17 @@ export async function notifyLead(input: LeadInput): Promise<void> {
     }
     if (input.email) {
       const subject = locale === 'es' ? 'Recibimos tu solicitud' : 'We got your request'
-      await safe('email:lead-ack', () => sendEmail(input.email!, subject, customerLeadEmailHtml(input, locale)))
+      // Stable per-address, per-day identity: a repeated form submission on the
+      // same day is the same business event, so it cannot double-send.
+      const ackEvent = `lead-ack:${input.email!.toLowerCase()}:${new Date().toISOString().slice(0, 10)}`
+      await safe('email:lead-ack', () =>
+        sendCustomerEmail({
+          to: input.email!,
+          subject,
+          html: customerLeadEmailHtml(input, locale),
+          eventId: ackEvent,
+        })
+      )
     }
   }
 }

@@ -5,9 +5,10 @@ import { bullConnection } from '../lib/redis'
 import { prisma } from '../lib/db'
 import { queueLogger } from '../lib/logger'
 import { guardedSend, classifyTemplate } from '../lib/email-guard'
-import { unsubscribeUrl } from '../lib/email-tokens'
+import { buildMarketingContext, applyMarketingContext } from '../lib/marketing-context'
 import { emailQueue } from '../lib/queues'
 import { bookingEligibility } from '../lib/email-eligibility'
+import { leadEligibility } from '../lib/journeys'
 import type { EmailJobData } from '../lib/queues'
 
 // ── Email template imports ─────────────────────────────────────
@@ -151,7 +152,7 @@ function injectOpenPixel(html: string, src: string): string {
 }
 
 async function processEmailJob(job: Job<EmailJobData>): Promise<void> {
-  const { template, to, bookingId, notificationId, payload } = job.data
+  const { template, to, bookingId, leadId, businessEventKey, notificationId, payload } = job.data
   const log = queueLogger.child({ jobId: job.id, template, to, bookingId })
 
   log.info('📧 Email job received')
@@ -185,12 +186,17 @@ async function processEmailJob(job: Job<EmailJobData>): Promise<void> {
     throw new Error(`Unknown email template: ${template}`)
   }
 
-  // The unsubscribe link is derived from the RECIPIENT here rather than trusted
-  // from the payload — a queued job cannot smuggle in someone else's link, and
-  // promotional templates get a working link even when the enqueuer forgot one.
+  // COMPLIANCE CONTEXT (finding EMAIL-P1-06). Derived from the RECIPIENT, never
+  // trusted from the payload — a queued job cannot smuggle in someone else's
+  // unsubscribe link, and a promotional template gets the full block (link +
+  // postal address + reason) even when the enqueuer supplied none of it.
+  // An incomplete context does NOT silently degrade: guardedSend blocks the send.
   const emailClass = classifyTemplate(template)
-  const renderPayload: Record<string, unknown> =
-    emailClass === 'promotional' ? { ...payload, unsubscribeUrl: unsubscribeUrl(to) ?? undefined } : payload
+  let renderPayload: Record<string, unknown> = payload
+  if (emailClass === 'promotional') {
+    const ctx = buildMarketingContext(to, template, (payload.locale as string) ?? 'en')
+    renderPayload = ctx.ok ? applyMarketingContext(payload, ctx.context) : payload
+  }
 
   let html = render(component(renderPayload))
   // Plain-text multipart part — deliverability (spam score) + accessibility.
@@ -229,10 +235,20 @@ async function processEmailJob(job: Job<EmailJobData>): Promise<void> {
     template,
     emailClass,
     journey: (payload.journey as string) ?? undefined,
-    eventId: bookingId ?? job.id ?? undefined,
+    // IDENTITY PRECEDENCE (finding EMAIL-P1-12): an explicit business-event key
+    // wins, then the booking, then the lead. The queue job id is the LAST
+    // resort — it changes on every scheduler retry, so keying on it lets the
+    // same logical send happen twice.
+    eventId: businessEventKey ?? bookingId ?? leadId ?? job.id ?? undefined,
     bookingId: bookingId ?? undefined,
+    leadId: leadId ?? undefined,
     payload: renderPayload,
-    recheck: bookingId ? () => bookingEligibility(template, bookingId) : undefined,
+    // Live state reload for whichever subject this email is about.
+    recheck: bookingId
+      ? () => bookingEligibility(template, bookingId)
+      : leadId
+      ? () => leadEligibility(leadId)
+      : undefined,
   })
 
   if (!outcome.sent) {

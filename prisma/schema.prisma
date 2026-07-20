@@ -987,14 +987,42 @@ model FollowUpLedger {
   bookingId String   @map("booking_id")
   type      String // review-request | review-reminder | repeat-reminder | referral-ask
   channel   String   @default("both") // sms | email | both
-  status    String   @default("sent") // sent | failed | skipped
+  /// OVERALL state (finding EMAIL-P1-10). This used to default to "sent" and be
+  /// written BEFORE either channel delivered, so the ledger — and every report
+  /// built on it — claimed a delivery that may never have happened. An SMS
+  /// merely ENQUEUED counted as sent. Queueing is not delivery.
+  ///   planned | claimed | deferred | partially_delivered | delivered
+  ///   | failed_retryable | failed_terminal | cancelled | skipped
+  status    String   @default("planned")
   error     String?
+  /// Per-channel truth. `both` no longer hides that one side failed, and a
+  /// retry can target ONLY the failed channel instead of re-sending the one
+  /// that succeeded.
+  ///   not_applicable | pending | queued | delivered | failed
+  emailStatus     String?   @map("email_status")
+  smsStatus       String?   @map("sms_status")
+  emailAttempts   Int       @default(0) @map("email_attempts")
+  smsAttempts     Int       @default(0) @map("sms_attempts")
+  emailProviderId String?   @map("email_provider_id")
+  smsProviderId   String?   @map("sms_provider_id")
+  emailLastError  String?   @map("email_last_error")
+  smsLastError    String?   @map("sms_last_error")
+  /// When a deferred/retryable follow-up may be attempted again.
+  nextAttemptAt   DateTime? @map("next_attempt_at")
+  /// Why a terminal row is terminal (opted-out, not-completed, ineligible…).
+  terminalReason  String?   @map("terminal_reason")
+  /// First delivery on ANY channel. Null until something really shipped.
+  deliveredAt     DateTime? @map("delivered_at")
+  createdAt       DateTime  @default(now()) @map("created_at")
+  updatedAt       DateTime  @updatedAt @map("updated_at")
+  /// Retained for back-compat with existing rows/readers.
   sentAt    DateTime @default(now()) @map("sent_at")
 
   booking Booking @relation(fields: [bookingId], references: [id])
 
   @@unique([bookingId, type])
   @@index([bookingId])
+  @@index([status, nextAttemptAt])
   @@map("followup_ledger")
 }
 

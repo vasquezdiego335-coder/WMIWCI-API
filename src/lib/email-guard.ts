@@ -43,6 +43,7 @@ import { resend, EMAIL_FROM, EMAIL_REPLY_TO } from './resend'
 import { normalizeEmail, unsubscribeUrl } from './email-tokens'
 import { isSuppressed, type EmailClass } from './email-suppression'
 import { assertEmailPayload, EmailValidationError } from '../emails/validation'
+import { buildMarketingContext } from './marketing-context'
 
 const log = queueLogger.child({ mod: 'email-guard' })
 
@@ -592,6 +593,23 @@ export async function guardedSend(input: GuardedSendInput): Promise<SendOutcome>
         return refuse(`validation: ${err.message}`)
       }
       throw err
+    }
+  }
+
+  // ── 5b. PROMOTIONAL COMPLIANCE CONTEXT (finding EMAIL-P1-06) ──────────
+  // A promotional email must carry a visible unsubscribe link, the real
+  // physical postal address, and the reason the recipient is getting it.
+  // The shared footer renders all three — but only when supplied, and before
+  // this gate NO sender supplied the address. Rather than ship a quietly
+  // non-compliant email, the send is BLOCKED and names what is unconfigured.
+  //
+  // Classified RETRYABLE: this is a configuration gap, so setting
+  // BUSINESS_POSTAL_ADDRESS later must be able to rescue the send.
+  if (emailClass === 'promotional') {
+    const ctx = buildMarketingContext(email, input.template, (input.payload?.locale as string) ?? 'en')
+    if (!ctx.ok) {
+      l.error({ missing: ctx.missing }, 'blocked: promotional email lacks required compliance context')
+      return refuse(`missing-configuration:marketing-context:${ctx.missing.join(',')}`)
     }
   }
 

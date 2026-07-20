@@ -27,30 +27,49 @@ There are **three** code paths that can put a message in front of a customer.
 Before this pass each called `resend.emails.send()` directly, and only one of
 them had any validation:
 
-| # | Path | Trigger | Gate before | Gate now |
-|---|---|---|---|---|
-| 1 | `src/workers/email.worker.ts` | BullMQ `email` queue | `assertEmailPayload` only | full guard |
-| 2 | `src/outbox/services/emailService.ts` | outbox state machine (`OUTBOX_ENABLED=true` — **what production runs**) | **none** | full guard |
-| 3 | `src/lib/followups.ts` | post-job scheduled follow-ups | **none** | full guard |
+| # | Path | Payload validation | Live recheck | Suppression | Text part | Compliance context | Idempotency | Provider retry |
+|---|---|---|---|---|---|---|---|---|
+| 1 | `src/workers/email.worker.ts` | yes | yes | yes | yes | yes | yes | yes |
+| 2 | `src/outbox/services/emailService.ts` | yes | yes | yes | yes | n/a (transactional) | yes | yes |
+| 3 | `src/lib/followups.ts` | yes | yes | yes | yes | yes | yes | yes |
+
+**This table was previously wrong** (finding EMAIL-P3-20): it claimed "full
+guard" on all three paths when the outbox passed neither a payload nor a
+recheck, and follow-ups passed neither payload, text, nor compliance context.
+The row values above are now asserted by
+`src/lib/__tests__/send-path-conformance.test.ts` rather than maintained by
+hand, so this table cannot drift again without a failing build.
 
 All three now call `guardedSend()` in [`src/lib/email-guard.ts`](../../src/lib/email-guard.ts).
 
 ### What `guardedSend` does, in order
 
 ```
-1. recipient format
-2. suppression check                     ← fails CLOSED
-3. recheck() — LIVE state reload         ← stale queue jobs die here
-4. quiet hours + frequency caps          ← promotional only
-5. assertEmailPayload                    ← required fields + URL safety
-6. IDEMPOTENCY CLAIM (EmailSend row)     ← written BEFORE the provider call
-7. provider send (Resend)
-8. mark sent + record provider id
+1.  recipient format
+2.  suppression check                    ← fails CLOSED
+3.  recheck() — LIVE state reload        ← stale queue jobs die here
+4.  quiet hours + frequency caps         ← promotional only
+5.  assertEmailPayload                   ← required fields + URL safety
+5b. marketing context                    ← promotional only; fails CLOSED
+6.  CLAIM OR RESUME (EmailSend row)      ← written BEFORE the provider call
+7.  provider send (Resend)
+8.  mark delivered + record provider id
 ```
 
-Every refusal writes an `EmailSend` row with `status: 'blocked'` and a machine
--readable `blockedReason`, so "why didn't this customer get their email?" is a
-database query, not a log hunt.
+Every refusal writes an `EmailSend` row with a machine-readable `blockedReason`
+**and a classification** — `terminal`, `retryable` or `deferred`. That
+classification is load-bearing: a quiet-hours deferral or a database outage
+leaves the logical send RESUMABLE, while a hard bounce closes it for good.
+Before this, every refusal permanently consumed the delivery key, so a
+frequency cap silently meant "never".
+
+Step 6 is `claimOrResumeSend()`, not a bare insert. A conflicting idempotency
+key does **not** by itself mean "already sent" — only a terminal row stops the
+attempt. See `src/lib/email-guard.ts` for the state table.
+
+**A provider outcome we cannot determine** (timeout, crash mid-flight) becomes
+`ambiguous` and is **never** auto-resent; `ambiguousSends()` surfaces it for a
+human. A duplicate to a real customer is worse than a delayed one.
 
 ---
 

@@ -172,6 +172,13 @@ async function processScheduledJob(job: Job<ScheduledJobData>): Promise<void> {
       await emailQueue.add(type, {
         template: type,
         to: lead!.email as string,
+        // Carried through the hop so the email worker can recheck the lead
+        // immediately before sending (finding EMAIL-P1-12).
+        leadId,
+        // STABLE business identity: lead + journey stage. The previous key was
+        // the generated queue job id, so a scheduler retry minted a NEW key and
+        // produced a second logical send of the same stage.
+        businessEventKey: `lead:${leadId}:${type}`,
         payload: {
           customerName: lead!.name,
           jobType: lead!.jobType ?? undefined,
