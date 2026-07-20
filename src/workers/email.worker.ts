@@ -1,11 +1,12 @@
 import { Worker, Job } from 'bullmq'
 import { randomUUID } from 'node:crypto'
 import { render } from '@react-email/render'
-import { assertEmailPayload, EmailValidationError } from '../emails/validation'
 import { bullConnection } from '../lib/redis'
-import { resend, EMAIL_FROM, EMAIL_REPLY_TO } from '../lib/resend'
 import { prisma } from '../lib/db'
 import { queueLogger } from '../lib/logger'
+import { guardedSend, classifyTemplate } from '../lib/email-guard'
+import { unsubscribeUrl } from '../lib/email-tokens'
+import { emailQueue } from '../lib/queues'
 import type { EmailJobData } from '../lib/queues'
 
 // ── Email template imports ─────────────────────────────────────
@@ -109,6 +110,70 @@ const SUBJECTS: Record<EmailJobData['template'], string> = {
   'referral-reward': 'Your referral reward is here',
 }
 
+// ════════════════════════════════════════════════════════════════════════
+//  SEND-TIME STOP RULES — the LAST guard before a message leaves.
+//  ---------------------------------------------------------------------
+//  A queue job may have been scheduled days ago. Deleting the queue record is
+//  NOT the only protection: this runs immediately before the provider call and
+//  reloads the booking's CURRENT state. If the world moved on — the customer
+//  paid, cancelled, or the move date passed — the message dies here.
+//
+//  Returns a reason string to ABORT, or null to proceed.
+// ════════════════════════════════════════════════════════════════════════
+async function stillWantedForBooking(template: string, bookingId: string): Promise<string | null> {
+  const booking = await prisma.booking.findUnique({
+    where: { id: bookingId },
+    select: {
+      status: true,
+      isInternalTest: true,
+      requestedDate: true,
+      confirmedDate: true,
+      scheduledStart: true,
+      completedAt: true,
+    },
+  })
+  if (!booking) return 'booking_deleted'
+  if (booking.isInternalTest) return 'internal_test_booking'
+
+  const moveDate = booking.scheduledStart ?? booking.confirmedDate ?? booking.requestedDate
+  // Compare against the END of the move day — a job at 9am is still "today".
+  const movePassed = moveDate ? moveDate.getTime() + 24 * 3_600_000 < Date.now() : false
+
+  switch (template) {
+    // Recovery mail only makes sense while the deposit is genuinely unpaid.
+    case 'abandoned-checkout':
+    case 'abandoned-checkout-2':
+    case 'abandoned-checkout-3':
+      if (booking.status !== 'PENDING_PAYMENT') return `booking_advanced:${booking.status}`
+      if (movePassed) return 'move_date_passed'
+      return null
+
+    // A reminder for a cancelled or already-finished move is noise.
+    case 'job-reminder':
+      if (!['CONFIRMED', 'SCHEDULED'].includes(booking.status)) return `booking_not_scheduled:${booking.status}`
+      if (movePassed) return 'move_date_passed'
+      return null
+
+    // Post-job mail requires the job to have actually happened.
+    case 'job-completion':
+    case 'review-request':
+    case 'review-reminder':
+    case 'referral':
+    case 'referral-ask':
+    case 'repeat-reminder':
+      if (booking.status !== 'COMPLETED') return `booking_not_completed:${booking.status}`
+      return null
+
+    // A confirmation must never go out for a cancelled booking.
+    case 'final-confirmation':
+      if (booking.status === 'CANCELLED') return 'booking_cancelled'
+      return null
+
+    default:
+      return null
+  }
+}
+
 /** Insert a 1x1 open-tracking pixel just before </body> (or append if none). */
 function injectOpenPixel(html: string, src: string): string {
   const pixel = `<img src="${src}" width="1" height="1" alt="" style="display:block;border:0;width:1px;height:1px;max-height:1px;overflow:hidden;opacity:0;" />`
@@ -150,28 +215,16 @@ async function processEmailJob(job: Job<EmailJobData>): Promise<void> {
     throw new Error(`Unknown email template: ${template}`)
   }
 
-  // ── PRE-SEND VALIDATION GATE ────────────────────────────────────────────
-  // Fail SAFELY: never send a misleading placeholder (a "confirmation" with no
-  // real date, a '#'/localhost link, etc.). Log loudly + drop the job — no
-  // throw, because missing data won't heal on a retry.
-  try {
-    assertEmailPayload(template, payload as Record<string, unknown>)
-  } catch (err) {
-    if (err instanceof EmailValidationError) {
-      log.error({ err: err.message }, '🚫 Email BLOCKED by pre-send validation — not sent')
-      if (notificationId) {
-        await prisma.notification
-          .update({ where: { id: notificationId }, data: { status: 'FAILED', error: err.message.slice(0, 500) } })
-          .catch(() => undefined)
-      }
-      return
-    }
-    throw err
-  }
+  // The unsubscribe link is derived from the RECIPIENT here rather than trusted
+  // from the payload — a queued job cannot smuggle in someone else's link, and
+  // promotional templates get a working link even when the enqueuer forgot one.
+  const emailClass = classifyTemplate(template)
+  const renderPayload: Record<string, unknown> =
+    emailClass === 'promotional' ? { ...payload, unsubscribeUrl: unsubscribeUrl(to) ?? undefined } : payload
 
-  let html = render(component(payload))
+  let html = render(component(renderPayload))
   // Plain-text multipart part — deliverability (spam score) + accessibility.
-  const text = render(component(payload), { plainText: true })
+  const text = render(component(renderPayload), { plainText: true })
   // Embed the open-tracking pixel. Requires a Notification row to attribute the
   // open to + APP_URL to build the public pixel URL. The token is persisted
   // BEFORE the send, so an open landing the instant the email arrives resolves.
@@ -189,37 +242,48 @@ async function processEmailJob(job: Job<EmailJobData>): Promise<void> {
     (payload.subject as string) ||
     (payload.locale ? emailSubject(template, payload.locale as string) : SUBJECTS[template])
 
-  // List-Unsubscribe on PROMOTIONAL messages ONLY (never on transactional
-  // receipts/booking updates/move-day messages). Activates when the payload
-  // carries a real https unsubscribe URL (see blocker: unsubscribe route).
-  const PROMOTIONAL = new Set(['abandoned-checkout', 'review-request', 'referral', 'referral-reward'])
-  const unsub = payload.unsubscribeUrl as string | undefined
-  const headers =
-    PROMOTIONAL.has(template) && unsub && /^https:\/\//.test(unsub)
-      ? { 'List-Unsubscribe': `<${unsub}>`, 'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click' }
-      : undefined
-
-  log.info({ subject }, '📤 Sending email via Resend…')
-  const { data, error } = await resend.emails.send({
-    from: EMAIL_FROM,
+  // ── THE SEND GATE ───────────────────────────────────────────────────────
+  // guardedSend owns suppression, the live state recheck, frequency caps, quiet
+  // hours, payload validation, and the idempotency claim. This worker no longer
+  // talks to Resend directly, so the guard cannot be bypassed here.
+  //
+  // `eventId` anchors the idempotency key. A booking-scoped email is
+  // exactly-once PER BOOKING; without a bookingId we fall back to the queue job
+  // id, which still stops a BullMQ retry from double-sending.
+  log.info({ subject }, '📤 Handing to the send guard…')
+  const outcome = await guardedSend({
     to,
-    reply_to: EMAIL_REPLY_TO,
     subject,
     html,
-    ...(text ? { text } : {}),
-    ...(headers ? { headers } : {}),
+    text,
+    template,
+    emailClass,
+    journey: (payload.journey as string) ?? undefined,
+    eventId: bookingId ?? job.id ?? undefined,
+    bookingId: bookingId ?? undefined,
+    payload: renderPayload,
+    recheck: bookingId ? () => stillWantedForBooking(template, bookingId) : undefined,
   })
 
-  if (error) {
-    log.error({ error }, 'Resend returned error')
-    // Mark notification failed
-    if (notificationId) {
-      await prisma.notification.update({
-        where: { id: notificationId },
-        data: { status: 'FAILED', error: JSON.stringify(error) },
-      })
+  if (!outcome.sent) {
+    // A refusal is a DECISION, not a failure — never throw, or BullMQ retries a
+    // message that policy has already rejected. Quiet-hours/gap deferrals are
+    // re-queued; everything else is terminal for this job.
+    if (outcome.retryAt) {
+      const delay = Math.max(0, outcome.retryAt.getTime() - Date.now())
+      log.info({ reason: outcome.reason, delay }, '⏸️ Deferred — re-queued inside the allowed window')
+      await emailQueue.add(template, job.data, { delay, jobId: `${job.id}:deferred` }).catch((err) =>
+        log.warn({ err: String(err) }, 're-queue after deferral failed (non-fatal)')
+      )
+    } else {
+      log.warn({ reason: outcome.reason }, '🚫 Send refused by the guard')
     }
-    throw new Error(`Resend error: ${error.message}`)
+    if (notificationId) {
+      await prisma.notification
+        .update({ where: { id: notificationId }, data: { status: 'FAILED', error: outcome.reason.slice(0, 500) } })
+        .catch(() => undefined)
+    }
+    return
   }
 
   // Mark notification sent
@@ -230,7 +294,7 @@ async function processEmailJob(job: Job<EmailJobData>): Promise<void> {
     })
   }
 
-  log.info({ resendId: data?.id }, '✅ Email sent successfully')
+  log.info({ resendId: outcome.providerId }, '✅ Email sent successfully')
 }
 
 // ── Start the worker ──────────────────────────────────────────

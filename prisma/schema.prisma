@@ -406,20 +406,20 @@ model Customer {
 }
 
 model Booking {
-  id             String        @id @default(cuid())
-  displayId      String        @unique @default(cuid()) @map("display_id") // mirrors bookingReference for back-compat
+  id               String        @id @default(cuid())
+  displayId        String        @unique @default(cuid()) @map("display_id") // mirrors bookingReference for back-compat
   // Public, human-friendly booking reference (WMIC-####). Backed by an atomic
   // Postgres sequence (booking_reference_seq) so concurrent inserts can never
   // collide; assigned once at creation and never changed. The internal cuid `id`
   // stays the private key used for all relationships/joins/webhooks. Nullable so
   // historical/internal-test rows may stay unreferenced. See src/lib/booking-reference.ts.
-  bookingReference String?     @unique @map("booking_reference")
-  status         BookingStatus @default(DRAFT)
-  outboxState    BookingState? @map("outbox_state") // src/outbox email state machine (additive, nullable)
+  bookingReference String?       @unique @map("booking_reference")
+  status           BookingStatus @default(DRAFT)
+  outboxState      BookingState? @map("outbox_state") // src/outbox email state machine (additive, nullable)
   // Owner checkout tests (mirrors Payment.isInternalTest). EXCLUDED from every
   // operational count + revenue report. Flagged by scripts/flag-test-bookings.ts.
-  isInternalTest Boolean       @default(false) @map("is_internal_test")
-  customerId     String        @map("customer_id")
+  isInternalTest   Boolean       @default(false) @map("is_internal_test")
+  customerId       String        @map("customer_id")
 
   // Location
   originAddress String  @map("origin_address")
@@ -1118,12 +1118,12 @@ model Lead {
   referrer       String?
   promoCode      String?   @map("promo_code")
   lastActivityAt DateTime? @map("last_activity_at")
-  contactedAt        DateTime?       @map("contacted_at")
-  quotedAt           DateTime?       @map("quoted_at")
-  bookedAt           DateTime?       @map("booked_at")
-  lostAt             DateTime?       @map("lost_at")
-  createdAt          DateTime        @default(now()) @map("created_at")
-  updatedAt          DateTime        @updatedAt @map("updated_at")
+  contactedAt    DateTime? @map("contacted_at")
+  quotedAt       DateTime? @map("quoted_at")
+  bookedAt       DateTime? @map("booked_at")
+  lostAt         DateTime? @map("lost_at")
+  createdAt      DateTime  @default(now()) @map("created_at")
+  updatedAt      DateTime  @updatedAt @map("updated_at")
 
   @@index([status])
   @@index([source])
@@ -1272,4 +1272,114 @@ model BusinessConfig {
   updatedAt             DateTime @updatedAt @map("updated_at")
 
   @@map("business_config")
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  EMAIL LIFECYCLE (owner spec 2026-07-20) — suppression, send ledger, events.
+//
+//  These three models are the release-blocker foundation the email system was
+//  missing: there was no way to record an unsubscribe, no way to act on a hard
+//  bounce or spam complaint, no durable per-send record, and no idempotency
+//  key — so a worker retry after a successful provider call could resend.
+//
+//  All three are ADDITIVE. Nothing existing reads or writes them yet, so the
+//  migration is safe to apply ahead of the code that uses it.
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Why an address may no longer receive email. Ordered loosely by severity.
+/// UNSUBSCRIBED blocks PROMOTIONAL only; every other reason blocks ALL mail
+/// (a hard-bouncing or complaining address must not be written to at all).
+enum SuppressionReason {
+  UNSUBSCRIBED
+  HARD_BOUNCE
+  SPAM_COMPLAINT
+  INVALID_ADDRESS
+  ADMIN_BLOCK
+  PROVIDER_REJECTED
+}
+
+/// The ONE global do-not-send list, keyed on the lowercased address so it works
+/// for Customers, Leads, and anyone Leadtracking (SendGrid) knows about but this
+/// database does not. `scope` records whether the block is promotional-only.
+model EmailSuppression {
+  id        String            @id @default(cuid())
+  /// Always stored lowercased + trimmed. Unique = the list is idempotent.
+  email     String            @unique
+  reason    SuppressionReason
+  /// 'promotional' (unsubscribe) | 'all' (bounce/complaint/invalid/admin).
+  scope     String            @default("all")
+  /// Where the signal came from: 'unsubscribe-link' | 'resend-webhook' |
+  /// 'leadtracking' | 'admin' | 'sms-stop'.
+  source    String?
+  /// Free-text provider detail (bounce sub-type, complaint feedback id, …).
+  detail    String?
+  createdAt DateTime          @default(now()) @map("created_at")
+  updatedAt DateTime          @updatedAt @map("updated_at")
+
+  @@index([reason])
+  @@index([createdAt])
+  @@map("email_suppressions")
+}
+
+/// One row per attempted send. Claimed BEFORE the provider call, so a crash or
+/// retry after a successful send finds the row and refuses to send again.
+/// `idempotencyKey` is the exactly-once guarantee (see src/lib/email-guard.ts).
+model EmailSend {
+  id             String    @id @default(cuid())
+  /// recipient + template + journey + qualifying-event id + template version.
+  idempotencyKey String    @unique @map("idempotency_key")
+  email          String
+  template       String
+  /// 'transactional' | 'promotional' — drives suppression scope + frequency caps.
+  emailClass     String    @map("email_class")
+  /// Lifecycle journey this send belongs to, when it is part of one.
+  journey        String?
+  bookingId      String?   @map("booking_id")
+  leadId         String?   @map("lead_id")
+  campaign       String?
+  /// 'claimed' | 'sent' | 'blocked' | 'failed'
+  status         String    @default("claimed")
+  /// Why a 'blocked' row was blocked (suppression reason, cap, stale state, …).
+  blockedReason  String?   @map("blocked_reason")
+  /// Resend message id, once accepted.
+  providerId     String?   @map("provider_id")
+  error          String?
+  sentAt         DateTime? @map("sent_at")
+  createdAt      DateTime  @default(now()) @map("created_at")
+  updatedAt      DateTime  @updatedAt @map("updated_at")
+
+  events EmailEvent[]
+
+  @@index([email])
+  @@index([status])
+  @@index([journey])
+  @@index([bookingId])
+  @@index([leadId])
+  @@index([createdAt])
+  @@map("email_sends")
+}
+
+/// Provider + first-party engagement events. `providerEventId` is unique so a
+/// duplicate webhook delivery is a no-op (providers retry aggressively).
+model EmailEvent {
+  id              String   @id @default(cuid())
+  /// Provider event id, or a synthesized stable id for first-party events.
+  providerEventId String   @unique @map("provider_event_id")
+  emailSendId     String?  @map("email_send_id")
+  email           String
+  /// 'delivered' | 'bounced' | 'complained' | 'opened' | 'clicked' |
+  /// 'delivery_delayed' | 'unsubscribed'
+  type            String
+  /// Raw provider payload excerpt for triage (never PII beyond the address).
+  detail          String?
+  occurredAt      DateTime @default(now()) @map("occurred_at")
+  createdAt       DateTime @default(now()) @map("created_at")
+
+  emailSend EmailSend? @relation(fields: [emailSendId], references: [id])
+
+  @@index([email])
+  @@index([type])
+  @@index([emailSendId])
+  @@index([occurredAt])
+  @@map("email_events")
 }

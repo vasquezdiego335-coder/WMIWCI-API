@@ -1,4 +1,3 @@
-import { resend, EMAIL_FROM, EMAIL_REPLY_TO } from '../../lib/resend'
 import {
   PaymentCompletedPayload,
   ApprovedPayload,
@@ -6,36 +5,59 @@ import {
   NewDatePickedPayload,
 } from '../domain/events'
 import { renderPreApproval, renderFinalConfirmation, renderBookingUpdated } from './premiumEmails'
+import { guardedSend } from '../../lib/email-guard'
 
 // ════════════════════════════════════════════════════════════════════════
-//  Real email provider (Resend). Reuses the app's configured client.
-//  Throwing makes the worker retry the job with backoff. Set
-//  OUTBOX_EMAIL_DRYRUN=true to log instead of sending (for testing the
-//  pipeline without real mail).
+//  Real email provider — now via the SHARED SEND GUARD (src/lib/email-guard).
 //
-//  NOTE on duplicates: the installed Resend SDK (3.x) has no idempotency-key
-//  param, so dedup is at the job level (unique key + SKIP LOCKED claim). If the
-//  provider send succeeds but the DB mark fails, the retry can resend — upgrade
-//  Resend and pass an idempotency key here for true near-exactly-once.
+//  BEFORE (gap audit 2026-07-17, G4): this path called `resend.emails.send()`
+//  directly and had NO validation gate, NO suppression check, and NO idempotency
+//  record. `assertEmailPayload` was wired only into src/workers/email.worker.ts,
+//  so the outbox — which is the path production actually runs when
+//  OUTBOX_ENABLED=true — was completely ungated.
+//
+//  NOW every outbox send goes through guardedSend, which owns suppression, the
+//  idempotency claim (an EmailSend row written BEFORE the provider call), and
+//  payload validation. Throwing still makes the worker retry with backoff.
+//  OUTBOX_EMAIL_DRYRUN=true logs instead of sending.
+//
+//  KNOWN LIMITATION (unchanged, now recorded rather than silent): the installed
+//  Resend SDK (3.x) exposes no idempotency-key parameter. A provider-accepted
+//  send whose DB mark fails leaves a 'claimed' row — which BLOCKS a resend
+//  rather than allowing one. See email-guard.staleClaims().
 // ════════════════════════════════════════════════════════════════════════
 async function deliverEmail(message: {
   to: string
   subject: string
   html: string
+  template: string
+  bookingId?: string
 }): Promise<{ id: string }> {
   if (process.env.OUTBOX_EMAIL_DRYRUN === 'true') {
     console.log(`[outbox/email DRYRUN] → ${message.to} | ${message.subject}`)
     return { id: 'dryrun' }
   }
-  const { data, error } = await resend.emails.send({
-    from: EMAIL_FROM,
+
+  const outcome = await guardedSend({
     to: message.to,
-    reply_to: EMAIL_REPLY_TO,
     subject: message.subject,
     html: message.html,
+    template: message.template,
+    // These are booking-lifecycle messages, not marketing.
+    emailClass: 'transactional',
+    journey: 'booking-transactional',
+    eventId: message.bookingId,
+    bookingId: message.bookingId,
   })
-  if (error) throw new Error(`Resend error: ${error.message ?? JSON.stringify(error)}`)
-  return { id: data?.id ?? 'unknown' }
+
+  if (!outcome.sent) {
+    // A policy refusal (suppressed address, duplicate claim) is TERMINAL — a
+    // throw would make the outbox worker retry something already decided.
+    // 'duplicate' in particular means the message was already delivered.
+    console.log(`[outbox/email] not sent → ${message.template}: ${outcome.reason}`)
+    return { id: `blocked:${outcome.reason}` }
+  }
+  return { id: outcome.providerId }
 }
 
 /** PAYMENT_COMPLETED → the premium "we've received your booking request" email
@@ -48,7 +70,7 @@ export async function sendPreApprovalEmail(p: PaymentCompletedPayload): Promise<
     customerName: p.customerName,
     requestedDate: p.requestedDate,
   })
-  return deliverEmail({ to: to || p.customerEmail, subject, html })
+  return deliverEmail({ to: to || p.customerEmail, subject, html, template: 'pre-approval', bookingId: p.bookingId })
 }
 
 /** APPROVED → the premium "your booking is approved" confirmation email. */
@@ -58,7 +80,7 @@ export async function sendFinalConfirmationEmail(p: ApprovedPayload): Promise<{ 
     customerName: p.customerName,
     requestedDate: p.requestedDate,
   })
-  return deliverEmail({ to: to || p.customerEmail, subject, html })
+  return deliverEmail({ to: to || p.customerEmail, subject, html, template: 'final-confirmation', bookingId: p.bookingId })
 }
 
 /** RESCHEDULE_REQUESTED → here are alternate dates. */
@@ -73,6 +95,8 @@ export async function sendRescheduleRequestEmail(
            <p>That date wasn't available. Choose one of these:</p>
            <ul>${list}</ul>
            <p><a href="${p.rescheduleUrl}">Pick your date</a></p>`,
+    template: 'reschedule-request',
+    bookingId: p.bookingId,
   })
 }
 
@@ -84,5 +108,5 @@ export async function sendDatePickedEmail(p: NewDatePickedPayload): Promise<{ id
     customerEmail: p.customerEmail,
     customerName: p.customerName,
   })
-  return deliverEmail({ to: to || p.customerEmail, subject, html })
+  return deliverEmail({ to: to || p.customerEmail, subject, html, template: 'booking-updated', bookingId: p.bookingId })
 }

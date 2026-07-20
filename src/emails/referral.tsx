@@ -4,6 +4,7 @@ import {
   LogoHeader,
   Card,
   Eyebrow,
+  IconChip,
   Pill,
   Spacer,
   PrimaryButton,
@@ -90,7 +91,17 @@ export default function ReferralEmail({
       {/* ── 1 · HERO ─────────────────────────────────────────── */}
       <Card style={{ borderTop: `3px solid ${C.orange}` }}>
         <div className="heropad" style={{ textAlign: 'center' as const }}>
-          <div style={{ fontSize: '30px', lineHeight: '30px' }}>&#127873;</div>
+          {/* BRANDED GRAPHIC — replaces the raw gift emoji (&#127873;) that
+              shipped here before (gap audit 2026-07-17, G2). An emoji is not a
+              brand asset: it renders as a different picture on every platform,
+              is off-palette everywhere, and degrades to tofu on older Outlook.
+              IconChip renders a hosted PNG from the shared icon set at real
+              pixel dimensions in the approved palette (Antique Gold on Bone).
+              It is a STATIC PNG, so there is no animated-GIF first-frame
+              problem. It is decorative — the headline immediately below carries
+              the meaning — so `alt` is intentionally empty, which is the
+              correct accessible treatment for decoration. */}
+          <IconChip icon="sparkle" color={C.gold} size={22} dim={48} bg={C.bone} radius={14} />
           <Spacer h={14} />
           <Pill tone="orange">{t.pill}</Pill>
           <h1 className="h1" style={{ fontFamily: FONT, fontSize: '30px', lineHeight: '36px', fontWeight: 800, letterSpacing: '-0.6px', color: C.navy, margin: '16px 0 10px' }}>

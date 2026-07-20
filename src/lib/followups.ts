@@ -27,8 +27,10 @@
 import { render } from '@react-email/render'
 import { prisma } from './db'
 import { smsQueue, scheduledQueue } from './queues'
-import { resend, EMAIL_FROM, EMAIL_REPLY_TO } from './resend'
 import { queueLogger } from './logger'
+import { guardedSend } from './email-guard'
+import { unsubscribeUrl } from './email-tokens'
+import { checkReferralEligibility } from './referral-eligibility'
 import { normalizeLocale, t, BIZ_NAME, BIZ_PHONE, type Locale } from './i18n'
 import ReviewRequestEmail from '../emails/review-request'
 import ReferralEmail from '../emails/referral'
@@ -55,6 +57,14 @@ const CAP_WINDOW_DAYS = 30
 const CAP_WINDOW_MAX = 4 // <=4 follow-ups per 30d per customer
 
 export type FollowupType = 'review-request' | 'review-reminder' | 'repeat-reminder' | 'referral-ask'
+
+/** Follow-up type → the template name the send guard classifies + records. */
+const EMAIL_TEMPLATE: Record<FollowupType, string> = {
+  'review-request': 'review-request',
+  'review-reminder': 'review-reminder',
+  'repeat-reminder': 'repeat-reminder',
+  'referral-ask': 'referral',
+}
 
 const HOUR = 3_600_000
 const DAY = 24 * HOUR
@@ -150,9 +160,18 @@ export async function recordReviewAndMaybeReferral(input: {
     create: { bookingId: input.bookingId, rating, isPositive, comment: input.comment ?? null, source: input.source ?? 'admin' },
   })
   if (isPositive && FOLLOWUPS_ENABLED) {
-    // Space the ask 24h after the review; shares the 'referral-ask' ledger type,
-    // so the day-5 fallback won't also fire (at most one referral per booking).
-    await enqueueFollowup(input.bookingId, 'referral-ask', new Date(Date.now() + DAY))
+    // Referral eligibility is enforced TWICE — here at schedule time (so an
+    // ineligible booking never even occupies a queue slot) and again inside
+    // runFollowup immediately before the send, because the booking can be
+    // refunded or cancelled in the 24h between.
+    const eligibility = await checkReferralEligibility(input.bookingId)
+    if (eligibility.eligible) {
+      // Space the ask 24h after the review; shares the 'referral-ask' ledger type,
+      // so the day-5 fallback won't also fire (at most one referral per booking).
+      await enqueueFollowup(input.bookingId, 'referral-ask', new Date(Date.now() + DAY))
+    } else {
+      log.info({ bookingId: input.bookingId, reason: eligibility.reason }, 'positive review, but referral not eligible')
+    }
   }
   return { id: review.id, rating, isPositive }
 }
@@ -183,10 +202,38 @@ async function recordSkip(bookingId: string, type: FollowupType, reason: string)
   return `skipped:${reason}`
 }
 
-// ── email (direct Resend — leaves the worker allowlist + templates alone) ──
-async function sendEmail(to: string, subject: string, html: string): Promise<void> {
-  const { error } = await resend.emails.send({ from: EMAIL_FROM, to, reply_to: EMAIL_REPLY_TO, subject, html })
-  if (error) throw new Error(`resend: ${error.message ?? JSON.stringify(error)}`)
+// ── email (via the SHARED SEND GUARD — src/lib/email-guard) ─────────────
+// BEFORE (gap audit 2026-07-17, G4): this called `resend.emails.send()`
+// directly, so the follow-up path had NO suppression check, NO payload
+// validation, and NO idempotency record. The ledger stopped a duplicate
+// FOLLOW-UP, but nothing stopped a send to an address that had bounced or
+// complained. Now every follow-up inherits the full gate.
+//
+// Returns true when the message actually went out.
+async function sendEmail(opts: {
+  to: string
+  subject: string
+  html: string
+  template: string
+  bookingId: string
+}): Promise<boolean> {
+  const outcome = await guardedSend({
+    to: opts.to,
+    subject: opts.subject,
+    html: opts.html,
+    template: opts.template,
+    emailClass: 'promotional',
+    journey: 'post-job',
+    // The booking IS the qualifying event — exactly one of each follow-up
+    // per booking, forever, even if the ledger row is ever cleared.
+    eventId: opts.bookingId,
+    bookingId: opts.bookingId,
+  })
+  if (!outcome.sent) {
+    log.info({ bookingId: opts.bookingId, template: opts.template, reason: outcome.reason }, 'follow-up email not sent')
+    return false
+  }
+  return true
 }
 
 const esc = (s: string): string => s.replace(/[<>&]/g, (c) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;' }[c] as string))
@@ -266,6 +313,25 @@ export async function runFollowup(bookingId: string, type: FollowupType): Promis
   // Conditional skip: the 48h reminder is pointless once a review exists.
   if (type === 'review-reminder' && booking.review) return recordSkip(bookingId, type, 'review-exists')
 
+  // ── STOP RULE: post-job mail requires the job to have actually happened ──
+  // The whole sequence is scheduled at completion, but a booking can be
+  // reopened, cancelled, or corrected in the days between. Recheck the CURRENT
+  // status rather than trusting the scheduling-time decision.
+  if (booking.status !== 'COMPLETED') return recordSkip(bookingId, type, `not-completed:${booking.status}`)
+
+  // ── REFERRAL ELIGIBILITY (gap audit G1, severity HIGH) ──────────────────
+  // Previously the referral ask fired on a day-5 timer or any 4★ review with NO
+  // check on payment, refunds, receipt, or the program being switched on. A
+  // cancelled or refunded job could ask the customer to refer their friends.
+  // Full rule set + rationale: src/lib/referral-eligibility.ts.
+  if (type === 'referral-ask') {
+    const eligibility = await checkReferralEligibility(bookingId, {
+      referralUrl: REFERRAL_URL,
+      referralCode: REFERRAL_CODE,
+    })
+    if (!eligibility.eligible) return recordSkip(bookingId, type, `referral-ineligible:${eligibility.reason}`)
+  }
+
   // TCPA opt-out.
   if (customer.marketingOptOut) return recordSkip(bookingId, type, 'opted-out')
 
@@ -299,8 +365,17 @@ export async function runFollowup(bookingId: string, type: FollowupType): Promis
   }
   if (customer.email) {
     try {
-      await sendEmail(customer.email, msg.subject, msg.html)
-      anySent = true
+      // The guard owns suppression/caps/idempotency; a `false` here is a policy
+      // refusal (already recorded), not an error.
+      if (await sendEmail({
+        to: customer.email,
+        subject: msg.subject,
+        html: msg.html,
+        template: EMAIL_TEMPLATE[type],
+        bookingId,
+      })) {
+        anySent = true
+      }
     } catch (err) {
       log.warn({ err: err instanceof Error ? err.message : String(err), bookingId, type }, 'follow-up email failed')
     }
