@@ -297,3 +297,25 @@ test('a missing PRIMARY CTA link blocks the send instead of rendering href="#"',
     )
   }
 })
+
+// ── 4. THE INLINE-HTML PATH ─────────────────────────────────────────────
+// `repeat-reminder` is the one follow-up still built as an inline HTML string
+// in src/lib/followups.ts rather than with the _ui kit, so the render-based
+// palette test above cannot see it. That is exactly how a BLUE CTA (#1f6feb)
+// shipped in a four-colour brand. Lock the source directly.
+test('the inline-HTML follow-up uses no off-palette colour literals', () => {
+  const src = readFileSync(join(EMAIL_DIR, '..', 'lib', 'followups.ts'), 'utf8')
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/^\s*\/\/.*$/gm, '')
+
+  const offenders: string[] = []
+  HEX_RE.lastIndex = 0
+  for (const hex of src.match(HEX_RE) ?? []) {
+    if (!APPROVED.has(hex.toUpperCase())) offenders.push(hex)
+  }
+  assert.deepEqual(
+    offenders.filter((v, i) => offenders.indexOf(v) === i),
+    [],
+    'followups.ts hard-codes an off-palette colour — use the C tokens'
+  )
+})

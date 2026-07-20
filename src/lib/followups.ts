@@ -34,6 +34,7 @@ import { checkReferralEligibility } from './referral-eligibility'
 import { normalizeLocale, t, BIZ_NAME, BIZ_PHONE, type Locale } from './i18n'
 import ReviewRequestEmail from '../emails/review-request'
 import ReferralEmail from '../emails/referral'
+import { C } from '../emails/_ui'
 
 const log = queueLogger.child({ mod: 'followups' })
 
@@ -238,16 +239,23 @@ async function sendEmail(opts: {
 
 const esc = (s: string): string => s.replace(/[<>&]/g, (c) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;' }[c] as string))
 
+// Palette for the ONE remaining inline-HTML follow-up (repeat-reminder). Every
+// other template uses the shared _ui kit, whose colours the palette test locks.
+// This block previously shipped a BLUE button (#1f6feb) — a colour that does not
+// exist in the four-colour brand — because inline HTML is invisible to that test.
+// Sourced from src/emails/_ui.ts C so the two can never drift.
+const BRAND = { navy: C.navy, orange: C.orange, muted: C.muted } as const
+
 function emailHtml(opts: { heading: string; paras: string[]; ctaLabel?: string; ctaUrl?: string }): string {
   const paras = opts.paras.map((p) => `<p style="margin:0 0 12px">${p}</p>`).join('')
   const cta =
     opts.ctaLabel && opts.ctaUrl
-      ? `<p style="margin:18px 0"><a href="${esc(opts.ctaUrl)}" style="background:#1f6feb;color:#fff;padding:11px 18px;border-radius:8px;text-decoration:none;display:inline-block">${esc(opts.ctaLabel)}</a></p>`
+      ? `<p style="margin:18px 0"><a href="${esc(opts.ctaUrl)}" style="background:${BRAND.orange};color:#FFFFFF;padding:11px 18px;border-radius:8px;text-decoration:none;display:inline-block;font-weight:700">${esc(opts.ctaLabel)}</a></p>`
       : ''
   return (
-    `<div style="font-family:system-ui,Arial,sans-serif;font-size:15px;line-height:1.5;color:#111">` +
+    `<div style="font-family:system-ui,Arial,sans-serif;font-size:15px;line-height:1.5;color:${BRAND.navy}">` +
     `<h2 style="margin:0 0 14px">${esc(opts.heading)}</h2>${paras}${cta}` +
-    `<p style="margin:16px 0 0;color:#555">— ${esc(BIZ_NAME)} · ${BIZ_PHONE}</p></div>`
+    `<p style="margin:16px 0 0;color:${BRAND.muted}">— ${esc(BIZ_NAME)} · ${BIZ_PHONE}</p></div>`
   )
 }
 
