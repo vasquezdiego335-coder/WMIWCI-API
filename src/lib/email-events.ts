@@ -98,6 +98,11 @@ export function verifySvixSignature(
 const SUPPRESSING: Record<string, SuppressionReason> = {
   'email.bounced': 'HARD_BOUNCE',
   'email.complained': 'SPAM_COMPLAINT',
+  // Resend maintains its OWN suppression list and refuses to send to addresses
+  // on it. Without mirroring that, our table believes an address is fine while
+  // the provider silently drops every message — we would queue sends forever
+  // and see no bounce, because the mail never leaves Resend.
+  'email.suppressed': 'PROVIDER_REJECTED',
 }
 
 /** Resend event type → our EmailEvent.type. */
@@ -109,6 +114,11 @@ const EVENT_TYPES: Record<string, string> = {
   'email.complained': 'complained',
   'email.opened': 'opened',
   'email.clicked': 'clicked',
+  // Verified against Resend's published event list 2026-07-20. These two were
+  // MISSING and fell through to 'ignored', so a provider-side send failure and
+  // a provider-side suppression were both silently discarded.
+  'email.failed': 'failed',
+  'email.suppressed': 'provider_suppressed',
 }
 
 type ResendEvent = {
@@ -256,6 +266,9 @@ export async function handleEmailEvent(event: ResendEvent, svixId: string): Prom
 
   // Does this event REQUIRE a suppression? A soft bounce does not.
   const reason = SUPPRESSING[resendType]
+  // The soft/hard distinction applies ONLY to email.bounced. A complaint and a
+  // provider-side suppression are unconditional — there is no "soft" version of
+  // either.
   const needsSuppression =
     Boolean(reason) && !(resendType === 'email.bounced' && !isHardBounce(event.data?.bounce))
 
@@ -363,7 +376,13 @@ export async function retryPendingSideEffects(limit = 50): Promise<{ attempted: 
     // Re-derive the reason from the RECORDED event type, never from the raw
     // payload — an old row may not have kept it.
     const reason: SuppressionReason | null =
-      row.type === 'bounced' ? 'HARD_BOUNCE' : row.type === 'complained' ? 'SPAM_COMPLAINT' : null
+      row.type === 'bounced'
+        ? 'HARD_BOUNCE'
+        : row.type === 'complained'
+        ? 'SPAM_COMPLAINT'
+        : row.type === 'provider_suppressed'
+        ? 'PROVIDER_REJECTED'
+        : null
     if (!reason) {
       await prisma.emailEvent
         .update({ where: { id: row.id }, data: { processingStatus: 'processed' } })

@@ -3,6 +3,8 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import crypto from 'node:crypto'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { verifySvixSignature, isHardBounce } from '../email-events'
 
 const SECRET_RAW = crypto.randomBytes(24).toString('base64')
@@ -98,4 +100,57 @@ test('an UNKNOWN bounce shape does not suppress — ambiguity favours the custom
   assert.equal(isHardBounce(undefined), false)
   assert.equal(isHardBounce({}), false)
   assert.equal(isHardBounce({ type: 'Weird' }), false)
+})
+
+// ── provider-side events verified against Resend's published list 2026-07-20 ──
+
+test('email.suppressed causes a SUPPRESSION, not just a recorded event', () => {
+  // Resend keeps its OWN suppression list and refuses to send to addresses on
+  // it. Before this was mapped, the event fell through to 'ignored' — our table
+  // believed the address was fine while every message was silently dropped
+  // inside Resend. No bounce ever arrives, because the mail never leaves the
+  // provider, so nothing else would have caught it.
+  const src = readFileSync(join(__dirname, '..', 'email-events.ts'), 'utf8')
+  const block = src.slice(src.indexOf('const SUPPRESSING'), src.indexOf('const EVENT_TYPES'))
+  // It must be in the SUPPRESSING map (which drives the side effect), not
+  // merely in EVENT_TYPES (which only records).
+  assert.match(block, /'email\.suppressed':\s*'PROVIDER_REJECTED'/)
+  assert.match(block, /'email\.bounced':\s*'HARD_BOUNCE'/)
+  assert.match(block, /'email\.complained':\s*'SPAM_COMPLAINT'/)
+})
+
+test('PROVIDER_REJECTED suppresses at scope "all", not promotional-only', () => {
+  // A provider refusing to deliver is not a marketing preference — nothing
+  // should be sent to that address, receipts included.
+  const { scopeForReason } = require('../email-suppression')
+  assert.equal(scopeForReason('PROVIDER_REJECTED'), 'all')
+  assert.equal(scopeForReason('HARD_BOUNCE'), 'all')
+  assert.equal(scopeForReason('SPAM_COMPLAINT'), 'all')
+  assert.equal(scopeForReason('UNSUBSCRIBED'), 'promotional')
+})
+
+test('the handled event set matches what Resend actually publishes', () => {
+  // Guards against the assumption that Resend exposes "only four" events.
+  // Checked against resend.com/docs/dashboard/webhooks/event-types.
+  const src = readFileSync(join(__dirname, '..', 'email-events.ts'), 'utf8')
+  for (const t of [
+    'email.sent',
+    'email.delivered',
+    'email.delivery_delayed',
+    'email.bounced',
+    'email.complained',
+    'email.opened',
+    'email.clicked',
+    'email.failed',
+    'email.suppressed',
+  ]) {
+    assert.ok(src.includes(`'${t}'`), `event type not handled: ${t}`)
+  }
+})
+
+test('bounce softness applies ONLY to email.bounced', () => {
+  // A complaint and a provider suppression have no "soft" variant — treating
+  // them like a bounce would let a spam complaint go unsuppressed.
+  const src = readFileSync(join(__dirname, '..', 'email-events.ts'), 'utf8')
+  assert.match(src, /resendType === 'email\.bounced' && !isHardBounce/)
 })
