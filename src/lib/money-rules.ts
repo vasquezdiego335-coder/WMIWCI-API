@@ -205,21 +205,52 @@ export function countUnreviewedExpenses(expenses: ExpenseRow[]): number {
 // ABSENCE of labor data visible instead of silently reporting $0.
 
 export interface CrewRow {
+  // legacy columns (pre-Phase-1 rows)
   actualHours?: number | null
   scheduledHours?: number | null
   payRate?: number | null
   flatPay?: number | null
   payStatus?: string | null
   user?: { payRate?: number | null } | null
+  // ── Phase 1 (owner spec 2026-07-20) ──
+  payModel?: string | null
+  assignmentStatus?: string | null
+  approvalStatus?: string | null
+  paymentStatus?: string | null
+  workedMinutes?: number | null
+  clockIn?: Date | null
+  clockOut?: Date | null
+  hourlyRateCentsSnapshot?: number | null
+  flatPayCentsSnapshot?: number | null
+  dayRateCentsSnapshot?: number | null
+  economicRateCentsSnapshot?: number | null
+  zeroLaborConfirmed?: boolean | null
+}
+
+/** Assignment states that are not labor at all — the person did not work. */
+const NON_COSTING_ASSIGNMENT = ['DECLINED', 'CANCELLED', 'NO_SHOW']
+
+/** True when this assignment counts toward the move's labor picture at all. */
+export function isLiveAssignment(c: CrewRow): boolean {
+  if (c.assignmentStatus && NON_COSTING_ASSIGNMENT.includes(c.assignmentStatus)) return false
+  if (c.approvalStatus === 'REJECTED') return false
+  return true
 }
 
 /**
  * True when this crew row carries enough information to price the labor —
- * INCLUDING an explicit zero. `flatPay: 0` or `actualHours: 0` is a deliberate
- * statement that this person's labor cost nothing; `null` is an absence of
- * information. Phase 0 exists to keep those two apart.
+ * INCLUDING an explicit zero. A confirmed $0, an unpaid-owner assignment, and a
+ * rate snapshot are all real information; `null` is an absence of it. Phase 0
+ * exists to keep those apart, and Phase 1 gives them each a state.
  */
 export function hasPaySignal(c: CrewRow): boolean {
+  if (c.zeroLaborConfirmed) return true
+  if (c.payModel === 'ZERO_CONFIRMED' || c.payModel === 'UNPAID_OWNER' || c.payModel === 'CUSTOM') return true
+  // A rate snapshot alone is not enough — we also need time (or a flat amount).
+  if (c.flatPayCentsSnapshot != null || c.dayRateCentsSnapshot != null) return true
+  const hasTime = c.workedMinutes != null || (c.clockIn != null && c.clockOut != null)
+  if (hasTime && c.hourlyRateCentsSnapshot != null) return true
+  // legacy rows
   if (c.flatPay != null) return true
   if (c.actualHours != null || c.scheduledHours != null) {
     return c.payRate != null || c.user?.payRate != null
@@ -227,21 +258,36 @@ export function hasPaySignal(c: CrewRow): boolean {
   return false
 }
 
-/** True when the crew data says, explicitly, that labor cost nothing. */
+/** True when the crew data says, explicitly, that labor cost nothing. Phase 1
+ *  makes this a deliberate, audited act rather than an inference from zeros. */
 export function isConfirmedZeroLabor(crew: CrewRow[]): boolean {
-  if (crew.length === 0) return false
-  if (!crew.every(hasPaySignal)) return false
-  return crew.every((c) => (c.flatPay ?? 0) === 0 && (c.actualHours ?? c.scheduledHours ?? 0) === 0)
+  const live = crew.filter(isLiveAssignment)
+  if (live.length === 0) return false
+  if (live.some((c) => c.zeroLaborConfirmed || c.payModel === 'ZERO_CONFIRMED')) {
+    return live.every((c) => c.zeroLaborConfirmed || c.payModel === 'ZERO_CONFIRMED')
+  }
+  // Legacy inference: every row priced, every price zero.
+  if (!live.every(hasPaySignal)) return false
+  return live.every((c) => (c.flatPay ?? 0) === 0 && (c.actualHours ?? c.scheduledHours ?? 0) === 0 && (c.workedMinutes ?? 0) === 0)
 }
 
 /** True when labor cost for this job is UNKNOWN: nobody assigned, or people
  *  assigned with no hours/rate ever entered. NOT the same as zero. */
 export function isLaborUnrecorded(crew: CrewRow[]): boolean {
-  if (crew.length === 0) return true
-  return !crew.some(hasPaySignal)
+  const live = crew.filter(isLiveAssignment)
+  if (live.length === 0) return true
+  return !live.some(hasPaySignal)
 }
 
-/** Crew rows already settled in cash (money has left the business). */
-export const isPaidCrew = (c: CrewRow): boolean => c.payStatus === 'PAID'
-/** Crew rows still owed (accrued but unsettled). */
-export const isUnpaidCrew = (c: CrewRow): boolean => c.payStatus !== 'PAID'
+/** Crew labor already settled in cash (money has left the business). Phase 1's
+ *  paymentStatus wins; the legacy payStatus is the fallback for old rows. */
+export const isPaidCrew = (c: CrewRow): boolean =>
+  c.paymentStatus ? c.paymentStatus === 'PAID' : c.payStatus === 'PAID'
+
+/** Crew labor still owed (accrued but unsettled). */
+export const isUnpaidCrew = (c: CrewRow): boolean => !isPaidCrew(c)
+
+/** True when the money on this assignment has been AGREED by an owner. Only
+ *  approved labor is a cost — see labor-calc.rollupLabor. */
+export const isApprovedLabor = (c: CrewRow): boolean =>
+  c.approvalStatus ? c.approvalStatus === 'APPROVED' : c.payStatus === 'PAY_APPROVED' || c.payStatus === 'PAID'

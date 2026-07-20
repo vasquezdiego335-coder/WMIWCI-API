@@ -11,6 +11,18 @@
 
 export type Role = 'OWNER' | 'MANAGER' | 'CREW'
 
+// ── Phase 1: CREW gains a NARROW set of self-service labor rights ────────────
+// Crew still have no admin access (middleware blocks /admin and /api/admin).
+// These exist so a future crew-facing surface can be built on an already-correct
+// rule, and so `can()` never accidentally answers true for a worker.
+// A worker may act ONLY on their own assignment — ownership of the row is
+// checked at the route, because a permission matrix cannot express "own".
+const CREW_ALLOWED: Action[] = [
+  'labor.clock_self',
+  'labor.submit_hours',
+  'labor.view_own_labor',
+]
+
 export type Action =
   // Action Center
   | 'action_center.view'
@@ -48,6 +60,20 @@ export type Action =
   | 'payroll.edit_hours'
   | 'payroll.approve'
   | 'payroll.mark_paid'
+  // ── Phase 1 labor system (owner spec 2026-07-20) ──
+  | 'labor.assign_crew' // add/remove a worker on a move
+  | 'labor.edit_assignment' // role, schedule, notes
+  | 'labor.edit_rate_snapshot' // change a FROZEN historical rate — owner only
+  | 'labor.enter_hours' // manual time entry for anyone
+  | 'labor.clock_self' // clock in/out on one's OWN assignment
+  | 'labor.submit_hours' // send hours for review
+  | 'labor.view_own_labor' // see one's own assignment, hours and pay
+  | 'labor.view_all_labor' // see everyone's hours and pay
+  | 'labor.confirm_zero_labor' // record a deliberate $0 — owner only
+  | 'labor.set_owner_labor_value' // economic valuation of owner time — owner only
+  | 'labor.record_payment' // log a labor payment
+  | 'labor.void_payment' // void a recorded labor payment — owner only
+  | 'labor.finalize_override' // finalize a move with incomplete labor — owner only
   // Bookings
   | 'booking.approve' // approve a PENDING_APPROVAL booking (captures the $49 hold)
   | 'booking.decline' // decline/deny before capture (releases the hold)
@@ -78,12 +104,25 @@ const OWNER_ONLY: Action[] = [
   // moves no money, so it stays OWNER + MANAGER (operations).
   'booking.approve',
   'booking.test_payment',
+  // ── Phase 1 labor (owner spec 2026-07-20) ──
+  // A frozen historical rate is the integrity anchor of every past move's
+  // profit; only an owner may change one, and only with a reason.
+  'labor.edit_rate_snapshot',
+  // "$0 labor" is a financial assertion, not a data-entry convenience.
+  'labor.confirm_zero_labor',
+  // What an owner's hour is worth is owner-financial authority.
+  'labor.set_owner_labor_value',
+  // Voiding a payment rewrites settled history.
+  'labor.void_payment',
+  // Finalizing a move whose labor is incomplete is the override Phase 0 defined.
+  'labor.finalize_override',
 ]
 
-// Everything not owner-only is available to OWNER + MANAGER. CREW has no admin
-// access at all (blocked earlier by middleware, but enforced here too).
+// Everything not owner-only is available to OWNER + MANAGER. CREW is limited to
+// the narrow self-service set above (and is blocked from /admin by middleware).
 export function can(role: Role | null | undefined, action: Action): boolean {
   if (role === 'OWNER') return true
+  if (role === 'CREW') return CREW_ALLOWED.includes(action)
   if (role !== 'MANAGER') return false
   return !OWNER_ONLY.includes(action)
 }

@@ -27,6 +27,7 @@ import {
   type ExpenseRow,
   type CrewRow,
 } from './money-rules'
+import { computeLaborPay, hasRateSnapshot } from './labor-calc'
 
 // Standard US Stripe pricing for card charges (2.9% + 30¢). Used to ESTIMATE
 // processing fees on Stripe-collected money only — cash / move-day money has no
@@ -73,14 +74,19 @@ export interface CrewPayInput {
 }
 
 /** Amount owed to ONE crew member for ONE job, in cents.
- *  flatPay wins over hourly; hours fall back to scheduled when actual isn't
- *  logged yet; the rate falls back to the worker's default. tips + bonus add,
- *  deductions subtract, never below zero.
+ *
+ *  PHASE 1: when the row carries a rate SNAPSHOT this delegates to
+ *  labor-calc.computeLaborPay, which prices from the snapshot and never from
+ *  the worker's current profile — a raise today must not rewrite last month's
+ *  move. The legacy path below runs only for pre-Phase-1 rows.
  *
  *  NOTE: a result of 0 does NOT mean labor was free — it usually means no
  *  labor data exists at all. Use financial-completeness.ts to tell the two
  *  apart before showing a profit figure. */
 export function crewPayOwedCents(c: CrewPayInput): number {
+  if (hasRateSnapshot(c as never)) {
+    return computeLaborPay(c as never).cashCostCents
+  }
   const base =
     c.flatPay != null && c.flatPay > 0
       ? c.flatPay
@@ -110,6 +116,16 @@ export interface JobMoneyInput {
   payments: (PaymentRow & { isStripe?: boolean })[]
   crew: CrewPayInput[]
   expenses: ExpenseRow[] // job-linked Expense rows (any category)
+  /** PHASE 1: the canonical labor rollup from labor-calc.rollupLabor. When
+   *  supplied it SUPERSEDES `crew` — only APPROVED labor is a cost, and the
+   *  economic (owner-labor) view rides along. `crew` remains for legacy callers
+   *  and tests that predate the labor system. */
+  labor?: {
+    approvedCashCents: number
+    pendingCashCents: number
+    economicCents: number
+    unpaidOwnerValueCents: number
+  }
 }
 
 export interface JobProfit {
@@ -125,12 +141,24 @@ export interface JobProfit {
   pendingDisputeCents: number
   /** Authorized holds that were never captured. NOT revenue. */
   authorizedNotCapturedCents: number
-  crewPayCents: number // sum of crew owed (0 usually means "not recorded")
+  crewPayCents: number // APPROVED cash labor (0 usually means "not recorded")
+  /** Calculated but not yet APPROVED labor. Shown, never counted as a cost. */
+  pendingLaborCents: number
   expenseCents: number // eligible job-linked expenses (REJECTED excluded)
   stripeFeeCents: number // estimated Stripe fees on Stripe-captured money
   totalCostsCents: number // crew + expenses + stripe  (refunds are NOT here)
-  netProfitCents: number // netRevenue − totalCosts (can be negative)
+  netProfitCents: number // netRevenue − totalCosts (can be negative) = CASH gross profit
   marginPct: number | null // netProfit / netRevenue; null when no revenue yet
+
+  // ── PHASE 1: owner labor, cash vs economic ──
+  /** What the labor was WORTH, including unpaid owner time. Never cash. */
+  economicLaborCents: number
+  /** economicLabor − cash labor: the value the owners personally subsidized. */
+  unpaidOwnerValueCents: number
+  /** netProfit − unpaidOwnerValue. Was this move profitable on its own, or only
+   *  because the owners worked for free? */
+  economicProfitCents: number
+  economicMarginPct: number | null
 }
 
 export function computeJobProfit(input: JobMoneyInput): JobProfit {
@@ -143,12 +171,21 @@ export function computeJobProfit(input: JobMoneyInput): JobProfit {
     .filter((p) => ['COMPLETED', 'PARTIALLY_REFUNDED', 'REFUNDED'].includes(p.status))
     .reduce((s, p) => s + stripeFeeCents(p.amount), 0)
 
-  const crewPayCents = input.crew.reduce((s, c) => s + crewPayOwedCents(c), 0)
+  // PHASE 1: the labor rollup is authoritative when supplied (only APPROVED
+  // labor is a cost). `crew` is the legacy path for callers that predate it.
+  const crewPayCents = input.labor ? input.labor.approvedCashCents : input.crew.reduce((s, c) => s + crewPayOwedCents(c), 0)
+  const pendingLaborCents = input.labor?.pendingCashCents ?? 0
+  const economicLaborCents = input.labor?.economicCents ?? crewPayCents
+  const unpaidOwnerValueCents = input.labor?.unpaidOwnerValueCents ?? 0
+
   const expenseCents = eligibleExpenseCents(input.expenses)
 
   const totalCostsCents = crewPayCents + expenseCents + stripeFeesCents
   const netProfitCents = rev.netCollectedCents - totalCostsCents
   const marginPct = rev.netCollectedCents > 0 ? netProfitCents / rev.netCollectedCents : null
+
+  // Economic profit charges the move for owner labor that was never paid.
+  const economicProfitCents = netProfitCents - unpaidOwnerValueCents
 
   return {
     grossCapturedCents: rev.grossCapturedCents,
@@ -158,11 +195,16 @@ export function computeJobProfit(input: JobMoneyInput): JobProfit {
     pendingDisputeCents: rev.pendingDisputeCents,
     authorizedNotCapturedCents: rev.authorizedNotCapturedCents,
     crewPayCents,
+    pendingLaborCents,
     expenseCents,
     stripeFeeCents: stripeFeesCents,
     totalCostsCents,
     netProfitCents,
     marginPct,
+    economicLaborCents,
+    unpaidOwnerValueCents,
+    economicProfitCents,
+    economicMarginPct: rev.netCollectedCents > 0 ? economicProfitCents / rev.netCollectedCents : null,
   }
 }
 

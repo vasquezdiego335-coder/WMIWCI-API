@@ -14,8 +14,11 @@ import {
   WAITING_RESCHEDULE_THRESHOLD_MINUTES,
 } from '@/lib/waiting-time'
 import { crewPayOwedCents } from '@/lib/profit'
-import { jobProfit, jobFinancialCompleteness } from '@/lib/job-money'
-import { completenessLabel } from '@/lib/financial-completeness'
+import { jobProfit, jobFinancialCompleteness, jobLabor, JOB_MONEY_CREW_SELECT } from '@/lib/job-money'
+import { completenessLabel, LABOR_STATE_LABELS } from '@/lib/financial-completeness'
+import { computeLaborPay, paidCentsOf } from '@/lib/labor-calc'
+import { isOnBreak } from '@/lib/labor-time'
+import CrewLaborPanel from './CrewLaborPanel'
 import { isEligibleExpense } from '@/lib/money-rules'
 import { Callout, CompletenessBadge } from '../../_ui'
 import ExpenseForm from '../../ExpenseForm'
@@ -66,14 +69,17 @@ function parseItemsBlob(text?: string | null): { label: string | null; value: st
 }
 
 export default async function JobDetail({ params }: { params: { id: string } }) {
-  await getSession()
+  const session = await getSession()
+  const isOwner = session?.role === 'OWNER'
 
   const booking = await prisma.booking.findUnique({
     where: { id: params.id },
     include: {
       customer: true,
       payments: { orderBy: { createdAt: 'desc' } },
-      job: { include: { crew: { include: { user: { select: { name: true, role: true, payRate: true } } } } } },
+      // PHASE 1: the blessed crew select — every rate snapshot, minute bucket
+      // and labor payment the money math needs, in one place.
+      job: { include: { crew: { select: { ...JOB_MONEY_CREW_SELECT, id: true, crewLeader: true, assignedAt: true, breakStartedAt: true, rateSnapshotAt: true, laborPayments: true, user: { select: { id: true, name: true, role: true, payRate: true } } }, orderBy: { assignedAt: 'asc' } } } },
       expenses: { orderBy: { incurredOn: 'desc' } },
       files: { orderBy: { createdAt: 'desc' } },
       receipt: true,
@@ -105,6 +111,59 @@ export default async function JobDetail({ params }: { params: { id: string } }) 
   const collected = profit.netRevenueCents
   const refunded = profit.refundedCents
   const crewRows = booking.job?.crew ?? []
+  const labor = jobLabor(booking as never)
+
+  // Staff roster for the assign form (active users only).
+  const staff = await prisma.user.findMany({
+    where: { active: true },
+    select: { id: true, name: true, role: true, payRate: true, workerType: true },
+    orderBy: [{ role: 'asc' }, { name: 'asc' }],
+  })
+
+  // Serialize assignments for the client panel. Money is pre-computed on the
+  // server so the browser never re-derives a labor cost.
+  const laborAssignments = crewRows.map((c) => {
+    const pay = computeLaborPay({
+      workerType: c.workerType as never, payModel: c.payModel as never,
+      assignmentStatus: c.assignmentStatus as never, approvalStatus: c.approvalStatus as never,
+      clockIn: c.clockIn, clockOut: c.clockOut,
+      workedMinutes: c.clockIn && c.clockOut ? null : c.workedMinutes,
+      actualBreakMinutes: c.actualBreakMinutes, travelMinutes: c.travelMinutes,
+      travelPayPolicy: c.travelPayPolicy as never,
+      hourlyRateCentsSnapshot: c.hourlyRateCentsSnapshot, overtimeRateCentsSnapshot: c.overtimeRateCentsSnapshot,
+      flatPayCentsSnapshot: c.flatPayCentsSnapshot, dayRateCentsSnapshot: c.dayRateCentsSnapshot,
+      travelRateCentsSnapshot: c.travelRateCentsSnapshot, economicRateCentsSnapshot: c.economicRateCentsSnapshot,
+      driverBonusCentsSnapshot: c.driverBonusCentsSnapshot, crewLeaderBonusCentsSnapshot: c.crewLeaderBonusCentsSnapshot,
+      otherBonusCents: c.otherBonusCents, reimbursementCents: c.reimbursementCents,
+      approvedPayCents: c.approvedPayCents, zeroLaborConfirmed: c.zeroLaborConfirmed,
+      legacyPayRate: c.payRate, legacyFlatPay: c.flatPay, legacyActualHours: c.actualHours,
+      legacyTips: c.tips, legacyBonus: c.bonus, legacyDeductions: c.deductions,
+      userProfilePayRate: c.user.payRate,
+    })
+    return {
+      id: c.id, userId: c.user.id, userName: c.user.name,
+      workerType: String(c.workerType), role: String(c.role),
+      assignmentStatus: String(c.assignmentStatus), approvalStatus: String(c.approvalStatus),
+      paymentStatus: String(c.paymentStatus), payModel: String(c.payModel),
+      clockIn: c.clockIn?.toISOString() ?? null, clockOut: c.clockOut?.toISOString() ?? null,
+      breakRunning: isOnBreak(c),
+      workedMinutes: c.workedMinutes, regularMinutes: c.regularMinutes, overtimeMinutes: c.overtimeMinutes,
+      travelMinutes: c.travelMinutes, breakMinutes: c.actualBreakMinutes,
+      hourlyRateCentsSnapshot: c.hourlyRateCentsSnapshot, flatPayCentsSnapshot: c.flatPayCentsSnapshot,
+      economicRateCentsSnapshot: c.economicRateCentsSnapshot,
+      driverBonusCents: c.driverBonusCentsSnapshot, crewLeaderBonusCents: c.crewLeaderBonusCentsSnapshot,
+      otherBonusCents: c.otherBonusCents,
+      calculatedPayCents: pay.calculatedPayCents, approvedPayCents: c.approvedPayCents,
+      paidCents: paidCentsOf(c.laborPayments ?? []),
+      cashCostCents: pay.cashCostCents, economicValueCents: pay.economicValueCents,
+      zeroLaborConfirmed: !!c.zeroLaborConfirmed,
+      rateSnapshotAt: c.rateSnapshotAt?.toISOString() ?? null,
+      payments: (c.laborPayments ?? []).map((p) => ({
+        id: p.id, amountCents: p.amountCents, method: String(p.method),
+        paidOn: p.paidOn.toISOString(), voided: p.voided, reference: p.reference,
+      })),
+    }
+  })
   const crewTotalOwed = crewRows.reduce((s, cr) => s + crewPayOwedCents({ actualHours: cr.actualHours, scheduledHours: cr.scheduledHours, payRate: cr.payRate, userPayRate: cr.user.payRate, flatPay: cr.flatPay, tips: cr.tips, bonus: cr.bonus, deductions: cr.deductions }), 0)
   const crewPaidOwed = crewRows.filter((cr) => cr.payStatus !== 'PAID').reduce((s, cr) => s + crewPayOwedCents({ actualHours: cr.actualHours, scheduledHours: cr.scheduledHours, payRate: cr.payRate, userPayRate: cr.user.payRate, flatPay: cr.flatPay, tips: cr.tips, bonus: cr.bonus, deductions: cr.deductions }), 0)
 
@@ -376,10 +435,32 @@ export default async function JobDetail({ params }: { params: { id: string } }) 
               <div style={divider} />
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '4px' }}>
                 <span style={{ fontSize: '13px', fontWeight: 700, color: '#0A1628' }}>
-                  Gross profit{completeness.isComplete ? '' : ' (incomplete)'}
+                  Cash gross profit{completeness.isComplete ? '' : ' (incomplete)'}
                 </span>
                 <span style={{ fontSize: '20px', fontWeight: 800, color: !completeness.isComplete && completeness.status !== 'NOT_APPLICABLE' ? '#B45309' : profit.netProfitCents >= 0 ? '#C9A961' : '#EF4444', fontVariantNumeric: 'tabular-nums' }}>{cents(profit.netProfitCents) ?? '$0.00'}</span>
               </div>
+
+              {/* PHASE 1: was this move profitable on its own, or only because
+                  the owners worked without paying themselves? */}
+              {profit.unpaidOwnerValueCents > 0 && (
+                <>
+                  <Row label="− Unpaid owner labor (value)" value={cents(profit.unpaidOwnerValueCents)!} />
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <span style={{ fontSize: '13px', fontWeight: 700, color: '#0A1628' }}>Economic profit</span>
+                    <span style={{ fontSize: '17px', fontWeight: 800, color: profit.economicProfitCents >= 0 ? '#6366F1' : '#EF4444', fontVariantNumeric: 'tabular-nums' }}>
+                      {cents(profit.economicProfitCents) ?? '$0.00'}
+                    </span>
+                  </div>
+                  <div style={{ fontSize: '11px', color: '#9CA3AF', textAlign: 'right' }}>
+                    what this move earned if the owners&apos; hours had to be hired
+                  </div>
+                </>
+              )}
+              {profit.pendingLaborCents > 0 && (
+                <div style={{ fontSize: '11px', color: '#B45309', textAlign: 'right', marginTop: '2px' }}>
+                  {cents(profit.pendingLaborCents)} of labor entered but not approved — not counted above
+                </div>
+              )}
               <div style={{ fontSize: '11px', color: '#9CA3AF', textAlign: 'right', marginTop: '2px' }}>
                 {profit.marginPct != null && <>{Math.round(profit.marginPct * 100)}% margin · </>}
                 crew owed {cents(crewPaidOwed) ?? '$0.00'} unpaid
@@ -503,56 +584,47 @@ export default async function JobDetail({ params }: { params: { id: string } }) 
             ))}
           </Card>
 
-          {/* Crew & Payroll */}
-          {booking.job && (
-            <Card title="Crew & Payroll" icon="👥" action={crewTotalOwed > 0 ? <span style={{ fontSize: '11px', color: '#9CA3AF' }}>{cents(crewTotalOwed)} labor</span> : undefined}>
-              {completeness.missingLabor && (
-                <Callout tone="danger" title="Crew labor has not been recorded for this move.">
-                  Profit above may be overstated. Crew hours and pay cannot be entered in the
-                  admin yet — that is the next build (Phase 1). Until then this move&apos;s labor
-                  cost is <strong>unknown</strong>, not zero.
-                </Callout>
-              )}
-              <Row label="Job status" value={booking.job.status} />
-              {booking.job.startedAt && <Row label="Started" value={dateTime(booking.job.startedAt)} />}
-              {booking.job.completedAt && <Row label="Completed" value={dateTime(booking.job.completedAt)} />}
-              <div style={divider} />
-              {crewRows.length > 0 ? crewRows.map((cr) => {
-                const owed = crewPayOwedCents({ actualHours: cr.actualHours, scheduledHours: cr.scheduledHours, payRate: cr.payRate, userPayRate: cr.user.payRate, flatPay: cr.flatPay, tips: cr.tips, bonus: cr.bonus, deductions: cr.deductions })
-                const paid = cr.payStatus === 'PAID'
-                return (
-                  <div key={cr.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '10px', padding: '6px 0' }}>
-                    <div style={{ minWidth: 0 }}>
-                      <div style={{ fontSize: '13px', fontWeight: 600 }}>{cr.user.name}{cr.crewLeader ? ' 👑' : ''} <span style={{ color: '#9CA3AF', fontWeight: 400 }}>· {cr.user.role}</span></div>
-                      <div style={{ fontSize: '11px', color: '#9CA3AF' }}>{cr.actualHours != null ? `${cr.actualHours}h` : cr.scheduledHours != null ? `${cr.scheduledHours}h sched` : 'hours not set'}{cr.flatPay ? ' · flat' : ''}</div>
-                    </div>
-                    <div style={{ textAlign: 'right' }}>
-                      <div style={{ fontSize: '13px', fontWeight: 700, fontVariantNumeric: 'tabular-nums' }}>{cents(owed)}</div>
-                      <Badge color={paid ? '#10B981' : '#F59E0B'}>{paid ? 'PAID' : cr.payStatus.replace(/_/g, ' ')}</Badge>
-                    </div>
-                  </div>
-                )
-              }) : <Empty>No crew assigned yet</Empty>}
-              {crewRows.length > 0 && (
-                <>
-                  <div style={divider} />
-                  <Row label="Total labor" value={cents(crewTotalOwed) ?? '$0.00'} strong />
-                  {crewPaidOwed > 0 && <Row label="Unpaid" value={cents(crewPaidOwed)!} />}
-                </>
-              )}
-            </Card>
-          )}
-
-          {/* No Job row at all yet — still say it plainly rather than let the
-              profit card imply labor was free. */}
-          {!booking.job && completeness.missingLabor && (
-            <Card title="Crew & Payroll" icon="👥">
+          {/* ── Crew & Labor (Phase 1, owner spec 2026-07-20) ──
+              The canonical labor record for this move. Assign crew, enter or
+              clock hours, approve the money, record payments. Everything here
+              writes JobCrew — nothing reads the Discord gig board. */}
+          <Card
+            title="Crew & Labor"
+            icon="👥"
+            action={<span style={{ fontSize: '11px', color: '#9CA3AF' }}>{LABOR_STATE_LABELS[completeness.laborState]}</span>}
+          >
+            {completeness.missingLabor && (
               <Callout tone="danger" title="Crew labor has not been recorded for this move.">
-                No crew record exists for this job, so its labor cost is <strong>unknown</strong>,
-                not zero. The profit figure above is incomplete.
+                Profit above may be overstated. This move&apos;s labor cost is <strong>unknown</strong>,
+                not zero — assign the crew and enter their hours below.
               </Callout>
-            </Card>
-          )}
+            )}
+            {completeness.laborState === 'MISSING_CLOCK_OUT' && (
+              <Callout tone="danger" title="A crew member has no clock-out.">
+                Their hours are still open, so the labor cost is incomplete.
+              </Callout>
+            )}
+            {completeness.laborUnapproved && (
+              <Callout tone="warning" title="Hours are entered but not approved.">
+                Unapproved labor is shown below but is <strong>not yet counted</strong> as a cost on
+                this move. Approve it to make it real.
+              </Callout>
+            )}
+            {booking.job && (
+              <div style={{ marginBottom: '12px' }}>
+                <Row label="Job status" value={booking.job.status} />
+                {booking.job.startedAt && <Row label="Started" value={dateTime(booking.job.startedAt)} />}
+                {booking.job.completedAt && <Row label="Completed" value={dateTime(booking.job.completedAt)} />}
+              </div>
+            )}
+            <CrewLaborPanel
+              bookingId={booking.id}
+              assignments={laborAssignments}
+              staff={staff.map((s) => ({ id: s.id, name: s.name, role: String(s.role), payRateCents: s.payRate, workerType: String(s.workerType) }))}
+              isOwner={isOwner}
+              currentUserId={session?.userId ?? ''}
+            />
+          </Card>
         </div>
       </div>
 

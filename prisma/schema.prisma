@@ -128,6 +128,23 @@ enum AuditAction {
   CREW_ASSIGNED
   CREW_PAY_UPDATED
   CREW_PAID
+  // ── Phase 1 labor system (owner spec 2026-07-20) ──
+  CREW_ASSIGNMENT_UPDATED
+  CREW_ASSIGNMENT_CANCELLED
+  CREW_ASSIGNMENT_ACCEPTED
+  CREW_ASSIGNMENT_DECLINED
+  CREW_CLOCK_IN
+  CREW_CLOCK_OUT
+  CREW_BREAK_UPDATED
+  CREW_HOURS_EDITED
+  CREW_HOURS_SUBMITTED
+  CREW_HOURS_APPROVED
+  CREW_HOURS_REJECTED
+  CREW_RATE_SNAPSHOT_CHANGED
+  CREW_PAYMENT_RECORDED
+  CREW_PAYMENT_VOIDED
+  CREW_ZERO_LABOR_CONFIRMED
+  CREW_OWNER_LABOR_VALUED
   LEAD_CREATED
   LEAD_STATUS_CHANGED
   PRICE_CHANGED
@@ -344,6 +361,86 @@ enum CrewPayStatus {
   PAID
 }
 
+// ── Phase 1 labor system (owner spec 2026-07-20) ─────────────────────────────
+//    JobCrew is THE canonical financial labor record for a customer move; see
+//    docs/admin/discord-crew-integration.md. These enums split the one legacy
+//    CrewPayStatus into the three dimensions the workflow actually has: whether
+//    someone is ON the job (assignment), whether the money is AGREED (approval),
+//    and whether it has MOVED (payment). CrewPayStatus is retained and kept in
+//    sync so existing readers keep working.
+
+enum CrewWorkerType {
+  OWNER // Diego / Sebastian — may work unpaid; carries an economic labor value
+  EMPLOYEE
+  CONTRACTOR
+  TEMP_HELPER
+}
+
+enum CrewRole {
+  CREW_MEMBER
+  CREW_LEADER
+  DRIVER
+  HELPER
+  OWNER_OPERATOR
+  OTHER
+}
+
+enum CrewAssignmentStatus {
+  INVITED
+  OFFERED
+  ACCEPTED
+  DECLINED
+  ASSIGNED
+  IN_PROGRESS
+  COMPLETED
+  CANCELLED
+  NO_SHOW
+}
+
+/// How the recorded time got there — an audit signal, not a workflow state.
+enum TimeEntrySource {
+  CLOCK // crew tapped clock in / out
+  MANUAL // owner typed the hours
+  IMPORTED
+  OWNER_OVERRIDE // owner corrected a submitted record
+  DISCORD_WORKFLOW
+}
+
+/// Is the money AGREED? Separate from whether it has been paid.
+enum LaborApprovalStatus {
+  DRAFT // assignment exists, hours not submitted
+  SUBMITTED // hours submitted for review
+  NEEDS_REVIEW // flagged by validation
+  APPROVED // owner agreed the amount — a real cost and a liability
+  REJECTED // not a cost at all
+}
+
+/// Has the money MOVED? Independent of approval.
+enum LaborPaymentStatus {
+  UNPAID
+  PARTIALLY_PAID
+  PAID
+  VOIDED
+}
+
+/// How this assignment is priced. The applicable rate is SNAPSHOT onto the
+/// assignment; a later profile change must never rewrite a historical move.
+enum LaborPayModel {
+  HOURLY
+  FLAT
+  DAY_RATE
+  UNPAID_OWNER // owner works, no cash changes hands; economic value still recorded
+  ZERO_CONFIRMED // explicitly confirmed $0 labor (owner + reason required)
+  CUSTOM // owner-approved amount no formula produces
+}
+
+/// Is travel time paid, and how? Per assignment, because it varies by worker.
+enum TravelPayPolicy {
+  UNPAID // travel recorded for analysis only
+  REGULAR // travel minutes are paid at the regular rate (added to paid time)
+  SEPARATE_RATE // travel paid at its own snapshot rate
+}
+
 // ── MODELS ────────────────────────────────────────────────────
 
 model User {
@@ -358,12 +455,17 @@ model User {
 
   // ── HR / payroll (admin OS, owner spec 2026-07-13) — all nullable ──
   //    payRate is the DEFAULT cents/hour; a JobCrew row can override it per job.
-  payRate               Int?    @map("pay_rate") // cents per hour
-  preferredRole         String? @map("preferred_role")
-  emergencyContact      String? @map("emergency_contact")
-  emergencyContactPhone String? @map("emergency_contact_phone")
-  reliabilityRating     Int?    @map("reliability_rating") // 1-5
-  performanceNotes      String? @map("performance_notes")
+  payRate               Int?           @map("pay_rate") // cents per hour
+  // Phase 1: the CURRENT profile defaults. These seed a JobCrew rate SNAPSHOT at
+  // assignment time and are never read again for that assignment — changing a
+  // rate here must not alter what a past move cost.
+  defaultFlatRateCents  Int?           @map("default_flat_rate_cents")
+  workerType            CrewWorkerType @default(EMPLOYEE) @map("worker_type")
+  preferredRole         String?        @map("preferred_role")
+  emergencyContact      String?        @map("emergency_contact")
+  emergencyContactPhone String?        @map("emergency_contact_phone")
+  reliabilityRating     Int?           @map("reliability_rating") // 1-5
+  performanceNotes      String?        @map("performance_notes")
 
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
@@ -406,20 +508,20 @@ model Customer {
 }
 
 model Booking {
-  id             String        @id @default(cuid())
-  displayId      String        @unique @default(cuid()) @map("display_id") // mirrors bookingReference for back-compat
+  id               String        @id @default(cuid())
+  displayId        String        @unique @default(cuid()) @map("display_id") // mirrors bookingReference for back-compat
   // Public, human-friendly booking reference (WMIC-####). Backed by an atomic
   // Postgres sequence (booking_reference_seq) so concurrent inserts can never
   // collide; assigned once at creation and never changed. The internal cuid `id`
   // stays the private key used for all relationships/joins/webhooks. Nullable so
   // historical/internal-test rows may stay unreferenced. See src/lib/booking-reference.ts.
-  bookingReference String?     @unique @map("booking_reference")
-  status         BookingStatus @default(DRAFT)
-  outboxState    BookingState? @map("outbox_state") // src/outbox email state machine (additive, nullable)
+  bookingReference String?       @unique @map("booking_reference")
+  status           BookingStatus @default(DRAFT)
+  outboxState      BookingState? @map("outbox_state") // src/outbox email state machine (additive, nullable)
   // Owner checkout tests (mirrors Payment.isInternalTest). EXCLUDED from every
   // operational count + revenue report. Flagged by scripts/flag-test-bookings.ts.
-  isInternalTest Boolean       @default(false) @map("is_internal_test")
-  customerId     String        @map("customer_id")
+  isInternalTest   Boolean       @default(false) @map("is_internal_test")
+  customerId       String        @map("customer_id")
 
   // Location
   originAddress String  @map("origin_address")
@@ -763,11 +865,156 @@ model JobCrew {
   paidAt         DateTime?      @map("paid_at")
   payNotes       String?        @map("pay_notes")
 
-  job  Job  @relation(fields: [jobId], references: [id])
-  user User @relation(fields: [userId], references: [id])
+  // ══ PHASE 1 LABOR SYSTEM (owner spec 2026-07-20) ═══════════════════════════
+  //    This model is THE canonical financial labor record for a customer move.
+  //    Everything above is retained and kept in SYNC by src/lib/labor-calc.ts so
+  //    existing readers (reminder rules, dashboards) never break; everything
+  //    below is the authoritative record going forward.
+  //
+  //    TIME IS STORED IN INTEGER MINUTES. The legacy Float `actualHours` /
+  //    `scheduledHours` are derived mirrors — never the source of truth.
+  //    MONEY IS INTEGER CENTS.
+
+  // ── Identity ──
+  workerType       CrewWorkerType       @default(EMPLOYEE) @map("worker_type")
+  role             CrewRole             @default(CREW_MEMBER)
+  assignmentStatus CrewAssignmentStatus @default(ASSIGNED) @map("assignment_status")
+  /// Optional link to a Discord gig-board `crew_jobs` row. PLAIN REFERENCE, no
+  /// FK by design (that table lives on an unmerged branch; same pattern as
+  /// OwnerTransaction.bookingId). UNIQUE so a replayed Discord acceptance can
+  /// never create a second assignment for one gig. A gig payout that arrives
+  /// here becomes flatPayCentsSnapshot — counted ONCE, here. See
+  /// docs/admin/discord-crew-integration.md.
+  crewJobId        String?              @unique @map("crew_job_id")
+  acceptedAt       DateTime?            @map("accepted_at")
+  declinedAt       DateTime?            @map("declined_at")
+  cancelledAt      DateTime?            @map("cancelled_at")
+  cancelReason     String?              @map("cancel_reason")
+  assignmentNotes  String?              @map("assignment_notes")
+
+  // ── Scheduled time ──
+  scheduledStartAt       DateTime? @map("scheduled_start_at")
+  scheduledEndAt         DateTime? @map("scheduled_end_at")
+  scheduledBreakMinutes  Int?      @map("scheduled_break_minutes")
+  scheduledMinutes       Int?      @map("scheduled_minutes") // derived, stored for reporting
+  scheduledTravelMinutes Int?      @map("scheduled_travel_minutes")
+
+  // ── Actual time (integer minutes) ──
+  breakStartedAt     DateTime?        @map("break_started_at") // an open break, if any
+  actualBreakMinutes Int?             @map("actual_break_minutes")
+  workedMinutes      Int?             @map("worked_minutes") // elapsed − breaks
+  regularMinutes     Int?             @map("regular_minutes")
+  overtimeMinutes    Int?             @map("overtime_minutes")
+  travelMinutes      Int?             @map("travel_minutes")
+  paidMinutes        Int?             @map("paid_minutes") // regular + overtime + paid travel
+  timeEntrySource    TimeEntrySource? @map("time_entry_source")
+  timeAdjustedById   String?          @map("time_adjusted_by_id")
+  timeAdjustedAt     DateTime?        @map("time_adjusted_at")
+  timeAdjustReason   String?          @map("time_adjust_reason")
+
+  // ── Pay model + RATE SNAPSHOTS ──
+  //    Snapshots are taken at assignment. crewPayOwedCents must NEVER fall back
+  //    to User.payRate for a snapshotted row: raising someone's rate today must
+  //    not change what a move cost last month.
+  payModel                  LaborPayModel   @default(HOURLY) @map("pay_model")
+  hourlyRateCentsSnapshot   Int?            @map("hourly_rate_cents_snapshot")
+  overtimeRateCentsSnapshot Int?            @map("overtime_rate_cents_snapshot")
+  flatPayCentsSnapshot      Int?            @map("flat_pay_cents_snapshot")
+  dayRateCentsSnapshot      Int?            @map("day_rate_cents_snapshot")
+  travelPayPolicy           TravelPayPolicy @default(REGULAR) @map("travel_pay_policy")
+  travelRateCentsSnapshot   Int?            @map("travel_rate_cents_snapshot")
+  /// Replacement-cost rate for OWNER labor — what hiring someone would cost.
+  /// Drives ECONOMIC profit; never cash.
+  economicRateCentsSnapshot Int?            @map("economic_rate_cents_snapshot")
+  rateSnapshotAt            DateTime?       @map("rate_snapshot_at")
+  rateSnapshotSource        String?         @map("rate_snapshot_source") // user_profile | manual | crew_job | business_config
+  rateAdjustedById          String?         @map("rate_adjusted_by_id")
+  rateAdjustedAt            DateTime?       @map("rate_adjusted_at")
+  rateAdjustReason          String?         @map("rate_adjust_reason")
+
+  // ── Bonuses ──
+  driverBonusCentsSnapshot     Int?    @map("driver_bonus_cents_snapshot")
+  crewLeaderBonusCentsSnapshot Int?    @map("crew_leader_bonus_cents_snapshot")
+  otherBonusCents              Int?    @map("other_bonus_cents")
+  otherBonusReason             String? @map("other_bonus_reason")
+  /// Labor-specific reimbursement (e.g. the worker bought straps). Distinct from
+  /// an owner PERSONAL_PURCHASE, which lives in OwnerTransaction.
+  reimbursementCents           Int?    @map("reimbursement_cents")
+  reimbursementReason          String? @map("reimbursement_reason")
+
+  // ── Calculated + approved ──
+  calculatedPayCents Int?                @map("calculated_pay_cents") // what the formula produced
+  approvedPayCents   Int?                @map("approved_pay_cents") // what the owner agreed to
+  approvalStatus     LaborApprovalStatus @default(DRAFT) @map("approval_status")
+  submittedAt        DateTime?           @map("submitted_at")
+  submittedById      String?             @map("submitted_by_id")
+  approvedById       String?             @map("approved_by_id")
+  approvedAt         DateTime?           @map("approved_at")
+  rejectedReason     String?             @map("rejected_reason")
+  adjustmentReason   String?             @map("adjustment_reason")
+
+  /// Explicit "$0 labor cost" confirmation. A MISSING assignment is never this —
+  /// financial-completeness.ts keeps "unknown" and "confirmed zero" apart.
+  zeroLaborConfirmed       Boolean   @default(false) @map("zero_labor_confirmed")
+  zeroLaborConfirmedById   String?   @map("zero_labor_confirmed_by_id")
+  zeroLaborConfirmedAt     DateTime? @map("zero_labor_confirmed_at")
+  zeroLaborConfirmedReason String?   @map("zero_labor_confirmed_reason")
+
+  // ── Payment state (amountPaid is DERIVED from laborPayments, never trusted raw) ──
+  paymentStatus LaborPaymentStatus @default(UNPAID) @map("payment_status")
+
+  // ── Audit ──
+  createdById   String?  @map("created_by_id")
+  createdByName String?  @map("created_by_name")
+  updatedById   String?  @map("updated_by_id")
+  sourceSystem  String?  @map("source_system") // admin | discord | import
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @updatedAt @map("updated_at")
+
+  job           Job            @relation(fields: [jobId], references: [id])
+  user          User           @relation(fields: [userId], references: [id])
+  laborPayments LaborPayment[]
 
   @@unique([jobId, userId])
+  @@index([jobId])
+  @@index([userId])
+  @@index([approvalStatus])
+  @@index([paymentStatus])
+  @@index([assignmentStatus])
+  @@index([scheduledStartAt])
   @@map("job_crew")
+}
+
+/// One recorded payment against ONE crew assignment. Supports partial payments,
+/// so `amountPaid` is always SUM(non-voided rows) rather than a mutable column
+/// that can drift. Recording a payment NEVER creates a business Expense row —
+/// labor is recognized once, when accrued (docs/financial-architecture.md).
+model LaborPayment {
+  id             String        @id @default(cuid())
+  jobCrewId      String        @map("job_crew_id")
+  amountCents    Int // > 0; a correction is a void + re-record, not a negative
+  method         PaymentMethod
+  paidOn         DateTime      @map("paid_on")
+  reference      String? // check no. / Zelle confirmation / etc.
+  notes          String?
+  proofUrl       String?       @map("proof_url")
+  proofPublicId  String?       @map("proof_public_id")
+  recordedById   String?       @map("recorded_by_id")
+  recordedByName String?       @map("recorded_by_name")
+  /// Voided payments are kept forever — never deleted — and count nowhere.
+  voided         Boolean       @default(false)
+  voidedById     String?       @map("voided_by_id")
+  voidedAt       DateTime?     @map("voided_at")
+  voidReason     String?       @map("void_reason")
+  createdAt      DateTime      @default(now()) @map("created_at")
+  updatedAt      DateTime      @updatedAt @map("updated_at")
+
+  jobCrew JobCrew @relation(fields: [jobCrewId], references: [id], onDelete: Cascade)
+
+  @@index([jobCrewId])
+  @@index([paidOn])
+  @@index([voided])
+  @@map("labor_payments")
 }
 
 model Availability {
@@ -1118,12 +1365,12 @@ model Lead {
   referrer       String?
   promoCode      String?   @map("promo_code")
   lastActivityAt DateTime? @map("last_activity_at")
-  contactedAt        DateTime?       @map("contacted_at")
-  quotedAt           DateTime?       @map("quoted_at")
-  bookedAt           DateTime?       @map("booked_at")
-  lostAt             DateTime?       @map("lost_at")
-  createdAt          DateTime        @default(now()) @map("created_at")
-  updatedAt          DateTime        @updatedAt @map("updated_at")
+  contactedAt    DateTime? @map("contacted_at")
+  quotedAt       DateTime? @map("quoted_at")
+  bookedAt       DateTime? @map("booked_at")
+  lostAt         DateTime? @map("lost_at")
+  createdAt      DateTime  @default(now()) @map("created_at")
+  updatedAt      DateTime  @updatedAt @map("updated_at")
 
   @@index([status])
   @@index([source])
@@ -1264,12 +1511,26 @@ model RoadmapItem {
 /// ownership split NEVER means all cash is distributable — the Owner Money page
 /// subtracts upcoming worker pay + bills + tax/emergency reserves first.
 model BusinessConfig {
-  id                    String   @id @default("singleton")
-  diegoSplitPercent     Int      @default(50) @map("diego_split_percent")
-  sebastianSplitPercent Int      @default(50) @map("sebastian_split_percent")
-  taxReservePercent     Int      @default(25) @map("tax_reserve_percent") // % of profit held for taxes
-  emergencyReserveCents Int      @default(0) @map("emergency_reserve_cents")
-  updatedAt             DateTime @updatedAt @map("updated_at")
+  id                    String @id @default("singleton")
+  diegoSplitPercent     Int    @default(50) @map("diego_split_percent")
+  sebastianSplitPercent Int    @default(50) @map("sebastian_split_percent")
+  taxReservePercent     Int    @default(25) @map("tax_reserve_percent") // % of profit held for taxes
+  emergencyReserveCents Int    @default(0) @map("emergency_reserve_cents")
+
+  // ── Phase 1 labor policy (owner spec 2026-07-20) ──
+  /// What an owner's hour is WORTH if it had to be hired out. Drives ECONOMIC
+  /// profit only — never cash, never a payable. Default $30/h.
+  ownerEconomicRateCents   Int @default(3000) @map("owner_economic_rate_cents")
+  /// Minutes in a day beyond which time is overtime. 0 disables overtime.
+  /// Default 480 (8h). NJ has no daily-OT statute; this is a house policy.
+  overtimeThresholdMinutes Int @default(480) @map("overtime_threshold_minutes")
+  /// Overtime multiplier in percent (150 = 1.5x).
+  overtimeMultiplierPct    Int @default(150) @map("overtime_multiplier_pct")
+  /// Shift length (minutes) past which a time entry is flagged for review
+  /// rather than rejected — long move days are legitimate. Default 840 (14h).
+  longShiftReviewMinutes   Int @default(840) @map("long_shift_review_minutes")
+
+  updatedAt DateTime @updatedAt @map("updated_at")
 
   @@map("business_config")
 }

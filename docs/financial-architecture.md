@@ -13,6 +13,22 @@ match these definitions or cite this file when it deliberately differs.**
 
 ---
 
+> ## PHASE 1 UPDATE (2026-07-20) — JobCrew now has a real write path
+>
+> The decision below is UNCHANGED and now enforced by working code. See
+> `docs/admin/phase1-jobcrew-implementation.md`.
+>
+> - Labor is recorded on `JobCrew` with **integer minutes** and a **frozen rate
+>   snapshot** — a later profile-rate change can no longer rewrite a past move.
+> - **Only APPROVED labor is a cost.** DRAFT/SUBMITTED labor is displayed and
+>   warned about but never counted.
+> - **Owner labor is never free**: `UNPAID_OWNER` costs $0 cash and carries an
+>   economic value, giving every move a CASH gross profit and an ECONOMIC profit.
+> - `labor_payments` supports partial payments; `paymentStatus` is derived from
+>   the non-voided rows and **never writes an `Expense`**.
+> - The Discord `crew_jobs` gig board is NOT a competing labor total — it has no
+>   booking, no Job and no app User. See `docs/admin/discord-crew-integration.md`.
+
 ## DECISION: crew labor single source of truth = JobCrew payroll (Option A)
 
 **Crew labor cost comes from `JobCrew` payroll records** (hours × rate, or flat

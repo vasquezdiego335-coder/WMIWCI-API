@@ -148,3 +148,106 @@ test('a move that was never worked cannot be finalized at all', () => {
   const d = canFinalizeFinancials({ completeness: c, override: true, role: 'OWNER', reason: 'x' })
   assert.equal(d.allow, false)
 })
+
+// ── PHASE 1: the distinct labor states (owner spec 2026-07-20) ──────────────
+// The whole point is that these are never collapsed into a generic "$0".
+
+import { deriveLaborState } from '../financial-completeness'
+import { can } from '../permissions'
+
+const APPROVED = { approvalStatus: 'APPROVED', paymentStatus: 'UNPAID', hourlyRateCentsSnapshot: 2500, workedMinutes: 480 }
+
+test('labor state: no assignments at all', () => {
+  assert.equal(deriveLaborState([]), 'NOT_ASSIGNED')
+})
+
+test('labor state: assigned but no hours ever entered', () => {
+  assert.equal(deriveLaborState([{ assignmentStatus: 'ASSIGNED', hourlyRateCentsSnapshot: 2500 }]), 'ASSIGNED_NO_HOURS')
+})
+
+test('labor state: an open shift is MISSING_CLOCK_OUT, and it blocks', () => {
+  const crew = [{ ...APPROVED, clockIn: new Date(), clockOut: null }]
+  assert.equal(deriveLaborState(crew), 'MISSING_CLOCK_OUT')
+  const c = evaluateFinancialCompleteness({ status: 'COMPLETED', crew, expenses: EXPENSE, payments: PAID })
+  assert.equal(c.isComplete, false)
+  assert.ok(c.blockers.length > 0)
+  assert.equal(completenessLabel(c), 'Missing clock-out')
+})
+
+test('labor state: hours with no rate is MISSING_RATE, and it blocks', () => {
+  const crew = [{ assignmentStatus: 'ASSIGNED', workedMinutes: 480, payModel: 'HOURLY' }]
+  assert.equal(deriveLaborState(crew), 'MISSING_RATE')
+  const c = evaluateFinancialCompleteness({ status: 'COMPLETED', crew, expenses: EXPENSE, payments: PAID })
+  assert.ok(c.blockers.length > 0)
+})
+
+test('labor state: entered but unapproved is NOT yet a cost, and blocks finalization', () => {
+  const crew = [{ approvalStatus: 'SUBMITTED', hourlyRateCentsSnapshot: 2500, workedMinutes: 480 }]
+  assert.equal(deriveLaborState(crew), 'HOURS_UNAPPROVED')
+  const c = evaluateFinancialCompleteness({ status: 'COMPLETED', crew, expenses: EXPENSE, payments: PAID })
+  assert.equal(c.laborUnapproved, true)
+  assert.equal(c.isComplete, false)
+  assert.equal(completenessLabel(c), 'Hours need approval')
+  assert.equal(canFinalizeFinancials({ completeness: c, override: false, role: 'OWNER' }).allow, false)
+})
+
+test('labor state: approved and unpaid is COMPLETE — the cost is agreed', () => {
+  const crew = [APPROVED]
+  assert.equal(deriveLaborState(crew), 'APPROVED_UNPAID')
+  const c = evaluateFinancialCompleteness({ status: 'COMPLETED', crew, expenses: EXPENSE, payments: PAID })
+  assert.equal(c.isComplete, true)
+  assert.equal(c.laborUnpaid, true)
+  assert.equal(canFinalizeFinancials({ completeness: c, override: false, role: 'OWNER' }).allow, true)
+})
+
+test('labor state: fully paid', () => {
+  assert.equal(deriveLaborState([{ ...APPROVED, paymentStatus: 'PAID' }]), 'PAID')
+})
+
+test('labor state: an explicit $0 confirmation is COMPLETE, a missing one is not', () => {
+  const confirmed = [{ payModel: 'ZERO_CONFIRMED', zeroLaborConfirmed: true, approvalStatus: 'APPROVED', paymentStatus: 'UNPAID' }]
+  assert.equal(deriveLaborState(confirmed), 'ZERO_CONFIRMED')
+  const c = evaluateFinancialCompleteness({ status: 'COMPLETED', crew: confirmed, expenses: EXPENSE, payments: PAID })
+  assert.equal(c.laborConfirmedZero, true)
+  assert.equal(c.isComplete, true)
+  // vs. nobody assigned at all
+  const missing = evaluateFinancialCompleteness({ status: 'COMPLETED', crew: [], expenses: EXPENSE, payments: PAID })
+  assert.equal(missing.laborState, 'NOT_ASSIGNED')
+  assert.equal(missing.isComplete, false)
+})
+
+test('cancelled and declined assignments are ignored when deriving the state', () => {
+  const crew = [{ assignmentStatus: 'CANCELLED', hourlyRateCentsSnapshot: 2500 }, { assignmentStatus: 'DECLINED' }]
+  assert.equal(deriveLaborState(crew), 'NOT_ASSIGNED')
+})
+
+// ── Permissions for the labor actions ───────────────────────────────────────
+
+test('a WORKER may clock and submit their own hours, and nothing else', () => {
+  assert.equal(can('CREW', 'labor.clock_self'), true)
+  assert.equal(can('CREW', 'labor.submit_hours'), true)
+  assert.equal(can('CREW', 'labor.view_own_labor'), true)
+  for (const a of ['payroll.approve', 'labor.record_payment', 'labor.view_all_labor', 'labor.assign_crew', 'money.view_job_profit', 'money.view_owner_ledger'] as const) {
+    assert.equal(can('CREW', a), false, a)
+  }
+})
+
+test('a MANAGER runs operations but holds no owner-financial labor authority', () => {
+  assert.equal(can('MANAGER', 'labor.assign_crew'), true)
+  assert.equal(can('MANAGER', 'labor.enter_hours'), true)
+  assert.equal(can('MANAGER', 'labor.record_payment'), true)
+  for (const a of ['labor.edit_rate_snapshot', 'labor.confirm_zero_labor', 'labor.set_owner_labor_value', 'labor.void_payment', 'labor.finalize_override', 'payroll.approve'] as const) {
+    assert.equal(can('MANAGER', a), false, a)
+  }
+})
+
+test('an OWNER can do everything labor-related', () => {
+  for (const a of ['labor.assign_crew', 'labor.edit_rate_snapshot', 'labor.confirm_zero_labor', 'labor.set_owner_labor_value', 'labor.void_payment', 'payroll.approve', 'labor.finalize_override'] as const) {
+    assert.equal(can('OWNER', a), true, a)
+  }
+})
+
+test('an unauthenticated caller can do nothing', () => {
+  assert.equal(can(null, 'labor.clock_self'), false)
+  assert.equal(can(undefined, 'labor.view_own_labor'), false)
+})

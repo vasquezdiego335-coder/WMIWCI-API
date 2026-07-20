@@ -6,6 +6,54 @@
 import { effectiveWaitingFeeCents } from './waiting-time'
 import { computeJobProfit, isStripePayment, type JobProfit } from './profit'
 import { evaluateFinancialCompleteness, type FinancialCompleteness } from './financial-completeness'
+import { rollupLabor, paidCentsOf, type RollupAssignment, type LaborRollup } from './labor-calc'
+import { DEFAULT_TIME_POLICY, type TimePolicy } from './labor-time'
+
+/** Map Prisma JobCrew rows to the labor calculator's shape. ONE place, so a
+ *  forgotten field cannot silently change a move's labor cost. */
+export function toLaborAssignments(crew: JobCrewShape[]): RollupAssignment[] {
+  return crew.map((c) => ({
+    workerType: (c.workerType ?? undefined) as never,
+    payModel: (c.payModel ?? undefined) as never,
+    assignmentStatus: (c.assignmentStatus ?? undefined) as never,
+    approvalStatus: (c.approvalStatus ?? undefined) as never,
+    paymentStatus: (c.paymentStatus ?? undefined) as never,
+    clockIn: c.clockIn ?? null,
+    clockOut: c.clockOut ?? null,
+    workedMinutes: c.workedMinutes ?? null,
+    actualBreakMinutes: c.actualBreakMinutes ?? null,
+    travelMinutes: c.travelMinutes ?? null,
+    travelPayPolicy: (c.travelPayPolicy ?? undefined) as never,
+    hourlyRateCentsSnapshot: c.hourlyRateCentsSnapshot ?? null,
+    overtimeRateCentsSnapshot: c.overtimeRateCentsSnapshot ?? null,
+    flatPayCentsSnapshot: c.flatPayCentsSnapshot ?? null,
+    dayRateCentsSnapshot: c.dayRateCentsSnapshot ?? null,
+    travelRateCentsSnapshot: c.travelRateCentsSnapshot ?? null,
+    economicRateCentsSnapshot: c.economicRateCentsSnapshot ?? null,
+    driverBonusCentsSnapshot: c.driverBonusCentsSnapshot ?? null,
+    crewLeaderBonusCentsSnapshot: c.crewLeaderBonusCentsSnapshot ?? null,
+    otherBonusCents: c.otherBonusCents ?? null,
+    reimbursementCents: c.reimbursementCents ?? null,
+    approvedPayCents: c.approvedPayCents ?? null,
+    zeroLaborConfirmed: c.zeroLaborConfirmed ?? null,
+    // legacy
+    legacyPayRate: c.payRate ?? null,
+    legacyFlatPay: c.flatPay ?? null,
+    legacyActualHours: c.actualHours ?? null,
+    legacyScheduledHours: c.scheduledHours ?? null,
+    legacyTips: c.tips ?? null,
+    legacyBonus: c.bonus ?? null,
+    legacyDeductions: c.deductions ?? null,
+    userProfilePayRate: c.user?.payRate ?? null,
+    paidCents: paidCentsOf(c.laborPayments ?? []),
+  }))
+}
+
+/** The canonical labor rollup for ONE move. THE labor number — profit, cash and
+ *  completeness all read this, and nothing reads `crew_jobs`. */
+export function jobLabor(b: BookingMoneyShape, policy: TimePolicy = DEFAULT_TIME_POLICY, otMultiplierPct = 150): LaborRollup {
+  return rollupLabor(toLaborAssignments(b.job?.crew ?? []), policy, otMultiplierPct)
+}
 
 export interface BookingMoneyShape {
   status: string
@@ -77,7 +125,78 @@ export interface JobCrewShape {
   deductions?: number | null
   payStatus?: string | null
   user?: { payRate?: number | null } | null
+  // ── PHASE 1 canonical labor columns ──
+  workerType?: string | null
+  role?: string | null
+  payModel?: string | null
+  assignmentStatus?: string | null
+  approvalStatus?: string | null
+  paymentStatus?: string | null
+  clockIn?: Date | null
+  clockOut?: Date | null
+  workedMinutes?: number | null
+  actualBreakMinutes?: number | null
+  travelMinutes?: number | null
+  travelPayPolicy?: string | null
+  hourlyRateCentsSnapshot?: number | null
+  overtimeRateCentsSnapshot?: number | null
+  flatPayCentsSnapshot?: number | null
+  dayRateCentsSnapshot?: number | null
+  travelRateCentsSnapshot?: number | null
+  economicRateCentsSnapshot?: number | null
+  driverBonusCentsSnapshot?: number | null
+  crewLeaderBonusCentsSnapshot?: number | null
+  otherBonusCents?: number | null
+  reimbursementCents?: number | null
+  approvedPayCents?: number | null
+  zeroLaborConfirmed?: boolean | null
+  laborPayments?: { amountCents: number; voided?: boolean | null }[]
 }
+
+/** THE Prisma `select` for crew rows feeding job money. Every money surface uses
+ *  it, so no page can silently drop a rate snapshot and mis-price a move. */
+export const JOB_MONEY_CREW_SELECT = {
+  id: true,
+  userId: true,
+  workerType: true,
+  role: true,
+  payModel: true,
+  assignmentStatus: true,
+  approvalStatus: true,
+  paymentStatus: true,
+  payStatus: true,
+  clockIn: true,
+  clockOut: true,
+  workedMinutes: true,
+  regularMinutes: true,
+  overtimeMinutes: true,
+  paidMinutes: true,
+  actualBreakMinutes: true,
+  travelMinutes: true,
+  travelPayPolicy: true,
+  hourlyRateCentsSnapshot: true,
+  overtimeRateCentsSnapshot: true,
+  flatPayCentsSnapshot: true,
+  dayRateCentsSnapshot: true,
+  travelRateCentsSnapshot: true,
+  economicRateCentsSnapshot: true,
+  driverBonusCentsSnapshot: true,
+  crewLeaderBonusCentsSnapshot: true,
+  otherBonusCents: true,
+  reimbursementCents: true,
+  approvedPayCents: true,
+  zeroLaborConfirmed: true,
+  // legacy columns, for rows that predate the labor system
+  actualHours: true,
+  scheduledHours: true,
+  payRate: true,
+  flatPay: true,
+  tips: true,
+  bonus: true,
+  deductions: true,
+  laborPayments: { select: { amountCents: true, voided: true } },
+  user: { select: { name: true, payRate: true } },
+} as const
 
 /** Fees collected ON MOVE DAY (never through the $49 Stripe deposit): truck
  *  add-on, travel fee, extra truck fees, waiting fee, and any itemized service
@@ -106,7 +225,8 @@ export function moveDayDueCents(b: BookingMoneyShape): number {
  *  A crewPayCents of 0 almost always means labor was never recorded, NOT that
  *  it was free — always pair this with jobFinancialCompleteness() before
  *  presenting the number. */
-export function jobProfit(b: BookingMoneyShape): JobProfit {
+export function jobProfit(b: BookingMoneyShape, policy: TimePolicy = DEFAULT_TIME_POLICY, otMultiplierPct = 150): JobProfit {
+  const labor = jobLabor(b, policy, otMultiplierPct)
   return computeJobProfit({
     payments: b.payments.map((p) => ({
       amount: p.amount,
@@ -117,6 +237,8 @@ export function jobProfit(b: BookingMoneyShape): JobProfit {
       disputeStatus: p.disputeStatus ?? null,
       isStripe: isStripePayment(p),
     })),
+    // Legacy path retained for rows without a rate snapshot; the `labor` rollup
+    // below supersedes it whenever crew rows exist.
     crew: (b.job?.crew ?? []).map((c) => ({
       actualHours: c.actualHours,
       scheduledHours: c.scheduledHours,
@@ -127,6 +249,12 @@ export function jobProfit(b: BookingMoneyShape): JobProfit {
       bonus: c.bonus,
       deductions: c.deductions,
     })),
+    labor: {
+      approvedCashCents: labor.approvedCashCents,
+      pendingCashCents: labor.pendingCashCents,
+      economicCents: labor.economicCents,
+      unpaidOwnerValueCents: labor.unpaidOwnerValueCents,
+    },
     expenses: (b.expenses ?? []).map((e) => ({ amount: e.amount, status: e.status })),
   })
 }

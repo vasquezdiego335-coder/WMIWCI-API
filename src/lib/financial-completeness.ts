@@ -19,6 +19,10 @@
 import {
   isLaborUnrecorded,
   isConfirmedZeroLabor,
+  isLiveAssignment,
+  isApprovedLabor,
+  isPaidCrew,
+  hasPaySignal,
   isEligibleExpense,
   isUnreviewedExpense,
   isCapturedPayment,
@@ -30,6 +34,9 @@ import {
 
 /** Owner-facing copy. Kept here so every surface says the same sentence. */
 export const MISSING_LABOR_WARNING = 'Crew labor has not been recorded for this move. Profit may be overstated.'
+export const UNAPPROVED_LABOR_WARNING = 'Crew hours are entered but not approved yet, so they are not counted as a cost.'
+export const MISSING_CLOCK_OUT_WARNING = 'A crew member has no clock-out, so their hours are incomplete.'
+export const MISSING_RATE_WARNING = 'A crew member has hours but no pay rate, so their labor cannot be priced.'
 export const MISSING_EXPENSES_WARNING = 'No job expenses recorded. If fuel, tolls, truck or supplies were paid, profit is overstated.'
 export const MISSING_PAYMENT_WARNING = 'Payment information is incomplete. Collected revenue may be inaccurate.'
 export const UNKNOWN_REFUND_WARNING = 'A partial refund on this move has no recorded amount. Revenue may be overstated.'
@@ -37,6 +44,31 @@ export const UNREVIEWED_EXPENSE_NOTICE = 'Some expenses on this move have not be
 export const NO_PAYMENT_WARNING = 'This move is completed but no captured payment is recorded.'
 
 export type FinancialStatus = 'COMPLETE' | 'INCOMPLETE' | 'NOT_APPLICABLE'
+
+/**
+ * PHASE 1: the distinct labor states a worked move can be in. The whole point
+ * is that these are never collapsed into a single "$0".
+ */
+export type LaborState =
+  | 'NOT_ASSIGNED' // nobody on the move — cost UNKNOWN
+  | 'ASSIGNED_NO_HOURS' // people on it, no time ever entered — cost UNKNOWN
+  | 'MISSING_CLOCK_OUT' // an open shift; the day isn't closed
+  | 'MISSING_RATE' // time entered, nothing to price it with
+  | 'HOURS_UNAPPROVED' // priced, awaiting owner approval — not yet a cost
+  | 'APPROVED_UNPAID' // agreed cost, still owed
+  | 'PAID' // agreed and settled
+  | 'ZERO_CONFIRMED' // explicitly, deliberately $0
+
+export const LABOR_STATE_LABELS: Record<LaborState, string> = {
+  NOT_ASSIGNED: 'No crew assigned',
+  ASSIGNED_NO_HOURS: 'Hours not entered',
+  MISSING_CLOCK_OUT: 'Missing clock-out',
+  MISSING_RATE: 'Missing pay rate',
+  HOURS_UNAPPROVED: 'Hours awaiting approval',
+  APPROVED_UNPAID: 'Approved — unpaid',
+  PAID: 'Paid',
+  ZERO_CONFIRMED: '$0 labor confirmed',
+}
 
 export interface FinancialCompleteness {
   /** True only when nothing required is missing. Drives the Complete badge. */
@@ -50,10 +82,48 @@ export interface FinancialCompleteness {
   /** Labor was explicitly recorded as costing nothing — NOT the same as
    *  missing. Lets the UI say "$0 confirmed" instead of "unknown". */
   laborConfirmedZero: boolean
+  /** PHASE 1: exactly which labor state this move is in — never a generic zero. */
+  laborState: LaborState
+  /** Hours entered but not yet approved by an owner. Not a cost yet. */
+  laborUnapproved: boolean
+  /** Approved labor that is still owed. */
+  laborUnpaid: boolean
   /** Everything worth telling the owner, most severe first. */
   warnings: string[]
   /** The subset that must block financial finalization (Phase 2 closeout). */
   blockers: string[]
+}
+
+/**
+ * Which single state best describes this move's labor. Ordered worst-first so
+ * the most actionable problem is what the owner sees.
+ */
+export function deriveLaborState(crew: CrewRow[]): LaborState {
+  const live = crew.filter(isLiveAssignment)
+  if (live.length === 0) return 'NOT_ASSIGNED'
+  if (isConfirmedZeroLabor(live)) return 'ZERO_CONFIRMED'
+  if (live.some((c) => c.clockIn && !c.clockOut)) return 'MISSING_CLOCK_OUT'
+  // Checked BEFORE "no hours": time that exists but cannot be priced is a
+  // different problem with a different fix, and saying "hours not entered" when
+  // the hours ARE entered sends the owner to the wrong place.
+  const pricelessWithTime = live.some(
+    (c) =>
+      (c.workedMinutes != null || c.actualHours != null) &&
+      c.hourlyRateCentsSnapshot == null &&
+      c.flatPayCentsSnapshot == null &&
+      c.dayRateCentsSnapshot == null &&
+      c.payRate == null &&
+      c.flatPay == null &&
+      c.user?.payRate == null &&
+      c.payModel !== 'UNPAID_OWNER' &&
+      c.payModel !== 'ZERO_CONFIRMED' &&
+      c.payModel !== 'CUSTOM',
+  )
+  if (pricelessWithTime) return 'MISSING_RATE'
+  if (!live.some(hasPaySignal)) return 'ASSIGNED_NO_HOURS'
+  if (!live.every(isApprovedLabor)) return 'HOURS_UNAPPROVED'
+  if (live.every(isPaidCrew)) return 'PAID'
+  return 'APPROVED_UNPAID'
 }
 
 export interface CompletenessInput {
@@ -96,13 +166,20 @@ export function evaluateFinancialCompleteness(input: CompletenessInput): Financi
       missingPaymentData: false,
       unreviewedExpenses: false,
       laborConfirmedZero: false,
+      laborState: deriveLaborState(input.crew),
+      laborUnapproved: false,
+      laborUnpaid: false,
       warnings: [],
       blockers: [],
     }
   }
 
-  const laborConfirmedZero = isConfirmedZeroLabor(input.crew)
-  const missingLabor = !laborConfirmedZero && isLaborUnrecorded(input.crew)
+  const laborState = deriveLaborState(input.crew)
+  const laborConfirmedZero = laborState === 'ZERO_CONFIRMED'
+  const missingLabor =
+    laborState === 'NOT_ASSIGNED' || laborState === 'ASSIGNED_NO_HOURS' || isLaborUnrecorded(input.crew)
+  const laborUnapproved = laborState === 'HOURS_UNAPPROVED'
+  const laborUnpaid = laborState === 'APPROVED_UNPAID'
 
   const eligibleExpenses = input.expenses.filter(isEligibleExpense)
   const missingExpenses = eligibleExpenses.length === 0
@@ -120,6 +197,22 @@ export function evaluateFinancialCompleteness(input: CompletenessInput): Financi
     warnings.push(MISSING_LABOR_WARNING)
     blockers.push(MISSING_LABOR_WARNING)
   }
+  // PHASE 1: an open shift or an unpriceable one is just as blocking as no
+  // labor at all — the cost is still unknown, only for a different reason.
+  if (laborState === 'MISSING_CLOCK_OUT') {
+    warnings.push(MISSING_CLOCK_OUT_WARNING)
+    blockers.push(MISSING_CLOCK_OUT_WARNING)
+  }
+  if (laborState === 'MISSING_RATE') {
+    warnings.push(MISSING_RATE_WARNING)
+    blockers.push(MISSING_RATE_WARNING)
+  }
+  // Unapproved hours are a real number nobody has agreed to. Blocking, because
+  // finalizing a move whose labor cost is still provisional defeats the point.
+  if (laborUnapproved) {
+    warnings.push(UNAPPROVED_LABOR_WARNING)
+    blockers.push(UNAPPROVED_LABOR_WARNING)
+  }
   if (noCapturedPayment) {
     warnings.push(NO_PAYMENT_WARNING)
     blockers.push(NO_PAYMENT_WARNING)
@@ -131,7 +224,7 @@ export function evaluateFinancialCompleteness(input: CompletenessInput): Financi
   if (missingExpenses) warnings.push(MISSING_EXPENSES_WARNING)
   if (unreviewedExpenses) warnings.push(UNREVIEWED_EXPENSE_NOTICE)
 
-  const isComplete = !missingLabor && !missingExpenses && !missingPaymentData
+  const isComplete = blockers.length === 0 && !missingExpenses
 
   return {
     isComplete,
@@ -141,6 +234,9 @@ export function evaluateFinancialCompleteness(input: CompletenessInput): Financi
     missingPaymentData,
     unreviewedExpenses,
     laborConfirmedZero,
+    laborState,
+    laborUnapproved,
+    laborUnpaid,
     warnings,
     blockers,
   }
@@ -150,7 +246,12 @@ export function evaluateFinancialCompleteness(input: CompletenessInput): Financi
 export function completenessLabel(c: FinancialCompleteness): string {
   if (c.status === 'NOT_APPLICABLE') return 'Not started'
   if (c.isComplete) return 'Complete'
+  // PHASE 1: name the SPECIFIC labor problem before the generic one — "missing
+  // labor" sends the owner looking for an assignment that already exists.
+  if (c.laborState === 'MISSING_CLOCK_OUT') return 'Missing clock-out'
+  if (c.laborState === 'MISSING_RATE') return 'Missing pay rate'
   if (c.missingLabor) return 'Missing labor'
+  if (c.laborUnapproved) return 'Hours need approval'
   if (c.missingPaymentData) return 'Missing payment info'
   if (c.missingExpenses) return 'Missing expenses'
   return 'Financial data incomplete'
