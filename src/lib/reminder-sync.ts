@@ -11,7 +11,7 @@
 // ============================================================================
 
 import { prisma } from './db'
-import { moveDayDueCents, jobProfit } from './job-money'
+import { moveDayDueCents, jobProfit, JOB_MONEY_PAYMENT_SELECT } from './job-money'
 import {
   evaluateAll,
   computeSyncActions,
@@ -52,7 +52,7 @@ export async function performSync(now = new Date()): Promise<SyncResult> {
       },
       include: {
         customer: { select: { name: true, phone: true, email: true } },
-        payments: { select: { amount: true, status: true, isInternalTest: true, stripePaymentIntentId: true, stripeChargeId: true } },
+        payments: { select: JOB_MONEY_PAYMENT_SELECT },
         job: { include: { crew: { include: { user: { select: { name: true, payRate: true } } } } } },
         expenses: { select: { id: true, category: true, amount: true, status: true, receiptUrl: true, vendor: true, createdAt: true } },
       },
@@ -117,7 +117,7 @@ export async function performSync(now = new Date()): Promise<SyncResult> {
       hasFailedPayment: b.payments.some((p) => p.status === 'FAILED' && !p.isInternalTest),
       hasWorkerPayExpense: b.expenses.some((e) => e.category === 'WORKER_PAY' && e.status !== 'REJECTED'),
       moveDayDueCents: moveDayDueCents(b),
-      grossRevenueCents: profit.grossRevenueCents,
+      netRevenueCents: profit.netRevenueCents,
       netProfitCents: profit.netProfitCents,
     }
   })

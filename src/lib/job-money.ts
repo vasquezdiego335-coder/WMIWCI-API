@@ -5,6 +5,7 @@
 
 import { effectiveWaitingFeeCents } from './waiting-time'
 import { computeJobProfit, isStripePayment, type JobProfit } from './profit'
+import { evaluateFinancialCompleteness, type FinancialCompleteness } from './financial-completeness'
 
 export interface BookingMoneyShape {
   status: string
@@ -32,10 +33,39 @@ export interface BookingMoneyShape {
   truckProvider?: string | null
   truckReservationStatus?: string | null
   truckReservationNumber?: string | null
-  payments: { amount: number; status: string; isInternalTest?: boolean | null; stripePaymentIntentId?: string | null; stripeChargeId?: string | null }[]
+  payments: {
+    amount: number
+    status: string
+    isInternalTest?: boolean | null
+    stripePaymentIntentId?: string | null
+    stripeChargeId?: string | null
+    // Phase 0: the REAL refunded amount + dispute state drive net revenue.
+    // A page that forgets to select these under-reports refunds, so
+    // JOB_MONEY_PAYMENT_SELECT below is the one blessed selection.
+    refundedAmountCents?: number | null
+    stripeDisputeId?: string | null
+    disputeStatus?: string | null
+  }[]
   job?: { crew: JobCrewShape[] } | null
-  expenses?: { amount: number }[]
+  expenses?: { amount: number; status: string }[]
 }
+
+/** THE Prisma `select` for payments feeding job money. Use this everywhere so
+ *  no surface silently drops the refund/dispute columns. */
+export const JOB_MONEY_PAYMENT_SELECT = {
+  amount: true,
+  status: true,
+  isInternalTest: true,
+  stripePaymentIntentId: true,
+  stripeChargeId: true,
+  refundedAmountCents: true,
+  stripeDisputeId: true,
+  disputeStatus: true,
+} as const
+
+/** THE Prisma `select` for job-linked expenses (status is required so rejected
+ *  rows can be excluded by money-rules, not by an ad-hoc page filter). */
+export const JOB_MONEY_EXPENSE_SELECT = { amount: true, status: true } as const
 
 export interface JobCrewShape {
   actualHours?: number | null
@@ -68,15 +98,23 @@ export function moveDayDueCents(b: BookingMoneyShape): number {
   )
 }
 
-/** Recorded per-job profit (revenue − crew − expenses − Stripe fees − refunds).
+/** Recorded per-job profit: NET collected revenue (captured − refunds −
+ *  chargebacks) − crew pay − eligible job expenses − Stripe fees.
  *  Reflects money actually recorded as Payment rows + logged crew pay/expenses;
- *  move-day cash only counts once it's recorded via "Record payment". */
+ *  move-day cash only counts once it's recorded via "Record payment".
+ *
+ *  A crewPayCents of 0 almost always means labor was never recorded, NOT that
+ *  it was free — always pair this with jobFinancialCompleteness() before
+ *  presenting the number. */
 export function jobProfit(b: BookingMoneyShape): JobProfit {
   return computeJobProfit({
     payments: b.payments.map((p) => ({
       amount: p.amount,
       status: p.status,
       isInternalTest: !!p.isInternalTest,
+      refundedAmountCents: p.refundedAmountCents ?? null,
+      stripeDisputeId: p.stripeDisputeId ?? null,
+      disputeStatus: p.disputeStatus ?? null,
       isStripe: isStripePayment(p),
     })),
     crew: (b.job?.crew ?? []).map((c) => ({
@@ -89,7 +127,25 @@ export function jobProfit(b: BookingMoneyShape): JobProfit {
       bonus: c.bonus,
       deductions: c.deductions,
     })),
-    expenses: (b.expenses ?? []).map((e) => ({ amount: e.amount })),
+    expenses: (b.expenses ?? []).map((e) => ({ amount: e.amount, status: e.status })),
+  })
+}
+
+/** What is still missing from this move's financial record. Every surface that
+ *  shows job profit must show this too — see docs/admin/phase0-financial-integrity.md. */
+export function jobFinancialCompleteness(b: BookingMoneyShape): FinancialCompleteness {
+  return evaluateFinancialCompleteness({
+    status: b.status,
+    crew: b.job?.crew ?? [],
+    expenses: b.expenses ?? [],
+    payments: b.payments.map((p) => ({
+      amount: p.amount,
+      status: p.status,
+      isInternalTest: !!p.isInternalTest,
+      refundedAmountCents: p.refundedAmountCents ?? null,
+      stripeDisputeId: p.stripeDisputeId ?? null,
+      disputeStatus: p.disputeStatus ?? null,
+    })),
   })
 }
 

@@ -86,7 +86,7 @@ export interface RuleBooking {
   hasWorkerPayExpense: boolean
   // Pre-computed by the loader from src/lib/job-money.ts (single-source math):
   moveDayDueCents: number
-  grossRevenueCents: number
+  netRevenueCents: number
   netProfitCents: number
 }
 
@@ -304,7 +304,7 @@ export function evaluateBooking(b: RuleBooking, now: Date): ReminderCandidate[] 
       })
     }
 
-    if (b.grossRevenueCents > 0 && b.netProfitCents < 0) {
+    if (b.netRevenueCents > 0 && b.netProfitCents < 0) {
       out.push({
         reminderType: 'job-negative-profit', category: 'FINANCIAL',
         severity: negativeProfitSeverity(b.netProfitCents),

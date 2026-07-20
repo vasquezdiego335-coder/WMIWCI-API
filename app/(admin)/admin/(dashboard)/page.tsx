@@ -3,6 +3,8 @@ import { getSession } from '@/lib/auth'
 import Link from 'next/link'
 import { fmtCents, crewPayOwedCents } from '@/lib/profit'
 import { moveDayDueCents } from '@/lib/job-money'
+import { summarizeRevenue, ELIGIBLE_EXPENSE_WHERE, CAPTURED_PAYMENT_WHERE, isLaborUnrecorded } from '@/lib/money-rules'
+import { Callout } from './_ui'
 
 export const revalidate = 60 // revalidate every 60 seconds
 
@@ -29,17 +31,23 @@ async function getDashboardData() {
     }),
     prisma.booking.count({ where: { status: 'PENDING_APPROVAL', isInternalTest: false } }),
     prisma.booking.count({ where: { discountType: 'DOOR_HANGER_PENDING', isInternalTest: false } }),
-    prisma.payment.aggregate({
-      // isInternalTest=false: owner checkout tests never count as revenue.
-      where: { status: 'COMPLETED', isInternalTest: false, createdAt: { gte: monthStart } },
-      _sum: { amount: true },
+    // PHASE 0: revenue is NET (captured − refunds − chargebacks), derived by
+    // money-rules so this card can never disagree with the Revenue page or a
+    // job's Profit card. isInternalTest=false: owner tests are never revenue.
+    prisma.payment.findMany({
+      where: { ...CAPTURED_PAYMENT_WHERE, isInternalTest: false, createdAt: { gte: monthStart } },
+      select: { amount: true, status: true, isInternalTest: true, refundedAmountCents: true, stripeDisputeId: true, disputeStatus: true },
     }),
-    prisma.expense.aggregate({ where: { incurredOn: { gte: monthStart } }, _sum: { amount: true } }),
+    // PHASE 0: REJECTED expenses are excluded here exactly as they are on Owner
+    // Money. Before this fix the two pages reported different monthly totals
+    // from the same rows.
+    prisma.expense.aggregate({ where: { ...ELIGIBLE_EXPENSE_WHERE, incurredOn: { gte: monthStart } }, _sum: { amount: true } }),
     // REAL operational bookings only. Two exclusions fix the inflated "53":
     //  • PENDING_PAYMENT = abandoned checkout (submitted, Stripe never paid) — not a booking.
     //  • isInternalTest = the owner's own checkout tests (flagged by signal).
     prisma.booking.count({ where: { status: { in: ['PENDING_APPROVAL', 'CONFIRMED', 'SCHEDULED', 'IN_PROGRESS', 'COMPLETED'] }, isInternalTest: false } }),
-    // Live jobs → outstanding move-day balances + unpaid crew (money-spine cards).
+    // Live jobs → outstanding move-day balances + unpaid crew (money-spine cards)
+    // + how many have no labor recorded at all (Phase 0 aggregate warning).
     prisma.booking.findMany({
       where: { status: { in: ['IN_PROGRESS', 'COMPLETED'] }, isInternalTest: false },
       select: {
@@ -63,28 +71,45 @@ async function getDashboardData() {
   const unpaidCrew = liveJobs.reduce((s, b) => s + (b.job?.crew ?? [])
     .filter((c) => c.payStatus !== 'PAID')
     .reduce((cs, c) => cs + crewPayOwedCents({ actualHours: c.actualHours, scheduledHours: c.scheduledHours, payRate: c.payRate, userPayRate: c.user?.payRate, flatPay: c.flatPay, tips: c.tips, bonus: c.bonus, deductions: c.deductions }), 0), 0)
+  // Worked moves whose labor cost is UNKNOWN (not zero). Drives the banner.
+  const movesMissingLabor = liveJobs.filter((b) => isLaborUnrecorded(b.job?.crew ?? [])).length
 
-  return { todayBookings, pendingApproval, pendingDiscounts, thisMonthRevenue, thisMonthExpenses, totalBookings, outstandingBalances, unpaidCrew, attentionReminders }
+  const revenue = summarizeRevenue(thisMonthRevenue)
+
+  return { todayBookings, pendingApproval, pendingDiscounts, revenue, thisMonthExpenses, totalBookings, outstandingBalances, unpaidCrew, movesMissingLabor, liveJobCount: liveJobs.length, attentionReminders }
 }
 
 const SEVERITY_ICON: Record<string, string> = { CRITICAL: '🚨', HIGH: '⚠️', MEDIUM: '🟠', LOW: '🔹', INFO: 'ℹ️' }
 
 export default async function AdminDashboard() {
   const session = await getSession()
-  const { todayBookings, pendingApproval, pendingDiscounts, thisMonthRevenue, thisMonthExpenses, totalBookings, outstandingBalances, unpaidCrew, attentionReminders } = await getDashboardData()
+  const { todayBookings, pendingApproval, pendingDiscounts, revenue, thisMonthExpenses, totalBookings, outstandingBalances, unpaidCrew, movesMissingLabor, liveJobCount, attentionReminders } = await getDashboardData()
 
-  const revenueCents = thisMonthRevenue._sum.amount ?? 0
-  const expenseCents = thisMonthExpenses._sum.amount ?? 0
+  const revenueCents = revenue.netCollectedCents
+  const expenseCents = thisMonthExpenses._sum?.amount ?? 0
 
   return (
     <div>
       <h1 style={h1}>Dashboard</h1>
       <p style={subtitle}>Good morning, {session?.name}. Here's what's happening today.</p>
 
+      {/* PHASE 0: an aggregate that includes moves with no labor recorded is
+          overstated. Say so at the top, before any number is read. */}
+      {movesMissingLabor > 0 && (
+        <Callout
+          tone="warning"
+          title={`${movesMissingLabor} of ${liveJobCount} worked move${liveJobCount === 1 ? '' : 's'} ${movesMissingLabor === 1 ? 'has' : 'have'} no crew labor recorded.`}
+        >
+          Labor is the largest cost on a move and it cannot be entered in the admin yet, so
+          every profit and cash figure below is <strong>overstated</strong>. Revenue and expense
+          totals are unaffected. <Link href="/admin/jobs" style={{ color: '#FF5A1F', fontWeight: 700 }}>Review those moves →</Link>
+        </Callout>
+      )}
+
       {/* Money-spine cards (owner spec 2026-07-13). Net profit / cash available
           land with the Reports increment where the P&L rule is defined. */}
       <div style={statsGrid}>
-        <StatCard label="Revenue This Month" value={fmtCents(revenueCents)} color="#10B981" />
+        <StatCard label="Net Revenue This Month" value={fmtCents(revenueCents)} color="#10B981" />
         <StatCard label="Expenses This Month" value={fmtCents(expenseCents)} color="#C9A961" />
         <StatCard label="Outstanding Balances" value={fmtCents(outstandingBalances)} color={outstandingBalances > 0 ? '#F59E0B' : '#10B981'} />
         <StatCard label="Unpaid Worker Pay" value={fmtCents(unpaidCrew)} color={unpaidCrew > 0 ? '#EF4444' : '#10B981'} />

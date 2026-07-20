@@ -2,6 +2,7 @@ import Link from 'next/link'
 import { prisma } from '@/lib/db'
 import { getSession } from '@/lib/auth'
 import { fmtCents } from '@/lib/profit'
+import { isEligibleExpense, eligibleExpenseCents } from '@/lib/money-rules'
 import { PageHeader, StatCard, StatGrid, COLORS, Empty, tableStyles as T, Badge } from '../_ui'
 import { EXPENSE_CATEGORY_LABELS, EXPENSE_CATEGORY_ORDER, EXPENSE_STATUS_LABELS, EXPENSE_STATUS_COLORS, PAYMENT_METHOD_LABELS } from '../_labels'
 import ExpenseForm from '../ExpenseForm'
@@ -35,9 +36,15 @@ export default async function ExpensesPage({ searchParams }: { searchParams: { m
   })
 
   // Stats reflect the whole month; the table reflects the active filters.
-  const monthTotal = monthExpenses.reduce((s, e) => s + e.amount, 0)
-  const jobTotal = monthExpenses.filter((e) => e.bookingId).reduce((s, e) => s + e.amount, 0)
+  // PHASE 0: totals count ELIGIBLE expenses only (REJECTED excluded), using the
+  // one shared rule in money-rules so this page, the dashboard and Owner Money
+  // can never report different figures for the same rows. Rejected rows stay
+  // listed below — visible, struck through, and counted nowhere.
+  const monthTotal = eligibleExpenseCents(monthExpenses)
+  const jobTotal = eligibleExpenseCents(monthExpenses.filter((e) => e.bookingId))
   const generalTotal = monthTotal - jobTotal
+  const eligibleCount = monthExpenses.filter(isEligibleExpense).length
+  const rejectedCents = monthExpenses.filter((e) => !isEligibleExpense(e)).reduce((s, e) => s + e.amount, 0)
   const needsReview = monthExpenses.filter((e) => e.status === 'SUBMITTED' || e.status === 'NEEDS_REVIEW').length
 
   const filtered = monthExpenses.filter((e) => {
@@ -58,7 +65,7 @@ export default async function ExpensesPage({ searchParams }: { searchParams: { m
       <ExpenseForm />
 
       <StatGrid>
-        <StatCard label={`Total · ${label}`} value={fmtCents(monthTotal)} accent={COLORS.navy} sub={`${monthExpenses.length} expense${monthExpenses.length === 1 ? '' : 's'}`} />
+        <StatCard label={`Total · ${label}`} value={fmtCents(monthTotal)} accent={COLORS.navy} sub={rejectedCents > 0 ? `${eligibleCount} counted · ${fmtCents(rejectedCents)} rejected, excluded` : `${eligibleCount} expense${eligibleCount === 1 ? '' : 's'}`} />
         <StatCard label="Job-linked" value={fmtCents(jobTotal)} accent={COLORS.orange} sub="reduces job profit" />
         <StatCard label="General business" value={fmtCents(generalTotal)} accent={COLORS.gold} sub="Railway, ads, insurance…" />
         <StatCard label="Needs review" value={String(needsReview)} accent={needsReview > 0 ? COLORS.amber : COLORS.green} sub={needsReview > 0 ? 'awaiting approval' : 'all reviewed'} />
@@ -99,11 +106,11 @@ export default async function ExpensesPage({ searchParams }: { searchParams: { m
               </thead>
               <tbody>
                 {filtered.map((e) => (
-                  <tr key={e.id}>
+                  <tr key={e.id} style={isEligibleExpense(e) ? undefined : { opacity: 0.55 }}>
                     <td style={T.td}>{dateOnly(e.incurredOn)}</td>
                     <td style={T.td}>{EXPENSE_CATEGORY_LABELS[e.category] ?? e.category}</td>
                     <td style={T.td}>{e.vendor ?? '—'}</td>
-                    <td style={{ ...T.td, fontWeight: 700, fontVariantNumeric: 'tabular-nums' }}>{fmtCents(e.amount)}</td>
+                    <td style={{ ...T.td, fontWeight: 700, fontVariantNumeric: 'tabular-nums', textDecoration: isEligibleExpense(e) ? 'none' : 'line-through' }} title={isEligibleExpense(e) ? undefined : 'Rejected — excluded from every total'}>{fmtCents(e.amount)}</td>
                     <td style={T.td}>{e.paymentMethod ? PAYMENT_METHOD_LABELS[e.paymentMethod] : '—'}</td>
                     <td style={T.td}>{e.paidBy ?? '—'}</td>
                     <td style={T.td}>

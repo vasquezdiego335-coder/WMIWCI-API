@@ -14,7 +14,10 @@ import {
   WAITING_RESCHEDULE_THRESHOLD_MINUTES,
 } from '@/lib/waiting-time'
 import { crewPayOwedCents } from '@/lib/profit'
-import { jobProfit } from '@/lib/job-money'
+import { jobProfit, jobFinancialCompleteness } from '@/lib/job-money'
+import { completenessLabel } from '@/lib/financial-completeness'
+import { isEligibleExpense } from '@/lib/money-rules'
+import { Callout, CompletenessBadge } from '../../_ui'
 import ExpenseForm from '../../ExpenseForm'
 import { EXPENSE_CATEGORY_LABELS } from '../../_labels'
 
@@ -89,14 +92,18 @@ export default async function JobDetail({ params }: { params: { id: string } }) 
   const lifetimeCents = custBookings.flatMap((b) => b.payments).reduce((s, p) => s + p.amount, 0)
   const previousMoves = custBookings.filter((b) => b.status === 'COMPLETED' && b.id !== booking.id).length
 
-  const collected = booking.payments.filter((p) => p.status === 'COMPLETED' && !p.isInternalTest).reduce((s, p) => s + p.amount, 0)
-  const refunded = booking.payments.filter((p) => p.status === 'REFUNDED' && !p.isInternalTest).reduce((s, p) => s + p.amount, 0)
   const moveDayDue = (booking.truckAddonAmount ?? 0) + (booking.travelFee ?? 0) + (booking.additionalTruckFees ?? 0) + effectiveWaitingFeeCents(booking)
     + (booking.stairFee ?? 0) + (booking.longCarryFee ?? 0) + (booking.heavyItemFee ?? 0)
     + (booking.packingFee ?? 0) + (booking.assemblyFee ?? 0) + (booking.disassemblyFee ?? 0) + (booking.taxAmount ?? 0)
-  // Per-job profit (recorded money): revenue − crew pay − job expenses − Stripe
-  // fees − refunds. Shares the exact math with the Jobs list + dashboard.
+  // Per-job profit (recorded money): NET collected revenue (captured − refunds
+  // − chargebacks) − crew pay − eligible expenses − Stripe fees. Shares the
+  // exact math with the Jobs list + dashboard via src/lib/money-rules.ts.
   const profit = jobProfit(booking)
+  // What is still missing from this move's money story (Phase 0). Never present
+  // a profit figure without it — crew pay of $0 usually means "not recorded".
+  const completeness = jobFinancialCompleteness(booking)
+  const collected = profit.netRevenueCents
+  const refunded = profit.refundedCents
   const crewRows = booking.job?.crew ?? []
   const crewTotalOwed = crewRows.reduce((s, cr) => s + crewPayOwedCents({ actualHours: cr.actualHours, scheduledHours: cr.scheduledHours, payRate: cr.payRate, userPayRate: cr.user.payRate, flatPay: cr.flatPay, tips: cr.tips, bonus: cr.bonus, deductions: cr.deductions }), 0)
   const crewPaidOwed = crewRows.filter((cr) => cr.payStatus !== 'PAID').reduce((s, cr) => s + crewPayOwedCents({ actualHours: cr.actualHours, scheduledHours: cr.scheduledHours, payRate: cr.payRate, userPayRate: cr.user.payRate, flatPay: cr.flatPay, tips: cr.tips, bonus: cr.bonus, deductions: cr.deductions }), 0)
@@ -149,6 +156,9 @@ export default async function JobDetail({ params }: { params: { id: string } }) 
               <h1 style={h1}>{c.name}</h1>
               <Badge color={STATUS_COLORS[booking.status] ?? '#9CA3AF'}>{booking.status.replace(/_/g, ' ')}</Badge>
               <Badge color={collected > 0 ? '#10B981' : '#F59E0B'}>{paymentStatus}</Badge>
+              {completeness.status !== 'NOT_APPLICABLE' && (
+                <CompletenessBadge label={completenessLabel(completeness)} complete={completeness.isComplete} />
+              )}
             </div>
             <div style={{ fontSize: '12px', color: '#9CA3AF' }}>#{booking.displayId} · {booking.serviceAreaZone ? String(booking.serviceAreaZone).replace(/_/g, ' ') : '—'} · booked {dateOnly(booking.createdAt)}</div>
           </div>
@@ -312,25 +322,74 @@ export default async function JobDetail({ params }: { params: { id: string } }) 
             </div>
           </Card>
 
-          {/* Section 7b: Job Profit & Costs (admin OS) */}
-          <Card title="Job Profit & Costs" icon="📊" action={<span style={{ fontSize: '11px', color: '#9CA3AF' }}>recorded money</span>}>
+          {/* Section 7b: Job Profit & Costs (admin OS; Phase 0 completeness) */}
+          <Card
+            title="Job Profit & Costs"
+            icon="📊"
+            action={
+              completeness.status === 'NOT_APPLICABLE'
+                ? <span style={{ fontSize: '11px', color: '#9CA3AF' }}>recorded money</span>
+                : <CompletenessBadge label={completenessLabel(completeness)} complete={completeness.isComplete} />
+            }
+          >
+            {/* The warning comes BEFORE the number on purpose: an incomplete
+                profit figure must never be read as final. */}
+            {completeness.warnings.length > 0 && (
+              <Callout
+                tone={completeness.blockers.length > 0 ? 'danger' : 'warning'}
+                title={completeness.blockers.length > 0 ? 'This profit figure is incomplete' : 'Check before relying on this figure'}
+              >
+                <ul style={{ margin: 0, paddingLeft: '18px' }}>
+                  {completeness.warnings.map((w) => <li key={w}>{w}</li>)}
+                </ul>
+              </Callout>
+            )}
+
             <div style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
-              <Row label="Revenue collected" value={cents(profit.grossRevenueCents) ?? '$0.00'} strong />
+              <Row label="Captured payments" value={cents(profit.grossCapturedCents) ?? '$0.00'} />
+              {profit.refundedCents > 0 && <Row label="− Refunded" value={cents(profit.refundedCents)!} />}
+              {profit.chargebackCents > 0 && <Row label="− Chargebacks (lost)" value={cents(profit.chargebackCents)!} />}
+              <Row label="Net revenue collected" value={cents(profit.netRevenueCents) ?? '$0.00'} strong />
+              {profit.authorizedNotCapturedCents > 0 && (
+                <div style={{ fontSize: '11px', color: '#9CA3AF', textAlign: 'right' }}>
+                  {cents(profit.authorizedNotCapturedCents)} authorized but not captured — not revenue
+                </div>
+              )}
+              {profit.pendingDisputeCents > 0 && (
+                <div style={{ fontSize: '11px', color: '#B45309', textAlign: 'right' }}>
+                  {cents(profit.pendingDisputeCents)} disputed and at risk
+                </div>
+              )}
               <div style={divider} />
-              <Row label="− Crew pay" value={cents(profit.crewPayCents) ?? '$0.00'} />
-              <Row label="− Job expenses" value={cents(profit.expenseCents) ?? '$0.00'} />
+              <Row
+                label="− Crew pay"
+                value={
+                  completeness.missingLabor
+                    ? 'not recorded'
+                    : completeness.laborConfirmedZero
+                      ? '$0.00 (confirmed)'
+                      : cents(profit.crewPayCents) ?? '$0.00'
+                }
+              />
+              <Row label="− Job expenses" value={completeness.missingExpenses ? 'none recorded' : cents(profit.expenseCents) ?? '$0.00'} />
               <Row label="− Stripe fees (est.)" value={cents(profit.stripeFeeCents) ?? '$0.00'} />
-              {profit.refundedCents > 0 && <Row label="− Refunds" value={cents(profit.refundedCents)!} />}
               <div style={divider} />
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '4px' }}>
-                <span style={{ fontSize: '13px', fontWeight: 700, color: '#0A1628' }}>Net profit</span>
-                <span style={{ fontSize: '20px', fontWeight: 800, color: profit.netProfitCents >= 0 ? '#C9A961' : '#EF4444', fontVariantNumeric: 'tabular-nums' }}>{cents(profit.netProfitCents) ?? '$0.00'}</span>
+                <span style={{ fontSize: '13px', fontWeight: 700, color: '#0A1628' }}>
+                  Gross profit{completeness.isComplete ? '' : ' (incomplete)'}
+                </span>
+                <span style={{ fontSize: '20px', fontWeight: 800, color: !completeness.isComplete && completeness.status !== 'NOT_APPLICABLE' ? '#B45309' : profit.netProfitCents >= 0 ? '#C9A961' : '#EF4444', fontVariantNumeric: 'tabular-nums' }}>{cents(profit.netProfitCents) ?? '$0.00'}</span>
               </div>
-              {profit.marginPct != null && (
-                <div style={{ fontSize: '11px', color: '#9CA3AF', textAlign: 'right', marginTop: '2px' }}>{Math.round(profit.marginPct * 100)}% margin · crew owed {cents(crewPaidOwed) ?? '$0.00'} unpaid</div>
-              )}
+              <div style={{ fontSize: '11px', color: '#9CA3AF', textAlign: 'right', marginTop: '2px' }}>
+                {profit.marginPct != null && <>{Math.round(profit.marginPct * 100)}% margin · </>}
+                crew owed {cents(crewPaidOwed) ?? '$0.00'} unpaid
+              </div>
+              {/* Honest label: overhead allocation is Phase 3, so this is gross. */}
+              <div style={{ fontSize: '11px', color: '#9CA3AF', textAlign: 'right' }}>
+                before company overhead (not yet allocated)
+              </div>
             </div>
-            {profit.grossRevenueCents <= (booking.depositPaid ? booking.depositAmount : 0) && (
+            {profit.netRevenueCents <= (booking.depositPaid ? booking.depositAmount : 0) && (
               <p style={{ fontSize: '11px', color: '#B45309', background: '#FFFBEB', border: '1px solid #FDE68A', borderRadius: '6px', padding: '7px 9px', margin: '10px 0 0' }}>
                 Only the deposit is recorded. Use “Record payment” to log move-day cash so profit is accurate.
               </p>
@@ -342,15 +401,25 @@ export default async function JobDetail({ params }: { params: { id: string } }) 
             {booking.expenses.length === 0 ? (
               <Empty>No expenses logged for this job</Empty>
             ) : (
-              booking.expenses.map((e, i) => (
-                <div key={e.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '12px', padding: '8px 0', borderBottom: i < booking.expenses.length - 1 ? '1px solid #F3F4F6' : 'none' }}>
-                  <div style={{ minWidth: 0 }}>
-                    <div style={{ fontSize: '13px', fontWeight: 600 }}>{EXPENSE_CATEGORY_LABELS[e.category] ?? e.category}{e.vendor ? ` · ${e.vendor}` : ''}</div>
-                    <div style={{ fontSize: '11px', color: '#9CA3AF' }}>{new Date(e.incurredOn).toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'America/New_York' })}{e.receiptUrl ? ' · ' : ''}{e.receiptUrl && <a href={e.receiptUrl} target="_blank" rel="noreferrer" style={{ color: '#FF5A1F' }}>receipt</a>}</div>
+              booking.expenses.map((e, i) => {
+                // Rejected rows stay VISIBLE (the spend happened and someone
+                // should see the decision) but are struck through and excluded
+                // from every total — money-rules.isEligibleExpense is the rule.
+                const counted = isEligibleExpense(e)
+                return (
+                  <div key={e.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '12px', padding: '8px 0', borderBottom: i < booking.expenses.length - 1 ? '1px solid #F3F4F6' : 'none', opacity: counted ? 1 : 0.55 }}>
+                    <div style={{ minWidth: 0 }}>
+                      <div style={{ fontSize: '13px', fontWeight: 600, textDecoration: counted ? 'none' : 'line-through' }}>{EXPENSE_CATEGORY_LABELS[e.category] ?? e.category}{e.vendor ? ` · ${e.vendor}` : ''}</div>
+                      <div style={{ fontSize: '11px', color: '#9CA3AF' }}>
+                        {new Date(e.incurredOn).toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'America/New_York' })}
+                        {!counted && ' · rejected — not counted'}
+                        {e.receiptUrl ? ' · ' : ''}{e.receiptUrl && <a href={e.receiptUrl} target="_blank" rel="noreferrer" style={{ color: '#FF5A1F' }}>receipt</a>}
+                      </div>
+                    </div>
+                    <div style={{ fontSize: '14px', fontWeight: 700, fontVariantNumeric: 'tabular-nums', textDecoration: counted ? 'none' : 'line-through' }}>{cents(e.amount)}</div>
                   </div>
-                  <div style={{ fontSize: '14px', fontWeight: 700, fontVariantNumeric: 'tabular-nums' }}>{cents(e.amount)}</div>
-                </div>
-              ))
+                )
+              })
             )}
             <div style={{ marginTop: '12px' }}>
               <ExpenseForm presetBookingId={booking.id} presetJobLabel={c.name} compact />
@@ -437,6 +506,13 @@ export default async function JobDetail({ params }: { params: { id: string } }) 
           {/* Crew & Payroll */}
           {booking.job && (
             <Card title="Crew & Payroll" icon="👥" action={crewTotalOwed > 0 ? <span style={{ fontSize: '11px', color: '#9CA3AF' }}>{cents(crewTotalOwed)} labor</span> : undefined}>
+              {completeness.missingLabor && (
+                <Callout tone="danger" title="Crew labor has not been recorded for this move.">
+                  Profit above may be overstated. Crew hours and pay cannot be entered in the
+                  admin yet — that is the next build (Phase 1). Until then this move&apos;s labor
+                  cost is <strong>unknown</strong>, not zero.
+                </Callout>
+              )}
               <Row label="Job status" value={booking.job.status} />
               {booking.job.startedAt && <Row label="Started" value={dateTime(booking.job.startedAt)} />}
               {booking.job.completedAt && <Row label="Completed" value={dateTime(booking.job.completedAt)} />}
@@ -464,6 +540,17 @@ export default async function JobDetail({ params }: { params: { id: string } }) 
                   {crewPaidOwed > 0 && <Row label="Unpaid" value={cents(crewPaidOwed)!} />}
                 </>
               )}
+            </Card>
+          )}
+
+          {/* No Job row at all yet — still say it plainly rather than let the
+              profit card imply labor was free. */}
+          {!booking.job && completeness.missingLabor && (
+            <Card title="Crew & Payroll" icon="👥">
+              <Callout tone="danger" title="Crew labor has not been recorded for this move.">
+                No crew record exists for this job, so its labor cost is <strong>unknown</strong>,
+                not zero. The profit figure above is incomplete.
+              </Callout>
             </Card>
           )}
         </div>
