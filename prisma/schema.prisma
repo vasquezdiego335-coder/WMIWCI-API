@@ -1362,18 +1362,33 @@ model EmailSend {
 /// Provider + first-party engagement events. `providerEventId` is unique so a
 /// duplicate webhook delivery is a no-op (providers retry aggressively).
 model EmailEvent {
-  id              String   @id @default(cuid())
+  id                 String   @id @default(cuid())
   /// Provider event id, or a synthesized stable id for first-party events.
-  providerEventId String   @unique @map("provider_event_id")
-  emailSendId     String?  @map("email_send_id")
-  email           String
+  providerEventId    String   @unique @map("provider_event_id")
+  emailSendId        String?  @map("email_send_id")
+  email              String
   /// 'delivered' | 'bounced' | 'complained' | 'opened' | 'clicked' |
   /// 'delivery_delayed' | 'unsubscribed'
-  type            String
+  type               String
   /// Raw provider payload excerpt for triage (never PII beyond the address).
-  detail          String?
-  occurredAt      DateTime @default(now()) @map("occurred_at")
-  createdAt       DateTime @default(now()) @map("created_at")
+  detail             String?
+  /// SIDE-EFFECT PROCESSING STATE (finding EMAIL-P0-01).
+  /// Recording the event and APPLYING its consequence (suppressing a bounced or
+  /// complaining address) are two different things. Previously only the record
+  /// existed, so a failed suppression write left an address permanently
+  /// sendable while the unique providerEventId deduplicated away every retry.
+  /// 'processed'          — no side effect needed, or it completed
+  /// 'side_effect_pending'— a suppression is required and not yet confirmed
+  /// 'side_effect_failed' — the suppression write failed; MUST be retried
+  /// 'dead_letter'        — exhausted retries; needs a human
+  processingStatus   String   @default("processed") @map("processing_status")
+  /// How many times the side effect has been attempted.
+  sideEffectAttempts Int      @default(0) @map("side_effect_attempts")
+  /// Last side-effect error, for triage.
+  sideEffectError    String?  @map("side_effect_error")
+  occurredAt         DateTime @default(now()) @map("occurred_at")
+  createdAt          DateTime @default(now()) @map("created_at")
+  updatedAt          DateTime @updatedAt @map("updated_at")
 
   emailSend EmailSend? @relation(fields: [emailSendId], references: [id])
 
@@ -1381,5 +1396,7 @@ model EmailEvent {
   @@index([type])
   @@index([emailSendId])
   @@index([occurredAt])
+  /// Drives the retry sweep for unfinished side effects.
+  @@index([processingStatus])
   @@map("email_events")
 }

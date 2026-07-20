@@ -95,58 +95,102 @@ export type SuppressInput = {
 }
 
 /**
- * Add (or escalate) an address on the suppression list. Idempotent.
+ * The outcome of a suppression write.
+ *
+ * WHY THIS IS A UNION AND NOT A BOOLEAN (finding EMAIL-P0-01):
+ * `suppress()` used to return `boolean`, where `false` meant BOTH "already
+ * covered, nothing to do" AND "the database write failed". Callers could not
+ * tell those apart, so the webhook handler treated a failed write as success,
+ * returned HTTP 200, and — because the EmailEvent row had already been written
+ * with a unique providerEventId — the provider's retry was deduplicated away.
+ * The address stayed sendable forever with no trace. A boolean cannot express
+ * "I did not do the thing you asked", so it is gone.
+ */
+export type SuppressionResult =
+  | { status: 'created' }
+  | { status: 'already_suppressed' }
+  | { status: 'escalated' }
+  | { status: 'not_required'; reason: string }
+  | { status: 'write_failed'; error: unknown }
+
+/** True when the address is definitely on the list at the required scope. */
+export function isSuppressionSettled(r: SuppressionResult): boolean {
+  return r.status === 'created' || r.status === 'already_suppressed' || r.status === 'escalated'
+}
+
+/**
+ * Add (or escalate) an address on the suppression list. Idempotent and ATOMIC.
  *
  * Escalation rule: a later, MORE severe signal wins. An address that
  * unsubscribed and then hard-bounced ends up scope 'all'. The reverse never
  * happens — an unsubscribe can never downgrade an existing 'all' block.
  *
- * Returns true when the row was created or escalated, false when it was already
- * covered. Never throws: suppression is called from webhook handlers where a
- * throw would make the provider retry forever.
+ * CONCURRENCY (finding EMAIL-P1-09): the previous implementation did
+ * `findUnique` then `create`/`update` outside a transaction, so a concurrent
+ * unsubscribe and hard-bounce could interleave and leave the WEAKER state. Both
+ * writes are now single atomic statements:
+ *   • promotional → `create`, and a unique-violation is re-read (someone else
+ *     got there first; their row is at least as strong, because a promotional
+ *     write never needs to widen anything).
+ *   • all        → `upsert`, whose update branch unconditionally sets
+ *     scope='all'. Severity only ever increases.
+ *
+ * Never throws — it returns `write_failed` instead, because this is called from
+ * webhook handlers where a throw would make the provider retry forever.
  */
-export async function suppress(input: SuppressInput): Promise<boolean> {
+export async function suppress(input: SuppressInput): Promise<SuppressionResult> {
   const email = normalizeEmail(input.email)
-  if (!email) return false
+  if (!email) return { status: 'not_required', reason: 'blank_email' }
 
   const scope = scopeForReason(input.reason)
+  const detail = input.detail?.slice(0, 500) ?? null
 
   try {
-    const existing = await prisma.emailSuppression.findUnique({ where: { email } })
-
-    if (!existing) {
-      await prisma.emailSuppression.create({
-        data: {
-          email,
-          reason: input.reason,
-          scope,
-          source: input.source ?? null,
-          detail: input.detail?.slice(0, 500) ?? null,
-        },
+    if (scope === 'all') {
+      // A total block always wins. One statement, no read-modify-write window:
+      // if a row exists at ANY scope this widens it; if not, it creates it.
+      const before = await prisma.emailSuppression.findUnique({
+        where: { email },
+        select: { scope: true },
       })
-      log.info({ reason: input.reason, scope, source: input.source }, 'address suppressed')
-      return true
+      await prisma.emailSuppression.upsert({
+        where: { email },
+        create: { email, reason: input.reason, scope: 'all', source: input.source ?? null, detail },
+        update: { reason: input.reason, scope: 'all', source: input.source ?? undefined, detail: detail ?? undefined },
+      })
+      if (!before) {
+        log.info({ reason: input.reason, source: input.source }, 'address suppressed (all)')
+        return { status: 'created' }
+      }
+      if (before.scope === 'all') return { status: 'already_suppressed' }
+      log.info({ reason: input.reason, source: input.source }, 'suppression escalated to scope=all')
+      return { status: 'escalated' }
     }
 
-    // Already blocked at the widest scope — nothing to escalate.
-    if (existing.scope === 'all' || scope === 'promotional') return false
-
-    await prisma.emailSuppression.update({
-      where: { email },
-      data: {
-        reason: input.reason,
-        scope: 'all',
-        source: input.source ?? existing.source,
-        detail: input.detail?.slice(0, 500) ?? existing.detail,
-      },
-    })
-    log.info({ reason: input.reason, source: input.source }, 'suppression escalated to scope=all')
-    return true
+    // Promotional: only ever creates. It must NEVER downgrade an existing row,
+    // so a unique violation is a success for our purposes — something at least
+    // as strong is already there.
+    try {
+      await prisma.emailSuppression.create({
+        data: { email, reason: input.reason, scope: 'promotional', source: input.source ?? null, detail },
+      })
+      log.info({ reason: input.reason, source: input.source }, 'address suppressed (promotional)')
+      return { status: 'created' }
+    } catch (err) {
+      if ((err as { code?: string })?.code === 'P2002') return { status: 'already_suppressed' }
+      throw err
+    }
   } catch (err) {
-    log.error({ err: err instanceof Error ? err.message : String(err) }, 'suppress() failed')
-    return false
+    log.error({ err: err instanceof Error ? err.message : String(err) }, 'suppress() FAILED — caller must not report success')
+    return { status: 'write_failed', error: err }
   }
 }
+
+export type ResubscribeResult =
+  | { status: 'removed' }
+  | { status: 'not_suppressed' }
+  | { status: 'hard_suppression_refused' }
+  | { status: 'write_failed'; error: unknown }
 
 /**
  * Remove a PROMOTIONAL suppression (a genuine resubscribe).
@@ -156,42 +200,88 @@ export async function suppress(input: SuppressInput): Promise<boolean> {
  * re-mailing a complaining address is how a sending domain gets blocklisted.
  * Those require an explicit admin action with a recorded reason.
  *
- * Returns 'removed' | 'not_suppressed' | 'refused_hard_suppression' | 'failed'.
+ * CONCURRENCY (finding EMAIL-P1-09): this used to read the row, check its
+ * scope, then `delete({ where: { email } })`. A hard bounce landing between the
+ * read and the delete was silently destroyed — a customer's resubscribe click
+ * would erase a complaint suppression. The delete is now a SINGLE conditional
+ * statement scoped to `scope: 'promotional'`, so a row that escalated to 'all'
+ * in the meantime simply does not match and survives.
  */
-export async function resubscribe(
-  email: string
-): Promise<'removed' | 'not_suppressed' | 'refused_hard_suppression' | 'failed'> {
+export async function resubscribe(email: string): Promise<ResubscribeResult> {
   const normalized = normalizeEmail(email)
-  if (!normalized) return 'failed'
+  if (!normalized) return { status: 'not_suppressed' }
 
   try {
-    const existing = await prisma.emailSuppression.findUnique({ where: { email: normalized } })
-    if (!existing) return 'not_suppressed'
-    if (existing.scope === 'all') return 'refused_hard_suppression'
+    // Conditional delete — the scope filter IS the race guard.
+    const { count } = await prisma.emailSuppression.deleteMany({
+      where: { email: normalized, scope: 'promotional' },
+    })
+    if (count > 0) {
+      log.info('promotional suppression removed (resubscribe)')
+      return { status: 'removed' }
+    }
 
-    await prisma.emailSuppression.delete({ where: { email: normalized } })
-    log.info('promotional suppression removed (resubscribe)')
-    return 'removed'
+    // Nothing deleted: either there was no row, or it is an 'all' block we must
+    // not touch. Distinguish so the customer gets a truthful page.
+    const existing = await prisma.emailSuppression.findUnique({
+      where: { email: normalized },
+      select: { scope: true },
+    })
+    return existing ? { status: 'hard_suppression_refused' } : { status: 'not_suppressed' }
   } catch (err) {
-    log.error({ err: err instanceof Error ? err.message : String(err) }, 'resubscribe() failed')
-    return 'failed'
+    log.error({ err: err instanceof Error ? err.message : String(err) }, 'resubscribe() FAILED')
+    return { status: 'write_failed', error: err }
   }
 }
 
+export type UnsubscribeResult =
+  | { status: 'unsubscribed'; mirrored: boolean }
+  | { status: 'already_unsubscribed'; mirrored: boolean }
+  | { status: 'write_failed'; error: unknown }
+
 /**
  * Record an email unsubscribe. Also mirrors onto Customer.marketingOptOut so the
- * existing SMS/follow-up guards (which read that flag) agree with the new list —
- * one opt-out, honoured by every path, in both directions.
+ * older SMS/follow-up guards (which read that flag) agree with the list — one
+ * opt-out, honoured by every path.
+ *
+ * TRUTHFULNESS (finding EMAIL-P1-07): this used to return a bare boolean that
+ * conflated "already unsubscribed" with "the write failed", and the route showed
+ * a success page either way. It now reports what actually happened, and the
+ * route is required to act on it.
+ *
+ * PARTIAL SUCCESS is explicit rather than hidden. The suppression list is the
+ * AUTHORITATIVE record and is written first; the Customer mirror is a
+ * convenience for older guards. If the MIRROR fails we still report success —
+ * the customer IS unsubscribed, because every send path consults the list — but
+ * `mirrored: false` is surfaced for operations. If the SUPPRESSION write fails,
+ * that is a real failure and is reported as one.
  */
-export async function unsubscribeEmail(email: string, source = 'unsubscribe-link'): Promise<boolean> {
+export async function unsubscribeEmail(
+  email: string,
+  source = 'unsubscribe-link'
+): Promise<UnsubscribeResult> {
   const normalized = normalizeEmail(email)
-  if (!normalized) return false
+  if (!normalized) return { status: 'write_failed', error: new Error('blank email') }
 
-  const created = await suppress({ email: normalized, reason: 'UNSUBSCRIBED', source })
+  const result = await suppress({ email: normalized, reason: 'UNSUBSCRIBED', source })
+  if (result.status === 'write_failed') return { status: 'write_failed', error: result.error }
+  if (result.status === 'not_required') {
+    return { status: 'write_failed', error: new Error(result.reason) }
+  }
 
+  let mirrored = true
   await prisma.customer
     .updateMany({ where: { email: normalized }, data: { marketingOptOut: true } })
-    .catch((err) => log.warn({ err: String(err) }, 'mirror to Customer.marketingOptOut failed (non-fatal)'))
+    .catch((err) => {
+      mirrored = false
+      log.warn(
+        { err: String(err) },
+        'suppression WRITTEN but Customer.marketingOptOut mirror failed — sends are still blocked by the list'
+      )
+    })
 
-  return created
+  return {
+    status: result.status === 'already_suppressed' ? 'already_unsubscribed' : 'unsubscribed',
+    mirrored,
+  }
 }

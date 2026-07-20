@@ -7,6 +7,7 @@ import { queueLogger } from '../lib/logger'
 import { guardedSend, classifyTemplate } from '../lib/email-guard'
 import { unsubscribeUrl } from '../lib/email-tokens'
 import { emailQueue } from '../lib/queues'
+import { bookingEligibility } from '../lib/email-eligibility'
 import type { EmailJobData } from '../lib/queues'
 
 // ── Email template imports ─────────────────────────────────────
@@ -130,68 +131,18 @@ const SUBJECTS: Record<EmailJobData['template'], string> = {
 }
 
 // ════════════════════════════════════════════════════════════════════════
-//  SEND-TIME STOP RULES — the LAST guard before a message leaves.
+//  SEND-TIME STOP RULES — delegated to the CANONICAL predicate.
 //  ---------------------------------------------------------------------
-//  A queue job may have been scheduled days ago. Deleting the queue record is
-//  NOT the only protection: this runs immediately before the provider call and
-//  reloads the booking's CURRENT state. If the world moved on — the customer
-//  paid, cancelled, or the move date passed — the message dies here.
+//  This used to be a hand-written switch that, for 'final-confirmation',
+//  blocked only 'CANCELLED' — while src/emails/status.ts said the template is
+//  truthful ONLY in CONFIRMED/SCHEDULED/IN_PROGRESS/COMPLETED. Two tables, two
+//  answers, and the weaker one was the one that ran (finding EMAIL-P0-02).
 //
-//  Returns a reason string to ABORT, or null to proceed.
+//  There is now exactly one answer: src/lib/email-eligibility.bookingEligibility,
+//  which reloads the booking and applies the status table from status.ts PLUS
+//  the workflow condition the template actually asserts. See that module for why
+//  a status match alone is not sufficient.
 // ════════════════════════════════════════════════════════════════════════
-async function stillWantedForBooking(template: string, bookingId: string): Promise<string | null> {
-  const booking = await prisma.booking.findUnique({
-    where: { id: bookingId },
-    select: {
-      status: true,
-      isInternalTest: true,
-      requestedDate: true,
-      confirmedDate: true,
-      scheduledStart: true,
-      completedAt: true,
-    },
-  })
-  if (!booking) return 'booking_deleted'
-  if (booking.isInternalTest) return 'internal_test_booking'
-
-  const moveDate = booking.scheduledStart ?? booking.confirmedDate ?? booking.requestedDate
-  // Compare against the END of the move day — a job at 9am is still "today".
-  const movePassed = moveDate ? moveDate.getTime() + 24 * 3_600_000 < Date.now() : false
-
-  switch (template) {
-    // Recovery mail only makes sense while the deposit is genuinely unpaid.
-    case 'abandoned-checkout':
-    case 'abandoned-checkout-2':
-    case 'abandoned-checkout-3':
-      if (booking.status !== 'PENDING_PAYMENT') return `booking_advanced:${booking.status}`
-      if (movePassed) return 'move_date_passed'
-      return null
-
-    // A reminder for a cancelled or already-finished move is noise.
-    case 'job-reminder':
-      if (!['CONFIRMED', 'SCHEDULED'].includes(booking.status)) return `booking_not_scheduled:${booking.status}`
-      if (movePassed) return 'move_date_passed'
-      return null
-
-    // Post-job mail requires the job to have actually happened.
-    case 'job-completion':
-    case 'review-request':
-    case 'review-reminder':
-    case 'referral':
-    case 'referral-ask':
-    case 'repeat-reminder':
-      if (booking.status !== 'COMPLETED') return `booking_not_completed:${booking.status}`
-      return null
-
-    // A confirmation must never go out for a cancelled booking.
-    case 'final-confirmation':
-      if (booking.status === 'CANCELLED') return 'booking_cancelled'
-      return null
-
-    default:
-      return null
-  }
-}
 
 /** Insert a 1x1 open-tracking pixel just before </body> (or append if none). */
 function injectOpenPixel(html: string, src: string): string {
@@ -281,7 +232,7 @@ async function processEmailJob(job: Job<EmailJobData>): Promise<void> {
     eventId: bookingId ?? job.id ?? undefined,
     bookingId: bookingId ?? undefined,
     payload: renderPayload,
-    recheck: bookingId ? () => stillWantedForBooking(template, bookingId) : undefined,
+    recheck: bookingId ? () => bookingEligibility(template, bookingId) : undefined,
   })
 
   if (!outcome.sent) {
