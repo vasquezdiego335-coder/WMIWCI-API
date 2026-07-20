@@ -23,6 +23,11 @@ const CREW_ALLOWED: Action[] = [
   'labor.view_own_labor',
 ]
 
+// Stage 3: MANAGER additionally does NOT get company profit reporting. They run
+// operations (move lists, estimate variance, crew efficiency, marketing
+// performance) without seeing what the company earns.
+const MANAGER_DENIED_EXTRA: Action[] = ['report.view_financial']
+
 export type Action =
   // Action Center
   | 'action_center.view'
@@ -89,6 +94,19 @@ export type Action =
   | 'distribution.approve' // authorize a distribution — owner only
   | 'distribution.record_payment' // record that a distribution was paid — owner only
   | 'distribution.void' // void a distribution — owner only
+  // ── Stage 3 reporting (owner spec 2026-07-20) ──
+  | 'report.view_operational' // move lists, estimate variance, crew efficiency
+  | 'report.view_financial' // P&L, company profit, margins
+  | 'report.view_owner_money' // owner equity activity — owner only
+  | 'report.view_worker_pay' // labor payables across workers
+  | 'report.view_marketing' // campaign performance + profit ROAS
+  | 'report.export' // download CSV/XLSX
+  | 'report.export_sensitive' // exports containing profit or pay — owner only
+  | 'report.save_shared_view' // publish a saved view to other users
+  | 'marketing.manage_campaign' // create/edit campaigns
+  | 'marketing.record_spend' // record campaign cost
+  | 'marketing.correct_attribution' // owner-assign a source — audited
+  | 'pricing.view_intelligence' // historical comparables + recommendations
   // Bookings
   | 'booking.approve' // approve a PENDING_APPROVAL booking (captures the $49 hold)
   | 'booking.decline' // decline/deny before capture (releases the hold)
@@ -146,6 +164,17 @@ const OWNER_ONLY: Action[] = [
   'distribution.approve',
   'distribution.record_payment',
   'distribution.void',
+  // ── Stage 3 (owner spec 2026-07-20) ──
+  // Owner equity activity and cross-worker pay are the two most sensitive
+  // report surfaces; a manager runs operations without seeing either.
+  'report.view_owner_money',
+  'report.view_worker_pay',
+  // An export is a file that leaves the building. Profit and pay exports are
+  // owner-only even though running the report on screen may not be.
+  'report.export_sensitive',
+  'report.save_shared_view',
+  // Overwriting how a customer was attributed changes marketing history.
+  'marketing.correct_attribution',
 ]
 
 // Everything not owner-only is available to OWNER + MANAGER. CREW is limited to
@@ -154,6 +183,7 @@ export function can(role: Role | null | undefined, action: Action): boolean {
   if (role === 'OWNER') return true
   if (role === 'CREW') return CREW_ALLOWED.includes(action)
   if (role !== 'MANAGER') return false
+  if (MANAGER_DENIED_EXTRA.includes(action)) return false
   return !OWNER_ONLY.includes(action)
 }
 

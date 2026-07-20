@@ -13,6 +13,24 @@ match these definitions or cite this file when it deliberately differs.**
 
 ---
 
+> ## STAGE 3 UPDATE (2026-07-20) — company reporting on top of snapshots
+>
+> See `docs/admin/stage3-reporting-analytics.md`.
+>
+> - Reports read the immutable `FinancialSnapshot` for finalized moves and
+>   **never recalculate them** from current settings. Provisional moves use live
+>   Stage 2 math and are always labelled.
+> - Every report declares a BASIS (cash vs accrual) and a SCOPE (finalized vs
+>   provisional vs combined); a mixed total carries an explicit warning.
+> - Reporting boundaries are business-local (America/New_York) over UTC storage,
+>   DST-safe, with an exclusive end.
+> - Marketing is judged by `Profit ROAS = attributed FINALIZED net profit /
+>   spend`, never by scans, leads or gross revenue.
+> - First-touch attribution is IMMUTABLE; corrections go to an owner-assigned
+>   source and are audited.
+> - Exports neutralize spreadsheet formulas losslessly, allow-list columns by
+>   role, and never log their own contents.
+
 > ## PHASE 2 UPDATE (2026-07-20) — financial closeout + durable snapshots
 >
 > See `docs/admin/phase2-financial-closeout.md`. The hierarchy is now complete

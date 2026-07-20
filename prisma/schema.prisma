@@ -163,6 +163,14 @@ enum AuditAction {
   DISTRIBUTION_PAID
   DISTRIBUTION_VOIDED
   SNAPSHOT_SUPERSEDED
+  // ── Stage 3 reporting (owner spec 2026-07-20) ──
+  REPORT_EXPORTED
+  SAVED_VIEW_CREATED
+  SAVED_VIEW_DELETED
+  CAMPAIGN_CREATED
+  CAMPAIGN_UPDATED
+  CAMPAIGN_SPEND_RECORDED
+  ATTRIBUTION_CORRECTED
   LEAD_CREATED
   LEAD_STATUS_CHANGED
   PRICE_CHANGED
@@ -824,6 +832,25 @@ model Booking {
   source  String? // QR src / tracking code carried by the booking URL
   foundUs String? @map("found_us") // "Where did you find us?" self-report
 
+  // ── Stage 3 attribution (owner spec 2026-07-20) ──
+  //    FIRST-TOUCH IS IMMUTABLE: it records how the customer originally found
+  //    the business. Corrections go to ownerAssignedSource, never here — see
+  //    marketing-profitability.canCorrectAttribution.
+  firstTouchSource    String?   @map("first_touch_source")
+  firstTouchCampaign  String?   @map("first_touch_campaign")
+  firstTouchAt        DateTime? @map("first_touch_at")
+  lastTouchSource     String?   @map("last_touch_source")
+  lastTouchCampaign   String?   @map("last_touch_campaign")
+  bookingSource       String?   @map("booking_source")
+  bookingCampaign     String?   @map("booking_campaign")
+  /// The source an owner decided to credit. Wins for BOOKING attribution.
+  ownerAssignedSource String?   @map("owner_assigned_source")
+  utmSource           String?   @map("utm_source")
+  utmMedium           String?   @map("utm_medium")
+  utmCampaign         String?   @map("utm_campaign")
+  utmContent          String?   @map("utm_content")
+  qrCampaign          String?   @map("qr_campaign")
+
   // ── Job completion (Phase 3) — set when the booking transitions to COMPLETED;
   //    the anchor time for the post-move follow-up sequence. ──
   completedAt DateTime? @map("completed_at")
@@ -848,6 +875,11 @@ model Booking {
   @@index([customerId])
   @@index([confirmedDate])
   @@index([customerToken])
+  // Stage 3 reporting: period scans, marketing rollups, city grouping.
+  @@index([completedAt])
+  @@index([source])
+  @@index([ownerAssignedSource])
+  @@index([originCity])
   @@map("bookings")
 }
 
@@ -1826,4 +1858,165 @@ model OwnerDistribution {
   @@index([bookingId])
   @@index([status])
   @@map("owner_distributions")
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+//  STAGE 3 — reporting, marketing profitability, exports (owner spec 2026-07-20)
+// ════════════════════════════════════════════════════════════════════════════
+
+enum CampaignStatus {
+  DRAFT
+  ACTIVE
+  PAUSED
+  COMPLETED
+  ARCHIVED
+}
+
+enum CampaignChannel {
+  DOOR_HANGER
+  YARD_SIGN
+  QR_CODE
+  GOOGLE_ADS
+  META_ADS
+  GOOGLE_BUSINESS
+  MARKETPLACE
+  INSTAGRAM
+  EMAIL
+  REFERRAL_PROGRAM
+  PARTNERSHIP
+  WEBSITE
+  PHONE
+  OTHER
+}
+
+enum SpendKind {
+  PRINT
+  DISTRIBUTION
+  AD_SPEND
+  PLATFORM_FEE
+  CREATIVE
+  ADJUSTMENT
+  OTHER
+}
+
+enum ReportExportStatus {
+  SUCCESS
+  FAILED
+}
+
+/// A marketing campaign. Profit ROAS = attributed FINALIZED company net profit
+/// / total spend, so a campaign is judged by money made, never by scans.
+model MarketingCampaign {
+  id          String          @id @default(cuid())
+  name        String
+  channel     CampaignChannel
+  /// The attribution source string this campaign owns (matches Booking.source
+  /// / UTM values), so attributed moves can be found without guessing.
+  sourceKey   String          @map("source_key")
+  status      CampaignStatus  @default(DRAFT)
+  startDate   DateTime?       @map("start_date")
+  endDate     DateTime?       @map("end_date")
+  budgetCents Int?            @map("budget_cents")
+
+  // Door-hanger / print specifics
+  printQuantity    Int?    @map("print_quantity")
+  distributionArea String? @map("distribution_area")
+  creativeVersion  String? @map("creative_version")
+  offer            String?
+  landingPageUrl   String? @map("landing_page_url")
+  qrIdentifier     String? @unique @map("qr_identifier")
+  phoneIdentifier  String? @map("phone_identifier")
+  notes            String?
+
+  createdById   String?  @map("created_by_id")
+  createdByName String?  @map("created_by_name")
+  updatedById   String?  @map("updated_by_id")
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @updatedAt @map("updated_at")
+
+  spend MarketingSpend[]
+
+  @@index([status])
+  @@index([sourceKey])
+  @@index([channel])
+  @@map("marketing_campaigns")
+}
+
+/// One cost against a campaign. Kept as rows rather than a single total so the
+/// spend is auditable and a correction is an entry, not an overwrite.
+model MarketingSpend {
+  id          String    @id @default(cuid())
+  campaignId  String    @map("campaign_id")
+  kind        SpendKind
+  amountCents Int       @map("amount_cents")
+  incurredOn  DateTime  @map("incurred_on")
+  vendor      String?
+  reference   String?
+  notes       String?
+  /// True for a monthly/ongoing cost, so it is not mistaken for one-time spend.
+  recurring   Boolean   @default(false)
+  receiptUrl  String?   @map("receipt_url")
+
+  createdById   String?  @map("created_by_id")
+  createdByName String?  @map("created_by_name")
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @updatedAt @map("updated_at")
+
+  campaign MarketingCampaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+
+  @@index([campaignId])
+  @@index([incurredOn])
+  @@map("marketing_spend")
+}
+
+/// A saved report configuration. Stores FILTERS ONLY - never user-supplied
+/// query code - so a saved view can never become an injection vector.
+model SavedReportView {
+  id         String   @id @default(cuid())
+  reportType String   @map("report_type")
+  name       String
+  /// Structured, validated filter object. Never raw SQL.
+  filters    Json
+  sortKey    String?  @map("sort_key")
+  sortDir    String?  @map("sort_dir")
+  columns    String[]
+  periodKey  String?  @map("period_key")
+  scope      String?
+  basis      String?
+  shared     Boolean  @default(false)
+
+  createdById   String   @map("created_by_id")
+  createdByName String?  @map("created_by_name")
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @updatedAt @map("updated_at")
+
+  @@unique([createdById, reportType, name])
+  @@index([reportType])
+  @@index([shared])
+  @@map("saved_report_views")
+}
+
+/// An audit record of a report leaving the building. Deliberately records the
+/// SHAPE of the export (filters, columns, row count) and never its contents -
+/// logging the file would recreate the disclosure the controls exist to prevent.
+model ReportExport {
+  id          String             @id @default(cuid())
+  reportType  String             @map("report_type")
+  format      String
+  periodLabel String             @map("period_label")
+  basisLabel  String             @map("basis_label")
+  filters     Json?
+  columnKeys  String[]           @map("column_keys")
+  recordCount Int                @map("record_count")
+  status      ReportExportStatus @default(SUCCESS)
+  error       String?
+
+  requestedById   String   @map("requested_by_id")
+  requestedByName String?  @map("requested_by_name")
+  createdAt       DateTime @default(now()) @map("created_at")
+
+  @@index([reportType])
+  @@index([requestedById])
+  @@index([createdAt])
+  @@map("report_exports")
 }
