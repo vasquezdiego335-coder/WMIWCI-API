@@ -236,21 +236,50 @@ async function processEmailJob(job: Job<EmailJobData>): Promise<void> {
   })
 
   if (!outcome.sent) {
-    // A refusal is a DECISION, not a failure — never throw, or BullMQ retries a
-    // message that policy has already rejected. Quiet-hours/gap deferrals are
-    // re-queued; everything else is terminal for this job.
-    if (outcome.retryAt) {
-      const delay = Math.max(0, outcome.retryAt.getTime() - Date.now())
-      log.info({ reason: outcome.reason, delay }, '⏸️ Deferred — re-queued inside the allowed window')
-      await emailQueue.add(template, job.data, { delay, jobId: `${job.id}:deferred` }).catch((err) =>
-        log.warn({ err: String(err) }, 're-queue after deferral failed (non-fatal)')
-      )
-    } else {
-      log.warn({ reason: outcome.reason }, '🚫 Send refused by the guard')
+    // ── TRUTHFUL OUTCOME REPORTING (finding EMAIL-P2-16) ──────────────────
+    // This used to mark EVERY refusal as notification status FAILED, including
+    // quiet-hours and frequency-cap deferrals — so reporting showed a delivery
+    // problem where policy had simply said "later". It also swallowed requeue
+    // errors, meaning a Redis hiccup silently DROPPED a deferred email while
+    // the job reported success.
+    const deferred = Boolean(outcome.retryAt)
+
+    if (deferred) {
+      const delay = Math.max(0, (outcome.retryAt as Date).getTime() - Date.now())
+      log.info({ reason: outcome.reason, delay }, '⏸️ Deferred — re-queueing inside the allowed window')
+
+      if (notificationId) {
+        await prisma.notification
+          .update({
+            where: { id: notificationId },
+            data: { status: 'DEFERRED', error: outcome.reason.slice(0, 500) },
+          })
+          .catch(() => undefined)
+      }
+
+      // A stable jobId keyed on the DEFERRAL REASON (not the attempt) means
+      // repeated deferrals collapse onto one pending job instead of fanning out.
+      // NOT caught: if we cannot re-queue, the email would be lost silently.
+      // Throwing hands it back to BullMQ's own retry, which is durable.
+      await emailQueue.add(template, job.data, {
+        delay,
+        jobId: `${job.id}:deferred:${outcome.reason}`,
+      })
+      return
     }
+
+    log.warn({ reason: outcome.reason, outcomeClass: outcome.outcomeClass }, '🚫 Send refused by the guard')
     if (notificationId) {
       await prisma.notification
-        .update({ where: { id: notificationId }, data: { status: 'FAILED', error: outcome.reason.slice(0, 500) } })
+        .update({
+          where: { id: notificationId },
+          // A retryable block is not a terminal failure either — the guard has
+          // left the logical send resumable, so do not report it as dead.
+          data: {
+            status: outcome.outcomeClass === 'retryable' ? 'QUEUED' : 'FAILED',
+            error: outcome.reason.slice(0, 500),
+          },
+        })
         .catch(() => undefined)
     }
     return

@@ -17,20 +17,24 @@
 //      3. LIVE STATE RELOAD via the caller's `recheck()`   → stale queue jobs die here
 //      4. frequency caps + quiet hours (PROMOTIONAL only)
 //      5. payload validation (required fields, safe URLs)  → src/emails/validation
-//      6. IDEMPOTENCY CLAIM — an EmailSend row is written BEFORE the provider
-//         call. A duplicate key means someone already sent this; we stop.
+//      6. CLAIM OR RESUME — an EmailSend row is written BEFORE the provider
+//         call. A conflicting key does NOT automatically mean "already sent":
+//         only a TERMINAL row stops us. See the attempt state machine below.
 //      7. provider send
-//      8. mark sent + record the provider id
+//      8. mark delivered + record the provider id
 //
-//  Every refusal is RECORDED (status 'blocked' + reason) so the admin can answer
-//  "why didn't this customer get their email?" without reading logs.
+//  Every refusal is RECORDED with a machine-readable reason and a classification
+//  (terminal / retryable / deferred), so the admin can answer "why didn't this
+//  customer get their email?" — and so a TEMPORARY refusal does not silently
+//  become permanent.
 //
 //  KNOWN LIMITATION (documented, not hidden): the installed Resend SDK (3.x)
-//  exposes no idempotency-key parameter. If the provider ACCEPTS a send and the
-//  process dies before step 8, the row stays 'claimed' and the message is not
-//  retried — we bias toward NOT double-sending. The residual window is
-//  provider-accepted-but-unrecorded, which shows up as a 'claimed' row with no
-//  providerId; `staleClaims()` surfaces those for the admin.
+//  exposes no idempotency-key parameter, so we cannot ask the provider to
+//  deduplicate. If the request leaves us and the outcome is unknown (timeout,
+//  crash mid-flight), the send becomes 'ambiguous' and is NEVER auto-resent —
+//  a duplicate to a real customer is worse than a delayed one. Those rows are
+//  surfaced by `ambiguousSends()` for a human to reconcile against the provider
+//  dashboard, and can be re-driven deliberately with `reopenForRetry()`.
 // ════════════════════════════════════════════════════════════════════════
 
 import { prisma } from './db'
@@ -186,10 +190,117 @@ export function buildIdempotencyKey(parts: {
   ].join('|')
 }
 
+// ════════════════════════════════════════════════════════════════════════
+//  ATTEMPT STATE MACHINE (findings EMAIL-P1-03 and EMAIL-P1-04)
+//  ---------------------------------------------------------------------
+//  THE DEFECT BOTH FINDINGS SHARE: the unique idempotency key WAS the outcome
+//  record. `guardedSend` created an EmailSend row, and whatever happened first
+//  permanently occupied that key:
+//
+//    • provider returns 500        → row marked 'failed', function throws,
+//      BullMQ retries → the retry hits the unique key → 'duplicate' → the email
+//      is NEVER sent. `releaseForRetry()` existed but nothing called it.
+//    • quiet hours / frequency cap → `recordBlock()` wrote a row on the same
+//      key, so once the cap expired or the quiet window ended, the send could
+//      never happen. Same for a suppression-table timeout, a temporarily
+//      missing URL, or a customer who later resubscribed.
+//
+//  THE FIX: separate DELIVERY IDENTITY from ATTEMPT OUTCOME.
+//  The key still identifies one logical business event — that is what stops
+//  double-sends. But a row in a NON-TERMINAL state is RESUMED in place rather
+//  than treated as "already handled". Attempts accumulate against one row.
+//
+//  TERMINAL (never re-attempted):
+//    delivered         the provider accepted it — the customer has the email
+//    blocked_terminal  hard suppression, ineligible booking state
+//    failed_terminal   attempts exhausted
+//    ambiguous         the request left us and we do not know the outcome.
+//                      Deliberately terminal for AUTOMATION: auto-resending
+//                      risks a duplicate to a real customer. Surfaced for a
+//                      human to reconcile (see `ambiguousSends`).
+//
+//  RESUMABLE:
+//    sending           an attempt is in flight (or a worker died mid-attempt)
+//    provider_rejected known rejection, no provider id — safe to retry
+//    retry_pending     awaiting another attempt
+//    deferred          policy says later; `nextAttemptAt` says when
+//    blocked_retryable temporary condition (DB outage, missing config)
+// ════════════════════════════════════════════════════════════════════════
+
+/** Statuses that permanently close a logical send. */
+const TERMINAL_STATUSES: ReadonlySet<string> = new Set([
+  'delivered',
+  'blocked_terminal',
+  'failed_terminal',
+  'ambiguous',
+])
+
+/** Max attempts against ONE logical send before it becomes failed_terminal. */
+export const MAX_SEND_ATTEMPTS = Number(process.env.EMAIL_MAX_SEND_ATTEMPTS) || 5
+
+/**
+ * How long a row may sit in 'sending' before we assume the worker died and
+ * allow a resume. Shorter than this and we risk two workers sending at once.
+ */
+export const SENDING_STALE_MS = Number(process.env.EMAIL_SENDING_STALE_MS) || 10 * 60_000
+
+/**
+ * Block reasons that are PERMANENT for this business event. Everything else is
+ * treated as temporary and stays resumable — the safer default, because wrongly
+ * calling something terminal silently loses a legitimate email.
+ */
+const TERMINAL_BLOCK_REASONS: ReadonlySet<string> = new Set([
+  'hard_bounce',
+  'spam_complaint',
+  'invalid_address',
+  'admin_block',
+  'provider_rejected',
+  'invalid_email',
+  'blank_email',
+  'internal_test_booking',
+  'booking_deleted',
+  'duplicate',
+])
+
+/** Reasons that mean "not now" rather than "not ever". */
+const DEFERRAL_REASONS: ReadonlySet<string> = new Set([
+  'quiet_hours',
+  'transactional_gap',
+  'cap_daily',
+  'cap_weekly',
+  'cap_monthly',
+])
+
+export type BlockClass = 'terminal' | 'retryable' | 'deferred'
+
+/**
+ * Classify a refusal. A reason that is unknown to us is treated as RETRYABLE,
+ * because a temporary condition wrongly marked terminal loses a real email,
+ * while a terminal condition wrongly marked retryable merely costs a few
+ * harmless re-checks that will refuse again.
+ */
+export function classifyBlock(reason: string): BlockClass {
+  if (DEFERRAL_REASONS.has(reason)) return 'deferred'
+  if (TERMINAL_BLOCK_REASONS.has(reason)) return 'terminal'
+  // Booking/lead state that genuinely cannot come back is terminal.
+  if (/^status_not_allowed:/.test(reason)) return 'terminal'
+  if (/^booking_not_completed:|^booking_advanced:|^lead_converted$|^lead_lost$/.test(reason)) return 'terminal'
+  if (reason === 'move_date_passed' || reason === 'deposit_already_paid') return 'terminal'
+  // Config/plumbing problems are fixable, so the send must survive them.
+  if (reason.startsWith('validation:')) return 'retryable'
+  if (reason.endsWith('_read_failed') || reason === 'suppression_read_failed') return 'retryable'
+  if (reason.startsWith('missing-configuration')) return 'retryable'
+  if (reason === 'unsubscribed') return 'terminal'
+  return 'retryable'
+}
+
+const statusForBlock = (c: BlockClass): string =>
+  c === 'terminal' ? 'blocked_terminal' : c === 'deferred' ? 'deferred' : 'blocked_retryable'
+
 // ── Result type ─────────────────────────────────────────────────────────
 export type SendOutcome =
   | { sent: true; providerId: string; emailSendId: string }
-  | { sent: false; reason: string; emailSendId?: string; retryAt?: Date }
+  | { sent: false; reason: string; emailSendId?: string; retryAt?: Date; outcomeClass?: BlockClass | 'ambiguous' }
 
 export type GuardedSendInput = {
   to: string
@@ -207,32 +318,36 @@ export type GuardedSendInput = {
   bookingId?: string
   leadId?: string
   campaign?: string
-  /** Payload for the required-field + URL-safety gate. Omit only for ad-hoc HTML. */
+  /** Payload for the required-field + URL-safety gate. */
   payload?: Record<string, unknown>
   /**
-   * LIVE STATE RELOAD. Called immediately before the idempotency claim, after
-   * every cheap check has passed. Return a reason string to ABORT — this is
-   * where a queued job discovers the booking was completed/cancelled, the move
-   * date passed, or the lead converted. Deleting the queue record is NOT the
-   * only protection; this is the final guard.
+   * LIVE STATE RELOAD. Called immediately before the claim, after every cheap
+   * check has passed. Return a reason string to ABORT.
    */
   recheck?: () => Promise<string | null>
   /** Set false to skip the unsubscribe header (transactional). Default: by class. */
   includeUnsubscribeHeader?: boolean
 }
 
-/** Record a refusal so the admin can see WHY nothing was sent. Never throws. */
+/**
+ * Record a refusal against the logical send, classified so that a TEMPORARY
+ * condition leaves the row resumable (finding EMAIL-P1-04).
+ */
 async function recordBlock(
   key: string,
   input: GuardedSendInput,
   emailClass: EmailClass,
-  reason: string
-): Promise<string | undefined> {
+  reason: string,
+  retryAt?: Date
+): Promise<{ id?: string; blockClass: BlockClass }> {
+  const blockClass = classifyBlock(reason)
+  const status = statusForBlock(blockClass)
   try {
     const row = await prisma.emailSend.upsert({
       where: { idempotencyKey: key },
-      // An already-recorded send keeps its own outcome — a later block must not
-      // rewrite the history of a message that really was delivered.
+      // No-op on conflict: we cannot express "only if not terminal" inside an
+      // upsert, so the row is read back and updated conditionally below. A
+      // delivered send must never be rewritten by a later policy check.
       update: {},
       create: {
         idempotencyKey: key,
@@ -243,28 +358,136 @@ async function recordBlock(
         bookingId: input.bookingId ?? null,
         leadId: input.leadId ?? null,
         campaign: input.campaign ?? null,
-        status: 'blocked',
+        status,
+        outcomeClass: blockClass,
         blockedReason: reason.slice(0, 500),
+        nextAttemptAt: retryAt ?? null,
       },
     })
-    return row.id
+    // Never downgrade a terminal row. `updateMany` with a status filter makes
+    // this atomic: a row that reached 'delivered' concurrently is not matched.
+    await prisma.emailSend
+      .updateMany({
+        where: { id: row.id, status: { notIn: Array.from(TERMINAL_STATUSES) } },
+        data: {
+          status,
+          outcomeClass: blockClass,
+          blockedReason: reason.slice(0, 500),
+          nextAttemptAt: retryAt ?? null,
+        },
+      })
+      .catch(() => undefined)
+    return { id: row.id, blockClass }
   } catch (err) {
     log.warn({ err: String(err), reason }, 'failed to record blocked send (non-fatal)')
-    return undefined
+    return { blockClass }
   }
 }
 
 /** Count PROMOTIONAL sends to this address inside a rolling window. */
 async function countSentSince(email: string, since: Date): Promise<number> {
   return prisma.emailSend.count({
-    where: { email, emailClass: 'promotional', status: 'sent', sentAt: { gte: since } },
+    where: { email, emailClass: 'promotional', status: 'delivered', sentAt: { gte: since } },
   })
+}
+
+type ClaimResult =
+  | { ok: true; id: string; attempts: number }
+  | { ok: false; reason: string; id?: string }
+
+/**
+ * Atomically claim a NEW logical send, or RESUME an existing non-terminal one.
+ *
+ * This is the heart of the P1-03/P1-04 fix. The old code did a bare `create`
+ * and treated a unique violation as "already done" — which is true only when
+ * the previous attempt actually delivered.
+ */
+async function claimOrResumeSend(
+  key: string,
+  input: GuardedSendInput,
+  emailClass: EmailClass
+): Promise<ClaimResult> {
+  const email = normalizeEmail(input.to)
+  const now = new Date()
+
+  try {
+    const row = await prisma.emailSend.create({
+      data: {
+        idempotencyKey: key,
+        email,
+        template: input.template,
+        emailClass,
+        journey: input.journey ?? null,
+        bookingId: input.bookingId ?? null,
+        leadId: input.leadId ?? null,
+        campaign: input.campaign ?? null,
+        status: 'sending',
+        outcomeClass: null,
+        attempts: 1,
+      },
+      select: { id: true, attempts: true },
+    })
+    return { ok: true, id: row.id, attempts: row.attempts }
+  } catch (err) {
+    if ((err as { code?: string })?.code !== 'P2002') throw err
+  }
+
+  // A row exists. Whether we may proceed depends entirely on its state.
+  const existing = await prisma.emailSend.findUnique({
+    where: { idempotencyKey: key },
+    select: { id: true, status: true, attempts: true, updatedAt: true, nextAttemptAt: true },
+  })
+  if (!existing) return { ok: false, reason: 'claim_lookup_failed' }
+
+  if (TERMINAL_STATUSES.has(existing.status)) {
+    // 'delivered' is the honest "already sent". The others are equally final,
+    // but for different reasons — report which, so logs are not misleading.
+    return {
+      ok: false,
+      reason: existing.status === 'delivered' ? 'duplicate' : `terminal:${existing.status}`,
+      id: existing.id,
+    }
+  }
+
+  if (existing.attempts >= MAX_SEND_ATTEMPTS) {
+    await prisma.emailSend
+      .update({ where: { id: existing.id }, data: { status: 'failed_terminal', outcomeClass: 'terminal' } })
+      .catch(() => undefined)
+    log.error({ key, attempts: existing.attempts }, 'send attempts exhausted — failed_terminal')
+    return { ok: false, reason: 'attempts_exhausted', id: existing.id }
+  }
+
+  // Another worker may be mid-flight. Only take over a genuinely stale claim.
+  if (existing.status === 'sending' && now.getTime() - existing.updatedAt.getTime() < SENDING_STALE_MS) {
+    return { ok: false, reason: 'in_flight', id: existing.id }
+  }
+
+  // A deferral is not due yet.
+  if (existing.nextAttemptAt && existing.nextAttemptAt.getTime() > now.getTime()) {
+    return { ok: false, reason: 'not_due', id: existing.id }
+  }
+
+  // RESUME the same logical send. The conditional `where` makes the takeover
+  // atomic: if another worker resumed it first, count is 0 and we back off.
+  const { count } = await prisma.emailSend.updateMany({
+    where: { id: existing.id, status: existing.status, attempts: existing.attempts },
+    data: {
+      status: 'sending',
+      attempts: existing.attempts + 1,
+      blockedReason: null,
+      outcomeClass: null,
+      nextAttemptAt: null,
+    },
+  })
+  if (count === 0) return { ok: false, reason: 'in_flight', id: existing.id }
+
+  log.info({ key, attempt: existing.attempts + 1, from: existing.status }, 'resuming logical send')
+  return { ok: true, id: existing.id, attempts: existing.attempts + 1 }
 }
 
 /**
  * THE send path. Every email in this system goes through here.
  * Never throws for a policy refusal — it returns `{ sent: false, reason }`.
- * It DOES throw on an unexpected provider error, so BullMQ can retry.
  */
 export async function guardedSend(input: GuardedSendInput): Promise<SendOutcome> {
   const email = normalizeEmail(input.to)
@@ -278,37 +501,36 @@ export async function guardedSend(input: GuardedSendInput): Promise<SendOutcome>
   })
   const l = log.child({ template: input.template, journey: input.journey, emailClass })
 
+  const refuse = async (reason: string, retryAt?: Date): Promise<SendOutcome> => {
+    const { id, blockClass } = await recordBlock(key, input, emailClass, reason, retryAt)
+    return { sent: false, reason, emailSendId: id, retryAt, outcomeClass: blockClass }
+  }
+
   // ── 1. recipient format ───────────────────────────────────────────────
   if (!isValidEmailAddress(email)) {
     l.warn('blocked: invalid recipient address')
-    return { sent: false, reason: 'invalid_email', emailSendId: await recordBlock(key, input, emailClass, 'invalid_email') }
+    return refuse('invalid_email')
   }
 
   // ── 2. suppression (fails CLOSED) ─────────────────────────────────────
   const suppression = await isSuppressed(email, emailClass)
   if (suppression.suppressed) {
     l.info({ reason: suppression.reason }, 'blocked: suppressed address')
-    return {
-      sent: false,
-      reason: suppression.reason,
-      emailSendId: await recordBlock(key, input, emailClass, suppression.reason),
-    }
+    return refuse(suppression.reason)
   }
 
   // ── 3. LIVE STATE RELOAD ──────────────────────────────────────────────
-  // The queue job may have been sitting for days. Reload the truth.
   if (input.recheck) {
     let abort: string | null
     try {
       abort = await input.recheck()
     } catch (err) {
-      // A failed state read must not become a send.
       l.error({ err: err instanceof Error ? err.message : String(err) }, 'recheck() threw — failing closed')
       abort = 'state_read_failed'
     }
     if (abort) {
       l.info({ reason: abort }, 'blocked: state recheck refused the send')
-      return { sent: false, reason: abort, emailSendId: await recordBlock(key, input, emailClass, abort) }
+      return refuse(abort)
     }
   }
 
@@ -317,9 +539,7 @@ export async function guardedSend(input: GuardedSendInput): Promise<SendOutcome>
     if (inQuietHours()) {
       const retryAt = nextAllowedTime()
       l.info({ retryAt }, 'deferred: quiet hours')
-      // NOT recorded as a block — the send is still wanted, just later. The
-      // caller re-queues; the idempotency key is unchanged so it cannot double.
-      return { sent: false, reason: 'quiet_hours', retryAt }
+      return refuse('quiet_hours', retryAt)
     }
 
     const now = Date.now()
@@ -335,25 +555,27 @@ export async function guardedSend(input: GuardedSendInput): Promise<SendOutcome>
       (month >= CAPS.perMonth && 'cap_monthly')
 
     if (capped) {
-      l.info({ day, week, month, capped }, 'blocked: frequency cap')
-      return { sent: false, reason: capped, emailSendId: await recordBlock(key, input, emailClass, capped) }
+      // A cap is a DEFERRAL, not a permanent block — it expires. Give it a due
+      // time so the sweep can pick it up rather than losing the email forever.
+      const dueIn = capped === 'cap_daily' ? DAY_MS : capped === 'cap_weekly' ? 7 * DAY_MS : 30 * DAY_MS
+      l.info({ day, week, month, capped }, 'deferred: frequency cap')
+      return refuse(capped, new Date(now + Math.min(dueIn, DAY_MS)))
     }
 
-    // Do not land a promotional email right beside a transactional one.
     const gapMin = CAPS.transactionalGapMinutes
     if (gapMin > 0) {
       const recentTransactional = await prisma.emailSend.count({
         where: {
           email,
           emailClass: 'transactional',
-          status: 'sent',
+          status: 'delivered',
           sentAt: { gte: new Date(now - gapMin * 60_000) },
         },
       })
       if (recentTransactional > 0) {
         const retryAt = new Date(now + gapMin * 60_000)
         l.info({ gapMin, retryAt }, 'deferred: too close to a transactional email')
-        return { sent: false, reason: 'transactional_gap', retryAt }
+        return refuse('transactional_gap', retryAt)
       }
     }
   }
@@ -365,40 +587,21 @@ export async function guardedSend(input: GuardedSendInput): Promise<SendOutcome>
     } catch (err) {
       if (err instanceof EmailValidationError) {
         l.error({ err: err.message }, 'blocked: payload validation')
-        return {
-          sent: false,
-          reason: `validation: ${err.message}`,
-          emailSendId: await recordBlock(key, input, emailClass, `validation: ${err.message}`),
-        }
+        // RETRYABLE by classification: a missing URL or field is a fixable
+        // configuration problem, not a permanent property of this customer.
+        return refuse(`validation: ${err.message}`)
       }
       throw err
     }
   }
 
-  // ── 6. IDEMPOTENCY CLAIM — before the provider call, always ───────────
-  let emailSendId: string
-  try {
-    const row = await prisma.emailSend.create({
-      data: {
-        idempotencyKey: key,
-        email,
-        template: input.template,
-        emailClass,
-        journey: input.journey ?? null,
-        bookingId: input.bookingId ?? null,
-        leadId: input.leadId ?? null,
-        campaign: input.campaign ?? null,
-        status: 'claimed',
-      },
-    })
-    emailSendId = row.id
-  } catch (err) {
-    if ((err as { code?: string })?.code === 'P2002') {
-      l.info({ key }, 'skipped: already claimed (idempotent)')
-      return { sent: false, reason: 'duplicate' }
-    }
-    throw err
+  // ── 6. CLAIM OR RESUME ────────────────────────────────────────────────
+  const claim = await claimOrResumeSend(key, input, emailClass)
+  if (!claim.ok) {
+    l.info({ key, reason: claim.reason }, 'not claiming')
+    return { sent: false, reason: claim.reason, emailSendId: claim.id }
   }
+  const emailSendId = claim.id
 
   // ── 7. provider send ──────────────────────────────────────────────────
   const wantsUnsubHeader = input.includeUnsubscribeHeader ?? emailClass === 'promotional'
@@ -407,8 +610,10 @@ export async function guardedSend(input: GuardedSendInput): Promise<SendOutcome>
     ? { 'List-Unsubscribe': `<${unsub}>`, 'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click' }
     : undefined
 
+  let data: { id?: string } | null = null
+  let providerError: unknown = null
   try {
-    const { data, error } = await resend.emails.send({
+    const res = await resend.emails.send({
       from: EMAIL_FROM,
       to: email,
       reply_to: EMAIL_REPLY_TO,
@@ -417,67 +622,121 @@ export async function guardedSend(input: GuardedSendInput): Promise<SendOutcome>
       ...(input.text ? { text: input.text } : {}),
       ...(headers ? { headers } : {}),
     })
-
-    if (error) {
-      await prisma.emailSend
-        .update({
-          where: { id: emailSendId },
-          data: { status: 'failed', error: (error.message ?? JSON.stringify(error)).slice(0, 500) },
-        })
-        .catch(() => undefined)
-      // Throw so BullMQ retries. The claimed row is now 'failed', and a retry
-      // re-enters at step 6 — where the unique key makes it a no-op unless the
-      // row is explicitly released. See releaseForRetry().
-      throw new Error(`Resend error: ${error.message ?? JSON.stringify(error)}`)
-    }
-
-    // ── 8. mark sent ────────────────────────────────────────────────────
-    const providerId = data?.id ?? 'unknown'
-    await prisma.emailSend
-      .update({ where: { id: emailSendId }, data: { status: 'sent', providerId, sentAt: new Date() } })
-      .catch((err) =>
-        // The message IS delivered. Losing the mark is a reporting problem, not
-        // a duplicate risk — the 'claimed' row still blocks a re-send.
-        l.error({ err: String(err), emailSendId, providerId }, 'send succeeded but marking failed')
-      )
-
-    l.info({ providerId }, 'email sent')
-    return { sent: true, providerId, emailSendId }
+    data = res.data
+    providerError = res.error
   } catch (err) {
+    // The request may or may not have reached the provider. This is the
+    // AMBIGUOUS case: never auto-resend, because a duplicate to a real customer
+    // is worse than a delayed one. A human reconciles via `ambiguousSends()`.
     await prisma.emailSend
       .update({
         where: { id: emailSendId },
-        data: { status: 'failed', error: (err instanceof Error ? err.message : String(err)).slice(0, 500) },
+        data: {
+          status: 'ambiguous',
+          outcomeClass: 'ambiguous',
+          error: (err instanceof Error ? err.message : String(err)).slice(0, 500),
+        },
       })
       .catch(() => undefined)
-    throw err
+    l.error({ err: err instanceof Error ? err.message : String(err) }, 'AMBIGUOUS provider outcome — not auto-resending')
+    return { sent: false, reason: 'ambiguous', emailSendId, outcomeClass: 'ambiguous' }
   }
+
+  if (providerError) {
+    // A STRUCTURED rejection with no message id: the provider definitively did
+    // not accept it, so retrying cannot duplicate anything.
+    const message =
+      (providerError as { message?: string }).message ?? JSON.stringify(providerError)
+    const exhausted = claim.attempts >= MAX_SEND_ATTEMPTS
+    await prisma.emailSend
+      .update({
+        where: { id: emailSendId },
+        data: {
+          status: exhausted ? 'failed_terminal' : 'provider_rejected',
+          outcomeClass: exhausted ? 'terminal' : 'retryable',
+          error: String(message).slice(0, 500),
+          nextAttemptAt: exhausted ? null : new Date(Date.now() + 60_000 * claim.attempts),
+        },
+      })
+      .catch(() => undefined)
+    l.error({ error: message, attempt: claim.attempts, exhausted }, 'provider rejected the send')
+    // Throw so BullMQ retries. The row is now resumable, so the retry RESUMES
+    // this same logical send instead of short-circuiting as a duplicate.
+    throw new Error(`Resend error: ${message}`)
+  }
+
+  // ── 8. mark delivered ─────────────────────────────────────────────────
+  const providerId = data?.id ?? 'unknown'
+  await prisma.emailSend
+    .update({
+      where: { id: emailSendId },
+      data: { status: 'delivered', outcomeClass: 'terminal', providerId, sentAt: new Date(), error: null },
+    })
+    .catch((err) =>
+      // The message IS delivered. Losing the mark is a reporting problem, not a
+      // duplicate risk — the row is still non-'delivered' but carries no
+      // provider id, so it surfaces in ambiguousSends() for reconciliation.
+      l.error({ err: String(err), emailSendId, providerId }, 'send succeeded but marking failed')
+    )
+
+  l.info({ providerId }, 'email sent')
+  return { sent: true, providerId, emailSendId }
 }
 
 /**
- * Release a FAILED claim so a deliberate retry can send. Only ever touches rows
- * that failed WITHOUT a provider id — a row with a providerId was delivered and
- * must never be re-opened.
+ * Sends whose outcome we genuinely do not know. NEVER auto-resent — a human
+ * checks the provider dashboard and either marks them delivered or re-drives
+ * them deliberately with `reopenForRetry`.
  */
-export async function releaseForRetry(idempotencyKey: string): Promise<boolean> {
-  const { count } = await prisma.emailSend.deleteMany({
-    where: { idempotencyKey, status: 'failed', providerId: null },
+export async function ambiguousSends(limit = 100) {
+  return prisma.emailSend.findMany({
+    where: { OR: [{ status: 'ambiguous' }, { status: 'delivered', providerId: null }] },
+    orderBy: { createdAt: 'desc' },
+    take: limit,
   })
-  return count > 0
+}
+
+/** Rows a sweep may legitimately re-attempt, with their due time reached. */
+export async function dueForRetry(limit = 100) {
+  return prisma.emailSend.findMany({
+    where: {
+      status: { in: ['provider_rejected', 'retry_pending', 'deferred', 'blocked_retryable'] },
+      OR: [{ nextAttemptAt: null }, { nextAttemptAt: { lte: new Date() } }],
+    },
+    orderBy: { createdAt: 'asc' },
+    take: limit,
+  })
 }
 
 /**
- * Rows stuck in 'claimed' with no provider id for longer than `olderThanMinutes`.
- * These are the documented residual double-send window: the process died between
- * the claim and the provider response, so we cannot know whether it sent.
- * Surfaced for a human, never auto-retried.
+ * DELIBERATE operator action: re-open a terminal row so it may be attempted
+ * again. Refuses 'delivered' — that email reached the customer, and re-sending
+ * it is a decision no automated path should be able to make.
+ */
+export async function reopenForRetry(idempotencyKey: string): Promise<'reopened' | 'refused_delivered' | 'not_found'> {
+  const row = await prisma.emailSend.findUnique({
+    where: { idempotencyKey },
+    select: { id: true, status: true },
+  })
+  if (!row) return 'not_found'
+  if (row.status === 'delivered') return 'refused_delivered'
+  await prisma.emailSend.update({
+    where: { id: row.id },
+    data: { status: 'retry_pending', outcomeClass: 'retryable', attempts: 0, nextAttemptAt: null },
+  })
+  return 'reopened'
+}
+
+/**
+ * Rows stuck mid-attempt for longer than `olderThanMinutes` — a worker died
+ * between the claim and the provider response. Surfaced for a human; the
+ * claim logic will also take these over automatically once they go stale.
  */
 export async function staleClaims(olderThanMinutes = 30) {
   return prisma.emailSend.findMany({
     where: {
-      status: 'claimed',
-      providerId: null,
-      createdAt: { lt: new Date(Date.now() - olderThanMinutes * 60_000) },
+      status: 'sending',
+      updatedAt: { lt: new Date(Date.now() - olderThanMinutes * 60_000) },
     },
     orderBy: { createdAt: 'desc' },
     take: 100,
