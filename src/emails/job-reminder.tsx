@@ -153,7 +153,7 @@ export default function JobReminderEmail({
                     <td valign="middle">
                       <div style={{ fontFamily: FONT, fontSize: '11px', fontWeight: 700, letterSpacing: '1.4px', textTransform: 'uppercase' as const, color: C.gold }}>{t.whenLabel}</div>
                       <div style={{ fontFamily: FONT, fontSize: '21px', fontWeight: 800, color: '#FFFFFF', marginTop: '7px', lineHeight: '27px' }}>{dateStr}</div>
-                      {timeStr ? <div style={{ fontFamily: FONT, fontSize: '14px', fontWeight: 600, color: '#AEB8C6', marginTop: '4px' }}>{timeStr}{originAddress ? ` · ${originAddress}` : ''}</div> : null}
+                      {timeStr ? <div style={{ fontFamily: FONT, fontSize: '14px', fontWeight: 600, color: C.onNavyMuted, marginTop: '4px' }}>{timeStr}{originAddress ? ` · ${originAddress}` : ''}</div> : null}
                     </td>
                     <td width={54} align="right" valign="middle" className="hide-sm" style={{ width: '54px' }}>
                       <IconChip icon="clock" color={C.gold} size={20} dim={46} border="none" radius={13} bg="rgba(212,162,76,0.16)" />

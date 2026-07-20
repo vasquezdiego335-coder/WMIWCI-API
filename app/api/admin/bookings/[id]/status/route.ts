@@ -4,6 +4,7 @@ import { prisma } from '@/lib/db'
 import { emailQueue } from '@/lib/queues'
 import { apiLogger } from '@/lib/logger'
 import { onBookingCompleted } from '@/lib/followups'
+import { onBookingCancelled } from '@/lib/journeys'
 import { confirmationScheduleData } from '@/lib/scheduling'
 import { approveBooking, declineBooking } from '@/lib/booking-approval'
 import { z } from 'zod'
@@ -180,6 +181,17 @@ export async function POST(req: NextRequest, { params }: { params: { id: string 
       await onBookingCompleted(params.id)
     } catch (err) {
       apiLogger.error({ err: err instanceof Error ? err.message : String(err), bookingId: params.id }, 'onBookingCompleted failed (non-fatal)')
+    }
+  }
+
+  // STOP RULE: a cancelled booking must not keep receiving recovery emails,
+  // move-day reminders, or post-job review/referral asks. Best-effort queue
+  // cleanup; the send-time rechecks are the real guarantee.
+  if (newStatus === 'CANCELLED') {
+    try {
+      await onBookingCancelled(params.id)
+    } catch (err) {
+      apiLogger.error({ err: err instanceof Error ? err.message : String(err), bookingId: params.id }, 'onBookingCancelled failed (non-fatal)')
     }
   }
 

@@ -153,6 +153,13 @@ export type EmailJobData = {
     | 'operational-alert'    // operational notice (delay/reschedule/weather)
     | 'final-invoice'        // post-job final invoice / balance due
     | 'referral-reward'      // a referral converted — reward earned (promotional)
+    // ── Lifecycle journeys (src/lib/journeys.ts) — one template per family,
+    //    multiple send times, stage passed in the payload. ──
+    | 'abandoned-checkout-2' // recovery stage 2 (~24h) — what's included
+    | 'abandoned-checkout-3' // recovery stage 3 (~72h) — did plans change
+    | 'quote-followup-1'     // 24h after a real quote — did it arrive
+    | 'quote-followup-2'     // ~3d — objection handling (labor-only explained)
+    | 'quote-followup-final' // ~7d — still moving?
   to: string
   bookingId?: string
   notificationId?: string
@@ -189,7 +196,12 @@ export type MarketingJobData = {
 
 export type ScheduledJobData = {
   type:
+    // ── Abandoned-booking recovery (scheduled by src/lib/journeys.ts) ──
     | 'abandoned-checkout-recovery'
+    | 'abandoned-checkout-recovery-2'
+    | 'abandoned-checkout-recovery-3'
+    // ── Pre-move reminders (transactional — not marketing) ──
+    | 'job-reminder-72h'
     | 'job-reminder-24h'
     | 'review-request-48h'
     | 'file-cleanup'
@@ -200,6 +212,12 @@ export type ScheduledJobData = {
     | 'review-reminder'
     | 'repeat-reminder'
     | 'referral-ask'
+    // ── Quote follow-up (LEAD-scoped, not booking-scoped) ──
+    | 'quote-followup-1'
+    | 'quote-followup-2'
+    | 'quote-followup-final'
   bookingId?: string
+  /** Set instead of bookingId for lead-scoped journeys (quote follow-up). */
+  leadId?: string
   payload?: Record<string, unknown>
 }

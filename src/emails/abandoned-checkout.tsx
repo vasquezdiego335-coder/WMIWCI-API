@@ -41,6 +41,8 @@ interface Props {
   websiteLabel?: string
   social?: { instagram?: string; facebook?: string; tiktok?: string; google?: string }
   locale?: string
+  /** Recovery stage 1 | 2 | 3 — varies the copy, not the layout. */
+  stage?: number
 }
 
 export default function AbandonedCheckoutEmail({
@@ -51,6 +53,7 @@ export default function AbandonedCheckoutEmail({
   portalUrl = '#',
   heroGifUrl,
   unsubscribeUrl,
+  stage = 1,
   postalAddress,
   phone = '862-640-0625',
   email = 'hello@moveitclearit.com',
@@ -64,12 +67,38 @@ export default function AbandonedCheckoutEmail({
     ? new Date(requestedDate).toLocaleDateString(es ? 'es-US' : 'en-US', { weekday: 'long', month: 'long', day: 'numeric', timeZone: 'America/New_York' })
     : undefined
 
+  // ── STAGE COPY (recovery 1 / 2 / 3) ───────────────────────────────────
+  // One template, three send times — the same pattern the 72h/24h reminder
+  // uses. Each stage does a DIFFERENT job rather than repeating the nudge:
+  //   1 (~45 min) — a helpful link back; they may simply have been interrupted
+  //   2 (~24 h)   — answer the objection: what labor-only actually includes
+  //   3 (~72 h)   — ask whether plans changed, and make leaving easy
+  //
+  // NOTHING here claims a countdown, a held slot, or a date about to be taken.
+  // We do not check live availability at send time, so any such line would be
+  // invented scarcity. The earlier "before someone else takes the slot" copy
+  // was removed for exactly that reason.
+  const stageCopy = (s: number) =>
+    es
+      ? {
+          1: { pill: 'Casi listo', h1: 'Tu reserva quedó a medias.', lead: 'Aquí está tu enlace para terminarla.' },
+          2: { pill: 'Qué incluye', h1: '¿Preguntas antes de reservar?', lead: 'Esto es exactamente lo que hacemos.' },
+          3: { pill: '¿Seguimos?', h1: '¿Cambiaron tus planes?', lead: 'Sin problema — solo queremos saber.' },
+        }[s] ?? { pill: 'Casi listo', h1: 'Tu reserva quedó a medias.', lead: '' }
+      : {
+          1: { pill: 'Almost there', h1: 'Your booking is half-finished.', lead: "Here's your link back to it." },
+          2: { pill: "What's included", h1: 'Questions before you book?', lead: "Here's exactly what we do." },
+          3: { pill: 'Still moving?', h1: 'Did your plans change?', lead: "No problem — we'd just like to know." },
+        }[s] ?? { pill: 'Almost there', h1: 'Your booking is half-finished.', lead: '' }
+
+  const sc = stageCopy(stage)
+
   const t = es
     ? {
-        preview: `Tu fecha sigue disponible — termina tu reserva con un depósito de ${money(amountHold, es)}.`,
-        pill: 'Casi listo',
-        h1: 'Tu fecha sigue disponible.',
-        sub: `Hola ${customerName}, empezaste tu reserva pero no completaste el depósito de ${money(amountHold, es)}${dateStr ? ` para el ${dateStr}` : ''}. Asegúrala antes de que alguien más la tome.`,
+        preview: `Termina tu reserva cuando quieras — depósito de ${money(amountHold, es)}.`,
+        pill: sc.pill,
+        h1: sc.h1,
+        sub: `Hola ${customerName}, empezaste tu reserva pero no completaste el depósito de ${money(amountHold, es)}${dateStr ? ` para el ${dateStr}` : ''}. ${sc.lead}`,
         whyTitle: 'Por qué reservar con nosotros',
         why: [
           'Solo mano de obra — pagas por músculo, no por el margen del intermediario.',
@@ -85,10 +114,10 @@ export default function AbandonedCheckoutEmail({
         footerLabels: { manage: 'Administrar preferencias', unsubscribe: 'Cancelar suscripción', rights: 'Todos los derechos reservados.' },
       }
     : {
-        preview: `Your date is still open — finish your booking with a ${money(amountHold, es)} deposit.`,
-        pill: 'Almost there',
-        h1: 'Your date is still available.',
-        sub: `Hi ${customerName}, you started your booking but didn't finish the ${money(amountHold, es)} deposit${dateStr ? ` for ${dateStr}` : ''}. Lock it in before someone else takes the slot.`,
+        preview: `Finish your booking whenever you're ready — ${money(amountHold, es)} deposit.`,
+        pill: sc.pill,
+        h1: sc.h1,
+        sub: `Hi ${customerName}, you started your booking but didn't finish the ${money(amountHold, es)} deposit${dateStr ? ` for ${dateStr}` : ''}. ${sc.lead}`,
         whyTitle: 'Why book with us',
         why: [
           'Labor-only — you pay for muscle, not a middleman markup.',

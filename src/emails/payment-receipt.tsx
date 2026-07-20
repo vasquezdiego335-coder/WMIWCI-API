@@ -179,7 +179,7 @@ export default function PaymentReceiptEmail({
             <td className="cardpad" style={{ padding: '22px 30px' }}>
               <div style={{ fontFamily: FONT, fontSize: '11px', fontWeight: 700, letterSpacing: '1.4px', textTransform: 'uppercase' as const, color: C.gold }}>{t.paidToday}</div>
               <div style={{ fontFamily: FONT, fontSize: '30px', fontWeight: 800, color: '#FFFFFF', margin: '6px 0 8px', letterSpacing: '-0.5px' }}>${amountPaid}</div>
-              <span style={{ display: 'inline-block', background: 'rgba(255,255,255,0.10)', color: captured ? '#8FE0B0' : C.gold, border: `1px solid ${captured ? 'rgba(143,224,176,0.4)' : 'rgba(212,162,76,0.4)'}`, borderRadius: '999px', fontFamily: FONT, fontSize: '11px', fontWeight: 700, letterSpacing: '0.4px', padding: '5px 12px' }}>
+              <span style={{ display: 'inline-block', background: 'rgba(255,255,255,0.10)', color: captured ? C.onNavyStrong : C.gold, border: `1px solid ${captured ? 'rgba(247,247,242,0.45)' : 'rgba(212,162,76,0.4)'}`, borderRadius: '999px', fontFamily: FONT, fontSize: '11px', fontWeight: 700, letterSpacing: '0.4px', padding: '5px 12px' }}>
                 {captured ? t.capturedYes : t.capturedNo}
               </span>
             </td>

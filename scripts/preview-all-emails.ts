@@ -22,6 +22,7 @@ import InformationRequired from '../src/emails/information-required'
 import OperationalAlert from '../src/emails/operational-alert'
 import FinalInvoice from '../src/emails/final-invoice'
 import ReferralReward from '../src/emails/referral-reward'
+import QuoteFollowup from '../src/emails/quote-followup'
 
 const OUT = resolve('email-previews')
 mkdirSync(OUT, { recursive: true })
@@ -46,6 +47,13 @@ const templates: Array<[string, React.ReactElement]> = [
   ['operational-alert', React.createElement(OperationalAlert, { ...common, alertType: 'reschedule', message: 'A job before yours ran long and our crew won’t make your window today. We’re sorry for the disruption — here’s the soonest we can get to you.', newDate: '2026-08-02T15:00:00Z', newTimeLabel: '9–11 AM', portalUrl: 'https://moveitclearit.com/my-booking/tok' })],
   ['final-invoice', React.createElement(FinalInvoice, { ...common, date: '2026-08-01T15:00:00Z', invoiceNumber: 'INV-1017', laborTotal: '420', truckAddon: '60', grandTotal: '480', amountPaid: '1', balanceDue: '479', payUrl: 'https://moveitclearit.com/pay/tok', portalUrl: 'https://moveitclearit.com/my-booking/tok' })],
   ['referral-reward', React.createElement(ReferralReward, { ...common, friendName: 'Marcus', rewardLabel: '$25 credit', rewardCode: 'THANKS25', expiresLabel: 'through Sept 30', redeemUrl: 'https://moveitclearit.com/book?code=THANKS25' })],
+  // ── Lifecycle journeys (2026-07-20). Every stage previewed separately:
+  //    one template, different copy, so a reviewer sees what actually ships.
+  ['abandoned-checkout-2', React.createElement(AbandonedCheckout, { ...common, amountHold: '1', stage: 2, checkoutUrl: 'https://moveitclearit.com/checkout/tok' })],
+  ['abandoned-checkout-3', React.createElement(AbandonedCheckout, { ...common, amountHold: '1', stage: 3, checkoutUrl: 'https://moveitclearit.com/checkout/tok' })],
+  ['quote-followup-1', React.createElement(QuoteFollowup, { ...common, stage: 1, jobType: '2-bedroom apartment, 3rd floor walk-up', moveDate: '2026-08-15T15:00:00Z', bookingUrl: 'https://www.moveitclearit.com/booking-form.html' })],
+  ['quote-followup-2', React.createElement(QuoteFollowup, { ...common, stage: 2, bookingUrl: 'https://www.moveitclearit.com/booking-form.html' })],
+  ['quote-followup-final', React.createElement(QuoteFollowup, { ...common, stage: 3, moveDate: '2026-08-15T15:00:00Z', bookingUrl: 'https://www.moveitclearit.com/booking-form.html' })],
 ]
 
 async function main() {

@@ -27,6 +27,7 @@ import InformationRequiredEmail from '../emails/information-required'
 import OperationalAlertEmail from '../emails/operational-alert'
 import FinalInvoiceEmail from '../emails/final-invoice'
 import ReferralRewardEmail from '../emails/referral-reward'
+import QuoteFollowupEmail from '../emails/quote-followup'
 import { emailSubject } from '../lib/i18n'
 
 // ════════════════════════════════════════════════════════════════════════
@@ -65,6 +66,12 @@ const ALLOWED_TEMPLATES = new Set<EmailJobData['template']>([
   'operational-alert',
   'final-invoice',
   'referral-reward',
+  // ── Lifecycle journeys (src/lib/journeys.ts) ──
+  'abandoned-checkout-2',
+  'abandoned-checkout-3',
+  'quote-followup-1',
+  'quote-followup-2',
+  'quote-followup-final',
 ])
 
 const TEMPLATES: Record<
@@ -87,6 +94,13 @@ const TEMPLATES: Record<
   'operational-alert': (p) => OperationalAlertEmail(p as any),
   'final-invoice': (p) => FinalInvoiceEmail(p as any),
   'referral-reward': (p) => ReferralRewardEmail(p as any),
+  // Recovery stages 2/3 reuse ONE template; `stage` in the payload varies
+  // the copy (same pattern as the 72h/24h reminder).
+  'abandoned-checkout-2': (p) => AbandonedCheckoutEmail({ ...(p as any), stage: 2 }),
+  'abandoned-checkout-3': (p) => AbandonedCheckoutEmail({ ...(p as any), stage: 3 }),
+  'quote-followup-1': (p) => QuoteFollowupEmail({ ...(p as any), stage: 1 }),
+  'quote-followup-2': (p) => QuoteFollowupEmail({ ...(p as any), stage: 2 }),
+  'quote-followup-final': (p) => QuoteFollowupEmail({ ...(p as any), stage: 3 }),
 }
 
 // English fallbacks. Bilingual subjects come from emailSubject(template, locale)
@@ -108,6 +122,11 @@ const SUBJECTS: Record<EmailJobData['template'], string> = {
   'operational-alert': 'An update about your move',
   'final-invoice': 'Your final invoice',
   'referral-reward': 'Your referral reward is here',
+  'abandoned-checkout-2': "What's included in a labor-only move",
+  'abandoned-checkout-3': 'Did your moving plans change?',
+  'quote-followup-1': 'Did your quote come through?',
+  'quote-followup-2': 'What "labor-only" actually means',
+  'quote-followup-final': 'Are you still planning your move?',
 }
 
 // ════════════════════════════════════════════════════════════════════════

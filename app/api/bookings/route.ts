@@ -5,6 +5,7 @@ import { BOOKING_FEE_CENTS, createBookingCheckout } from '@/lib/stripe'
 import { apiLogger } from '@/lib/logger'
 import { AGREEMENT_VERSION } from '@/lib/agreement'
 import { notifyBookingCreated } from '@/lib/notify'
+import { onCheckoutStarted } from '@/lib/journeys'
 import { checkServiceArea, travelFeeDollars, type AddressInput } from '@/lib/service-area'
 import { verifyAddress, type VerifiedAddress } from '@/lib/address-verify'
 import { assessAddress } from '@/lib/address'
@@ -629,6 +630,18 @@ async function handleBooking(req: NextRequest): Promise<NextResponse> {
   // email) were both removed.
 
   apiLogger.info({ bookingId: booking.id, customerId: customer.id, serviceType: data.serviceType }, 'Booking created')
+
+  // ── ABANDONED-BOOKING RECOVERY ──────────────────────────────────────────
+  // The booking now sits in PENDING_PAYMENT with a Stripe Checkout URL. If the
+  // customer never completes the deposit, this is the anchor for the recovery
+  // sequence. Stages self-cancel the moment the booking leaves PENDING_PAYMENT
+  // (fulfillPaidCheckout calls onBookingPaid, and every stage re-reads the
+  // booking at send time anyway). Flag-gated OFF by default; never fatal.
+  try {
+    await onCheckoutStarted(booking.id)
+  } catch (err) {
+    apiLogger.error({ err: err instanceof Error ? err.message : String(err), bookingId: booking.id }, 'onCheckoutStarted failed (non-fatal)')
+  }
 
   // ── Owner alert: a new booking was started (non-fatal; never blocks booking) ──
   // The customer is intentionally NOT messaged here — they receive the existing

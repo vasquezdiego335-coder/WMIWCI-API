@@ -34,6 +34,19 @@ export const C = {
   orangeTint: '#FFF0E6',
   orangeInk: '#B8480A',
   navyTint: '#EBEEF3',
+
+  // ── Brand-family neutrals (promoted 2026-07-20) ──────────────────────────
+  // These five were already in use, hard-coded as bare hexes across six
+  // templates and _ui itself. They are legitimate tints of the brand neutrals,
+  // but as magic numbers they could not be audited and drifted invisibly.
+  // Naming them makes the palette test (src/emails/__tests__/brand.test.ts) the
+  // single source of truth: a NEW unnamed hex now fails the build.
+  footerRule: '#DCD7CC', // hairline on the bone footer background
+  dotMuted: '#D8D3C8', // timeline / step dots on bone
+  goldEdge: '#EAD9B0', // gold-tint chip border
+  orangeEdge: '#FBD9C2', // orange-tint chip border
+  onNavyMuted: '#AEB8C6', // secondary text ON the navy panel
+  onNavyStrong: '#F7F7F2', // primary text/badge ON the navy panel (bone)
 } as const
 
 export const FONT =
@@ -662,8 +675,8 @@ export function Callout({
   children: React.ReactNode
 }) {
   const map = {
-    gold: { bg: C.goldTint, br: '#EAD9B0' },
-    orange: { bg: C.orangeTint, br: '#FBD9C2' },
+    gold: { bg: C.goldTint, br: C.goldEdge },
+    orange: { bg: C.orangeTint, br: C.orangeEdge },
     bone: { bg: C.inset, br: C.hair },
   } as const
   const t = map[tone]
@@ -1103,7 +1116,7 @@ export function Footer({
 
       <SocialChips {...(social || {})} />
 
-      <div style={{ height: '1px', background: '#DCD7CC', margin: '20px auto', maxWidth: '360px', fontSize: 0, lineHeight: '1px' }}>
+      <div style={{ height: '1px', background: C.footerRule, margin: '20px auto', maxWidth: '360px', fontSize: 0, lineHeight: '1px' }}>
         &nbsp;
       </div>
 
@@ -1487,7 +1500,7 @@ export function HTimeline({ steps }: { steps: TLStep[] }) {
     }
     return (
       <td width={32} height={32} align="center" valign="middle" style={{ width: '32px', height: '32px', background: '#FFFFFF', border: `2px solid ${C.hair}`, borderRadius: '50%' }}>
-        <span style={{ display: 'inline-block', width: '8px', height: '8px', borderRadius: '50%', background: '#D8D3C8' }}>&nbsp;</span>
+        <span style={{ display: 'inline-block', width: '8px', height: '8px', borderRadius: '50%', background: C.dotMuted }}>&nbsp;</span>
       </td>
     )
   }

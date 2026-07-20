@@ -112,7 +112,7 @@ export default function BookingDeclinedEmail({
           <tbody>
             <tr>
               <td width={44} valign="top" style={{ width: '44px' }}>
-                <IconChip icon="shield" color={C.goldInk} size={19} dim={36} bg="#FFFFFF" border="1px solid #EAD9B0" radius={10} />
+                <IconChip icon="shield" color={C.goldInk} size={19} dim={36} bg="#FFFFFF" border={`1px solid ${C.goldEdge}`} radius={10} />
               </td>
               <td valign="top" style={{ paddingLeft: '4px' }}>
                 <div style={{ fontFamily: FONT, fontSize: '15px', fontWeight: 800, color: C.navy, marginBottom: '4px' }}>{t.releaseTitle}</div>

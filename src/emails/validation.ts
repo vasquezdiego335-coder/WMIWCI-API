@@ -65,6 +65,24 @@ export const REQUIRED_FIELDS = {
   'final-invoice': ['portalUrl'],
   // The referral reward is meaningless without a link to redeem it.
   'referral-reward': ['redeemUrl'],
+
+  // ── PRIMARY-CTA LINKS (added 2026-07-20) ────────────────────────────────
+  // Every template in src/emails defaults its URL props to '#', so an ABSENT
+  // link rendered a dead `href="#"` button rather than failing. The URL-safety
+  // gate only inspects keys PRESENT in the payload, so absence slipped through.
+  // Listing each template's primary CTA here turns a missing link into a
+  // blocked send — the message that cannot be acted on never goes out.
+  'abandoned-checkout': ['checkoutUrl'],
+  'abandoned-checkout-2': ['checkoutUrl'],
+  'abandoned-checkout-3': ['checkoutUrl'],
+  'quote-followup-1': ['bookingUrl'],
+  'quote-followup-2': ['bookingUrl'],
+  'quote-followup-final': ['bookingUrl'],
+  'referral': ['referralUrl'],
+  'job-completion': ['portalUrl'],
+  'booking-cancellation': ['portalUrl'],
+  'booking-updated': ['portalUrl'],
+  'operational-alert': ['portalUrl'],
 } as const satisfies Record<string, readonly string[]>
 
 export type ValidatedTemplate = keyof typeof REQUIRED_FIELDS

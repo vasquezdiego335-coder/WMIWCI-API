@@ -208,7 +208,7 @@ export default function FinalConfirmationEmail({
                     <td valign="middle">
                       <div style={{ fontFamily: FONT, fontSize: '11px', fontWeight: 700, letterSpacing: '1.4px', textTransform: 'uppercase' as const, color: C.gold }}>{t.dateLabel}</div>
                       <div style={{ fontFamily: FONT, fontSize: '21px', fontWeight: 800, color: '#FFFFFF', marginTop: '7px', lineHeight: '27px' }}>{dateOnly}</div>
-                      {timeOnly ? <div style={{ fontFamily: FONT, fontSize: '14px', fontWeight: 600, color: '#AEB8C6', marginTop: '4px' }}>{timeOnly}</div> : null}
+                      {timeOnly ? <div style={{ fontFamily: FONT, fontSize: '14px', fontWeight: 600, color: C.onNavyMuted, marginTop: '4px' }}>{timeOnly}</div> : null}
                     </td>
                     <td width={54} align="right" valign="middle" className="hide-sm" style={{ width: '54px' }}>
                       <IconChip icon="calendar" color={C.gold} size={20} dim={46} border="none" radius={13} bg="rgba(212,162,76,0.16)" />
@@ -302,7 +302,7 @@ export default function FinalConfirmationEmail({
           <tbody>
             <tr>
               <td width={44} valign="top" style={{ width: '44px' }}>
-                <IconChip icon="truck" color={C.orange} size={19} dim={36} border="1px solid #FBD9C2" radius={10} />
+                <IconChip icon="truck" color={C.orange} size={19} dim={36} border={`1px solid ${C.orangeEdge}`} radius={10} />
               </td>
               <td valign="top" style={{ paddingLeft: '4px' }}>
                 <div style={{ fontFamily: FONT, fontSize: '15px', fontWeight: 800, color: C.navy, marginBottom: '4px' }}>{t.remindTitle}</div>
