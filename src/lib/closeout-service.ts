@@ -157,6 +157,8 @@ export async function buildCloseoutView(bookingId: string): Promise<CloseoutView
   const blockers = computeCloseoutBlockers({
     bookingStatus: booking.status,
     hasCapturedPayment: revenue.grossCapturedCents > 0,
+    // D3 — only an internal-test booking may rehearse past NO_PAYMENT_DATA.
+    isInternalTest: !!booking.isInternalTest,
     hasUnknownRefundAmount: revenue.hasUnknownRefund,
     refundExceedsCaptured,
     outstandingBalanceCents: financials.outstandingBalanceCents,
