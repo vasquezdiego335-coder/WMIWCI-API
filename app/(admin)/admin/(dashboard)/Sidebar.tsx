@@ -20,6 +20,7 @@ const GROUPS: Group[] = [
       { href: '/admin', label: 'Dashboard', icon: '🏠' },
       { href: '/admin/action-center', label: 'Action Center', icon: '🔔' },
       { href: '/admin/schedule', label: 'Calendar', icon: '📅' },
+      { href: '/admin/scheduling', label: 'Scheduling', icon: '🗂️' },
     ],
   },
   {
@@ -29,7 +30,7 @@ const GROUPS: Group[] = [
       { href: '/admin/bookings', label: 'Bookings', icon: '📋' },
       { href: '/admin/customers', label: 'Customers', icon: '👤' },
       { label: 'Leads', icon: '📈', soon: true },
-      { href: '/admin/staff', label: 'Crew', icon: '👥' },
+      { href: '/admin/staff', label: 'Staff & Crew', icon: '👥' },
     ],
   },
   {

@@ -93,6 +93,8 @@ export const config = {
     '/admin/staff',
     '/admin/schedule/:path*',
     '/admin/schedule',
+    '/admin/scheduling/:path*',
+    '/admin/scheduling',
     '/admin/queues/:path*',
     '/admin/queues',
     // Stage 3B: reporting pages must be auth-gated by the middleware too, not

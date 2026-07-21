@@ -1,5 +1,7 @@
 import { prisma } from '@/lib/db'
 import { getSession } from '@/lib/auth'
+import { can, type Role } from '@/lib/permissions'
+import JobStaffingPanel from './JobStaffingPanel'
 import { notFound } from 'next/navigation'
 import Link from 'next/link'
 import BookingActions from './BookingActions'
@@ -562,6 +564,13 @@ export default async function JobDetail({ params }: { params: { id: string } }) 
               </div>
             )}
           </Card>
+
+          {/* Section 7b-2: Staffing (Stage 5) — assign crew/owners, conflicts, health */}
+          {booking.job && (
+            <Card title="Staffing" icon="👥" wide>
+              <JobStaffingPanel jobId={booking.job.id} isOwner={isOwner} canManage={can(session?.role as Role, 'schedule.manage')} />
+            </Card>
+          )}
 
           {/* Section 7c: Job Expenses (admin OS) */}
           <Card title={`Job Expenses (${booking.expenses.length})`} icon="🧾">
