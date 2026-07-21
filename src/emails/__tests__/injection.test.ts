@@ -180,3 +180,77 @@ test('rendered confirmation output contains no unresolved template tokens', () =
     assert.equal(html.includes(token), false, `rendered output contains ${token}`)
   }
 })
+
+// ── APP'S OWN HOST (production incident, 2026-07-21) ────────────────────
+// The preview-domain rule blocklisted *.railway.app to stop staging links
+// reaching customers. Move It Clear It's PRODUCTION host is a railway.app
+// subdomain, so every portalUrl the app generated about ITSELF was rejected and
+// assertEmailPayload refused every booking confirmation, receipt and reminder.
+// Found by /api/email/health on the first production deploy.
+
+test("a URL on the app's OWN host is accepted even on a preview-style domain", () => {
+  const saved = process.env.APP_URL
+  process.env.APP_URL = 'https://wonderful-strength-production-a0f1.up.railway.app'
+  try {
+    assert.equal(
+      unsafeUrlReason('https://wonderful-strength-production-a0f1.up.railway.app/my-booking/TOKEN'),
+      null
+    )
+    // The real failure: a portalUrl on the app's own host must not block a send.
+    assert.doesNotThrow(() =>
+      assertEmailPayload('final-confirmation', {
+        displayId: 'WMIC-1',
+        date: '2026-08-01T00:00:00Z',
+        timeLabel: '8-10 AM',
+        amountPaid: '49.00',
+        portalUrl: 'https://wonderful-strength-production-a0f1.up.railway.app/my-booking/TOKEN',
+      })
+    )
+  } finally {
+    if (saved === undefined) delete process.env.APP_URL
+    else process.env.APP_URL = saved
+  }
+})
+
+test('a DIFFERENT preview host is still rejected — the exemption is host-scoped', () => {
+  const saved = process.env.APP_URL
+  process.env.APP_URL = 'https://wonderful-strength-production-a0f1.up.railway.app'
+  try {
+    // Someone else's railway/vercel/ngrok deployment is still a stray link.
+    assert.notEqual(unsafeUrlReason('https://someone-else.up.railway.app/x'), null)
+    assert.notEqual(unsafeUrlReason('https://preview-abc.vercel.app/x'), null)
+    assert.notEqual(unsafeUrlReason('https://tunnel.ngrok-free.app/x'), null)
+  } finally {
+    if (saved === undefined) delete process.env.APP_URL
+    else process.env.APP_URL = saved
+  }
+})
+
+test('the own-host exemption cannot smuggle an unsafe URL through', () => {
+  const saved = process.env.APP_URL
+  process.env.APP_URL = 'https://wonderful-strength-production-a0f1.up.railway.app'
+  try {
+    // Every other rule still applies to the app's own host.
+    assert.notEqual(unsafeUrlReason('http://wonderful-strength-production-a0f1.up.railway.app/x'), null)
+    assert.notEqual(unsafeUrlReason('javascript:alert(1)'), null)
+    assert.notEqual(unsafeUrlReason('data:text/html,x'), null)
+    assert.notEqual(unsafeUrlReason('#'), null)
+    assert.notEqual(
+      unsafeUrlReason('https://wonderful-strength-production-a0f1.up.railway.app/REPLACE_WITH_X'),
+      null
+    )
+  } finally {
+    if (saved === undefined) delete process.env.APP_URL
+    else process.env.APP_URL = saved
+  }
+})
+
+test('with APP_URL unset, preview domains are rejected as before', () => {
+  const saved = process.env.APP_URL
+  delete process.env.APP_URL
+  try {
+    assert.notEqual(unsafeUrlReason('https://anything.up.railway.app/x'), null)
+  } finally {
+    if (saved !== undefined) process.env.APP_URL = saved
+  }
+})
