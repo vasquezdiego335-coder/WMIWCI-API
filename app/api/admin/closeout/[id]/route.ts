@@ -6,6 +6,7 @@ import { can, type Role } from '@/lib/permissions'
 import { buildCloseoutView, ensureCloseout, writeSnapshot } from '@/lib/closeout-service'
 import { canFinalizeCloseout, canReopenCloseout, canOverrideBlocker, canEditCloseoutInputs, canSetOverhead, canSetReserves, canSetOwnerSplit, isConcurrentFinalize } from '@/lib/closeout-guards'
 import { computeOwnerSplit, type SplitMethod } from '@/lib/owner-split'
+import { evaluateRehearsal, rehearsalEnabled, buildRehearsalAudit, REHEARSABLE_BLOCKER } from '@/lib/internal-rehearsal'
 import { z } from 'zod'
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -194,6 +195,26 @@ export async function POST(req: NextRequest, { params }: { params: { id: string 
     }
 
     case 'OVERRIDE': {
+      // D3 — clearing NO_PAYMENT_DATA is a REHEARSAL, not an ordinary override,
+      // and it runs through its own gate first: internal-test booking, OWNER,
+      // written reason, not switched off. A real customer booking is refused
+      // here with a message about the booking rather than about the person.
+      const isRehearsal = d.blockerCode === REHEARSABLE_BLOCKER
+      if (isRehearsal) {
+        const booking = await prisma.booking.findUnique({
+          where: { id: params.id },
+          select: { isInternalTest: true },
+        })
+        const decision = evaluateRehearsal({
+          role,
+          isInternalTest: booking?.isInternalTest,
+          reason: d.reason,
+          blockerCode: d.blockerCode,
+          enabled: rehearsalEnabled(process.env.INTERNAL_REHEARSAL_DISABLED),
+        })
+        if (!decision.allow) return NextResponse.json({ error: decision.error }, { status: decision.status })
+      }
+
       const gate = canOverrideBlocker({ role, code: d.blockerCode ?? '', reason: d.reason, blockers: view.blockers })
       if (!gate.allow) return NextResponse.json({ error: gate.error }, { status: gate.status })
       const next = [
@@ -203,6 +224,25 @@ export async function POST(req: NextRequest, { params }: { params: { id: string 
       await prisma.$transaction(async (tx) => {
         await tx.moveCloseout.update({ where: { id: closeoutId }, data: { overrides: next as never } })
         await audit('CLOSEOUT_OVERRIDE_USED', { code: d.blockerCode, reason: d.reason, previousOverrides: view.overrides.map((o) => o.code) }, tx as never)
+        if (isRehearsal) {
+          // A second, distinctly-actioned entry so synthetic activity can be
+          // found without parsing override reasons. It records the side effects
+          // that did NOT happen — no Stripe call, no email, no SMS — because
+          // that absence is the whole point of the pathway.
+          await tx.auditLog.create({
+            data: {
+              action: 'CLOSEOUT_REHEARSAL',
+              userId: session.userId,
+              bookingId: params.id,
+              details: buildRehearsalAudit({
+                bookingId: params.id,
+                reason: d.reason!,
+                byName: session.name,
+                blockerCode: d.blockerCode,
+              }) as never,
+            },
+          })
+        }
       })
       break
     }
