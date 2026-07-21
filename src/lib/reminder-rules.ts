@@ -85,7 +85,9 @@ export interface RuleBooking {
   hasFailedPayment: boolean
   hasWorkerPayExpense: boolean
   // Pre-computed by the loader from src/lib/job-money.ts (single-source math):
-  moveDayDueCents: number
+  /** Full customer balance still owed (job-money.customerBalance) — base
+   *  labor INCLUDED, not just the move-day fee columns. */
+  outstandingBalanceCents: number
   netRevenueCents: number
   netProfitCents: number
 }
@@ -291,13 +293,13 @@ export function evaluateBooking(b: RuleBooking, now: Date): ReminderCandidate[] 
 
   // FINANCIAL / CUSTOMER_BALANCE ------------------------------------------------
   if (b.status === 'COMPLETED') {
-    if (b.moveDayDueCents > 0) {
+    if (b.outstandingBalanceCents > 0) {
       const daysSince = b.completedAt ? (now.getTime() - b.completedAt.getTime()) / DAY : 0
       out.push({
         reminderType: 'job-balance-unpaid', category: 'CUSTOMER_BALANCE',
-        severity: unpaidBalanceSeverity(b.moveDayDueCents, daysSince),
-        title: `${b.customerName}: ${money(b.moveDayDueCents)} still owed after completed job`,
-        description: `The job is complete but ${money(b.moveDayDueCents)} in move-day charges has not been recorded as collected. Collect it or record the payment on the job page.`,
+        severity: unpaidBalanceSeverity(b.outstandingBalanceCents, daysSince),
+        title: `${b.customerName}: ${money(b.outstandingBalanceCents)} still owed after completed job`,
+        description: `The job is complete but ${money(b.outstandingBalanceCents)} of the customer's balance has not been recorded as collected. Collect it or record the payment on the job page.`,
         sourceEntityType: 'booking', sourceEntityId: b.id, sourceUrl: jobUrl(b.id),
         dedupeKey: key('job-balance-unpaid', 'booking', b.id),
         dueAt: b.completedAt ? new Date(b.completedAt.getTime() + 3 * DAY) : null,

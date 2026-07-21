@@ -4,6 +4,7 @@
 // logic so the Jobs list and the job-detail Profit card agree exactly.
 
 import { effectiveWaitingFeeCents } from './waiting-time'
+import { summarizeRevenue } from './money-rules'
 import { computeJobProfit, isStripePayment, type JobProfit } from './profit'
 import { evaluateFinancialCompleteness, type FinancialCompleteness } from './financial-completeness'
 import { rollupLabor, paidCentsOf, type RollupAssignment, type LaborRollup } from './labor-calc'
@@ -57,6 +58,14 @@ export function jobLabor(b: BookingMoneyShape, policy: TimePolicy = DEFAULT_TIME
 
 export interface BookingMoneyShape {
   status: string
+  /** DOLLARS (pricing.ts unit contract) — base labor + access add-ons + travel. */
+  totalEstimate?: number | null
+  /** DOLLARS — flat move-size labor price. Fallback when totalEstimate is null. */
+  baseRate?: number | null
+  /** CENTS — the Stripe deposit ($49), applied against the total. */
+  depositAmount?: number | null
+  /** Whole percent off the quote (10 = 10%). Stored at booking/approval time. */
+  discountPercent?: number | null
   truckAddonAmount?: number | null
   truckAddonDueOnMoveDay?: boolean | null
   travelFee?: number | null
@@ -198,13 +207,35 @@ export const JOB_MONEY_CREW_SELECT = {
   user: { select: { name: true, payRate: true } },
 } as const
 
-/** Fees collected ON MOVE DAY (never through the $49 Stripe deposit): truck
- *  add-on, travel fee, extra truck fees, waiting fee, and any itemized service
- *  fees. This is the concrete "remaining balance" the crew still collects. */
-export function moveDayDueCents(b: BookingMoneyShape): number {
+// ── THE customer balance ────────────────────────────────────────────────────
+//
+// One model, one formula, every surface. Before this existed, the job page, the
+// jobs list, the dashboard KPI and the Action Center reminder each summed a bag
+// of fee columns and called the result "due on move day" — which silently
+// EXCLUDED the unpaid base-service balance. A $409 move with a $49 deposit
+// reported "$100 due" when the customer owed $460.
+//
+//   quoted (Booking.totalEstimate: base labor + access add-ons + travel)
+//   + additional charges (everything NOT already inside the quote)
+//   − discount
+//   = final billed
+//   − collected (captured − refunds − lost chargebacks)
+//   = outstanding
+//
+// The ONLY money Stripe ever takes is the $49 deposit, so the entire
+// outstanding balance is settled on move day. "Due on move day" and
+// "outstanding" are the same number by construction — they can no longer drift.
+
+/**
+ * Charges that are NOT already inside `Booking.totalEstimate`.
+ *
+ * The travel fee is deliberately absent: `estimate.ts` folds it into
+ * `estimatedTotal`, so counting it here would bill it twice (it did — the
+ * closeout's billed revenue was over by exactly the travel fee).
+ */
+export function additionalChargeCents(b: BookingMoneyShape): number {
   return (
-    (b.truckAddonAmount ?? 0) +
-    (b.travelFee ?? 0) +
+    (b.truckAddonDueOnMoveDay === false ? 0 : (b.truckAddonAmount ?? 0)) +
     (b.additionalTruckFees ?? 0) +
     effectiveWaitingFeeCents(b) +
     (b.stairFee ?? 0) +
@@ -215,6 +246,69 @@ export function moveDayDueCents(b: BookingMoneyShape): number {
     (b.disassemblyFee ?? 0) +
     (b.taxAmount ?? 0)
   )
+}
+
+export interface CustomerBalance {
+  /** The quote the customer accepted (base + access add-ons + travel). */
+  quotedCents: number
+  /** Approved charges added on top of the quote (truck, waiting, itemized). */
+  additionalChargeCents: number
+  /** Percentage discount applied to the quote + additional charges. */
+  discountCents: number
+  /** quoted + additional − discount. An entitlement, never cash. */
+  finalBilledCents: number
+  /** Captured − refunds − lost chargebacks. Real money in the bank. */
+  collectedCents: number
+  refundedCents: number
+  /** Authorized but not captured — never counted as collected. */
+  authorizedNotCapturedCents: number
+  /** finalBilled − collected. What the customer still owes. */
+  outstandingCents: number
+  /**
+   * The whole outstanding balance: Stripe only ever holds the $49 deposit, so
+   * everything still owed is collected in person on move day.
+   */
+  dueOnMoveDayCents: number
+  /** Of the outstanding balance, the part that is not the base quote. */
+  moveDayFeeCents: number
+  /** No quote is stored — the balance is a floor, not the full amount. */
+  quoteMissing: boolean
+}
+
+/**
+ * THE customer balance for one move. Every surface that shows an amount owed
+ * must originate it here rather than re-summing fee columns.
+ */
+export function customerBalance(b: BookingMoneyShape): CustomerBalance {
+  // totalEstimate is DOLLARS (pricing.ts unit contract); everything else CENTS.
+  const quoteMissing = b.totalEstimate == null
+  const quotedCents = quoteMissing
+    // Legacy / "need a quote" rows: rebuild the quote from its parts so the
+    // base labor is still billed rather than silently dropped.
+    ? Math.round((b.baseRate ?? 0) * 100) + (b.travelFee ?? 0)
+    : Math.round((b.totalEstimate ?? 0) * 100)
+
+  const additional = additionalChargeCents(b)
+  const pct = b.discountPercent ?? 0
+  const discountCents = pct > 0 ? Math.round(((quotedCents + additional) * pct) / 100) : 0
+  const finalBilledCents = Math.max(0, quotedCents + additional - discountCents)
+
+  const revenue = summarizeRevenue(b.payments as never)
+  const outstandingCents = Math.max(0, finalBilledCents - revenue.netCollectedCents)
+
+  return {
+    quotedCents,
+    additionalChargeCents: additional,
+    discountCents,
+    finalBilledCents,
+    collectedCents: revenue.netCollectedCents,
+    refundedCents: revenue.refundedCents,
+    authorizedNotCapturedCents: revenue.authorizedNotCapturedCents,
+    outstandingCents,
+    dueOnMoveDayCents: outstandingCents,
+    moveDayFeeCents: Math.min(additional, outstandingCents),
+    quoteMissing,
+  }
 }
 
 /** Recorded per-job profit: NET collected revenue (captured − refunds −
@@ -294,7 +388,7 @@ export function jobWarnings(b: BookingMoneyShape): string[] {
   if (live && crewCount === 0) {
     w.push('Crew assignment incomplete')
   }
-  const due = moveDayDueCents(b)
+  const due = customerBalance(b).outstandingCents
   if (due > 0 && (b.status === 'COMPLETED' || b.status === 'IN_PROGRESS')) {
     w.push('Balance due after job')
   }

@@ -3,6 +3,7 @@ import { prisma } from '@/lib/db'
 import { notFound } from 'next/navigation'
 import { CopyReference } from './CopyReference'
 import { accessSections } from '@/lib/booking-access'
+import { customerBalance, JOB_MONEY_PAYMENT_SELECT } from '@/lib/job-money'
 import { waitingMinutesBetween, WAITING_GRACE_MINUTES, WAITING_POLICY } from '@/lib/waiting-time'
 
 export const revalidate = 0
@@ -89,6 +90,13 @@ type CustomerBookingView = {
   notes: string | null // customer's own words, capped — never internal notes
   estimate: string | null // "$X" move estimate (labor), advisory
   estimateTotal: number | null // raw dollars for the payment breakdown
+  /** Approved charges that sit OUTSIDE the quote (truck add-on). Dollars. */
+  moveDayAddonTotal: number | null
+  /** Discount actually applied to this booking, in dollars. */
+  discountTotal: number | null
+  /** What the customer still owes, from job-money.customerBalance. Dollars.
+   *  Null when no quote is stored — we show nothing rather than guess. */
+  remainingBalance: number | null
   travelFeeNote: string | null // clean move-day travel line, or null
   photoCount: number
   receiptUrl: string | null
@@ -216,6 +224,12 @@ function buildCustomerView(booking: BookingRecord): CustomerBookingView {
     : null
   const estimate = estimateTotal != null ? money(estimateTotal) : null
 
+  // THE customer balance — the same model the admin reads. The portal used to
+  // show `estimateTotal − $49`, which omitted the $50 truck add-on (it sits
+  // OUTSIDE the quote by design), ignored any discount, and ignored every
+  // payment after the deposit.
+  const balance = customerBalance(booking as never)
+
   // Travel fee: clean, from the structured column only. Pending (manual-review)
   // bookings show no number — never the internal "do not confirm" instruction.
   const travelFeeNote = booking.travelFeeDueOnMoveDay && booking.travelFee > 0 && !booking.manualReviewRequired
@@ -257,6 +271,11 @@ function buildCustomerView(booking: BookingRecord): CustomerBookingView {
     notes: items.notes,
     estimate,
     estimateTotal,
+    moveDayAddonTotal: balance.additionalChargeCents > 0 ? balance.additionalChargeCents / 100 : null,
+    discountTotal: balance.discountCents > 0 ? balance.discountCents / 100 : null,
+    // Never quote a balance we cannot vouch for: a booking with no stored
+    // estimate shows no number at all rather than one rebuilt from parts.
+    remainingBalance: balance.quoteMissing ? null : balance.outstandingCents / 100,
     travelFeeNote,
     photoCount: booking.files.length,
     receiptUrl: booking.receipt?.cloudinaryUrl ?? null,
@@ -429,7 +448,9 @@ async function loadBooking(token: string) {
     where: { customerToken: token, customerTokenExpiry: { gte: new Date() } },
     include: {
       customer: { select: { name: true } },
-      payments: { select: { status: true } },
+      // The blessed payment select — the balance model needs amounts, refunds
+      // and dispute state, not just a status.
+      payments: { select: JOB_MONEY_PAYMENT_SELECT },
       files: { select: { id: true } },
       receipt: { select: { cloudinaryUrl: true } },
     },
@@ -447,7 +468,7 @@ export default async function BookingStatusPage({ params }: { params: { token: s
 
   const isReviewing = v.status === 'under_review'
   const paid = v.paymentStatus === 'received' || v.paymentStatus === 'captured'
-  const remaining = v.estimateTotal != null ? Math.max(0, v.estimateTotal - v.bookingFee) : null
+  const remaining = v.remainingBalance
   const payHeadline = v.paymentStatus === 'captured' ? 'Payment successful'
     : v.paymentStatus === 'received' ? 'Payment successful'
       : v.paymentStatus === 'released' ? 'Hold released'
@@ -675,6 +696,18 @@ export default async function BookingStatusPage({ params }: { params: { token: s
                   <div className="bk-payline">
                     <dt className="bk-payline__k">Estimated move total</dt>
                     <dd className="bk-payline__v">{money(v.estimateTotal)}</dd>
+                  </div>
+                )}
+                {v.moveDayAddonTotal != null && (
+                  <div className="bk-payline">
+                    <dt className="bk-payline__k">Truck pickup &amp; return</dt>
+                    <dd className="bk-payline__v">{money(v.moveDayAddonTotal)}</dd>
+                  </div>
+                )}
+                {v.discountTotal != null && (
+                  <div className="bk-payline">
+                    <dt className="bk-payline__k">Discount applied</dt>
+                    <dd className="bk-payline__v">−{money(v.discountTotal)}</dd>
                   </div>
                 )}
                 <div className="bk-payline bk-payline--accent">

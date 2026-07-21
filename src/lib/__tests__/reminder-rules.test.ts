@@ -38,7 +38,7 @@ function booking(over: Partial<RuleBooking> = {}): RuleBooking {
     requestedDate: null, completedAt: null,
     truckAddonDueOnMoveDay: false, truckProvider: null, truckReservationStatus: null, truckReservationNumber: null,
     jobStartedAt: null, crew: [crew()], hasFailedPayment: false, hasWorkerPayExpense: false,
-    moveDayDueCents: 0, netRevenueCents: 70000, netProfitCents: 40000,
+    outstandingBalanceCents: 0, netRevenueCents: 70000, netProfitCents: 40000,
     ...over,
   }
 }
@@ -91,7 +91,7 @@ test('completed job with unpaid move-day balance + negative profit + missing hou
   const c = evaluateBooking(
     booking({
       status: 'COMPLETED', completedAt: new Date(NOW.getTime() - 2 * DAY),
-      moveDayDueCents: 41000, netProfitCents: -5000,
+      outstandingBalanceCents: 41000, netProfitCents: -5000,
       crew: [crew({ actualHours: null, flatPay: null })],
     }),
     NOW,

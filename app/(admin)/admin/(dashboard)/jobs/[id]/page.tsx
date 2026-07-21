@@ -14,7 +14,7 @@ import {
   WAITING_RESCHEDULE_THRESHOLD_MINUTES,
 } from '@/lib/waiting-time'
 import { crewPayOwedCents } from '@/lib/profit'
-import { jobProfit, jobFinancialCompleteness, jobLabor, JOB_MONEY_CREW_SELECT } from '@/lib/job-money'
+import { jobProfit, jobFinancialCompleteness, jobLabor, customerBalance, JOB_MONEY_CREW_SELECT } from '@/lib/job-money'
 import { completenessLabel, LABOR_STATE_LABELS } from '@/lib/financial-completeness'
 import { computeLaborPay, paidCentsOf } from '@/lib/labor-calc'
 import { isOnBreak } from '@/lib/labor-time'
@@ -101,9 +101,10 @@ export default async function JobDetail({ params }: { params: { id: string } }) 
   const lifetimeCents = custBookings.flatMap((b) => b.payments).reduce((s, p) => s + p.amount, 0)
   const previousMoves = custBookings.filter((b) => b.status === 'COMPLETED' && b.id !== booking.id).length
 
-  const moveDayDue = (booking.truckAddonAmount ?? 0) + (booking.travelFee ?? 0) + (booking.additionalTruckFees ?? 0) + effectiveWaitingFeeCents(booking)
-    + (booking.stairFee ?? 0) + (booking.longCarryFee ?? 0) + (booking.heavyItemFee ?? 0)
-    + (booking.packingFee ?? 0) + (booking.assemblyFee ?? 0) + (booking.disassemblyFee ?? 0) + (booking.taxAmount ?? 0)
+  // THE customer balance — one model shared with the jobs list, the dashboard
+  // KPI, the closeout and the Action Center. Never re-sum fee columns here:
+  // that is what made this page report "$100 due" on a move owing $460.
+  const balance = customerBalance(booking as never)
   // Per-job profit (recorded money): NET collected revenue (captured − refunds
   // − chargebacks) − crew pay − eligible expenses − Stripe fees. Shares the
   // exact math with the Jobs list + dashboard via src/lib/money-rules.ts.
@@ -378,15 +379,46 @@ export default async function JobDetail({ params }: { params: { id: string } }) 
             <FeeRow label="Disassembly" value={cents(booking.disassemblyFee)} />
             <FeeRow label="Tax" value={cents(booking.taxAmount)} />
             <FeeRow label="Processing" value={cents(booking.processingFee)} />
-            {booking.discountType && <FeeRow label={`Discount (${String(booking.discountType).replace(/_/g, ' ')})`} value={`${booking.discountPercent ?? 0}%`} />}
             <div style={divider} />
-            <Row label="Estimated total" value={money(booking.totalEstimate) ?? '—'} strong />
+            {/* ── The balance, from the ONE model (job-money.customerBalance).
+                Quoted → billed → collected → outstanding. The outstanding
+                balance INCLUDES the unpaid base labor; showing only the fee
+                columns is what made this card understate a $460 balance as
+                "$100 due on move day". ── */}
+            <Row label="Quoted (estimate)" value={cents(balance.quotedCents) ?? '—'} />
+            {balance.additionalChargeCents > 0 && (
+              <Row label="+ Approved add-ons / move-day charges" value={cents(balance.additionalChargeCents)!} />
+            )}
+            {booking.discountType && (
+              <Row
+                label={`− Discount (${String(booking.discountType).replace(/_/g, ' ')} ${booking.discountPercent ?? 0}%)`}
+                value={cents(balance.discountCents) ?? '$0.00'}
+              />
+            )}
+            <Row label="Final billed amount" value={cents(balance.finalBilledCents) ?? '$0.00'} strong />
+            {balance.quoteMissing && (
+              <div style={{ fontSize: '11px', color: '#B45309', textAlign: 'right' }}>
+                No stored quote — rebuilt from base labor + travel; confirm before collecting
+              </div>
+            )}
             <div style={{ marginTop: '10px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
-              <PayBadge color="#3B82F6" label="Deposit (Stripe)" value={cents(booking.depositAmount) ?? '$0.00'} note={booking.depositPaid ? 'paid' : 'unpaid'} />
-              <PayBadge color="#10B981" label="Collected" value={cents(collected) ?? '$0.00'} />
-              {refunded > 0 && <PayBadge color="#EF4444" label="Refunded" value={cents(refunded)!} />}
-              <PayBadge color="#F59E0B" label="Due on move day" value={cents(moveDayDue) ?? '$0.00'} note="not in Stripe" />
+              <PayBadge color="#3B82F6" label="Deposit (Stripe)" value={cents(booking.depositAmount) ?? '$0.00'} note={booking.depositPaid ? 'captured' : 'held, not captured'} />
+              <PayBadge color="#10B981" label="Collected" value={cents(balance.collectedCents) ?? '$0.00'} />
+              {balance.refundedCents > 0 && <PayBadge color="#EF4444" label="Refunded" value={cents(balance.refundedCents)!} />}
+              <PayBadge
+                color={balance.outstandingCents > 0 ? '#F59E0B' : '#10B981'}
+                label="Outstanding balance"
+                value={cents(balance.outstandingCents) ?? '$0.00'}
+                note={balance.outstandingCents > 0 ? 'collect on move day — not in Stripe' : 'paid in full'}
+              />
             </div>
+            {balance.outstandingCents > 0 && (
+              <p style={{ fontSize: '11px', color: '#6B7280', margin: '10px 0 0' }}>
+                Stripe only ever holds the {cents(booking.depositAmount) ?? '$49.00'} deposit. The full
+                outstanding balance — base labor included — is collected in person on move day and must be
+                logged with “Record payment”.
+              </p>
+            )}
           </Card>
 
           {/* Section 7b: Job Profit & Costs (admin OS; Phase 0 completeness) */}
