@@ -13,6 +13,10 @@ import { getSession } from '@/lib/auth'
 import { can } from '@/lib/permissions'
 import { emailCampaignResults } from '@/lib/email-attribution'
 import { parseRange } from '@/lib/email-admin'
+import { prisma } from '@/lib/db'
+import { templateRegistry } from '@/lib/email-registry'
+import { allowedTransitions, type CampaignState } from '@/lib/email-campaign'
+import CampaignComposer from './CampaignComposer'
 import { PageHeader, Card, COLORS, Empty, tableStyles as T, SoftBadge } from '../../_ui'
 import { EmailTabs, RangePicker, money } from '../_shared'
 
@@ -39,6 +43,43 @@ export default async function EmailCampaignsPage({ searchParams }: { searchParam
   const range = parseRange(searchParams.range as string | undefined)
   const { rows, error } = await emailCampaignResults(range)
 
+  // Composer inputs. Only PROMOTIONAL templates can be broadcast: a
+  // transactional template states a fact about one specific booking.
+  const templates = templateRegistry()
+    .filter((t) => t.emailClass === 'promotional')
+    .map((t) => ({ key: t.key, name: t.name }))
+
+  let audiences: Array<{ id: string; name: string }> = []
+  let manageRows: React.ComponentProps<typeof CampaignComposer>['campaigns'] = []
+  let manageError: string | null = null
+  try {
+    const [aud, camps] = await Promise.all([
+      prisma.emailAudience.findMany({ orderBy: { name: 'asc' }, select: { id: true, name: true } }),
+      prisma.marketingCampaign.findMany({
+        where: { channel: 'EMAIL' },
+        orderBy: { createdAt: 'desc' },
+        include: { emailConfig: { include: { audience: { select: { name: true } } } } },
+      }),
+    ])
+    audiences = aud
+    manageRows = camps.map((c) => ({
+      id: c.id,
+      name: c.name,
+      sourceKey: c.sourceKey,
+      status: c.status,
+      allowedTransitions: allowedTransitions(c.status as CampaignState),
+      template: c.emailConfig?.template ?? null,
+      audienceName: c.emailConfig?.audience?.name ?? null,
+      scheduledAt: c.emailConfig?.scheduledAt ? c.emailConfig.scheduledAt.toISOString() : null,
+      approvedByName: c.emailConfig?.approvedByName ?? null,
+      approvedAt: c.emailConfig?.approvedAt ? c.emailConfig.approvedAt.toISOString() : null,
+      statusNote: c.emailConfig?.statusNote ?? null,
+      validation: (c.emailConfig?.validation ?? null) as never,
+    }))
+  } catch (err) {
+    manageError = err instanceof Error ? err.message : String(err)
+  }
+
   return (
     <div>
       <PageHeader
@@ -47,6 +88,13 @@ export default async function EmailCampaignsPage({ searchParams }: { searchParam
         actions={<RangePicker base="/admin/email-marketing/campaigns" active={range} />}
       />
       <EmailTabs active="/admin/email-marketing/campaigns" isOwner={isOwner} />
+
+      <div style={{ marginBottom: '20px' }}>
+        <CampaignComposer templates={templates} audiences={audiences} campaigns={manageRows} />
+        {manageError && (
+          <p style={{ fontSize: '12px', color: COLORS.red, marginTop: '10px' }}>Campaign management unavailable: {manageError}</p>
+        )}
+      </div>
 
       <Card wide>
         {error && <p style={{ fontSize: '13px', color: COLORS.red }}>Could not read campaign results: {error}</p>}
