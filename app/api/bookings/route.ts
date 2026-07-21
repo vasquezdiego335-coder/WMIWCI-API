@@ -5,7 +5,7 @@ import { BOOKING_FEE_CENTS, createBookingCheckout } from '@/lib/stripe'
 import { apiLogger } from '@/lib/logger'
 import { AGREEMENT_VERSION } from '@/lib/agreement'
 import { notifyBookingCreated } from '@/lib/notify'
-import { onCheckoutStarted } from '@/lib/journeys'
+import { onCheckoutStarted, onLeadClosed } from '@/lib/journeys'
 import { checkServiceArea, travelFeeDollars, type AddressInput } from '@/lib/service-area'
 import { verifyAddress, type VerifiedAddress } from '@/lib/address-verify'
 import { assessAddress } from '@/lib/address'
@@ -14,7 +14,7 @@ import { etDateTimeToInstant } from '@/lib/scheduling'
 import { computeEstimate, MOVE_SIZES } from '@/lib/estimate'
 import { nextBookingReference } from '@/lib/booking-reference'
 import { rateLimit, tooManyRequests, LIMITS, clientIp } from '@/lib/rate-limit'
-import { ingestLeadSafe } from '@/lib/leads'
+import { ingestLeadSafe, markLeadConverted } from '@/lib/leads'
 
 const TRUCK_PICKUP_RETURN_AMOUNT_CENTS = 5000
 
@@ -657,6 +657,18 @@ async function handleBooking(req: NextRequest): Promise<NextResponse> {
     await onCheckoutStarted(booking.id)
   } catch (err) {
     apiLogger.error({ err: err instanceof Error ? err.message : String(err), bookingId: booking.id }, 'onCheckoutStarted failed (non-fatal)')
+  }
+
+  // ── LEAD CONVERSION ─────────────────────────────────────────────────────
+  // If this customer was a tracked lead, they have now booked. Convert the
+  // matching OPEN lead (stamps convertedBookingId/bookedAt — the columns
+  // audiences and attribution already read) and stop any quote follow-up
+  // sequence for it. Best-effort: never blocks the booking response.
+  try {
+    const convertedLeadId = await markLeadConverted(customer.email, booking.id)
+    if (convertedLeadId) await onLeadClosed(convertedLeadId)
+  } catch (err) {
+    apiLogger.error({ err: err instanceof Error ? err.message : String(err), bookingId: booking.id }, 'lead conversion failed (non-fatal)')
   }
 
   // ── Owner alert: a new booking was started (non-fatal; never blocks booking) ──
