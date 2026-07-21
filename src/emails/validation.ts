@@ -38,9 +38,41 @@ export function unsafeUrlReason(url: string | undefined | null): string | null {
     return 'placeholder marker in URL (not configured)'
   }
   if (/\b(example\.(com|org|net)|test\.test|foo\.bar)\b/i.test(u)) return 'example/test domain'
-  if (/^https?:\/\/[^/]*\.(vercel|ngrok(-free)?|railway)\.app/i.test(u)) return 'preview/staging domain'
+
+  // ── THE APP'S OWN HOST IS ALWAYS LEGITIMATE ──────────────────────────────
+  // The preview-domain rule below blocklists *.vercel.app / *.railway.app /
+  // *.ngrok.app to stop a staging link reaching a customer. That was wrong for
+  // a deployment whose PRODUCTION host is one of those: Move It Clear It runs
+  // on `wonderful-strength-production-….up.railway.app`, so every portalUrl the
+  // app generated about itself was rejected, and `assertEmailPayload` refused
+  // every booking confirmation, receipt and reminder. Caught by
+  // /api/email/health on the first production deploy — before a customer.
+  //
+  // A URL pointing at the host this app is DEPLOYED ON cannot be a stray
+  // preview link; it is the canonical destination. So APP_URL's host is
+  // exempt from the preview rule — and only that rule. javascript:, data:,
+  // localhost, placeholders and non-https are still rejected above and below,
+  // so this cannot be used to smuggle an unsafe URL through.
+  if (!isAppOwnHost(u) && /^https?:\/\/[^/]*\.(vercel|ngrok(-free)?|railway)\.app/i.test(u)) {
+    return 'preview/staging domain'
+  }
+
   if (!/^https:\/\//i.test(u)) return 'not an absolute https URL'
   return null
+}
+
+/** Does this URL point at the host APP_URL is configured to? */
+function isAppOwnHost(url: string): boolean {
+  const configured = process.env.APP_URL?.trim()
+  if (!configured) return false
+  try {
+    const appHost = new URL(configured).host.toLowerCase()
+    // A blank host would make every relative-ish string "own host".
+    if (!appHost) return false
+    return new URL(url).host.toLowerCase() === appHost
+  } catch {
+    return false
+  }
 }
 
 export const isSafeUrl = (url: string | undefined | null): boolean => unsafeUrlReason(url) === null
