@@ -46,7 +46,7 @@ const GROUPS: Group[] = [
   {
     title: 'Growth',
     items: [
-      { label: 'Email Marketing', icon: '✉️', soon: true },
+      { href: '/admin/email-marketing', label: 'Email Marketing', icon: '✉️' },
       { href: '/admin/discounts', label: 'Discounts', icon: '🏷' },
       { label: 'Referrals', icon: '🤝', soon: true },
       { label: 'Marketing Sources', icon: '🧭', soon: true },
