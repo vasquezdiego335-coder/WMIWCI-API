@@ -4,7 +4,7 @@ import { prisma } from '@/lib/db'
 import { apiLogger } from '@/lib/logger'
 import { can, type Role } from '@/lib/permissions'
 import { buildCloseoutView, ensureCloseout, writeSnapshot } from '@/lib/closeout-service'
-import { canFinalizeCloseout, canReopenCloseout, canOverrideBlocker, canEditCloseoutInputs, canSetOverhead, canSetReserves, canSetOwnerSplit } from '@/lib/closeout-guards'
+import { canFinalizeCloseout, canReopenCloseout, canOverrideBlocker, canEditCloseoutInputs, canSetOverhead, canSetReserves, canSetOwnerSplit, isConcurrentFinalize } from '@/lib/closeout-guards'
 import { computeOwnerSplit, type SplitMethod } from '@/lib/owner-split'
 import { z } from 'zod'
 
@@ -226,7 +226,9 @@ export async function POST(req: NextRequest, { params }: { params: { id: string 
         return NextResponse.json({ error: gate.error, canFinalize: false, blockers: fresh.blockers }, { status: gate.status })
       }
       const allocations = (fresh.split?.shares ?? []).map((s) => ({ owner: s.owner, amountCents: s.amountCents, percentBp: s.percentBp }))
-      const snap = await prisma.$transaction(async (tx) => {
+      let snap: { id: string; version: number }
+      try {
+        snap = await prisma.$transaction(async (tx) => {
         const written = await writeSnapshot(tx as never, {
           closeoutId, bookingId: params.id, view: fresh, userId: session.userId, userName: session.name, allocations,
         })
@@ -248,8 +250,21 @@ export async function POST(req: NextRequest, { params }: { params: { id: string 
             } as never,
           },
         })
-        return written
-      })
+          return written
+        })
+      } catch (err) {
+        // P1-4 — the loser of a concurrent finalize. The unique index on
+        // (closeoutId, version) already prevented the duplicate snapshot; only
+        // the message was wrong. The move IS finalized, by the other person.
+        if (isConcurrentFinalize(err)) {
+          apiLogger.warn({ bookingId: params.id, userId: session.userId }, 'Concurrent finalize rejected by version unique index')
+          return NextResponse.json(
+            { error: 'This move was finalized by someone else a moment ago. Reload to see the final numbers — nothing was lost or double-counted.', concurrent: true },
+            { status: 409 },
+          )
+        }
+        throw err
+      }
       apiLogger.info({ bookingId: params.id, snapshotId: snap.id, version: snap.version }, 'Move financially finalized')
       break
     }

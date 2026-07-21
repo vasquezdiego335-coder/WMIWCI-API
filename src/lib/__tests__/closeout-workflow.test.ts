@@ -20,6 +20,7 @@ import {
   canSetOverhead,
   canSetOwnerSplit,
   canRecordDistribution,
+  isConcurrentFinalize,
 } from '../closeout-guards'
 import { computeOwnerSplit, validateDistribution } from '../owner-split'
 
@@ -328,4 +329,26 @@ test('voiding a distribution needs an owner and a reason, and never repeats', ()
   assert.equal(deny(canRecordDistribution({ ...base, role: 'OWNER' })), 422)
   assert.equal(deny(canRecordDistribution({ ...base, role: 'OWNER', reason: 'x', status: 'VOIDED' })), 409)
   assert.equal(canRecordDistribution({ ...base, role: 'OWNER', reason: 'Recorded twice' }).allow, true)
+})
+
+// ── P1-4: concurrent finalize is a 409, not a raw constraint dump ────────────
+
+test('a P2002 on (closeoutId, version) is recognized as a lost finalize race', () => {
+  assert.equal(isConcurrentFinalize({ code: 'P2002', meta: { target: ['closeoutId', 'version'] } }), true)
+})
+
+test('the postgres index name form is recognized too', () => {
+  assert.equal(isConcurrentFinalize({ code: 'P2002', meta: { target: 'financial_snapshots_closeout_id_version_key' } }), true)
+})
+
+test('an UNRELATED unique violation is NOT swallowed as a race', () => {
+  // Misreporting a real bug as "someone beat you to it" would hide it forever.
+  assert.equal(isConcurrentFinalize({ code: 'P2002', meta: { target: ['email'] } }), false)
+})
+
+test('non-P2002 errors pass straight through', () => {
+  assert.equal(isConcurrentFinalize({ code: 'P2025' }), false)
+  assert.equal(isConcurrentFinalize(new Error('connection lost')), false)
+  assert.equal(isConcurrentFinalize(null), false)
+  assert.equal(isConcurrentFinalize(undefined), false)
 })

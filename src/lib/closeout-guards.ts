@@ -236,3 +236,25 @@ export function canRecordDistribution(ctx: DistributionContext): GuardDecision {
   }
   return ok
 }
+
+/**
+ * Did this write lose a concurrent-finalization race?
+ *
+ * writeSnapshot reads the current max version and inserts version + 1. Two
+ * simultaneous finalizations therefore race — but FinancialSnapshot carries
+ * @@unique([closeoutId, version]), so the loser's INSERT is rejected by the
+ * database rather than producing a duplicate snapshot. That is the correct
+ * outcome; the constraint is doing exactly its job.
+ *
+ * What was wrong was the REPORTING: the loser saw a raw Prisma P2002 dump
+ * mentioning `closeoutId_version`, which reads like corruption. The move is in
+ * fact perfectly finalized — by the other person, moments earlier.
+ */
+export function isConcurrentFinalize(err: unknown): boolean {
+  const e = err as { code?: string; meta?: { target?: unknown } } | null
+  if (!e || e.code !== 'P2002') return false
+  const target = e.meta?.target
+  const fields = Array.isArray(target) ? target.map(String) : typeof target === 'string' ? [target] : []
+  const joined = fields.join(',').toLowerCase()
+  return joined.includes('version') || joined.includes('closeout')
+}
