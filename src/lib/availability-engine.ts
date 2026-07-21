@@ -206,6 +206,23 @@ export function formatMinute(m: number): string {
   return `${h12}:${String(min).padStart(2, '0')} ${ampm}`
 }
 
+/**
+ * A UTC instant → the worker's LOCAL date and minute-from-midnight, DST-correct
+ * via Intl. Deterministic for a given (instant, zone), so it stays testable.
+ * This is the bridge the service layer uses before calling the pure engine.
+ */
+export function toLocalParts(d: Date, timeZone: string): { date: string; minute: number } {
+  const fmt = new Intl.DateTimeFormat('en-CA', {
+    timeZone, year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', hour12: false,
+  })
+  const parts: Record<string, string> = {}
+  for (const p of fmt.formatToParts(d)) parts[p.type] = p.value
+  let hour = Number(parts.hour)
+  if (hour === 24) hour = 0
+  return { date: `${parts.year}-${parts.month}-${parts.day}`, minute: hour * 60 + Number(parts.minute) }
+}
+
 /** "HH:MM" (24h) → minutes. Returns null on a malformed value rather than 0,
  *  so a bad input never reads as "midnight". */
 export function parseHHMM(value: string): number | null {

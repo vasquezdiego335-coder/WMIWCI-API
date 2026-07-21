@@ -35,6 +35,11 @@ const CreateSchema = z.object({
   driverBonusCents: z.number().int().min(0).max(100_000_00).nullable().optional(),
   crewLeaderBonusCents: z.number().int().min(0).max(100_000_00).nullable().optional(),
   assignmentNotes: z.string().trim().max(1000).optional(),
+  // ── Stage 5 scheduling fields (additive; the rate freeze below is unchanged) ──
+  isDriver: z.boolean().optional(),
+  reportTime: z.string().datetime().nullable().optional(),
+  workerVisibleNotes: z.string().trim().max(2000).nullable().optional(),
+  privateAdminNotes: z.string().trim().max(2000).nullable().optional(),
 })
 
 export async function GET(_req: NextRequest, { params }: { params: { id: string } }): Promise<NextResponse> {
@@ -154,6 +159,11 @@ export async function POST(req: NextRequest, { params }: { params: { id: string 
       driverBonusCentsSnapshot: d.driverBonusCents ?? null,
       crewLeaderBonusCentsSnapshot: d.crewLeaderBonusCents ?? null,
       assignmentNotes: d.assignmentNotes || null,
+      // Stage 5: explicit driver designation + report time + worker-visible note.
+      isDriver: d.isDriver ?? (d.role === 'DRIVER'),
+      reportTime: d.reportTime ? new Date(d.reportTime) : null,
+      workerVisibleNotes: d.workerVisibleNotes ?? null,
+      privateAdminNotes: d.privateAdminNotes ?? null,
       approvalStatus: 'DRAFT' as never,
       paymentStatus: 'UNPAID' as never,
       createdById: session.userId,
