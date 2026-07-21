@@ -26,6 +26,7 @@ import { prisma } from './db'
 import { scheduledQueue } from './queues'
 import { queueLogger } from './logger'
 import { nextAllowedTime } from './email-guard'
+import { effectiveMoveDate } from './email-eligibility'
 
 const log = queueLogger.child({ mod: 'journeys' })
 
@@ -177,6 +178,37 @@ export async function onMoveDateSet(bookingId: string, moveDate: Date | null): P
     await enqueue(r.type, { bookingId }, fireAt, jobId)
   }
   log.info({ bookingId, moveDate }, 'pre-move reminders scheduled')
+}
+
+/**
+ * A booking reached a CONFIRMED/SCHEDULED state (approval, admin status change,
+ * or a reschedule that re-confirmed the date) → (re-)anchor the pre-move
+ * reminders to the CURRENT effective move date.
+ *
+ * This is the trigger site the old registry called "scheduler pending": the
+ * move-reminder journey was implemented and tested but nothing invoked it. It
+ * reloads the booking so the caller never has to compute the move-date
+ * precedence, and it delegates to the idempotent `onMoveDateSet` — a re-fire
+ * (e.g. approve → schedule → reschedule) cancels and re-schedules cleanly
+ * rather than duplicating a reminder.
+ *
+ * FAILS SOFT: a read error simply schedules nothing. Reminders are a
+ * convenience layer over the authoritative move date; losing one is never
+ * worse than the send-time recheck already guards against.
+ */
+export async function onBookingConfirmed(bookingId: string): Promise<void> {
+  if (!enabled('reminders')) return
+  const b = await prisma.booking
+    .findUnique({
+      where: { id: bookingId },
+      select: { scheduledStart: true, confirmedDate: true, requestedDate: true },
+    })
+    .catch((err) => {
+      log.warn({ bookingId, err: err instanceof Error ? err.message : String(err) }, 'onBookingConfirmed read failed (non-fatal)')
+      return null
+    })
+  if (!b) return
+  await onMoveDateSet(bookingId, effectiveMoveDate(b))
 }
 
 /**

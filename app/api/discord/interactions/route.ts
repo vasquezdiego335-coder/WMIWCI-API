@@ -13,6 +13,7 @@ import {
   type Embed,
 } from "@/bot/task-service";
 import { approveBooking, declineBooking } from "@/lib/booking-approval";
+import { onBookingConfirmed } from "@/lib/journeys";
 import { offerRescheduleToCustomer } from "@/lib/reschedule";
 import { t } from "@/lib/i18n";
 import { formatEastern } from "@/lib/scheduling";
@@ -172,6 +173,15 @@ async function handleApprove(bookingId: string | undefined, messageId: string | 
       return ephemeral("⏳ This booking was just handled by another owner — no action taken.");
     }
     return ephemeral(`⚠️ ${result.message}`);
+  }
+
+  // Move date is now confirmed → (re-)anchor the 72h/24h pre-move reminders.
+  // Non-fatal and time-boxed already inside the journey; a failure here must
+  // never break the Discord interaction response.
+  if (bookingId) {
+    await onBookingConfirmed(bookingId).catch((err) =>
+      apiLogger.error({ err: err instanceof Error ? err.message : String(err), bookingId }, "onBookingConfirmed failed (non-fatal)")
+    );
   }
 
   // Render the confirmed card from the (pre-claim) booking snapshot.

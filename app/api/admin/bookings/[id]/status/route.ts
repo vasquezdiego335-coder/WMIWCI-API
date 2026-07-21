@@ -4,7 +4,7 @@ import { prisma } from '@/lib/db'
 import { emailQueue } from '@/lib/queues'
 import { apiLogger } from '@/lib/logger'
 import { onBookingCompleted } from '@/lib/followups'
-import { onBookingCancelled } from '@/lib/journeys'
+import { onBookingCancelled, onBookingConfirmed } from '@/lib/journeys'
 import { confirmationScheduleData } from '@/lib/scheduling'
 import { approveBooking, declineBooking } from '@/lib/booking-approval'
 import { z } from 'zod'
@@ -56,6 +56,12 @@ export async function POST(req: NextRequest, { params }: { params: { id: string 
       const status = result.code === 'forbidden' ? 403 : result.code === 'capture_failed' ? 502 : 409
       return NextResponse.json({ error: result.message }, { status })
     }
+    // Move date is now confirmed → (re-)anchor the 72h/24h pre-move reminders.
+    // Non-fatal: the reminder journey is a convenience over the authoritative
+    // move date, and every stage rechecks at send time.
+    await onBookingConfirmed(params.id).catch((err) =>
+      apiLogger.error({ err: err instanceof Error ? err.message : String(err), bookingId: params.id }, 'onBookingConfirmed failed (non-fatal)')
+    )
     const updated = await prisma.booking.findUnique({ where: { id: params.id } })
     return NextResponse.json(updated)
   }
