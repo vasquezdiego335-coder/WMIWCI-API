@@ -150,8 +150,8 @@ npx prisma migrate status
 `migrate status` **before** should list two pending migrations:
 
 ```
-20260721190000_email_admin_audit_actions
-20260721210000_email_marketing_admin
+20260721220000_email_admin_audit_actions
+20260721230000_email_marketing_admin
 ```
 
 `migrate deploy` should report `2 migrations applied`.

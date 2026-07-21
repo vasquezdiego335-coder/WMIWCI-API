@@ -24,7 +24,7 @@ fully merged; nothing was ported from it.
 | Per-booking email ledger | `app/(admin)/admin/(dashboard)/jobs/[id]/EmailTimeline.tsx` |
 | Admin API (4 routes) | `app/api/admin/email-marketing/**` |
 | Permissions (10 actions) | `src/lib/permissions.ts` |
-| Audit actions (4) | `prisma/migrations/20260721190000_email_admin_audit_actions` |
+| Audit actions (4) | `prisma/migrations/20260721220000_email_admin_audit_actions` |
 | Tests (45 checks) | `src/lib/__tests__/email-registry.test.ts`, `email-admin.test.ts` |
 
 ### Changed in shared files (minimal, for merge safety)

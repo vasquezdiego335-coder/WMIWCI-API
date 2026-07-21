@@ -572,7 +572,7 @@ test('ambiguous historical rows are NOT backfilled', () => {
   // A source-key match is not proof of which campaign sent an email. Guessing
   // would fabricate attribution the reports then present as fact.
   const migration = readFileSync(
-    join(SRC, '..', 'prisma', 'migrations', '20260721210000_email_marketing_admin', 'migration.sql'),
+    join(SRC, '..', 'prisma', 'migrations', '20260721230000_email_marketing_admin', 'migration.sql'),
     'utf8'
   )
   assert.equal(/UPDATE\s+"?email_sends"?\s+SET\s+"?campaign_id"?/i.test(migration), false, 'the migration backfills campaign_id by guessing')

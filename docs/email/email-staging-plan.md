@@ -16,8 +16,8 @@ Railway staging + staging Neon + Redis + a Resend test configuration +
 npx prisma migrate deploy
 ```
 
-Applies `20260721190000_email_admin_audit_actions` and
-`20260721210000_email_marketing_admin`. Then:
+Applies `20260721220000_email_admin_audit_actions` and
+`20260721230000_email_marketing_admin`. Then:
 
 ```
 npm run email:preflight     # needs a live DATABASE_URL
