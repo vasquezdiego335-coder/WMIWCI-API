@@ -17,7 +17,7 @@ import { evaluateFinancialCompleteness, deriveLaborState } from './financial-com
 import { computeCloseout, CALCULATION_VERSION, type CloseoutFinancials, type OverheadMethod } from './closeout-calc'
 import { computeCloseoutBlockers, evaluateFinalize, deriveCloseoutStatus, type Blocker, type OverrideRecord, type FinalizeDecision } from './closeout-blockers'
 import { computeOwnerSplit, type SplitMethod, type SplitResult } from './owner-split'
-import { buildProfitAllocation, type ProfitAllocationView } from './profit-allocation'
+import { buildProfitAllocation, allocationFromSnapshot, type ProfitAllocationView, type AllocationBasis } from './profit-allocation'
 import { loadLaborPolicy } from './labor-service'
 
 export interface CloseoutView {
@@ -30,16 +30,47 @@ export interface CloseoutView {
   decision: FinalizeDecision
   overrides: OverrideRecord[]
   split: SplitResult | null
-  /** THE owner-facing 40/30/30 view. Every surface renders this, never the
-   *  raw 50/50 split percentages. */
+  /**
+   * THE owner-facing 40/30/30 view. Every surface renders this, never the raw
+   * 50/50 split percentages.
+   *
+   * On a FINALIZED move this comes from the snapshot, not from live settings —
+   * changing the policy today must not restate a closed move. `allocationBasis`
+   * says which it is, and `liveAllocation` carries the live recomputation so
+   * the owner can still see what changed since.
+   */
   allocation: ProfitAllocationView
+  allocationBasis: AllocationBasis
+  /** Live recomputation. Equal to `allocation` on a move that is not finalized. */
+  liveAllocation: ProfitAllocationView
+  /** Version of the snapshot `allocation` came from; null when provisional. */
+  allocationSnapshotVersion: number | null
   laborState: string
+  /** Why the move was last reopened, if it has been. Shown against the version
+   *  that superseded the one in force at the time. */
+  reopenReason: string | null
   /** Approved labor still owed to crew — a real liability held back. */
   unpaidLaborCents: number
   ownerReimbursementOwedCents: number
   expensesMissingReceipt: { id: string; label: string; amountCents: number }[]
   pendingExpenseCount: number
-  snapshots: { id: string; version: number; createdAt: Date; supersededAt: Date | null; companyNetProfitCents: number; distributableProfitCents: number }[]
+  /** Newest first. Every entry carries its own FROZEN 40/30/30 view, so the
+   *  history table never restates an old version with today's policy. */
+  snapshots: {
+    id: string
+    version: number
+    createdAt: Date
+    supersededAt: Date | null
+    companyNetProfitCents: number
+    distributableProfitCents: number
+    createdByName: string | null
+    calculationVersion: string
+    configSource: string | null
+    configVersion: string | null
+    allocation: ProfitAllocationView
+    /** Change in company net profit against the previous version. */
+    deltaFromPreviousCents: number | null
+  }[]
   distributions: { id: string; owner: string; status: string; approvedCents: number; paidCents: number; voided: boolean }[]
 }
 
@@ -206,12 +237,42 @@ export async function buildCloseoutView(bookingId: string): Promise<CloseoutView
 
   // THE owner-facing 40/30/30 view. Built once here so the closeout panel,
   // Owner Money, reports and exports can never disagree about the policy.
-  const allocation = buildProfitAllocation({
+  const liveAllocation = buildProfitAllocation({
     companyNetProfitCents: financials.profit.companyNetProfitCents,
     businessRetainedCents: financials.reserves.businessRetainedCents,
     businessRetainedBp: financials.reserves.businessRetainedBp,
     distributableProfitCents: financials.reserves.distributableProfitCents,
     ownerShares: (split?.shares ?? []).map((sh) => ({ owner: sh.owner, amountCents: sh.amountCents, percentBp: sh.percentBp })),
+  })
+
+  // A FINALIZED move reads its snapshot. This is the difference between a
+  // historical record and a live opinion: after this line, changing the
+  // retained share, the owner split or an owner's labor rate cannot move a
+  // single number on a closed move.
+  const currentSnapshot = (closeout?.snapshots ?? []).find((s) => !s.supersededAt) ?? null
+  const useSnapshot = isFinalized && !!currentSnapshot
+  const allocation = useSnapshot ? allocationFromSnapshot(currentSnapshot as never) : liveAllocation
+  const allocationBasis: AllocationBasis = useSnapshot ? 'FINALIZED' : 'PROVISIONAL'
+
+  // Snapshot history, newest first, each with its OWN frozen allocation and the
+  // change against the version before it.
+  const ordered = [...(closeout?.snapshots ?? [])].sort((a, b) => b.version - a.version)
+  const snapshotHistory = ordered.map((s, idx) => {
+    const previous = ordered[idx + 1] ?? null
+    return {
+      id: s.id,
+      version: s.version,
+      createdAt: s.createdAt,
+      supersededAt: s.supersededAt,
+      companyNetProfitCents: s.companyNetProfitCents,
+      distributableProfitCents: s.distributableProfitCents,
+      createdByName: s.createdByName ?? null,
+      calculationVersion: s.calculationVersion,
+      configSource: s.configSource ?? null,
+      configVersion: s.configVersion ?? null,
+      allocation: allocationFromSnapshot(s as never),
+      deltaFromPreviousCents: previous ? s.companyNetProfitCents - previous.companyNetProfitCents : null,
+    }
   })
 
   return {
@@ -225,19 +286,16 @@ export async function buildCloseoutView(bookingId: string): Promise<CloseoutView
     overrides,
     split,
     allocation,
+    allocationBasis,
+    liveAllocation,
+    allocationSnapshotVersion: useSnapshot ? currentSnapshot!.version : null,
     laborState,
+    reopenReason: closeout?.reopenReason ?? null,
     unpaidLaborCents: labor.unpaidCents,
     ownerReimbursementOwedCents,
     expensesMissingReceipt,
     pendingExpenseCount,
-    snapshots: (closeout?.snapshots ?? []).map((s) => ({
-      id: s.id,
-      version: s.version,
-      createdAt: s.createdAt,
-      supersededAt: s.supersededAt,
-      companyNetProfitCents: s.companyNetProfitCents,
-      distributableProfitCents: s.distributableProfitCents,
-    })),
+    snapshots: snapshotHistory,
     distributions: distributions.map((d) => ({
       id: d.id, owner: String(d.owner), status: String(d.status),
       approvedCents: d.approvedCents, paidCents: d.paidCents, voided: d.voided,
@@ -264,7 +322,13 @@ export async function ensureCloseout(bookingId: string, userId: string): Promise
  */
 export async function writeSnapshot(
   tx: typeof prisma,
-  args: { closeoutId: string; bookingId: string; view: CloseoutView; userId: string; userName: string; allocations: { owner: string; amountCents: number; percentBp: number }[] },
+  args: {
+    closeoutId: string; bookingId: string; view: CloseoutView; userId: string; userName: string
+    allocations: { owner: string; amountCents: number; percentBp: number }[]
+    /** Where the retained rate came from, and which config produced it. */
+    configSource?: string | null
+    configVersion?: string | null
+  },
 ): Promise<{ id: string; version: number }> {
   const latest = await tx.financialSnapshot.findFirst({
     where: { closeoutId: args.closeoutId },
@@ -279,6 +343,21 @@ export async function writeSnapshot(
   }
   const f = args.view.financials
   const version = (latest?.version ?? 0) + 1
+
+  // Provenance of the retained share, resolved HERE so the route cannot forget
+  // it. `closeout.frozen` means this move had already been finalized once and
+  // kept its original rate; `business_config` means it took today's policy;
+  // `default` means no policy was configured and the share is zero.
+  const frozenBp = await tx.moveCloseout
+    .findUnique({ where: { id: args.closeoutId }, select: { businessRetainedBp: true } })
+    .catch(() => null)
+  const cfg = await tx.businessConfig
+    .findUnique({ where: { id: 'singleton' }, select: { updatedAt: true, generalReserveBp: true } })
+    .catch(() => null)
+  const configSource =
+    args.configSource ??
+    (frozenBp?.businessRetainedBp != null ? 'closeout.frozen' : cfg ? 'business_config' : 'default')
+  const configVersion = args.configVersion ?? cfg?.updatedAt?.toISOString() ?? null
   const row = await tx.financialSnapshot.create({
     data: {
       closeoutId: args.closeoutId,
@@ -319,12 +398,19 @@ export async function writeSnapshot(
       unresolvedLiabilityCents: f.reserves.unresolvedLiabilityCents,
       distributableProfitCents: f.reserves.distributableProfitCents,
       ownerAllocations: args.allocations as never,
+      // The lines EXACTLY as the owner saw them at finalization. Storing the
+      // presentation — not just the inputs — is what lets a report, an export
+      // or a printed summary restate this move years later without ever
+      // consulting live configuration.
+      allocationLines: args.view.liveAllocation.lines as never,
       overheadMethod: f.overhead.method as never,
       overheadRateRaw: f.overhead.rateRaw,
       taxReserveBp: null,
       splitMethod: (args.view.split?.method ?? null) as never,
       incompleteFlags: { blockers: args.view.blockers.map((b) => b.code), overrides: args.view.overrides.map((o) => o.code) } as never,
       calculationVersion: CALCULATION_VERSION,
+      configSource,
+      configVersion,
       createdById: args.userId,
       createdByName: args.userName,
     },
