@@ -24,6 +24,20 @@ npm run email:preflight     # needs a live DATABASE_URL
 npm run email:doctor
 ```
 
+## Execution status
+
+**Two scenarios cannot be run on this branch.** Campaign dispatch and automation
+execution have no producer: nothing calls `resolveAudienceForDispatch()`,
+`canDispatch()` or `automationJobId()`, and nothing writes
+`EmailCampaignConfig.dispatchedAt`. The composer, lifecycle, validation,
+approval, audience resolution and versioning are all built and testable; the
+worker that turns an approved campaign into one guarded send per recipient is
+not. See [email-staging-runbook.md](./email-staging-runbook.md) section 0.
+
+* **17 (campaign click → booking)** — cannot run; no campaign email can be sent.
+* **19 / 20 (pause, cancel)** — runnable as state transitions only.
+* **23 (campaign relation)** — runnable via a test send and the preflight FK check.
+
 ## Scenarios
 
 | # | Scenario | Pass criterion |
@@ -44,10 +58,10 @@ npm run email:doctor
 | 14 | Abandoned journey stops after booking | Deposit paid → stages cancelled |
 | 15 | Review eligibility | No review → eligible; review exists → excluded |
 | 16 | Referral eligibility | Positive review required |
-| 17 | Campaign click → booking | UTM lands on the booking |
+| 17 | Campaign click → booking | **DEFERRED — no dispatcher.** See runbook §0 |
 | 18 | Booking → collected revenue → finalized profit | Only finalized snapshots counted |
-| 19 | Campaign pause | ACTIVE → PAUSED; no further dispatch |
-| 20 | Campaign cancellation | Reason required and recorded |
+| 19 | Campaign pause | ACTIVE → PAUSED + audit. Nothing is being stopped yet |
+| 20 | Campaign cancellation | Reason required and recorded (state only) |
 | 21 | Journey config version stability | Sends in flight keep their version |
 | 22 | Customer timeline | Multiple bookings + campaigns render, refusals visible |
 | 23 | Direct campaign relation | New send stores `campaignId`; deleting the campaign leaves the send |
