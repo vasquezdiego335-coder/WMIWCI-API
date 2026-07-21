@@ -705,6 +705,7 @@ export default async function JobDetail({ params }: { params: { id: string } }) 
               blockers: closeout.blockers,
               overrides: closeout.overrides,
               split: closeout.split,
+              allocation: closeout.allocation,
               unpaidLaborCents: closeout.unpaidLaborCents,
               ownerReimbursementOwedCents: closeout.ownerReimbursementOwedCents,
               snapshots: closeout.snapshots.map((sn) => ({

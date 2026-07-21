@@ -51,6 +51,17 @@ export type CloseoutData = {
   blockers: { code: string; message: string; severity: string; section: string }[]
   overrides: { code: string; reason: string; byName?: string; at?: string }[]
   split: { ok: boolean; error?: string; method: string; shares: { owner: string; amountCents: number; percentBp: number }[]; undistributedCents: number } | null
+  /** THE owner-facing 40/30/30 view (src/lib/profit-allocation.ts). */
+  allocation: {
+    companyNetProfitCents: number
+    hasDistribution: boolean
+    businessRetainedCents: number
+    businessRetainedBp: number
+    ownerDistributableCents: number
+    lines: { label: string; ofNetProfitBp: number; amountCents: number; isBusiness: boolean }[]
+    roundingRemainderCents: number
+    explanation: string
+  }
   unpaidLaborCents: number
   ownerReimbursementOwedCents: number
   snapshots: { id: string; version: number; createdAt: string; supersededAt: string | null; companyNetProfitCents: number; distributableProfitCents: number }[]
@@ -76,6 +87,9 @@ export default function FinancialCloseoutPanel({
   const [reason, setReason] = useState('')
 
   const f = data.financials
+  const a = data.allocation
+  // Share of FINAL net profit, e.g. 4000 -> "40%".
+  const pct = (bp: number) => `${Number.isInteger(bp / 100) ? bp / 100 : (bp / 100).toFixed(1)}%`
   const hard = data.blockers.filter((b) => b.severity === 'HARD')
   const overriddenCodes = new Set(data.overrides.map((o) => o.code))
   const unresolved = data.blockers.filter((b) => b.severity === 'OVERRIDABLE' && !overriddenCodes.has(b.code))
@@ -226,19 +240,49 @@ export default function FinancialCloseoutPanel({
         </p>
       </Section>
 
-      {/* ── 15. Owner split ── */}
-      {data.split && (
-        <Section title={`Owner split · ${data.split.method.replace(/_/g, ' ').toLowerCase()}`}>
-          {!data.split.ok && <div style={box('#FEF2F2', '#FECACA', '#B91C1C')}>{data.split.error}</div>}
-          {data.split.shares.map((s) => (
-            <Line key={s.owner} label={s.owner === 'DIEGO' ? 'Diego' : 'Sebastian'} value={money(s.amountCents)} hint={`${(s.percentBp / 100).toFixed(1)}%`} />
-          ))}
-          {data.split.undistributedCents > 0 && <Line label="Undistributed" value={money(data.split.undistributedCents)} tone="#6B7280" />}
-          <p style={{ fontSize: '11px', color: '#9CA3AF', margin: '6px 0 0' }}>
-            A calculation only — no money moves until a distribution is approved and recorded.
+      {/* ── 15. Profit allocation — the OWNER-FACING policy view ──
+          Never render the raw 50/50 split on its own: without the retained
+          share it reads as "the owners take everything and the business keeps
+          nothing", which is the opposite of the policy. ── */}
+      <Section title="Profit allocation">
+        <Line label="Final company net profit" value={money(a.companyNetProfitCents)} strong />
+        {!a.hasDistribution ? (
+          <div style={box('#F9FAFB', '#E5E7EB', '#6B7280')}>
+            {a.companyNetProfitCents < 0
+              ? 'This move made a loss, so nothing is allocated. The loss is recorded and the move can still be finalized.'
+              : 'No profit to allocate on this move.'}
+          </div>
+        ) : (
+          <>
+            {a.lines.map((ln) => (
+              <Line
+                key={ln.label}
+                label={`${ln.label} — ${pct(ln.ofNetProfitBp)}`}
+                value={money(ln.amountCents)}
+                strong={ln.isBusiness}
+                tone={ln.isBusiness ? '#0A1628' : '#C9A961'}
+              />
+            ))}
+            {a.roundingRemainderCents > 0 && (
+              <p style={{ fontSize: '11px', color: '#9CA3AF', margin: '4px 0 0' }}>
+                Includes a {money(a.roundingRemainderCents)} rounding remainder, which stays with the business.
+              </p>
+            )}
+          </>
+        )}
+        <details style={{ marginTop: '8px' }}>
+          <summary style={{ fontSize: '11px', color: '#6B7280', cursor: 'pointer' }}>How this is calculated</summary>
+          <p style={{ fontSize: '11px', color: '#6B7280', margin: '6px 0 0', lineHeight: 1.5 }}>
+            {a.explanation} Owner-distributable after the retained share is {money(a.ownerDistributableCents)}.
+            The retained share is a general company allocation — it may fund taxes, equipment, insurance,
+            licensing or growth. It is not tax advice.
           </p>
-        </Section>
-      )}
+        </details>
+        {data.split && !data.split.ok && <div style={box('#FEF2F2', '#FECACA', '#B91C1C')}>{data.split.error}</div>}
+        <p style={{ fontSize: '11px', color: '#9CA3AF', margin: '6px 0 0' }}>
+          A calculation only — no money moves until a distribution is approved and recorded.
+        </p>
+      </Section>
 
       {/* ── 16. Finalize / reopen ── */}
       {isOwner && (

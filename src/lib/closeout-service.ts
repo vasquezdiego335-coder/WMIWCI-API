@@ -17,6 +17,7 @@ import { evaluateFinancialCompleteness, deriveLaborState } from './financial-com
 import { computeCloseout, CALCULATION_VERSION, type CloseoutFinancials, type OverheadMethod } from './closeout-calc'
 import { computeCloseoutBlockers, evaluateFinalize, deriveCloseoutStatus, type Blocker, type OverrideRecord, type FinalizeDecision } from './closeout-blockers'
 import { computeOwnerSplit, type SplitMethod, type SplitResult } from './owner-split'
+import { buildProfitAllocation, type ProfitAllocationView } from './profit-allocation'
 import { loadLaborPolicy } from './labor-service'
 
 export interface CloseoutView {
@@ -29,6 +30,9 @@ export interface CloseoutView {
   decision: FinalizeDecision
   overrides: OverrideRecord[]
   split: SplitResult | null
+  /** THE owner-facing 40/30/30 view. Every surface renders this, never the
+   *  raw 50/50 split percentages. */
+  allocation: ProfitAllocationView
   laborState: string
   /** Approved labor still owed to crew — a real liability held back. */
   unpaidLaborCents: number
@@ -198,6 +202,16 @@ export async function buildCloseoutView(bookingId: string): Promise<CloseoutView
     decision,
   })
 
+  // THE owner-facing 40/30/30 view. Built once here so the closeout panel,
+  // Owner Money, reports and exports can never disagree about the policy.
+  const allocation = buildProfitAllocation({
+    companyNetProfitCents: financials.profit.companyNetProfitCents,
+    businessRetainedCents: financials.reserves.businessRetainedCents,
+    businessRetainedBp: financials.reserves.businessRetainedBp,
+    distributableProfitCents: financials.reserves.distributableProfitCents,
+    ownerShares: (split?.shares ?? []).map((sh) => ({ owner: sh.owner, amountCents: sh.amountCents, percentBp: sh.percentBp })),
+  })
+
   return {
     bookingId: booking.id,
     closeoutId: closeout?.id ?? null,
@@ -208,6 +222,7 @@ export async function buildCloseoutView(bookingId: string): Promise<CloseoutView
     decision,
     overrides,
     split,
+    allocation,
     laborState,
     unpaidLaborCents: labor.unpaidCents,
     ownerReimbursementOwedCents,
@@ -287,6 +302,16 @@ export async function writeSnapshot(
       economicNetProfitCents: f.profit.economicNetProfitCents,
       marginBp: f.profit.marginBp,
       taxReserveCents: f.reserves.taxReserveCents,
+      // ── The 40/30/30 policy AS APPLIED to this move at this moment.
+      //    Rate + resolved dollars + remainder are all stored, so the snapshot
+      //    explains itself without re-reading BusinessConfig — and a later
+      //    policy change can never rewrite it. ──
+      businessRetainedBp: f.reserves.businessRetainedBp,
+      businessRetainedCents: f.reserves.businessRetainedCents,
+      roundingRemainderCents: Math.max(
+        0,
+        f.reserves.distributableProfitCents - args.allocations.reduce((s, a) => s + a.amountCents, 0),
+      ),
       businessReserveCents: f.reserves.businessReserveCents,
       retainedEarningsCents: f.reserves.retainedEarningsCents,
       unresolvedLiabilityCents: f.reserves.unresolvedLiabilityCents,

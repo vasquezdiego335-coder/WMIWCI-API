@@ -234,7 +234,13 @@ export async function POST(req: NextRequest, { params }: { params: { id: string 
         })
         await tx.moveCloseout.update({
           where: { id: closeoutId },
-          data: { status: 'FINALIZED', finalizedAt: new Date(), finalizedById: session.userId },
+          data: {
+            status: 'FINALIZED', finalizedAt: new Date(), finalizedById: session.userId,
+            // FREEZE the company-retained rate at finalization. buildCloseoutView
+            // prefers this over live BusinessConfig, so changing the policy later
+            // cannot rewrite a closed move.
+            businessRetainedBp: fresh.financials.reserves.businessRetainedBp,
+          },
         })
         await tx.auditLog.create({
           data: {
