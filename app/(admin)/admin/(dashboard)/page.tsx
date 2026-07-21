@@ -2,7 +2,7 @@ import { prisma } from '@/lib/db'
 import { getSession } from '@/lib/auth'
 import Link from 'next/link'
 import { fmtCents, crewPayOwedCents } from '@/lib/profit'
-import { moveDayDueCents } from '@/lib/job-money'
+import { customerBalance, JOB_MONEY_PAYMENT_SELECT } from '@/lib/job-money'
 import { summarizeRevenue, ELIGIBLE_EXPENSE_WHERE, CAPTURED_PAYMENT_WHERE, isLaborUnrecorded } from '@/lib/money-rules'
 import { Callout } from './_ui'
 
@@ -51,9 +51,14 @@ async function getDashboardData() {
     prisma.booking.findMany({
       where: { status: { in: ['IN_PROGRESS', 'COMPLETED'] }, isInternalTest: false },
       select: {
-        status: true, truckAddonAmount: true, travelFee: true, additionalTruckFees: true,
+        // The balance model needs the QUOTE and the PAYMENTS, not just the fee
+        // columns — outstanding balance includes unpaid base labor.
+        status: true, totalEstimate: true, baseRate: true, discountPercent: true,
+        truckAddonAmount: true, truckAddonDueOnMoveDay: true, travelFee: true, additionalTruckFees: true,
         stairFee: true, longCarryFee: true, heavyItemFee: true, packingFee: true, assemblyFee: true,
         disassemblyFee: true, taxAmount: true, waitingFee: true, waitingFeeOverride: true, waitingFeeWaived: true,
+        crewArrivedAt: true, customerReadyAt: true, waitingStartedAt: true, waitingEndedAt: true,
+        payments: { select: JOB_MONEY_PAYMENT_SELECT },
         job: { select: { crew: { select: { actualHours: true, scheduledHours: true, payRate: true, flatPay: true, tips: true, bonus: true, deductions: true, payStatus: true, user: { select: { payRate: true } } } } } },
       },
       take: 500,
@@ -67,7 +72,7 @@ async function getDashboardData() {
     }),
   ])
 
-  const outstandingBalances = liveJobs.reduce((s, b) => s + moveDayDueCents(b as never), 0)
+  const outstandingBalances = liveJobs.reduce((s, b) => s + customerBalance(b as never).outstandingCents, 0)
   const unpaidCrew = liveJobs.reduce((s, b) => s + (b.job?.crew ?? [])
     .filter((c) => c.payStatus !== 'PAID')
     .reduce((cs, c) => cs + crewPayOwedCents({ actualHours: c.actualHours, scheduledHours: c.scheduledHours, payRate: c.payRate, userPayRate: c.user?.payRate, flatPay: c.flatPay, tips: c.tips, bonus: c.bonus, deductions: c.deductions }), 0), 0)
@@ -100,9 +105,10 @@ export default async function AdminDashboard() {
           tone="warning"
           title={`${movesMissingLabor} of ${liveJobCount} worked move${liveJobCount === 1 ? '' : 's'} ${movesMissingLabor === 1 ? 'has' : 'have'} no crew labor recorded.`}
         >
-          Labor is the largest cost on a move and it cannot be entered in the admin yet, so
-          every profit and cash figure below is <strong>overstated</strong>. Revenue and expense
-          totals are unaffected. <Link href="/admin/jobs" style={{ color: '#FF5A1F', fontWeight: 700 }}>Review those moves →</Link>
+          Labor is the largest cost on a move, so every profit and cash figure below is
+          <strong> overstated</strong> until it is entered. Revenue and expense totals are
+          unaffected. Assign the crew and enter their hours in <strong>Crew &amp; Labor</strong> on
+          each move. <Link href="/admin/jobs" style={{ color: '#FF5A1F', fontWeight: 700 }}>Review those moves →</Link>
         </Callout>
       )}
 

@@ -13,7 +13,16 @@
 //    • The $49 deposit is AUTHORIZED (held) at checkout, CAPTURED only on owner
 //      approval. "Collected" counts CAPTURED (Payment.status=COMPLETED) only —
 //      an authorized-but-not-captured hold is NOT collected.
-//    • Travel fee + truck add-on are due ON MOVE DAY, never charged in Stripe.
+//    • The $49 deposit is the ONLY money Stripe ever takes. Base labor, travel
+//      and the truck add-on are ALL collected in person on move day, so the
+//      "due on move day" amount is the WHOLE outstanding balance, never just
+//      the fee columns.
+//    • `Booking.totalEstimate` ALREADY contains the travel fee (estimate.ts:
+//      base + access add-ons + travel). Adding travelFee to it double-bills.
+//
+//  For the live per-move balance used by the admin, use
+//  `job-money.customerBalance()` — it works in integer cents and handles
+//  waiting fees, itemized charges, discounts, refunds and chargebacks.
 // ════════════════════════════════════════════════════════════════════════
 
 export const centsToDollars = (cents: number): number => cents / 100
@@ -57,8 +66,17 @@ export type PricingBreakdown = {
   refundedDollars: number
   moveTotalDollars: number | null
   balanceAfterJobDollars: number | null
-  /** Travel + truck add-on — settled on move day, NOT charged in Stripe. */
+  /**
+   * The customer's FULL remaining balance — base labor included. Stripe only
+   * ever holds the $49 deposit, so everything still owed is collected in
+   * person on move day.
+   *
+   * This used to be `travel + truck add-on`, which described the fee columns
+   * rather than the balance and understated a $460 debt as "$100".
+   */
   dueOnMoveDayDollars: number
+  /** Of that balance, the part that is NOT inside the quote (truck add-on). */
+  moveDayFeesDollars: number
 }
 
 const round2 = (n: number): number => Math.round(n * 100) / 100
@@ -81,6 +99,12 @@ export function bookingPricing(b: PricingInput): PricingBreakdown {
 
   const moveTotalDollars = typeof b.totalEstimate === 'number' ? round2(b.totalEstimate) : null
 
+  // The quote (base + access add-ons + travel) plus the truck add-on, which
+  // estimate.ts deliberately leaves OUT of estimatedTotal. Travel is already
+  // inside the quote and must not be added again.
+  const finalBilledDollars = round2((moveTotalDollars ?? round2(b.baseRate ?? 0) + travelFeeDollars) + truckAddonDollars)
+  const outstandingDollars = Math.max(0, round2(finalBilledDollars - round2(centsToDollars(collectedCents))))
+
   return {
     baseDollars: typeof b.baseRate === 'number' ? round2(b.baseRate) : null,
     travelFeeDollars,
@@ -92,7 +116,8 @@ export function bookingPricing(b: PricingInput): PricingBreakdown {
     refundedDollars: round2(centsToDollars(refundedCents)),
     moveTotalDollars,
     balanceAfterJobDollars: moveTotalDollars != null ? round2(moveTotalDollars - depositDollars) : null,
-    dueOnMoveDayDollars: round2(travelFeeDollars + truckAddonDollars),
+    dueOnMoveDayDollars: outstandingDollars,
+    moveDayFeesDollars: truckAddonDollars,
   }
 }
 

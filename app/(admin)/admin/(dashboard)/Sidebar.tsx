@@ -104,8 +104,10 @@ export default function Sidebar({ name, role }: { name: string; role: string }) 
             <img src="/icon.svg" alt="" width={28} height={28} style={{ display: 'block' }} />
           </span>
           <div>
-            <p style={brandLine}>WE MOVE IT.</p>
-            <p style={brandLine}>WE CLEAR IT.</p>
+            {/* Brand name only — the old "We Move It. We Clear It." slogan was
+                retired by the owner on 2026-07-17. */}
+            <p style={brandLine}>MOVE IT</p>
+            <p style={brandLine}>CLEAR IT</p>
           </div>
         </div>
         <p style={{ color: '#8B9BC1', fontSize: '11px', margin: 0 }}>

@@ -1,7 +1,7 @@
 import Link from 'next/link'
 import { prisma } from '@/lib/db'
 import { fmtCents } from '@/lib/profit'
-import { moveDayDueCents, jobProfit, jobWarnings, jobFinancialCompleteness, JOB_MONEY_PAYMENT_SELECT, JOB_MONEY_EXPENSE_SELECT } from '@/lib/job-money'
+import { customerBalance, jobProfit, jobWarnings, jobFinancialCompleteness, JOB_MONEY_PAYMENT_SELECT, JOB_MONEY_EXPENSE_SELECT } from '@/lib/job-money'
 import { completenessLabel } from '@/lib/financial-completeness'
 import { PageHeader, COLORS, Empty, Badge, SoftBadge, Callout, CompletenessBadge } from '../_ui'
 
@@ -85,7 +85,7 @@ export default async function JobsPage({ searchParams }: { searchParams: { statu
 
   // Client-side special views that need computed money/flags.
   if (searchParams.view === 'attention') bookings = bookings.filter((b) => jobWarnings(b).length > 0)
-  if (searchParams.view === 'unpaid') bookings = bookings.filter((b) => moveDayDueCents(b) > 0 && ['IN_PROGRESS', 'COMPLETED'].includes(b.status))
+  if (searchParams.view === 'unpaid') bookings = bookings.filter((b) => customerBalance(b).outstandingCents > 0 && ['IN_PROGRESS', 'COMPLETED'].includes(b.status))
 
   const totalOperational = activeStatuses.reduce((s, st) => s + (countByStatus[st] ?? 0), 0)
 
@@ -154,7 +154,7 @@ export default async function JobsPage({ searchParams }: { searchParams: { statu
         <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
           {bookings.map((b) => {
             const p = jobProfit(b)
-            const due = moveDayDueCents(b)
+            const due = customerBalance(b).outstandingCents
             const warnings = jobWarnings(b)
             const completeness = jobFinancialCompleteness(b)
             const crew = b.job?.crew ?? []
@@ -181,7 +181,7 @@ export default async function JobsPage({ searchParams }: { searchParams: { statu
                   <div style={moneyCol}>
                     <MiniMoney label="Quoted" value={b.totalEstimate != null ? `$${b.totalEstimate.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : '—'} />
                     <MiniMoney label="Collected" value={fmtCents(p.netRevenueCents)} color={COLORS.green} />
-                    <MiniMoney label="Move-day due" value={due > 0 ? fmtCents(due) : '—'} color={due > 0 ? COLORS.amber : COLORS.faint} />
+                    <MiniMoney label="Outstanding" value={due > 0 ? fmtCents(due) : '—'} color={due > 0 ? COLORS.amber : COLORS.faint} />
                     <MiniMoney
                       label={completeness.isComplete || completeness.status === 'NOT_APPLICABLE' ? 'Gross profit' : 'Gross profit *'}
                       value={fmtCents(p.netProfitCents)}

@@ -10,7 +10,7 @@
 import { prisma } from './db'
 import { summarizeRevenue, eligibleExpenseCents, isEligibleExpense, isUnreviewedExpense } from './money-rules'
 import { rollupLabor, paidCentsOf } from './labor-calc'
-import { toLaborAssignments, JOB_MONEY_CREW_SELECT, JOB_MONEY_PAYMENT_SELECT, moveDayDueCents } from './job-money'
+import { toLaborAssignments, JOB_MONEY_CREW_SELECT, JOB_MONEY_PAYMENT_SELECT, customerBalance } from './job-money'
 import { isStripePayment, stripeFeeCents } from './profit'
 import { rollupOwner } from './owner-ledger'
 import { evaluateFinancialCompleteness, deriveLaborState } from './financial-completeness'
@@ -71,10 +71,12 @@ export async function buildCloseoutView(bookingId: string): Promise<CloseoutView
     .filter((p) => !p.isInternalTest && isStripePayment(p) && ['COMPLETED', 'PARTIALLY_REFUNDED', 'REFUNDED'].includes(p.status))
     .reduce((s, p) => s + stripeFeeCents(p.amount), 0)
 
-  // Billed = the stored estimate (DOLLARS float — see pricing.ts unit contract)
-  // plus the move-day fees that are never in Stripe.
-  const estimateCents = booking.totalEstimate != null ? Math.round(booking.totalEstimate * 100) : 0
-  const grossCustomerChargesCents = estimateCents + moveDayDueCents(booking as never)
+  // Billed = the ONE customer-balance model (job-money.customerBalance): the
+  // stored quote plus every approved charge that is NOT already inside it.
+  // This used to be `estimate + moveDayDueCents`, which counted the travel fee
+  // twice — estimate.ts folds travel INTO estimatedTotal.
+  const balance = customerBalance(booking as never)
+  const grossCustomerChargesCents = balance.quotedCents + balance.additionalChargeCents
 
   // ── Labor ──
   const crew = booking.job?.crew ?? []
@@ -106,7 +108,7 @@ export async function buildCloseoutView(bookingId: string): Promise<CloseoutView
   const retainedEarningsCents = reserveRows.filter((r) => r.kind === 'RETAINED_EARNINGS').reduce((s, r) => s + r.amountCents, 0)
 
   const financials = computeCloseout({
-    billed: { grossCustomerChargesCents, discountsCents: 0, creditsCents: 0 },
+    billed: { grossCustomerChargesCents, discountsCents: balance.discountCents, creditsCents: 0 },
     collected: { netCollectedCents: revenue.netCollectedCents },
     refundedCents: revenue.refundedCents,
     chargebackCents: revenue.chargebackCents,

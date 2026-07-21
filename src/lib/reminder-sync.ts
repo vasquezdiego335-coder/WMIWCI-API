@@ -11,7 +11,7 @@
 // ============================================================================
 
 import { prisma } from './db'
-import { moveDayDueCents, jobProfit, JOB_MONEY_PAYMENT_SELECT } from './job-money'
+import { customerBalance, jobProfit, JOB_MONEY_PAYMENT_SELECT } from './job-money'
 import {
   evaluateAll,
   computeSyncActions,
@@ -116,7 +116,7 @@ export async function performSync(now = new Date()): Promise<SyncResult> {
       })),
       hasFailedPayment: b.payments.some((p) => p.status === 'FAILED' && !p.isInternalTest),
       hasWorkerPayExpense: b.expenses.some((e) => e.category === 'WORKER_PAY' && e.status !== 'REJECTED'),
-      moveDayDueCents: moveDayDueCents(b),
+      outstandingBalanceCents: customerBalance(b).outstandingCents,
       netRevenueCents: profit.netRevenueCents,
       netProfitCents: profit.netProfitCents,
     }
