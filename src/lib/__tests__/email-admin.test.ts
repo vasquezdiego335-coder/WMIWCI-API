@@ -206,12 +206,14 @@ test('a signed-out visitor is denied every email action', () => {
   for (const a of EMAIL_ACTIONS) assert.equal(can(null, a), false, `null role allowed ${a}`)
 })
 
-test('a manager runs email operations but does not hold the customer list or the money', () => {
-  // Operational: yes.
-  assert.equal(can('MANAGER', 'email.view'), true)
-  assert.equal(can('MANAGER', 'email.cancel_scheduled'), true)
-  assert.equal(can('MANAGER', 'email.send_test'), true)
-  // Authority: no.
+test('BETA: a manager has NO email access at all', () => {
+  // The section is owner-only until the staging scenarios pass. The
+  // manager-operational split below is the POST-BETA design and is already
+  // implemented; lifting Beta is deleting three entries from OWNER_ONLY.
+  assert.equal(can('MANAGER', 'email.view'), false)
+  assert.equal(can('MANAGER', 'email.cancel_scheduled'), false)
+  assert.equal(can('MANAGER', 'email.send_test'), false)
+  // These stay owner-only PERMANENTLY, beta or not.
   assert.equal(can('MANAGER', 'email.view_recipients'), false, 'the full recipient list IS the customer list')
   assert.equal(can('MANAGER', 'email.view_attribution'), false, 'attribution ends in company net profit')
   assert.equal(can('MANAGER', 'email.manage_suppression'), false)
