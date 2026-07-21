@@ -1,65 +1,110 @@
 // ════════════════════════════════════════════════════════════════════════
 //  estimate.ts — THE canonical booking estimate. One calculation, server-side.
 //
-//  The static booking form (WMIWCI-SITE/public/booking-form.html) mirrors these
-//  EXACT constants for its live display (its `SERVICES` + `MODIFIERS` tables).
-//  estimate.test.ts pins representative option-sets so the form and server can
-//  never silently diverge again — this is the fix for the "$699 on the form vs
-//  $599 in the email/DB" bug (the server used to drop the access add-ons).
+//  ⚠ THIS FILE NO LONGER OWNS ANY PRICE. Every amount comes from
+//  `pricing-config.ts`, and the browser form reads the SAME numbers via the
+//  generated mirror (WMIWCI-SITE/public/js/pricing-config.js). That closes the
+//  "$699 on the form vs $599 in the email" class of bug structurally rather
+//  than by hand-syncing two tables.
 //
 //  NEVER trust a client-submitted total. The API recomputes here from validated
-//  inputs and stores the result on the booking; every downstream surface (admin,
-//  Discord, emails, SMS, receipts, reporting) reads that one stored value.
+//  inputs and stores the result; every downstream surface (admin, Discord,
+//  emails, SMS, receipts, reporting) reads that one stored value.
 //
 //  MONEY MODEL
-//    • estimatedTotal = base labor + access add-ons + travel fee
+//    • estimatedTotal = base labor + auto-applicable access add-ons + travel
 //        → the full expected job value; the number shown EVERYWHERE.
-//    • Access add-ons (stairs / long carry / heavy items / elevator / parking /
-//      building age) are INCLUDED in the estimate — they reflect labor difficulty.
-//    • Travel fee is part of estimatedTotal but COLLECTED ON MOVE DAY (never in
-//      the $49 Stripe deposit).
-//    • Truck pickup & return (+$50) is DUE ON MOVE DAY and is NOT part of
-//      estimatedTotal (its own line) — matching the form exactly.
-//    • The $49 deposit is authorized at checkout, separate from all the above.
+//    • Charges that need owner review (4+ flights, 400lb+, piano/safe, NY,
+//      difficult elevator/building access, >25mi stops) are NOT summed into
+//      the total. They surface as `reviewLines` and set `requiresReview`, so a
+//      customer is never shown $0 for something that has not been priced yet.
+//    • Truck pickup & return ($49) is DUE ON MOVE DAY and is NOT part of
+//      estimatedTotal (its own line, never discountable).
+//    • The $49 booking authorization is separate from all of the above.
+//
+//  REMOVED 2026-07-21 (owner decision): the building-age surcharge, and the
+//  automatic elevator-distance and parking-distance charges. See
+//  NO_BUILDING_AGE_FEE in pricing-config.ts.
 // ════════════════════════════════════════════════════════════════════════
 
-// Move-size flat labor prices (DOLLARS). Must match the form's `SERVICES`.
-export const MOVE_SIZES: Record<string, { label: string; price: number }> = {
-  'little-studio': { label: 'Little Studio', price: 359 },
-  'half-studio': { label: 'Half Studio', price: 409 },
-  'full-studio': { label: 'Full Studio', price: 509 },
-  '1br': { label: '1 Bedroom', price: 599 },
-  '2br': { label: '2 Bedrooms', price: 699 },
-  '3br': { label: '3 Bedrooms', price: 949 },
-  '4br': { label: '4 Bedrooms', price: 1249 },
-  '5br': { label: '5 Bedrooms', price: 1549 },
-  'not-sure': { label: 'Need a Quote', price: 0 },
+import {
+  PACKAGES, TRUCK_PICKUP_RETURN, ELEVATOR, PARKING_TOLLS_DELAYS,
+  stairChargeForFlights, longCarryChargeForFeet, heavyItemChargeForWeight,
+  additionalLocationChargeForMiles, travelChargeForMinutes,
+  formatCharge, isAutoApplicable,
+  type Charge, type PackageKey,
+} from './pricing-config'
+
+/**
+ * Move-size flat labor prices (DOLLARS), derived from PACKAGES.
+ * Kept as a named export for existing callers (app/api/bookings/route.ts).
+ * `starting: true` means the price is a FLOOR and the booking cannot be
+ * auto-confirmed — callers must not present it as a settled flat rate.
+ */
+export const MOVE_SIZES: Record<string, { label: string; price: number; starting: boolean; requiresReview: boolean }> =
+  Object.fromEntries(
+    Object.values(PACKAGES).map((p) => [
+      p.key,
+      {
+        label: p.label,
+        price: p.price.amount ?? 0,
+        starting: p.price.kind === 'starting',
+        requiresReview: p.requiresReview,
+      },
+    ])
+  )
+
+/** Truck pickup & return add-on (DOLLARS) — due on move day, never discounted. */
+export const TRUCK_ADDON_DOLLARS = TRUCK_PICKUP_RETURN.amount
+
+export type HeavyItemInput = {
+  /** Free-text description shown on the quote. */
+  label?: string
+  /** Estimated weight in POUNDS. Under 150 = normal furniture = included. */
+  pounds?: number | null
+  /** Piano or substantial safe — always a custom quote, never auto-priced. */
+  isPianoOrSafe?: boolean | null
 }
 
-// Truck pickup & return add-on (DOLLARS) — due on move day, not in estimatedTotal.
-export const TRUCK_ADDON_DOLLARS = 50
-
-// Access-difficulty add-ons (DOLLARS). MUST match the form's `MODIFIERS` table.
-// (booking-form.html: stairs 40, longWalk 30, heavyItems 60, elevator.far 25,
-//  parking.medium 25 / far 50, building.old 40.)
-export const ACCESS_MODIFIERS = {
-  stairs: 40,
-  longWalk: 30,
-  heavyItems: 60,
-  elevator: { none: 0, close: 0, far: 25 } as Record<string, number>,
-  parking: { door: 0, short: 0, medium: 25, far: 50 } as Record<string, number>,
-  building: { newer: 0, mid: 0, old: 40, unsure: 0, '': 0 } as Record<string, number>,
+export type AdditionalStopInput = {
+  label?: string
+  /** Distance in miles from the main route. */
+  miles?: number | null
 }
 
 export type EstimateInputs = {
   serviceType?: string | null
+
+  // ── Structured access inputs (preferred) ──────────────────────────────
+  /** Flights of stairs at the PICKUP address. 1st flight is included. */
+  pickupStairFlights?: number | null
+  /** Flights of stairs at the DROP-OFF address. Charged per address. */
+  dropoffStairFlights?: number | null
+  /** Door-to-truck carry distance in FEET, per location. */
+  pickupCarryFeet?: number | null
+  dropoffCarryFeet?: number | null
+  /** Genuinely difficult elevator access (slow / freight-restricted / long hall). */
+  pickupDifficultElevator?: boolean | null
+  dropoffDifficultElevator?: boolean | null
+  /** Genuinely difficult building access, beyond stairs and carry distance. */
+  pickupDifficultBuilding?: boolean | null
+  dropoffDifficultBuilding?: boolean | null
+  heavyItems?: HeavyItemInput[] | null
+  additionalStops?: AdditionalStopInput[] | null
+  /** Drive-time minutes beyond the primary service zone. */
+  travelMinutes?: number | null
+  /** New York job — never auto-priced. */
+  isNewYork?: boolean | null
+
+  // ── Legacy boolean inputs (a browser tab opened before the cutover) ────
+  /** @deprecated use pickup/dropoffStairFlights */
   stairs?: boolean | null
+  /** @deprecated use pickup/dropoffCarryFeet */
   longWalk?: boolean | null
-  heavyItems?: boolean | null
-  elevatorAccess?: string | null
-  parkingDistance?: string | null
-  buildingYear?: string | null
-  /** Server-computed service-area fee, in CENTS. */
+  /** @deprecated use heavyItems[] with weights */
+  legacyHeavyItems?: boolean | null
+
+  /** Server-computed service-area fee, in CENTS. Overrides travelMinutes when set. */
   travelFeeCents?: number | null
   truckAddonDueOnMoveDay?: boolean | null
 }
@@ -67,70 +112,172 @@ export type EstimateInputs = {
 export type EstimateLine = {
   key: string
   label: string
-  amount: number // DOLLARS
+  /** DOLLARS. 0 for review/quote lines — read `display` for what to show. */
+  amount: number
+  /** Exactly what the customer must see: "$40", "Included", "Pending review". */
+  display: string
   timing: 'included' | 'move_day'
+  /** True when this line still needs owner review before it is real. */
+  pendingReview: boolean
 }
 
 export type Estimate = {
   hasService: boolean
-  base: number // DOLLARS (0 when the size is unknown / "not-sure")
-  accessAddons: number // DOLLARS
+  base: number
+  /** True when the package price is a floor ("Starting at"). */
+  baseIsStarting: boolean
+  accessAddons: number
   accessLines: EstimateLine[]
-  travel: number // DOLLARS (in estimatedTotal, collected on move day)
-  truckAddon: number // DOLLARS (move day, NOT in estimatedTotal)
-  /** base + access add-ons + travel — the ONE number shown everywhere. */
+  /** Charges that need owner review — NOT summed into estimatedTotal. */
+  reviewLines: EstimateLine[]
+  travel: number
+  truckAddon: number
+  /** base + auto-applicable access add-ons + travel. */
   estimatedTotal: number
   /** travel + truck add-on — collected on move day, never in the $49 deposit. */
   dueOnMoveDay: number
+  /** Blocks automatic confirmation. Any review line, floor price, or NY job. */
+  requiresReview: boolean
+  reviewReasons: string[]
 }
 
 const round2 = (n: number): number => Math.round(n * 100) / 100
 
+/** Piano / substantial safe — custom quote, manual approval, never auto-priced. */
+const HEAVY_PIANO_SAFE: Charge = {
+  kind: 'manual_quote',
+  per: 'item',
+  requiresReview: true,
+  label: 'Upright piano or substantial safe',
+  note: 'Custom quote and manual approval.',
+}
+
+/** Build an EstimateLine from a resolved Charge. */
+function lineFrom(key: string, ch: Charge, labelOverride?: string): EstimateLine {
+  const auto = isAutoApplicable(ch)
+  return {
+    key,
+    label: labelOverride ?? ch.label,
+    amount: auto ? ch.amount ?? 0 : 0,
+    display: formatCharge(ch),
+    timing: 'included',
+    pendingReview: !auto && ch.kind !== 'included',
+  }
+}
+
 /**
  * THE booking estimate. Pure; safe to unit-test and to call from the API route.
- * Mirrors the booking form's live calculation exactly.
+ * Mirrors the browser form's calculation exactly (same config, same resolvers).
  */
 export function computeEstimate(i: EstimateInputs): Estimate {
-  const svc = i.serviceType ? MOVE_SIZES[i.serviceType] : undefined
-  const base = svc ? svc.price : 0
+  const pkg = i.serviceType ? PACKAGES[i.serviceType as PackageKey] : undefined
+  const base = pkg?.price.amount ?? 0
+  const baseIsStarting = pkg?.price.kind === 'starting'
 
-  const lines: EstimateLine[] = []
-  const push = (key: string, amount: number, label: string): void => {
-    if (amount > 0) lines.push({ key, label, amount, timing: 'included' })
+  const accessLines: EstimateLine[] = []
+  const reviewLines: EstimateLine[] = []
+  const reviewReasons: string[] = []
+
+  const consider = (key: string, ch: Charge, label?: string): void => {
+    const line = lineFrom(key, ch, label)
+    if (ch.kind === 'included') return // nothing to show as a charge
+    if (line.pendingReview) {
+      reviewLines.push(line)
+      reviewReasons.push(line.label)
+    } else if (line.amount > 0) {
+      accessLines.push(line)
+    }
   }
-  push('stairs', i.stairs ? ACCESS_MODIFIERS.stairs : 0, 'Stairs')
-  push('longWalk', i.longWalk ? ACCESS_MODIFIERS.longWalk : 0, 'Long carry')
-  push('heavyItems', i.heavyItems ? ACCESS_MODIFIERS.heavyItems : 0, 'Heavy items')
-  push('elevator', ACCESS_MODIFIERS.elevator[i.elevatorAccess ?? ''] ?? 0, 'Elevator access')
-  push('parking', ACCESS_MODIFIERS.parking[i.parkingDistance ?? ''] ?? 0, 'Parking distance')
-  push('building', ACCESS_MODIFIERS.building[i.buildingYear ?? ''] ?? 0, 'Building access')
 
-  const accessAddons = round2(lines.reduce((s, l) => s + l.amount, 0))
-  const travel = round2((i.travelFeeCents ?? 0) / 100)
+  // ── Stairs: PER ADDRESS. Legacy boolean maps to the 2nd-flight tier only. ──
+  const pickupFlights = i.pickupStairFlights ?? (i.stairs ? 2 : 0)
+  const dropoffFlights = i.dropoffStairFlights ?? 0
+  consider('stairs_pickup', stairChargeForFlights(pickupFlights), 'Stairs — pickup')
+  consider('stairs_dropoff', stairChargeForFlights(dropoffFlights), 'Stairs — drop-off')
+
+  // ── Long carry: PER LOCATION. Legacy boolean maps to the 100–250ft tier. ──
+  const pickupFeet = i.pickupCarryFeet ?? (i.longWalk ? 100 : 0)
+  const dropoffFeet = i.dropoffCarryFeet ?? 0
+  consider('carry_pickup', longCarryChargeForFeet(pickupFeet), 'Long carry — pickup')
+  consider('carry_dropoff', longCarryChargeForFeet(dropoffFeet), 'Long carry — drop-off')
+
+  // ── Elevator: a normal elevator is NEVER charged. Only difficult access. ──
+  if (i.pickupDifficultElevator) consider('elevator_pickup', ELEVATOR.difficult, 'Difficult elevator — pickup')
+  if (i.dropoffDifficultElevator) consider('elevator_dropoff', ELEVATOR.difficult, 'Difficult elevator — drop-off')
+
+  // ── Difficult building access (replaces the removed building-age fee). ──
+  if (i.pickupDifficultBuilding) consider('building_pickup', PARKING_TOLLS_DELAYS.difficultBuildingAccess, 'Difficult building access — pickup')
+  if (i.dropoffDifficultBuilding) consider('building_dropoff', PARKING_TOLLS_DELAYS.difficultBuildingAccess, 'Difficult building access — drop-off')
+
+  // ── Heavy items: by weight, per item. Piano/safe is always a custom quote. ──
+  const heavy = i.heavyItems ?? []
+  for (let n = 0; n < heavy.length; n++) {
+    const item = heavy[n]
+    const label = item.label?.trim() || `Heavy item ${n + 1}`
+    if (item.isPianoOrSafe) {
+      consider(`heavy_${n}`, { ...HEAVY_PIANO_SAFE, label }, label)
+      continue
+    }
+    consider(`heavy_${n}`, heavyItemChargeForWeight(item.pounds ?? 0), label)
+  }
+  // A legacy "heavy items" checkbox carries NO weight, so it can only mean
+  // "review this" — never a silent charge at a guessed tier.
+  if (i.legacyHeavyItems && !(i.heavyItems ?? []).length) {
+    consider('heavy_legacy', { kind: 'pending_review', per: 'item', requiresReview: true, label: 'Heavy item (weight not provided)' })
+  }
+
+  // ── Additional stops beyond the included 1 pickup + 1 drop-off. ──
+  const stops = i.additionalStops ?? []
+  for (let n = 0; n < stops.length; n++) {
+    const stop = stops[n]
+    const label = stop.label?.trim() || `Additional location ${n + 1}`
+    consider(`stop_${n}`, additionalLocationChargeForMiles(stop.miles ?? 0), label)
+  }
+
+  // ── Travel. An explicit server-computed fee wins; else the drive-time ladder. ──
+  let travel = 0
+  if (typeof i.travelFeeCents === 'number') {
+    travel = round2(i.travelFeeCents / 100)
+  } else if (i.travelMinutes != null) {
+    const ch = travelChargeForMinutes(i.travelMinutes)
+    if (isAutoApplicable(ch)) {
+      travel = ch.amount ?? 0
+    } else if (ch.kind !== 'included') {
+      reviewLines.push(lineFrom('travel', ch))
+      reviewReasons.push('Travel beyond 90 minutes')
+    }
+  }
+
+  if (i.isNewYork) reviewReasons.push('New York address')
+  if (pkg?.requiresReview) reviewReasons.push(`${pkg.label} requires inventory and access review`)
+
+  const accessAddons = round2(accessLines.reduce((s, l) => s + l.amount, 0))
   const truckAddon = i.truckAddonDueOnMoveDay ? TRUCK_ADDON_DOLLARS : 0
   const estimatedTotal = round2(base + accessAddons + travel)
 
   return {
-    hasService: !!svc,
+    hasService: !!pkg && pkg.key !== 'not-sure',
     base,
+    baseIsStarting,
     accessAddons,
-    accessLines: lines,
+    accessLines,
+    reviewLines,
     travel,
     truckAddon,
     estimatedTotal,
     dueOnMoveDay: round2(travel + truckAddon),
+    requiresReview: reviewReasons.length > 0,
+    reviewReasons,
   }
 }
 
 /**
  * The value stored on Booking.totalEstimate. Returns null only when there is
- * genuinely nothing to estimate (no known size and no fees) — preserving the
- * pre-fix "null when empty" behaviour while guaranteeing that whenever a size
- * IS chosen the stored total equals the form's headline (base + add-ons + travel).
+ * genuinely nothing to estimate (no known size and no fees).
  */
 export function storedTotalEstimate(i: EstimateInputs): number | null {
   const est = computeEstimate(i)
-  const hasKnownSize = !!(i.serviceType && MOVE_SIZES[i.serviceType])
+  const hasKnownSize = !!(i.serviceType && PACKAGES[i.serviceType as PackageKey] && i.serviceType !== 'not-sure')
   if (hasKnownSize) return est.estimatedTotal
   return est.estimatedTotal > 0 ? est.estimatedTotal : null
 }

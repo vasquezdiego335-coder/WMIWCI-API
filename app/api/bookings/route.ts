@@ -15,8 +15,11 @@ import { computeEstimate, MOVE_SIZES } from '@/lib/estimate'
 import { nextBookingReference } from '@/lib/booking-reference'
 import { rateLimit, tooManyRequests, LIMITS, clientIp } from '@/lib/rate-limit'
 import { ingestLeadSafe } from '@/lib/leads'
+import { TRUCK_PICKUP_RETURN, DISCOUNT_POLICY } from '@/lib/pricing-config'
 
-const TRUCK_PICKUP_RETURN_AMOUNT_CENTS = 5000
+/** The truck pickup & return ADD-ON. Distinct from BOOKING_FEE_CENTS — the two
+ *  are both $49 and must never be merged or deduplicated by amount. */
+const TRUCK_PICKUP_RETURN_AMOUNT_CENTS = TRUCK_PICKUP_RETURN.amountCents
 
 // ── CORS ──────────────────────────────────────────────────────
 // The marketing site (static HTML) is served from a different origin than this
@@ -118,12 +121,48 @@ const BookingSchema = z.object({
       zip: z.string().transform(sanitizeText).pipe(z.string().max(12)).optional(),
     })
     .optional(),
+  // ── LEGACY access booleans. Kept so a browser tab opened before the
+  //    2026-07-21 cutover still submits successfully; they map to the LOWEST
+  //    tier server-side and never guess a heavy-item weight. ──
   stairs: z.coerce.boolean().optional(),
   longWalk: z.coerce.boolean().optional(),
   heavyItems: z.coerce.boolean().optional(),
 
+  // ── TIERED access details (2026-07-21). Stairs and carry distance are
+  //    priced PER ADDRESS, so each end is captured separately. ──
+  pickupStairFlights: z.coerce.number().int().min(0).max(60).optional(),
+  dropoffStairFlights: z.coerce.number().int().min(0).max(60).optional(),
+  pickupCarryFeet: z.coerce.number().int().min(0).max(5000).optional(),
+  dropoffCarryFeet: z.coerce.number().int().min(0).max(5000).optional(),
+
+  /** Heavy items WITH weights. Weight is what makes the $50/$100/review tiers
+   *  computable; a piano or safe is always a custom quote regardless. */
+  heavyItemsDetail: z
+    .array(
+      z.object({
+        label: z.string().transform(sanitizeText).pipe(z.string().max(80)).optional(),
+        pounds: z.coerce.number().int().min(0).max(5000).optional(),
+        isPianoOrSafe: z.coerce.boolean().optional(),
+      })
+    )
+    .max(20)
+    .optional(),
+
+  /** Stops beyond the included one pickup + one drop-off. */
+  additionalStops: z
+    .array(
+      z.object({
+        label: z.string().transform(sanitizeText).pipe(z.string().max(120)).optional(),
+        miles: z.coerce.number().min(0).max(500).optional(),
+      })
+    )
+    .max(10)
+    .optional(),
+
   // ── Structured access details (booking form selects). Unknown values are
-  //    dropped rather than rejected so an old cached form can never 422. ──
+  //    dropped rather than rejected so an old cached form can never 422.
+  //    NOTE: as of 2026-07-21 these are STORED FOR THE CREW ONLY and price
+  //    nothing. The building-age surcharge was removed as undisclosed. ──
   elevatorAccess: z
     .string()
     .transform((v) => (ELEVATOR_LABELS[sanitizeText(v)] ? sanitizeText(v) : undefined))
@@ -418,15 +457,18 @@ async function handleBooking(req: NextRequest): Promise<NextResponse> {
     create: { email: data.email, name: data.fullName, phone: data.phone, isFirstTime: true, locale: customerLocale },
   })
 
+  // DOOR-HANGER CAMPAIGN REMOVED 2026-07-21 (owner decision). It approved 30%,
+  // over the 10% public cap in DISCOUNT_POLICY, and disagreed with the admin
+  // route which wrote 10% for the same click. A submitted discount code no
+  // longer opens a pending 30% path; first-time customers keep the 10% rate,
+  // which is the cap. The Prisma DiscountType enum values are retained so
+  // historical bookings still read correctly.
   let discountType: string | undefined
   let discountPercent: number | undefined
 
-  if (data.discountCode) {
-    discountType = 'DOOR_HANGER_PENDING'
-    discountPercent = 0
-  } else if (!existingCustomer) {
+  if (!existingCustomer) {
     discountType = 'FIRST_TIME_AUTO'
-    discountPercent = 10
+    discountPercent = DISCOUNT_POLICY.maxPublicPercent
   }
 
   const requestedDate = buildRequestedDate(data.date, data.time)
@@ -439,14 +481,24 @@ async function handleBooking(req: NextRequest): Promise<NextResponse> {
   //    SMS and Stripe metadata all show the SAME number. Access add-ons are
   //    INCLUDED in the total (labor difficulty); travel + truck are labelled
   //    due-on-move-day. This is the fix for the "$699 form vs $599 email" bug. ──
+  //    2026-07-21: elevatorAccess / parkingDistance / buildingYear no longer
+  //    price anything — the building-age surcharge was removed (undisclosed)
+  //    and elevator/parking distance are review-gated, not automatic. They are
+  //    still collected and stored for the crew; they just don't bill.
   const est = computeEstimate({
     serviceType: data.serviceType,
+    pickupStairFlights: data.pickupStairFlights ?? undefined,
+    dropoffStairFlights: data.dropoffStairFlights ?? undefined,
+    pickupCarryFeet: data.pickupCarryFeet ?? undefined,
+    dropoffCarryFeet: data.dropoffCarryFeet ?? undefined,
+    heavyItems: data.heavyItemsDetail ?? undefined,
+    additionalStops: data.additionalStops ?? undefined,
+    // Legacy booleans from a browser tab opened before the cutover. They map to
+    // the LOWEST tier (stairs → 2nd flight, longWalk → 100ft); a weightless
+    // heavy-item checkbox becomes a review line, never a guessed charge.
     stairs: data.stairs,
     longWalk: data.longWalk,
-    heavyItems: data.heavyItems,
-    elevatorAccess: data.elevatorAccess,
-    parkingDistance: data.parkingDistance,
-    buildingYear: data.buildingYear,
+    legacyHeavyItems: data.heavyItems,
     travelFeeCents,
     truckAddonDueOnMoveDay,
   })

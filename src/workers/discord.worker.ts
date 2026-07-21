@@ -4,7 +4,6 @@ import { queueLogger } from '../lib/logger'
 import type { DiscordJobData } from '../lib/queues'
 import {
   postBookingApprovalCard,
-  postDiscountApprovalCard,
   postPaymentAlert,
   postFailureAlert,
   createJobChannels,
@@ -26,7 +25,10 @@ async function processDiscordJob(job: Job<DiscordJobData>): Promise<void> {
       await postPaymentAlert(bookingId!, payload)
       break
     case 'discount-request':
-      await postDiscountApprovalCard(bookingId!, payload)
+      // Door-hanger campaign retired 2026-07-21. A job left in Redis from
+      // before the cutover is acknowledged and dropped rather than posting a
+      // 30%-off card that no longer has a rule behind it.
+      log.warn('discount-request job ignored — door-hanger campaign retired')
       break
     case 'create-job-channels':
       await createJobChannels(bookingId!, payload)

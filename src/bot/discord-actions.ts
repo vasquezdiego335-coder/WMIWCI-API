@@ -370,57 +370,14 @@ export async function postBookingApprovalCard(
 }
 
 // ══════════════════════════════════════════════════════════════════════════
-//  2. Door-hanger discount approval card  (Approve 30% / Deny → 10%)
-//     Job type: 'discount-request'
+//  2. Door-hanger discount approval card — REMOVED 2026-07-21 (owner decision)
+//     The campaign approved 30% off, three times the 10% public cap, and
+//     disagreed with the admin route that wrote 10% for the same click. The
+//     card builder, the rule and the admin endpoint are all gone; the Discord
+//     interaction handler still answers pre-cutover cards with a "retired"
+//     notice instead of applying a discount.
 // ══════════════════════════════════════════════════════════════════════════
-export async function postDiscountApprovalCard(
-  bookingId: string,
-  payload: Record<string, unknown>
-): Promise<void> {
-  botLogger.info({ bookingId, payloadKeys: Object.keys(payload) }, '▶ postDiscountApprovalCard')
 
-  const channel = await getChannel('DISCORD_CHANNEL_SCHEDULING')
-  if (!channel) {
-    botLogger.warn({ bookingId }, 'Scheduling channel not configured — skipping discount card')
-    return
-  }
-
-  const embed = new EmbedBuilder()
-    .setTitle(`🏷️ Door Hanger Discount Request — ${payload.displayId}`)
-    .setColor(0xfbbf24) // amber
-    .setDescription(
-      'Customer submitted a door hanger code. Approve for **30% off** or deny for **10% first-time fallback**.'
-    )
-    .addFields(
-      {
-        name: '👤 Customer',
-        value: [`**${payload.customerName}**`, payload.customerEmail as string].filter(Boolean).join('\n') || '—',
-        inline: true,
-      },
-      { name: '🎟️ Code', value: (payload.discountCode as string) || 'N/A', inline: true },
-      { name: '📦 Service', value: (payload.serviceType as string) || 'Unknown', inline: true }
-    )
-    .setFooter({ text: `Booking ID: ${bookingId}` })
-    .setTimestamp()
-
-  const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
-    new ButtonBuilder()
-      .setCustomId(`approve_discount:${bookingId}`)
-      .setLabel('✅ Approve 30%')
-      .setStyle(ButtonStyle.Success),
-    new ButtonBuilder()
-      .setCustomId(`deny_discount:${bookingId}`)
-      .setLabel('❌ Deny → 10%')
-      .setStyle(ButtonStyle.Danger)
-  )
-
-  try {
-    const msg = await channel.send({ embeds: [embed], components: [row] })
-    botLogger.info({ bookingId, messageId: msg.id }, '✔ Discount approval card posted')
-  } catch (err) {
-    botLogger.error({ bookingId, err: errMsg(err), stack: errStack(err) }, '✖ Failed to send discount card')
-  }
-}
 
 // ══════════════════════════════════════════════════════════════════════════
 //  3. Payment received alert  (informational — no buttons)

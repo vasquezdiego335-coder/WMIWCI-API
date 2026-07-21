@@ -182,31 +182,10 @@ export async function postBookingApprovalCard(
 }
 
 // ══════════════════════════════════════════════════════════════════════════
-//  2. Door-hanger discount approval card
+//  2. Door-hanger discount approval card — REMOVED 2026-07-21 (owner decision).
+//     The 30% approval exceeded the 10% public cap in DISCOUNT_POLICY.
 // ══════════════════════════════════════════════════════════════════════════
-export async function postDiscountApprovalCard(
-  bookingId: string,
-  payload: Record<string, unknown>
-): Promise<void> {
-  botLogger.info({ bookingId }, '▶ postDiscountApprovalCard (REST)')
-  const embed = new EmbedBuilder()
-    .setTitle(`🏷️ Door Hanger Discount Request — ${payload.displayId}`)
-    .setColor(0xfbbf24)
-    .setDescription('Customer submitted a door hanger code. Approve for **30% off** or deny for **10% first-time fallback**.')
-    .addFields(
-      { name: '👤 Customer', value: [`**${payload.customerName}**`, payload.customerEmail as string].filter(Boolean).join('\n') || '—', inline: true },
-      { name: '🎟️ Code', value: (payload.discountCode as string) || 'N/A', inline: true },
-      { name: '📦 Service', value: (payload.serviceType as string) || 'Unknown', inline: true }
-    )
-    .setFooter({ text: `Booking ID: ${bookingId}` })
-    .setTimestamp()
 
-  const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
-    new ButtonBuilder().setCustomId(`approve_discount:${bookingId}`).setLabel('✅ Approve 30%').setStyle(ButtonStyle.Success),
-    new ButtonBuilder().setCustomId(`deny_discount:${bookingId}`).setLabel('❌ Deny → 10%').setStyle(ButtonStyle.Danger)
-  )
-  await restSendToChannel('DISCORD_CHANNEL_SCHEDULING', { embeds: [embed.toJSON()], components: [row.toJSON()] })
-}
 
 // ══════════════════════════════════════════════════════════════════════════
 //  3. Payment received alert (informational)
