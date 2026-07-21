@@ -36,6 +36,7 @@
 // ════════════════════════════════════════════════════════════════════════
 import 'dotenv/config'
 
+import { timingSafeEqual } from 'node:crypto'
 import express, { type Request, type Response } from 'express'
 
 import { startEmailWorker } from './workers/email.worker'
@@ -97,6 +98,38 @@ function startHttpServer(): void {
   app.get('/', health)
   app.get('/health', health)
   app.get('/healthz', health) // point Railway's Healthcheck Path here
+
+  // ── Email diagnostics ─────────────────────────────────────────────
+  // The Next.js app exposes GET /api/email/health, but THIS process is a plain
+  // Express host and does not serve Next routes — so that endpoint 404s here.
+  // That mattered the moment it was needed: the worker SIGNS unsubscribe links
+  // and the API VERIFIES them, so if their EMAIL_TOKEN_SECRET differs, every
+  // link is dead and nothing surfaces it. Comparing the two required shell
+  // access; now it is a curl against each host.
+  //
+  // Same auth and same redaction as the Next route: presence, length, and a
+  // SHA-256 fingerprint PREFIX. No secret value is ever returned.
+  app.get('/api/email/health', async (req: Request, res: Response) => {
+    const expected = process.env.EMAIL_SUPPRESSION_API_KEY?.trim()
+    if (!expected) {
+      res.status(503).json({ ok: false, error: 'diagnostics_disabled' })
+      return
+    }
+    const given = String(req.header('x-suppression-key') ?? req.query.key ?? '').trim()
+    const a = Buffer.from(given)
+    const b = Buffer.from(expected)
+    if (a.length !== b.length || !timingSafeEqual(a, b)) {
+      res.status(401).json({ ok: false, error: 'unauthorized' })
+      return
+    }
+    try {
+      const { runDiagnostics } = await import('./lib/email-diagnostics')
+      const d = await runDiagnostics()
+      res.status(d.status === 'blocked' ? 503 : 200).json({ service: 'worker-host', ...d })
+    } catch (err) {
+      res.status(500).json({ ok: false, error: err instanceof Error ? err.message : String(err) })
+    }
+  })
 
   // ── Stripe webhook (OPTIONAL — only if you register THIS host in Stripe) ──
   // RAW body is mandatory: Stripe's signature is computed over the exact bytes.
