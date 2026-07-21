@@ -90,6 +90,15 @@ export interface MoveFinancialRow {
     businessReserveCents: number
     retainedEarningsCents: number
     distributableProfitCents: number
+    // ── The 40/30/30 allocation (Stage 4) ──
+    //    OPTIONAL because snapshots written before Stage 4 genuinely do not
+    //    carry them. Missing reads as zero in a total, which is honest: that
+    //    move allocated nothing under a policy that did not exist yet.
+    businessRetainedCents?: number
+    businessRetainedBp?: number
+    roundingRemainderCents?: number
+    /** [{ owner, amountCents, percentBp }] as allocated on THIS move. */
+    ownerAllocations?: { owner: string; amountCents: number; percentBp: number }[]
   } | null
   /** Live recomputation, used when not finalized. */
   provisional?: MoveFinancialRow['snapshot']
@@ -113,6 +122,12 @@ export interface AggregateTotals {
   businessReserveCents: number
   retainedEarningsCents: number
   distributableProfitCents: number
+  // ── The 40/30/30 allocation, summed across the period ──
+  businessRetainedCents: number
+  roundingRemainderCents: number
+  /** Allocation per owner key ("DIEGO" / "SEBASTIAN"), summed. Keyed rather
+   *  than named so the totals do not hard-code who the owners are. */
+  ownerAllocationCents: Record<string, number>
   /** Basis points of net collected revenue; null when nothing was collected. */
   marginBp: number | null
   moveCount: number
@@ -128,6 +143,7 @@ const ZERO: AggregateTotals = {
   allocatedOverheadCents: 0, cashGrossProfitCents: 0, economicProfitCents: 0,
   companyNetProfitCents: 0, economicNetProfitCents: 0, taxReserveCents: 0,
   businessReserveCents: 0, retainedEarningsCents: 0, distributableProfitCents: 0,
+  businessRetainedCents: 0, roundingRemainderCents: 0, ownerAllocationCents: {},
   marginBp: null, moveCount: 0, finalizedCount: 0, provisionalCount: 0, unusableCount: 0,
 }
 
@@ -153,7 +169,7 @@ export function selectMoveFigures(row: MoveFinancialRow, scope: ReportScope): Mo
  * be in the total but has no usable figures is itself information.
  */
 export function aggregateMoves(rows: MoveFinancialRow[], scope: ReportScope): AggregateTotals {
-  const t: AggregateTotals = { ...ZERO }
+  const t: AggregateTotals = { ...ZERO, ownerAllocationCents: {} }
   for (const row of rows) {
     const f = selectMoveFigures(row, scope)
     if (!f) {
@@ -181,6 +197,11 @@ export function aggregateMoves(rows: MoveFinancialRow[], scope: ReportScope): Ag
     t.businessReserveCents += f.businessReserveCents
     t.retainedEarningsCents += f.retainedEarningsCents
     t.distributableProfitCents += f.distributableProfitCents
+    t.businessRetainedCents += f.businessRetainedCents ?? 0
+    t.roundingRemainderCents += f.roundingRemainderCents ?? 0
+    for (const a of f.ownerAllocations ?? []) {
+      t.ownerAllocationCents[a.owner] = (t.ownerAllocationCents[a.owner] ?? 0) + a.amountCents
+    }
   }
   t.marginBp = t.netCollectedRevenueCents > 0
     ? Math.round((t.companyNetProfitCents / t.netCollectedRevenueCents) * 10_000)

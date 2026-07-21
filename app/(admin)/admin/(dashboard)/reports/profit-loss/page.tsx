@@ -4,7 +4,7 @@ import { getSession } from '@/lib/auth'
 import { can, type Role } from '@/lib/permissions'
 import { COLORS } from '../../_ui'
 import {
-  PageShell, BasisStrip, EmptyState, FilterBar, ResponsiveTable,
+  PageShell, BasisStrip, EmptyState, FilterBar, ResponsiveTable, AllocationPanel,
   fetchReport, money, pctText, td, tdNum, ProfitCell, Tag,
   type PLLine,
 } from '../_shared'
@@ -55,6 +55,7 @@ export default async function ProfitLossReport({ searchParams }: { searchParams:
           {result.dataState !== 'OK'
             ? <EmptyState state={result.dataState} message={result.dataStateMessage} />
             : (<>
+              <AllocationPanel allocation={result.data.allocation} />
               <ResponsiveTable headers={['Section', 'Line', result.meta.periodLabel, result.meta.comparePeriodLabel, 'Change', 'Change %']}>
                 {(result.data.lines as PLLine[]).map((l, i) => (
                   <tr key={`${l.section}-${l.line}`} style={i > 0 && l.section !== (result.data.lines as PLLine[])[i - 1].section ? { borderTop: '2px solid #E5E7EB' } : undefined}>

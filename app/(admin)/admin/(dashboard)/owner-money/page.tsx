@@ -1,6 +1,7 @@
 import { prisma } from '@/lib/db'
 import { getSession } from '@/lib/auth'
 import { fmtCents, crewPayOwedCents, distributablePosition, taxReserveCentsFor } from '@/lib/profit'
+import { buildProfitAllocation } from '@/lib/profit-allocation'
 import { rollupOwner, estimateBusinessCash, totalReimbursementOwed, operatingProfitCents } from '@/lib/owner-ledger'
 import { summarizeRevenue, ELIGIBLE_EXPENSE_WHERE, CAPTURED_PAYMENT_WHERE, isPaidCrew } from '@/lib/money-rules'
 import { PageHeader, Card, COLORS, Empty, MoneyRow, tableStyles as T, Badge, Callout } from '../_ui'
@@ -95,6 +96,21 @@ export default async function OwnerMoneyPage() {
     emergencyReserveCents: cfg.emergencyCents,
   })
   const safe = position.distributableCents
+  // THE owner-facing 40/30/30 view — the same shared model the closeout uses,
+  // so Owner Money and the closeout can never disagree about the policy.
+  const retainedBp = config?.generalReserveBp ?? 0
+  const retained = Math.min(safe, Math.floor((safe * retainedBp) / 10000))
+  const distributable = safe - retained
+  const allocation = buildProfitAllocation({
+    companyNetProfitCents: safe,
+    businessRetainedCents: retained,
+    businessRetainedBp: retainedBp,
+    distributableProfitCents: distributable,
+    ownerShares: [
+      { owner: 'DIEGO', amountCents: Math.floor((distributable * cfg.diego) / 100), percentBp: cfg.diego * 100 },
+      { owner: 'SEBASTIAN', amountCents: Math.floor((distributable * cfg.sebastian) / 100), percentBp: cfg.sebastian * 100 },
+    ],
+  })
 
   return (
     <div>
@@ -165,8 +181,22 @@ export default async function OwnerMoneyPage() {
           </div>
         )}
         {safe > 0 && (
-          <div style={{ fontSize: '12px', color: COLORS.faint, textAlign: 'right', maxWidth: '640px', marginTop: '4px' }}>
-            At the current split — Diego {fmtCents(Math.round(safe * cfg.diego / 100))} · Sebastian {fmtCents(Math.round(safe * cfg.sebastian / 100))}
+          /* The 40/30/30 policy, from the shared model. This used to read
+             "Diego 50% · Sebastian 50%" of the WHOLE amount — which showed the
+             business retaining nothing, the opposite of the policy. */
+          <div style={{ textAlign: 'right', maxWidth: '640px', marginTop: '8px' }}>
+            {allocation.lines.map((ln) => (
+              <div key={ln.label} style={{ fontSize: '12px', color: ln.isBusiness ? COLORS.navy : COLORS.faint, fontWeight: ln.isBusiness ? 700 : 400 }}>
+                {ln.label} — {ln.ofNetProfitBp / 100}%: {fmtCents(ln.amountCents)}
+              </div>
+            ))}
+            <details style={{ marginTop: '6px' }}>
+              <summary style={{ fontSize: '11px', color: COLORS.muted, cursor: 'pointer' }}>How this is calculated</summary>
+              <p style={{ fontSize: '11px', color: COLORS.muted, margin: '4px 0 0', lineHeight: 1.5 }}>
+                {allocation.explanation} The retained share is a general company allocation — it may fund
+                taxes, equipment, insurance, licensing or growth. It is not tax advice.
+              </p>
+            </details>
           </div>
         )}
       </Card>

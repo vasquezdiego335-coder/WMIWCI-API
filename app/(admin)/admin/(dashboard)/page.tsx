@@ -5,6 +5,7 @@ import { fmtCents, crewPayOwedCents } from '@/lib/profit'
 import { customerBalance, JOB_MONEY_PAYMENT_SELECT } from '@/lib/job-money'
 import { summarizeRevenue, ELIGIBLE_EXPENSE_WHERE, CAPTURED_PAYMENT_WHERE, isLaborUnrecorded } from '@/lib/money-rules'
 import { Callout } from './_ui'
+import { evaluateFinancialSetup } from '@/lib/financial-setup'
 
 export const revalidate = 60 // revalidate every 60 seconds
 
@@ -22,6 +23,8 @@ async function getDashboardData() {
     thisMonthExpenses,
     totalBookings,
     liveJobs,
+    allUsers,
+    businessConfig,
     attentionReminders,
   ] = await Promise.all([
     prisma.booking.findMany({
@@ -63,6 +66,10 @@ async function getDashboardData() {
       },
       take: 500,
     }),
+    // D6 (Stage 4): what the owner still has to configure before ANY move can
+    // be closed out. Reported, never guessed — a missing rate is unknown, not $0.
+    prisma.user.findMany({ select: { role: true, workerType: true, name: true, active: true, payRate: true, ownerEconomicRateCents: true } }),
+    prisma.businessConfig.findUnique({ where: { id: 'singleton' } }).catch(() => null),
     // Needs Attention: top open reminders (critical → overdue → due today → rest).
     prisma.reminder.findMany({
       where: { status: { in: ['OPEN', 'ACKNOWLEDGED', 'IN_PROGRESS'] } },
@@ -81,14 +88,20 @@ async function getDashboardData() {
 
   const revenue = summarizeRevenue(thisMonthRevenue)
 
-  return { todayBookings, pendingApproval, pendingDiscounts, revenue, thisMonthExpenses, totalBookings, outstandingBalances, unpaidCrew, movesMissingLabor, liveJobCount: liveJobs.length, attentionReminders }
+  const setup = evaluateFinancialSetup({
+    users: allUsers.map((u) => ({ role: String(u.role), workerType: String(u.workerType), name: u.name, active: u.active, payRate: u.payRate, ownerEconomicRateCents: u.ownerEconomicRateCents })),
+    ownerEconomicRateCents: businessConfig?.ownerEconomicRateCents ?? null,
+    hasBusinessConfig: !!businessConfig,
+  })
+
+  return { setup, todayBookings, pendingApproval, pendingDiscounts, revenue, thisMonthExpenses, totalBookings, outstandingBalances, unpaidCrew, movesMissingLabor, liveJobCount: liveJobs.length, attentionReminders }
 }
 
 const SEVERITY_ICON: Record<string, string> = { CRITICAL: '🚨', HIGH: '⚠️', MEDIUM: '🟠', LOW: '🔹', INFO: 'ℹ️' }
 
 export default async function AdminDashboard() {
   const session = await getSession()
-  const { todayBookings, pendingApproval, pendingDiscounts, revenue, thisMonthExpenses, totalBookings, outstandingBalances, unpaidCrew, movesMissingLabor, liveJobCount, attentionReminders } = await getDashboardData()
+  const { setup, todayBookings, pendingApproval, pendingDiscounts, revenue, thisMonthExpenses, totalBookings, outstandingBalances, unpaidCrew, movesMissingLabor, liveJobCount, attentionReminders } = await getDashboardData()
 
   const revenueCents = revenue.netCollectedCents
   const expenseCents = thisMonthExpenses._sum?.amount ?? 0
@@ -97,6 +110,22 @@ export default async function AdminDashboard() {
     <div>
       <h1 style={h1}>Dashboard</h1>
       <p style={subtitle}>Good morning, {session?.name}. Here's what's happening today.</p>
+
+      {/* D6 (Stage 4): the owner cannot close ANY move until these are set.
+          Shown above the money so it is read before the numbers are trusted. */}
+      {!setup.ready && (
+        <Callout tone="warning" title={setup.headline ?? 'Financial setup required'}>
+          Moves cannot be financially finalized until these are configured. A missing rate is
+          treated as <strong>unknown</strong>, never $0 — so profit stays incomplete rather than wrong.
+          <ul style={{ margin: '8px 0 0', paddingLeft: '18px' }}>
+            {setup.outstanding.map((item) => (
+              <li key={item.key}>
+                <Link href={item.href} style={{ color: '#FF5A1F', fontWeight: 600 }}>{item.label}</Link>
+              </li>
+            ))}
+          </ul>
+        </Callout>
+      )}
 
       {/* PHASE 0: an aggregate that includes moves with no labor recorded is
           overstated. Say so at the top, before any number is read. */}

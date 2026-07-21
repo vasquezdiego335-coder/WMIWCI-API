@@ -4,7 +4,7 @@ import { getSession } from '@/lib/auth'
 import { can, type Role } from '@/lib/permissions'
 import { COLORS } from '../../_ui'
 import {
-  PageShell, BasisStrip, EmptyState, FilterBar, ResponsiveTable,
+  PageShell, BasisStrip, EmptyState, FilterBar, ResponsiveTable, AllocationPanel,
   fetchReport, money, pctText, td, tdNum, ProfitCell, Tag,
   type MoveRow,
 } from '../_shared'
@@ -55,6 +55,7 @@ export default async function MoveProfitabilityReport({ searchParams }: { search
           {result.dataState !== 'OK'
             ? <EmptyState state={result.dataState} message={result.dataStateMessage} />
             : (<>
+              <AllocationPanel allocation={result.data.allocation} />
               <ResponsiveTable headers={['Move', 'Date', 'Status', 'City', 'Crew', 'Hours', 'Collected', 'Outstanding', 'Costs', 'Profit', 'Margin', 'Source']}>
                 {(result.data.rows as MoveRow[]).map((r) => (
                   <tr key={r.bookingId}>

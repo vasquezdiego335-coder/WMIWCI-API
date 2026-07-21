@@ -98,6 +98,18 @@ const MOVE_SELECT = {
   job: { select: { crew: { select: { id: true, paidMinutes: true, workedMinutes: true, assignmentStatus: true } } } },
 } as const
 
+/** Owner allocations off a snapshot's JSON column, defensively. A malformed or
+ *  absent value reads as "nothing was allocated", never as a guess. */
+function ownerAllocationsOf(raw: unknown): { owner: string; amountCents: number; percentBp: number }[] {
+  if (!Array.isArray(raw)) return []
+  return raw
+    .filter((v): v is { owner: string; amountCents: number; percentBp?: number } =>
+      !!v && typeof v === 'object' &&
+      typeof (v as { owner?: unknown }).owner === 'string' &&
+      typeof (v as { amountCents?: unknown }).amountCents === 'number')
+    .map((v) => ({ owner: v.owner, amountCents: v.amountCents, percentBp: v.percentBp ?? 0 }))
+}
+
 /** The date a move belongs to for reporting: when it was actually worked. */
 const moveDateOf = (b: { completedAt: Date | null; scheduledStart: Date | null; confirmedDate: Date | null }): Date | null =>
   b.completedAt ?? b.scheduledStart ?? b.confirmedDate
@@ -197,6 +209,12 @@ export async function loadMovesReport(
         businessReserveCents: snap.businessReserveCents,
         retainedEarningsCents: snap.retainedEarningsCents,
         distributableProfitCents: snap.distributableProfitCents,
+        // The 40/30/30 allocation, read from the FROZEN snapshot. Changing the
+        // retained share or the owner split today cannot move these.
+        businessRetainedCents: snap.businessRetainedCents,
+        businessRetainedBp: snap.businessRetainedBp,
+        roundingRemainderCents: snap.roundingRemainderCents,
+        ownerAllocations: ownerAllocationsOf(snap.ownerAllocations),
       }
     } else if (scope !== 'FINALIZED_ONLY') {
       // APPLICATION AGGREGATION — bounded.
@@ -223,6 +241,18 @@ export async function loadMovesReport(
             businessReserveCents: f.reserves.businessReserveCents,
             retainedEarningsCents: f.reserves.retainedEarningsCents,
             distributableProfitCents: f.reserves.distributableProfitCents,
+            // Live allocation. Labelled PROVISIONAL by the row's
+            // financialStatus, and it may still change at closeout.
+            businessRetainedCents: view.allocation.businessRetainedCents,
+            businessRetainedBp: view.allocation.businessRetainedBp,
+            roundingRemainderCents: view.allocation.roundingRemainderCents,
+            ownerAllocations: view.allocation.lines
+              .filter((l) => !l.isBusiness)
+              .map((l) => ({
+                owner: l.label.replace(/ allocation$/i, '').toUpperCase(),
+                amountCents: l.amountCents,
+                percentBp: l.ofNetProfitBp,
+              })),
           }
         }
       }
@@ -364,7 +394,18 @@ export function paginate<T>(rows: T[], page: number, pageSize: number): { slice:
 
 // ── Marketing ───────────────────────────────────────────────────────────────
 
-export async function loadMarketingReport(req: ResolvedReportRequest, model: AttributionModel = 'BOOKING'): Promise<{ results: MarketingResult[]; counts: { finalized: number; provisional: number; incomplete: number }; warnings: string[] }> {
+/** What one marketing source contributed to the 40/30/30 allocation. */
+export interface SourceAllocation {
+  companyNetProfitCents: number
+  businessRetainedCents: number
+  roundingRemainderCents: number
+  distributableProfitCents: number
+  ownerAllocationCents: Record<string, number>
+  /** FINALIZED only when every attributed move is finalized. */
+  allFinalized: boolean
+}
+
+export async function loadMarketingReport(req: ResolvedReportRequest, model: AttributionModel = 'BOOKING'): Promise<{ results: MarketingResult[]; allocations: Record<string, SourceAllocation>; counts: { finalized: number; provisional: number; incomplete: number }; warnings: string[] }> {
   const moves = await loadMovesReport(req, { attribution: model })
 
   const campaigns = await prisma.marketingCampaign.findMany({
@@ -388,6 +429,20 @@ export async function loadMarketingReport(req: ResolvedReportRequest, model: Att
     return bySource.get(k)!
   }
 
+  // The 40/30/30 allocation attributable to each source, accumulated from the
+  // same figures as the profit above — frozen values for finalized moves, live
+  // for provisional ones.
+  const allocations: Record<string, SourceAllocation> = {}
+  const bumpAllocation = (k: string): SourceAllocation => {
+    if (!allocations[k]) {
+      allocations[k] = {
+        companyNetProfitCents: 0, businessRetainedCents: 0, roundingRemainderCents: 0,
+        distributableProfitCents: 0, ownerAllocationCents: {}, allFinalized: true,
+      }
+    }
+    return allocations[k]
+  }
+
   for (const r of moves.rows) {
     const e = bump(r.marketingSource)
     e.bookings++
@@ -398,6 +453,16 @@ export async function loadMarketingReport(req: ResolvedReportRequest, model: Att
     e.cost += f.directJobCostCents
     if (r.isFinalized) { e.finalized++; e.finalProfit += f.companyNetProfitCents }
     else e.provProfit += f.companyNetProfitCents
+
+    const a = bumpAllocation(r.marketingSource)
+    a.companyNetProfitCents += f.companyNetProfitCents
+    a.businessRetainedCents += f.businessRetainedCents ?? 0
+    a.roundingRemainderCents += f.roundingRemainderCents ?? 0
+    a.distributableProfitCents += f.distributableProfitCents
+    for (const share of f.ownerAllocations ?? []) {
+      a.ownerAllocationCents[share.owner] = (a.ownerAllocationCents[share.owner] ?? 0) + share.amountCents
+    }
+    if (!r.isFinalized) a.allFinalized = false
   }
 
   // Leads by source (DATABASE AGGREGATION).
@@ -424,7 +489,7 @@ export async function loadMarketingReport(req: ResolvedReportRequest, model: Att
     }),
   )
 
-  return { results, counts: moves.counts, warnings: moves.warnings }
+  return { results, allocations, counts: moves.counts, warnings: moves.warnings }
 }
 
 // ── Pricing comparables ─────────────────────────────────────────────────────

@@ -7,7 +7,7 @@ import { parseReportRequest, buildReportMetadata } from '@/lib/reporting-filters
 import { canExportReport, REPORT_COLUMNS, type ReportType } from '@/lib/report-permissions'
 import { buildReport, REPORT_TYPES } from '@/lib/report-builders'
 import {
-  canExport, toCsv, toXlsxXml, exportFilename, contentTypeFor,
+  canExport, toCsv, toXlsxXml, toPdf, exportFilename, contentTypeFor,
   buildExportAudit, type ExportFormat, type ExportMeta,
 } from '@/lib/export-service'
 
@@ -53,9 +53,8 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
   const report = (req.nextUrl.searchParams.get('report') ?? '') as ReportType
   const format = (req.nextUrl.searchParams.get('format') ?? 'CSV').toUpperCase() as ExportFormat
   if (!REPORT_TYPES.includes(report)) return NextResponse.json({ error: 'Unknown report.' }, { status: 404 })
-  if (!['CSV', 'XLSX'].includes(format)) {
-    // PDF is reserved and content-typed but not yet rendered — say so plainly.
-    return NextResponse.json({ error: 'Only CSV and XLSX exports are available. PDF is not implemented yet.' }, { status: 422 })
+  if (!['CSV', 'XLSX', 'PDF'].includes(format)) {
+    return NextResponse.json({ error: 'Exports are available as CSV, XLSX or PDF.' }, { status: 422 })
   }
 
   const access = canExportReport(role, report)
@@ -99,11 +98,17 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
 
     const body = format === 'CSV'
       ? toCsv(decision.columns, rows, exportMeta)
-      : toXlsxXml(decision.columns, rows, exportMeta)
+      : format === 'PDF'
+        ? toPdf(decision.columns, rows, exportMeta)
+        : toXlsxXml(decision.columns, rows, exportMeta)
 
     await audit(session, report, format, meta.periodLabel, meta.basisLabel, meta.filters, decision.columns.map((c) => c.key), rows.length, true, null)
 
-    return new NextResponse(body, {
+    // Buffer (PDF) and string (CSV/XLSX) both become bytes here; Next wants a
+    // Uint8Array rather than a Node Buffer.
+    const payload = typeof body === 'string' ? body : new Uint8Array(body)
+
+    return new NextResponse(payload, {
       status: 200,
       headers: {
         'Content-Type': contentTypeFor(format),
