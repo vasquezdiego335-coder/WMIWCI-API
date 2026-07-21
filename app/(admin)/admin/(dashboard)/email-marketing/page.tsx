@@ -7,7 +7,8 @@
 import Link from 'next/link'
 import { getSession } from '@/lib/auth'
 import { can } from '@/lib/permissions'
-import { getOverview, parseRange, webhookHealth, formatRate } from '@/lib/email-admin'
+import { getOverview, parseRange, webhookHealth, formatRate, listScheduled, dnsChecks, requiredUrlChecks, postalAddressCheck } from '@/lib/email-admin'
+import { prisma } from '@/lib/db'
 import { attributionByJourney } from '@/lib/email-attribution'
 import { templateRegistry, journeyRegistry } from '@/lib/email-registry'
 import { PageHeader, StatCard, StatGrid, Card, COLORS, Empty, Callout, tableStyles as T } from '../_ui'
@@ -24,11 +25,23 @@ export default async function EmailOverviewPage({ searchParams }: { searchParams
 
   const range = parseRange(searchParams.range as string | undefined)
 
-  const [overview, health, attribution] = await Promise.all([
+  const [overview, health, attribution, scheduled, campaignCounts] = await Promise.all([
     getOverview(range),
     webhookHealth(),
     maySeeMoney ? attributionByJourney(range) : Promise.resolve({ rows: [], error: null }),
+    listScheduled(500),
+    prisma.marketingCampaign
+      .groupBy({ by: ['status'], _count: true, where: { channel: 'EMAIL' } })
+      .catch(() => [] as Array<{ status: string; _count: number }>),
   ])
+
+  const dns = dnsChecks()
+  const urls = requiredUrlChecks()
+  const postal = postalAddressCheck()
+  const activeCampaigns = campaignCounts
+    .filter((c) => c.status === 'ACTIVE' || c.status === 'SCHEDULED')
+    .reduce((n, c) => n + c._count, 0)
+  const conversions = attribution.rows.reduce((n, r) => n + (r.bookings ?? 0), 0)
 
   const templates = templateRegistry()
   const journeys = journeyRegistry()
@@ -45,6 +58,14 @@ export default async function EmailOverviewPage({ searchParams }: { searchParams
         actions={<RangePicker base="/admin/email-marketing" active={range} />}
       />
       <EmailTabs active="/admin/email-marketing" isOwner={isOwner} />
+
+      <Callout tone="warning" title="Email Marketing is in BETA — owner-only until staging passes">
+        Every page here is live and reading real data. What has NOT happened is a staging rehearsal against a real
+        provider, queue and webhook. Until those scenarios pass, keep{' '}
+        <strong>promotional campaign sending disabled</strong> behind its feature flag. Transactional email —
+        confirmations, receipts, move-day reminders — continues on its existing safe configuration and is unaffected by
+        anything on this page.
+      </Callout>
 
       {overview.unfinishedSideEffects > 0 && (
         <Callout tone="danger" title={`${overview.unfinishedSideEffects} suppression side effect${overview.unfinishedSideEffects === 1 ? '' : 's'} never completed`}>
@@ -81,6 +102,13 @@ export default async function EmailOverviewPage({ searchParams }: { searchParams
         <StatCard label="Bounced" value={String(overview.bounced)} accent={overview.bounced > 0 ? COLORS.red : undefined} sub={`Bounce rate ${formatRate(overview.bounceRate)}`} />
         <StatCard label="Complaints" value={String(overview.complained)} accent={overview.complained > 0 ? COLORS.red : undefined} sub={`Complaint rate ${formatRate(overview.complaintRate)}`} />
         <StatCard label="Unsubscribes" value={String(overview.unsubscribed)} href="/admin/email-marketing/suppressions?reason=UNSUBSCRIBED" sub="Promotional only" />
+        <StatCard
+          label="Scheduled"
+          value={scheduled.error ? '—' : String(scheduled.rows.length)}
+          sub={scheduled.error ? 'Queue unreadable' : 'Queued, not yet sent'}
+          accent={scheduled.error ? COLORS.red : undefined}
+          href="/admin/email-marketing/scheduled"
+        />
         <StatCard label="Failed" value={String(overview.failed)} accent={overview.failed > 0 ? COLORS.red : undefined} sub="Attempts exhausted" href={`/admin/email-marketing/sends?range=${range}&status=failed_terminal`} />
       </StatGrid>
 
@@ -90,6 +118,8 @@ export default async function EmailOverviewPage({ searchParams }: { searchParams
         <StatGrid min={220}>
           <StatCard label="Attributed collected revenue" value={money(attributedRevenue)} accent={COLORS.navy} sub="On moves credited to an email journey" />
           <StatCard label="Attributed finalized profit" value={money(attributedProfit)} accent={COLORS.gold} sub="Financially closed-out moves only" />
+          <StatCard label="Campaign conversions" value={String(conversions)} sub="Bookings credited to an email journey" />
+          <StatCard label="Active campaigns" value={String(activeCampaigns)} sub="ACTIVE or SCHEDULED" href="/admin/email-marketing/campaigns" />
           <StatCard label="Active journeys" value={`${activeJourneys.length} of ${journeys.length}`} sub="Flag-enabled in this environment" href="/admin/email-marketing/journeys" />
           <StatCard label="Templates" value={String(templates.length)} sub="Registered and reachable" href="/admin/email-marketing/templates" />
         </StatGrid>
@@ -175,6 +205,27 @@ export default async function EmailOverviewPage({ searchParams }: { searchParams
           {health.error && (
             <p style={{ fontSize: '12px', color: COLORS.red, margin: '12px 0 0' }}>Could not read provider events: {health.error}</p>
           )}
+
+          <div style={{ height: '1px', backgroundColor: COLORS.line, margin: '18px 0' }} />
+
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: '14px' }}>
+            <Fact label="Postal address" value={postal.status} tone={postal.status === 'VERIFIED' ? 'good' : 'bad'} />
+            {urls.map((u) => (
+              <Fact key={u.name} label={u.name} value={u.status} tone={u.status === 'VERIFIED' ? 'good' : u.status === 'MISSING' ? 'bad' : 'warn'} />
+            ))}
+            {dns.map((d) => (
+              <Fact key={d.name} label={d.name} value={d.status} tone={d.status === 'VERIFIED' ? 'good' : d.status === 'UNVERIFIED' ? 'muted' : 'bad'} />
+            ))}
+            <Fact
+              label="Suppression health"
+              value={overview.unfinishedSideEffects === 0 ? 'OK' : `${overview.unfinishedSideEffects} STUCK`}
+              tone={overview.unfinishedSideEffects === 0 ? 'good' : 'bad'}
+            />
+          </div>
+          <p style={{ fontSize: '11px', color: COLORS.faint, margin: '12px 0 0', lineHeight: 1.5 }}>
+            SPF, DKIM and DMARC show <strong>UNVERIFIED</strong> until an operator records a real DNS check. This
+            application cannot read DNS, so it will never claim they are verified on its own.
+          </p>
         </Card>
       </div>
     </div>

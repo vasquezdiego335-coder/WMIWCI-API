@@ -25,6 +25,8 @@ import { prisma } from './db'
 import { scheduledQueue } from './queues'
 import { classifyBlock } from './email-guard'
 import { templateLabel } from './email-registry'
+import { isSafeUrl } from '../emails/validation'
+import { businessPostalAddress } from './marketing-context'
 
 // ── Time ranges ─────────────────────────────────────────────────────────
 
@@ -122,8 +124,10 @@ const BLOCKED_STATUSES = ['blocked_terminal', 'blocked_retryable']
 
 export async function getOverview(range: RangeKey = '30d'): Promise<Overview> {
   const since = rangeStart(range)
-  const sendWhere = since ? { createdAt: { gte: since } } : {}
-  const eventWhere = since ? { occurredAt: { gte: since } } : {}
+  // Test sends are excluded from every headline number: an owner reading
+  // "142 delivered" must be reading customer mail, not rehearsals.
+  const sendWhere = { isTest: false, ...(since ? { createdAt: { gte: since } } : {}) }
+  const eventWhere = { emailSend: { isTest: false }, ...(since ? { occurredAt: { gte: since } } : {}) }
   const notes: string[] = []
   let degraded = false
 
@@ -230,6 +234,8 @@ export async function getOverview(range: RangeKey = '30d'): Promise<Overview> {
 
 export type SendFilters = {
   range?: RangeKey
+  /** Include admin test sends. Off by default so the ledger reads as customer mail. */
+  includeTests?: boolean
   status?: string
   template?: string
   journey?: string
@@ -245,6 +251,7 @@ export type SendFilters = {
 export async function listSends(filters: SendFilters = {}) {
   const since = rangeStart(filters.range ?? '30d')
   const where: Record<string, unknown> = {}
+  if (!filters.includeTests) where.isTest = false
   if (since) where.createdAt = { gte: since }
   if (filters.status) where.status = filters.status
   if (filters.template) where.template = filters.template
@@ -632,15 +639,86 @@ export async function webhookHealth(): Promise<WebhookHealth> {
  * be exactly the kind of false green the deliverability page exists to prevent.
  * Every value here is UNVERIFIED until someone checks the provider dashboard.
  */
-export type DnsCheck = { name: string; status: 'unverified'; detail: string }
+export type DnsStatus = 'VERIFIED' | 'UNVERIFIED' | 'MISSING' | 'INVALID'
 
+export type DnsCheck = { name: string; status: DnsStatus; detail: string; verifiedAt: string | null }
+
+/**
+ * DNS authentication status.
+ *
+ * FOUR states, not two, because "we have not checked" and "it is broken" are
+ * different facts and collapsing them is how a domain silently stops
+ * authenticating:
+ *
+ *   VERIFIED   — an operator recorded a real check (EMAIL_DNS_VERIFIED_AT plus
+ *                the per-record env var). Never inferred.
+ *   UNVERIFIED — nobody has recorded a check. The DEFAULT, and the honest one.
+ *   MISSING    — an operator recorded that the record is absent.
+ *   INVALID    — an operator recorded that the record exists but is wrong.
+ *
+ * This application CANNOT read DNS. Every value below therefore comes from what
+ * a human recorded after checking, and the page says so. Inferring "configured"
+ * from the presence of an API key would produce a green light that means
+ * nothing — which is the exact failure this page exists to prevent.
+ */
 export function dnsChecks(): DnsCheck[] {
-  const domain = (process.env.EMAIL_FROM ?? '').split('@').pop()?.replace(/>$/, '') ?? 'unknown'
-  const note = (record: string) =>
-    `Not verifiable from the application. Check the ${record} record for ${domain} in the Resend dashboard or with a DNS lookup.`
+  const domain = (process.env.EMAIL_FROM ?? '').split('@').pop()?.replace(/>$/, '').trim() || 'unknown'
+  const verifiedAt = process.env.EMAIL_DNS_VERIFIED_AT?.trim() || null
+
+  const read = (record: 'SPF' | 'DKIM' | 'DMARC'): DnsCheck => {
+    const raw = process.env[`EMAIL_DNS_${record}`]?.trim().toUpperCase()
+    const known: DnsStatus[] = ['VERIFIED', 'MISSING', 'INVALID']
+    const status: DnsStatus = raw && (known as string[]).includes(raw) ? (raw as DnsStatus) : 'UNVERIFIED'
+
+    // A VERIFIED claim with no date is not a verification — it is an assertion
+    // nobody can audit. Downgrade it rather than display it.
+    if (status === 'VERIFIED' && !verifiedAt) {
+      return {
+        name: record,
+        status: 'UNVERIFIED',
+        detail: `EMAIL_DNS_${record}=VERIFIED but EMAIL_DNS_VERIFIED_AT is unset, so there is no record of WHEN it was checked. Treated as unverified.`,
+        verifiedAt: null,
+      }
+    }
+
+    const detail =
+      status === 'VERIFIED'
+        ? `Recorded as verified for ${domain}. This is an operator's attestation, not a live lookup — re-check periodically.`
+        : status === 'MISSING'
+        ? `Recorded as ABSENT for ${domain}. Mail from this domain is far more likely to be filtered.`
+        : status === 'INVALID'
+        ? `Recorded as present but INCORRECT for ${domain}. Fix the record at the registrar.`
+        : `Not verifiable from the application. Check the ${record} record for ${domain} in the Resend dashboard or with a DNS lookup, then record the result in EMAIL_DNS_${record}.`
+
+    return { name: record, status, detail, verifiedAt: status === 'VERIFIED' ? verifiedAt : null }
+  }
+
+  return [read('SPF'), read('DKIM'), read('DMARC')]
+}
+
+/** Is a required URL configured AND acceptable to the production gate? */
+export type UrlCheck = { name: string; status: DnsStatus; detail: string }
+
+export function requiredUrlChecks(): UrlCheck[] {
+  const check = (name: string, env: string, why: string): UrlCheck => {
+    const raw = process.env[env]?.trim()
+    if (!raw) return { name, status: 'MISSING', detail: `${env} is unset. ${why}` }
+    if (!isSafeUrl(raw)) return { name, status: 'INVALID', detail: `${env} is ${raw}, which the production URL gate REJECTS. ${why}` }
+    return { name, status: 'VERIFIED', detail: raw }
+  }
   return [
-    { name: 'SPF', status: 'unverified', detail: note('SPF') },
-    { name: 'DKIM', status: 'unverified', detail: note('DKIM') },
-    { name: 'DMARC', status: 'unverified', detail: note('DMARC') },
+    check('App URL', 'APP_URL', 'Every unsubscribe and portal link is built from it, so promotional sends are blocked without it.'),
+    check('Google review URL', 'GOOGLE_REVIEW_URL', 'Review requests are never queued without it.'),
   ]
+}
+
+/** Postal-address compliance — required on every promotional email. */
+export function postalAddressCheck(): { status: DnsStatus; detail: string } {
+  const postal = businessPostalAddress()
+  return postal
+    ? { status: 'VERIFIED', detail: `Configured (${postal.length} characters).` }
+    : {
+        status: 'MISSING',
+        detail: 'BUSINESS_POSTAL_ADDRESS is unset or a placeholder. EVERY promotional send is blocked by the compliance gate. Transactional mail is unaffected.',
+      }
 }

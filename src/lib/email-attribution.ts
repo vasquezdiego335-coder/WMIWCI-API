@@ -103,6 +103,9 @@ async function creditsFor(journey: string, since: Date | null): Promise<{ credit
   const sendWhere = {
     journey,
     status: 'delivered',
+    // Admin test sends never count as a conversion. Rehearsing a template must
+    // not be able to move a marketing number.
+    isTest: false,
     ...(since ? { sentAt: { gte: since } } : {}),
   }
 
@@ -239,7 +242,7 @@ async function moneyFor(bookingIds: string[]): Promise<{
 
 /** Delivery + engagement counts for one journey. */
 async function reachFor(journey: string, since: Date | null) {
-  const sendWhere = { journey, ...(since ? { createdAt: { gte: since } } : {}) }
+  const sendWhere = { journey, isTest: false, ...(since ? { createdAt: { gte: since } } : {}) }
   const [delivered, recipients, events] = await Promise.all([
     prisma.emailSend.count({ where: { ...sendWhere, status: 'delivered' } }),
     prisma.emailSend.findMany({ where: { ...sendWhere, status: 'delivered' }, select: { email: true }, distinct: ['email'] }),
@@ -361,11 +364,24 @@ export async function emailCampaignResults(range: RangeKey = '90d'): Promise<{ r
     const rows = await Promise.all(
       campaigns.map(async (c): Promise<EmailCampaignResult> => {
         const [emailsDelivered, clickEvents, bookings] = await Promise.all([
+          // PREFER THE RELATION, fall back to the legacy string. New campaign
+          // sends populate `campaignId`; historical rows only ever had the
+          // source-key string, and those were deliberately not backfilled
+          // because a string match is not proof of which campaign sent it.
           prisma.emailSend.count({
-            where: { campaign: c.sourceKey, status: 'delivered', ...(since ? { createdAt: { gte: since } } : {}) },
+            where: {
+              OR: [{ campaignId: c.id }, { campaignId: null, campaign: c.sourceKey }],
+              status: 'delivered',
+              isTest: false,
+              ...(since ? { createdAt: { gte: since } } : {}),
+            },
           }),
           prisma.emailEvent.count({
-            where: { type: 'clicked', emailSend: { campaign: c.sourceKey }, ...(since ? { occurredAt: { gte: since } } : {}) },
+            where: {
+              type: 'clicked',
+              emailSend: { OR: [{ campaignId: c.id }, { campaignId: null, campaign: c.sourceKey }], isTest: false },
+              ...(since ? { occurredAt: { gte: since } } : {}),
+            },
           }),
           prisma.booking.findMany({
             where: {
