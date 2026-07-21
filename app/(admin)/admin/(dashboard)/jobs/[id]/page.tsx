@@ -14,7 +14,16 @@ import {
   WAITING_RESCHEDULE_THRESHOLD_MINUTES,
 } from '@/lib/waiting-time'
 import { crewPayOwedCents } from '@/lib/profit'
-import { jobProfit } from '@/lib/job-money'
+import { jobProfit, jobFinancialCompleteness, jobLabor, JOB_MONEY_CREW_SELECT } from '@/lib/job-money'
+import { completenessLabel, LABOR_STATE_LABELS } from '@/lib/financial-completeness'
+import { computeLaborPay, paidCentsOf } from '@/lib/labor-calc'
+import { isOnBreak } from '@/lib/labor-time'
+import CrewLaborPanel from './CrewLaborPanel'
+import FinancialCloseoutPanel from './FinancialCloseoutPanel'
+import { buildCloseoutView } from '@/lib/closeout-service'
+import { isSettledForMoney } from '@/lib/financial-completeness'
+import { isEligibleExpense } from '@/lib/money-rules'
+import { Callout, CompletenessBadge } from '../../_ui'
 import ExpenseForm from '../../ExpenseForm'
 import { EXPENSE_CATEGORY_LABELS } from '../../_labels'
 
@@ -63,14 +72,17 @@ function parseItemsBlob(text?: string | null): { label: string | null; value: st
 }
 
 export default async function JobDetail({ params }: { params: { id: string } }) {
-  await getSession()
+  const session = await getSession()
+  const isOwner = session?.role === 'OWNER'
 
   const booking = await prisma.booking.findUnique({
     where: { id: params.id },
     include: {
       customer: true,
       payments: { orderBy: { createdAt: 'desc' } },
-      job: { include: { crew: { include: { user: { select: { name: true, role: true, payRate: true } } } } } },
+      // PHASE 1: the blessed crew select — every rate snapshot, minute bucket
+      // and labor payment the money math needs, in one place.
+      job: { include: { crew: { select: { ...JOB_MONEY_CREW_SELECT, id: true, crewLeader: true, assignedAt: true, breakStartedAt: true, rateSnapshotAt: true, laborPayments: true, user: { select: { id: true, name: true, role: true, payRate: true } } }, orderBy: { assignedAt: 'asc' } } } },
       expenses: { orderBy: { incurredOn: 'desc' } },
       files: { orderBy: { createdAt: 'desc' } },
       receipt: true,
@@ -89,15 +101,77 @@ export default async function JobDetail({ params }: { params: { id: string } }) 
   const lifetimeCents = custBookings.flatMap((b) => b.payments).reduce((s, p) => s + p.amount, 0)
   const previousMoves = custBookings.filter((b) => b.status === 'COMPLETED' && b.id !== booking.id).length
 
-  const collected = booking.payments.filter((p) => p.status === 'COMPLETED' && !p.isInternalTest).reduce((s, p) => s + p.amount, 0)
-  const refunded = booking.payments.filter((p) => p.status === 'REFUNDED' && !p.isInternalTest).reduce((s, p) => s + p.amount, 0)
   const moveDayDue = (booking.truckAddonAmount ?? 0) + (booking.travelFee ?? 0) + (booking.additionalTruckFees ?? 0) + effectiveWaitingFeeCents(booking)
     + (booking.stairFee ?? 0) + (booking.longCarryFee ?? 0) + (booking.heavyItemFee ?? 0)
     + (booking.packingFee ?? 0) + (booking.assemblyFee ?? 0) + (booking.disassemblyFee ?? 0) + (booking.taxAmount ?? 0)
-  // Per-job profit (recorded money): revenue − crew pay − job expenses − Stripe
-  // fees − refunds. Shares the exact math with the Jobs list + dashboard.
+  // Per-job profit (recorded money): NET collected revenue (captured − refunds
+  // − chargebacks) − crew pay − eligible expenses − Stripe fees. Shares the
+  // exact math with the Jobs list + dashboard via src/lib/money-rules.ts.
   const profit = jobProfit(booking)
+  // What is still missing from this move's money story (Phase 0). Never present
+  // a profit figure without it — crew pay of $0 usually means "not recorded".
+  const completeness = jobFinancialCompleteness(booking)
+  const collected = profit.netRevenueCents
+  const refunded = profit.refundedCents
   const crewRows = booking.job?.crew ?? []
+  const labor = jobLabor(booking as never)
+
+  // PHASE 2: the full closeout picture — revenue, costs, profit, reserves,
+  // blockers and snapshots — from the ONE centralized derivation. Only for
+  // moves that have actually been worked; a pending quote has nothing to close.
+  const closeout = isSettledForMoney(booking.status) ? await buildCloseoutView(booking.id) : null
+
+  // Staff roster for the assign form (active users only).
+  const staff = await prisma.user.findMany({
+    where: { active: true },
+    select: { id: true, name: true, role: true, payRate: true, workerType: true },
+    orderBy: [{ role: 'asc' }, { name: 'asc' }],
+  })
+
+  // Serialize assignments for the client panel. Money is pre-computed on the
+  // server so the browser never re-derives a labor cost.
+  const laborAssignments = crewRows.map((c) => {
+    const pay = computeLaborPay({
+      workerType: c.workerType as never, payModel: c.payModel as never,
+      assignmentStatus: c.assignmentStatus as never, approvalStatus: c.approvalStatus as never,
+      clockIn: c.clockIn, clockOut: c.clockOut,
+      workedMinutes: c.clockIn && c.clockOut ? null : c.workedMinutes,
+      actualBreakMinutes: c.actualBreakMinutes, travelMinutes: c.travelMinutes,
+      travelPayPolicy: c.travelPayPolicy as never,
+      hourlyRateCentsSnapshot: c.hourlyRateCentsSnapshot, overtimeRateCentsSnapshot: c.overtimeRateCentsSnapshot,
+      flatPayCentsSnapshot: c.flatPayCentsSnapshot, dayRateCentsSnapshot: c.dayRateCentsSnapshot,
+      travelRateCentsSnapshot: c.travelRateCentsSnapshot, economicRateCentsSnapshot: c.economicRateCentsSnapshot,
+      driverBonusCentsSnapshot: c.driverBonusCentsSnapshot, crewLeaderBonusCentsSnapshot: c.crewLeaderBonusCentsSnapshot,
+      otherBonusCents: c.otherBonusCents, reimbursementCents: c.reimbursementCents,
+      approvedPayCents: c.approvedPayCents, zeroLaborConfirmed: c.zeroLaborConfirmed,
+      legacyPayRate: c.payRate, legacyFlatPay: c.flatPay, legacyActualHours: c.actualHours,
+      legacyTips: c.tips, legacyBonus: c.bonus, legacyDeductions: c.deductions,
+      userProfilePayRate: c.user.payRate,
+    })
+    return {
+      id: c.id, userId: c.user.id, userName: c.user.name,
+      workerType: String(c.workerType), role: String(c.role),
+      assignmentStatus: String(c.assignmentStatus), approvalStatus: String(c.approvalStatus),
+      paymentStatus: String(c.paymentStatus), payModel: String(c.payModel),
+      clockIn: c.clockIn?.toISOString() ?? null, clockOut: c.clockOut?.toISOString() ?? null,
+      breakRunning: isOnBreak(c),
+      workedMinutes: c.workedMinutes, regularMinutes: c.regularMinutes, overtimeMinutes: c.overtimeMinutes,
+      travelMinutes: c.travelMinutes, breakMinutes: c.actualBreakMinutes,
+      hourlyRateCentsSnapshot: c.hourlyRateCentsSnapshot, flatPayCentsSnapshot: c.flatPayCentsSnapshot,
+      economicRateCentsSnapshot: c.economicRateCentsSnapshot,
+      driverBonusCents: c.driverBonusCentsSnapshot, crewLeaderBonusCents: c.crewLeaderBonusCentsSnapshot,
+      otherBonusCents: c.otherBonusCents,
+      calculatedPayCents: pay.calculatedPayCents, approvedPayCents: c.approvedPayCents,
+      paidCents: paidCentsOf(c.laborPayments ?? []),
+      cashCostCents: pay.cashCostCents, economicValueCents: pay.economicValueCents,
+      zeroLaborConfirmed: !!c.zeroLaborConfirmed,
+      rateSnapshotAt: c.rateSnapshotAt?.toISOString() ?? null,
+      payments: (c.laborPayments ?? []).map((p) => ({
+        id: p.id, amountCents: p.amountCents, method: String(p.method),
+        paidOn: p.paidOn.toISOString(), voided: p.voided, reference: p.reference,
+      })),
+    }
+  })
   const crewTotalOwed = crewRows.reduce((s, cr) => s + crewPayOwedCents({ actualHours: cr.actualHours, scheduledHours: cr.scheduledHours, payRate: cr.payRate, userPayRate: cr.user.payRate, flatPay: cr.flatPay, tips: cr.tips, bonus: cr.bonus, deductions: cr.deductions }), 0)
   const crewPaidOwed = crewRows.filter((cr) => cr.payStatus !== 'PAID').reduce((s, cr) => s + crewPayOwedCents({ actualHours: cr.actualHours, scheduledHours: cr.scheduledHours, payRate: cr.payRate, userPayRate: cr.user.payRate, flatPay: cr.flatPay, tips: cr.tips, bonus: cr.bonus, deductions: cr.deductions }), 0)
 
@@ -149,6 +223,9 @@ export default async function JobDetail({ params }: { params: { id: string } }) 
               <h1 style={h1}>{c.name}</h1>
               <Badge color={STATUS_COLORS[booking.status] ?? '#9CA3AF'}>{booking.status.replace(/_/g, ' ')}</Badge>
               <Badge color={collected > 0 ? '#10B981' : '#F59E0B'}>{paymentStatus}</Badge>
+              {completeness.status !== 'NOT_APPLICABLE' && (
+                <CompletenessBadge label={completenessLabel(completeness)} complete={completeness.isComplete} />
+              )}
             </div>
             <div style={{ fontSize: '12px', color: '#9CA3AF' }}>#{booking.displayId} · {booking.serviceAreaZone ? String(booking.serviceAreaZone).replace(/_/g, ' ') : '—'} · booked {dateOnly(booking.createdAt)}</div>
           </div>
@@ -312,25 +389,96 @@ export default async function JobDetail({ params }: { params: { id: string } }) 
             </div>
           </Card>
 
-          {/* Section 7b: Job Profit & Costs (admin OS) */}
-          <Card title="Job Profit & Costs" icon="📊" action={<span style={{ fontSize: '11px', color: '#9CA3AF' }}>recorded money</span>}>
+          {/* Section 7b: Job Profit & Costs (admin OS; Phase 0 completeness) */}
+          <Card
+            title="Job Profit & Costs"
+            icon="📊"
+            action={
+              completeness.status === 'NOT_APPLICABLE'
+                ? <span style={{ fontSize: '11px', color: '#9CA3AF' }}>recorded money</span>
+                : <CompletenessBadge label={completenessLabel(completeness)} complete={completeness.isComplete} />
+            }
+          >
+            {/* The warning comes BEFORE the number on purpose: an incomplete
+                profit figure must never be read as final. */}
+            {completeness.warnings.length > 0 && (
+              <Callout
+                tone={completeness.blockers.length > 0 ? 'danger' : 'warning'}
+                title={completeness.blockers.length > 0 ? 'This profit figure is incomplete' : 'Check before relying on this figure'}
+              >
+                <ul style={{ margin: 0, paddingLeft: '18px' }}>
+                  {completeness.warnings.map((w) => <li key={w}>{w}</li>)}
+                </ul>
+              </Callout>
+            )}
+
             <div style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
-              <Row label="Revenue collected" value={cents(profit.grossRevenueCents) ?? '$0.00'} strong />
+              <Row label="Captured payments" value={cents(profit.grossCapturedCents) ?? '$0.00'} />
+              {profit.refundedCents > 0 && <Row label="− Refunded" value={cents(profit.refundedCents)!} />}
+              {profit.chargebackCents > 0 && <Row label="− Chargebacks (lost)" value={cents(profit.chargebackCents)!} />}
+              <Row label="Net revenue collected" value={cents(profit.netRevenueCents) ?? '$0.00'} strong />
+              {profit.authorizedNotCapturedCents > 0 && (
+                <div style={{ fontSize: '11px', color: '#9CA3AF', textAlign: 'right' }}>
+                  {cents(profit.authorizedNotCapturedCents)} authorized but not captured — not revenue
+                </div>
+              )}
+              {profit.pendingDisputeCents > 0 && (
+                <div style={{ fontSize: '11px', color: '#B45309', textAlign: 'right' }}>
+                  {cents(profit.pendingDisputeCents)} disputed and at risk
+                </div>
+              )}
               <div style={divider} />
-              <Row label="− Crew pay" value={cents(profit.crewPayCents) ?? '$0.00'} />
-              <Row label="− Job expenses" value={cents(profit.expenseCents) ?? '$0.00'} />
+              <Row
+                label="− Crew pay"
+                value={
+                  completeness.missingLabor
+                    ? 'not recorded'
+                    : completeness.laborConfirmedZero
+                      ? '$0.00 (confirmed)'
+                      : cents(profit.crewPayCents) ?? '$0.00'
+                }
+              />
+              <Row label="− Job expenses" value={completeness.missingExpenses ? 'none recorded' : cents(profit.expenseCents) ?? '$0.00'} />
               <Row label="− Stripe fees (est.)" value={cents(profit.stripeFeeCents) ?? '$0.00'} />
-              {profit.refundedCents > 0 && <Row label="− Refunds" value={cents(profit.refundedCents)!} />}
               <div style={divider} />
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '4px' }}>
-                <span style={{ fontSize: '13px', fontWeight: 700, color: '#0A1628' }}>Net profit</span>
-                <span style={{ fontSize: '20px', fontWeight: 800, color: profit.netProfitCents >= 0 ? '#C9A961' : '#EF4444', fontVariantNumeric: 'tabular-nums' }}>{cents(profit.netProfitCents) ?? '$0.00'}</span>
+                <span style={{ fontSize: '13px', fontWeight: 700, color: '#0A1628' }}>
+                  Cash gross profit{completeness.isComplete ? '' : ' (incomplete)'}
+                </span>
+                <span style={{ fontSize: '20px', fontWeight: 800, color: !completeness.isComplete && completeness.status !== 'NOT_APPLICABLE' ? '#B45309' : profit.netProfitCents >= 0 ? '#C9A961' : '#EF4444', fontVariantNumeric: 'tabular-nums' }}>{cents(profit.netProfitCents) ?? '$0.00'}</span>
               </div>
-              {profit.marginPct != null && (
-                <div style={{ fontSize: '11px', color: '#9CA3AF', textAlign: 'right', marginTop: '2px' }}>{Math.round(profit.marginPct * 100)}% margin · crew owed {cents(crewPaidOwed) ?? '$0.00'} unpaid</div>
+
+              {/* PHASE 1: was this move profitable on its own, or only because
+                  the owners worked without paying themselves? */}
+              {profit.unpaidOwnerValueCents > 0 && (
+                <>
+                  <Row label="− Unpaid owner labor (value)" value={cents(profit.unpaidOwnerValueCents)!} />
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <span style={{ fontSize: '13px', fontWeight: 700, color: '#0A1628' }}>Economic profit</span>
+                    <span style={{ fontSize: '17px', fontWeight: 800, color: profit.economicProfitCents >= 0 ? '#6366F1' : '#EF4444', fontVariantNumeric: 'tabular-nums' }}>
+                      {cents(profit.economicProfitCents) ?? '$0.00'}
+                    </span>
+                  </div>
+                  <div style={{ fontSize: '11px', color: '#9CA3AF', textAlign: 'right' }}>
+                    what this move earned if the owners&apos; hours had to be hired
+                  </div>
+                </>
               )}
+              {profit.pendingLaborCents > 0 && (
+                <div style={{ fontSize: '11px', color: '#B45309', textAlign: 'right', marginTop: '2px' }}>
+                  {cents(profit.pendingLaborCents)} of labor entered but not approved — not counted above
+                </div>
+              )}
+              <div style={{ fontSize: '11px', color: '#9CA3AF', textAlign: 'right', marginTop: '2px' }}>
+                {profit.marginPct != null && <>{Math.round(profit.marginPct * 100)}% margin · </>}
+                crew owed {cents(crewPaidOwed) ?? '$0.00'} unpaid
+              </div>
+              {/* Honest label: overhead allocation is Phase 3, so this is gross. */}
+              <div style={{ fontSize: '11px', color: '#9CA3AF', textAlign: 'right' }}>
+                before company overhead (not yet allocated)
+              </div>
             </div>
-            {profit.grossRevenueCents <= (booking.depositPaid ? booking.depositAmount : 0) && (
+            {profit.netRevenueCents <= (booking.depositPaid ? booking.depositAmount : 0) && (
               <p style={{ fontSize: '11px', color: '#B45309', background: '#FFFBEB', border: '1px solid #FDE68A', borderRadius: '6px', padding: '7px 9px', margin: '10px 0 0' }}>
                 Only the deposit is recorded. Use “Record payment” to log move-day cash so profit is accurate.
               </p>
@@ -342,15 +490,25 @@ export default async function JobDetail({ params }: { params: { id: string } }) 
             {booking.expenses.length === 0 ? (
               <Empty>No expenses logged for this job</Empty>
             ) : (
-              booking.expenses.map((e, i) => (
-                <div key={e.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '12px', padding: '8px 0', borderBottom: i < booking.expenses.length - 1 ? '1px solid #F3F4F6' : 'none' }}>
-                  <div style={{ minWidth: 0 }}>
-                    <div style={{ fontSize: '13px', fontWeight: 600 }}>{EXPENSE_CATEGORY_LABELS[e.category] ?? e.category}{e.vendor ? ` · ${e.vendor}` : ''}</div>
-                    <div style={{ fontSize: '11px', color: '#9CA3AF' }}>{new Date(e.incurredOn).toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'America/New_York' })}{e.receiptUrl ? ' · ' : ''}{e.receiptUrl && <a href={e.receiptUrl} target="_blank" rel="noreferrer" style={{ color: '#FF5A1F' }}>receipt</a>}</div>
+              booking.expenses.map((e, i) => {
+                // Rejected rows stay VISIBLE (the spend happened and someone
+                // should see the decision) but are struck through and excluded
+                // from every total — money-rules.isEligibleExpense is the rule.
+                const counted = isEligibleExpense(e)
+                return (
+                  <div key={e.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '12px', padding: '8px 0', borderBottom: i < booking.expenses.length - 1 ? '1px solid #F3F4F6' : 'none', opacity: counted ? 1 : 0.55 }}>
+                    <div style={{ minWidth: 0 }}>
+                      <div style={{ fontSize: '13px', fontWeight: 600, textDecoration: counted ? 'none' : 'line-through' }}>{EXPENSE_CATEGORY_LABELS[e.category] ?? e.category}{e.vendor ? ` · ${e.vendor}` : ''}</div>
+                      <div style={{ fontSize: '11px', color: '#9CA3AF' }}>
+                        {new Date(e.incurredOn).toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'America/New_York' })}
+                        {!counted && ' · rejected — not counted'}
+                        {e.receiptUrl ? ' · ' : ''}{e.receiptUrl && <a href={e.receiptUrl} target="_blank" rel="noreferrer" style={{ color: '#FF5A1F' }}>receipt</a>}
+                      </div>
+                    </div>
+                    <div style={{ fontSize: '14px', fontWeight: 700, fontVariantNumeric: 'tabular-nums', textDecoration: counted ? 'none' : 'line-through' }}>{cents(e.amount)}</div>
                   </div>
-                  <div style={{ fontSize: '14px', fontWeight: 700, fontVariantNumeric: 'tabular-nums' }}>{cents(e.amount)}</div>
-                </div>
-              ))
+                )
+              })
             )}
             <div style={{ marginTop: '12px' }}>
               <ExpenseForm presetBookingId={booking.id} presetJobLabel={c.name} compact />
@@ -434,40 +592,101 @@ export default async function JobDetail({ params }: { params: { id: string } }) 
             ))}
           </Card>
 
-          {/* Crew & Payroll */}
-          {booking.job && (
-            <Card title="Crew & Payroll" icon="👥" action={crewTotalOwed > 0 ? <span style={{ fontSize: '11px', color: '#9CA3AF' }}>{cents(crewTotalOwed)} labor</span> : undefined}>
-              <Row label="Job status" value={booking.job.status} />
-              {booking.job.startedAt && <Row label="Started" value={dateTime(booking.job.startedAt)} />}
-              {booking.job.completedAt && <Row label="Completed" value={dateTime(booking.job.completedAt)} />}
-              <div style={divider} />
-              {crewRows.length > 0 ? crewRows.map((cr) => {
-                const owed = crewPayOwedCents({ actualHours: cr.actualHours, scheduledHours: cr.scheduledHours, payRate: cr.payRate, userPayRate: cr.user.payRate, flatPay: cr.flatPay, tips: cr.tips, bonus: cr.bonus, deductions: cr.deductions })
-                const paid = cr.payStatus === 'PAID'
-                return (
-                  <div key={cr.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '10px', padding: '6px 0' }}>
-                    <div style={{ minWidth: 0 }}>
-                      <div style={{ fontSize: '13px', fontWeight: 600 }}>{cr.user.name}{cr.crewLeader ? ' 👑' : ''} <span style={{ color: '#9CA3AF', fontWeight: 400 }}>· {cr.user.role}</span></div>
-                      <div style={{ fontSize: '11px', color: '#9CA3AF' }}>{cr.actualHours != null ? `${cr.actualHours}h` : cr.scheduledHours != null ? `${cr.scheduledHours}h sched` : 'hours not set'}{cr.flatPay ? ' · flat' : ''}</div>
-                    </div>
-                    <div style={{ textAlign: 'right' }}>
-                      <div style={{ fontSize: '13px', fontWeight: 700, fontVariantNumeric: 'tabular-nums' }}>{cents(owed)}</div>
-                      <Badge color={paid ? '#10B981' : '#F59E0B'}>{paid ? 'PAID' : cr.payStatus.replace(/_/g, ' ')}</Badge>
-                    </div>
-                  </div>
-                )
-              }) : <Empty>No crew assigned yet</Empty>}
-              {crewRows.length > 0 && (
-                <>
-                  <div style={divider} />
-                  <Row label="Total labor" value={cents(crewTotalOwed) ?? '$0.00'} strong />
-                  {crewPaidOwed > 0 && <Row label="Unpaid" value={cents(crewPaidOwed)!} />}
-                </>
-              )}
-            </Card>
-          )}
+          {/* ── Crew & Labor (Phase 1, owner spec 2026-07-20) ──
+              The canonical labor record for this move. Assign crew, enter or
+              clock hours, approve the money, record payments. Everything here
+              writes JobCrew — nothing reads the Discord gig board. */}
+          <Card
+            title="Crew & Labor"
+            icon="👥"
+            action={<span style={{ fontSize: '11px', color: '#9CA3AF' }}>{LABOR_STATE_LABELS[completeness.laborState]}</span>}
+          >
+            {completeness.missingLabor && (
+              <Callout tone="danger" title="Crew labor has not been recorded for this move.">
+                Profit above may be overstated. This move&apos;s labor cost is <strong>unknown</strong>,
+                not zero — assign the crew and enter their hours below.
+              </Callout>
+            )}
+            {completeness.laborState === 'MISSING_CLOCK_OUT' && (
+              <Callout tone="danger" title="A crew member has no clock-out.">
+                Their hours are still open, so the labor cost is incomplete.
+              </Callout>
+            )}
+            {completeness.laborUnapproved && (
+              <Callout tone="warning" title="Hours are entered but not approved.">
+                Unapproved labor is shown below but is <strong>not yet counted</strong> as a cost on
+                this move. Approve it to make it real.
+              </Callout>
+            )}
+            {booking.job && (
+              <div style={{ marginBottom: '12px' }}>
+                <Row label="Job status" value={booking.job.status} />
+                {booking.job.startedAt && <Row label="Started" value={dateTime(booking.job.startedAt)} />}
+                {booking.job.completedAt && <Row label="Completed" value={dateTime(booking.job.completedAt)} />}
+              </div>
+            )}
+            <CrewLaborPanel
+              bookingId={booking.id}
+              assignments={laborAssignments}
+              staff={staff.map((s) => ({ id: s.id, name: s.name, role: String(s.role), payRateCents: s.payRate, workerType: String(s.workerType) }))}
+              isOwner={isOwner}
+              currentUserId={session?.userId ?? ''}
+            />
+          </Card>
         </div>
       </div>
+
+      {/* ── Financial Closeout (Phase 2, owner spec 2026-07-20) ──
+          The move's durable financial record: revenue reconciled against cash,
+          costs, profit, reserves and what may actually be distributed. Rendered
+          full-width because it is the answer the whole admin exists to give. */}
+      {closeout && (
+        <Card
+          title="Financial Closeout"
+          icon="🧮"
+          wide
+          action={<span style={{ fontSize: '11px', color: '#9CA3AF' }}>{closeout.isFinalized ? 'finalized' : 'not finalized'}</span>}
+        >
+          <FinancialCloseoutPanel
+            bookingId={booking.id}
+            isOwner={isOwner}
+            data={{
+              status: closeout.status,
+              isFinalized: closeout.isFinalized,
+              canFinalize: closeout.decision.canFinalize,
+              financials: {
+                netBilledRevenueCents: closeout.financials.netBilledRevenueCents,
+                netCollectedRevenueCents: closeout.financials.netCollectedRevenueCents,
+                outstandingBalanceCents: closeout.financials.outstandingBalanceCents,
+                refundedCents: closeout.financials.refundedCents,
+                chargebackCents: closeout.financials.chargebackCents,
+                disputedOpenCents: closeout.financials.disputedOpenCents,
+                directJobCostCents: closeout.financials.directJobCostCents,
+                crewLaborCents: closeout.financials.crewLaborCents,
+                ownerEconomicLaborCents: closeout.financials.ownerEconomicLaborCents,
+                processingFeeCents: closeout.financials.processingFeeCents,
+                directExpenseCents: closeout.financials.directExpenseCents,
+                profit: closeout.financials.profit,
+                overhead: { amountCents: closeout.financials.overhead.amountCents, method: closeout.financials.overhead.method, basis: closeout.financials.overhead.basis },
+                reserves: closeout.financials.reserves,
+              },
+              blockers: closeout.blockers,
+              overrides: closeout.overrides,
+              split: closeout.split,
+              unpaidLaborCents: closeout.unpaidLaborCents,
+              ownerReimbursementOwedCents: closeout.ownerReimbursementOwedCents,
+              snapshots: closeout.snapshots.map((sn) => ({
+                id: sn.id, version: sn.version,
+                createdAt: sn.createdAt.toISOString(),
+                supersededAt: sn.supersededAt ? sn.supersededAt.toISOString() : null,
+                companyNetProfitCents: sn.companyNetProfitCents,
+                distributableProfitCents: sn.distributableProfitCents,
+              })),
+              distributions: closeout.distributions,
+            }}
+          />
+        </Card>
+      )}
 
       {/* Section 13: Timeline */}
       <Card title="Lifecycle Timeline" icon="🗓" wide>

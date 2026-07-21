@@ -2,7 +2,7 @@
 // spec). These are the invariants docs/financial-architecture.md promises.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { rollupOwner, estimateBusinessCash, operatingRevenueCents, operatingExpenseCents, type OwnerTxLike } from '../owner-ledger'
+import { rollupOwner, estimateBusinessCash, operatingRevenueCents, operatingExpenseCents, operatingProfitCents, totalReimbursementOwed, type OwnerTxLike } from '../owner-ledger'
 import { computeJobProfit, crewPayOwedCents } from '../profit'
 
 const tx = (owner: string, type: string, amount: number, approvalStatus = 'APPROVED'): OwnerTxLike => ({ owner, type, amount, approvalStatus })
@@ -40,20 +40,55 @@ test('rollup: contributions / withdrawals / reimbursement owed per owner', () =>
 test('rejected transactions never count anywhere', () => {
   const txs = [tx('DIEGO', 'CONTRIBUTION', 90000, 'REJECTED')]
   assert.equal(rollupOwner(txs, 'DIEGO').contributed, 0)
-  assert.equal(estimateBusinessCash({ revenueCents: 0, expenseCents: 0, ownerTxs: txs }), 0)
+  assert.equal(estimateBusinessCash({ netRevenueCents: 0, expenseCents: 0, paidLaborCents: 0, ownerTxs: txs }), 0)
 })
 
 test('reimbursement clears the owed amount and reduces cash', () => {
   const txs = [tx('DIEGO', 'PERSONAL_PURCHASE', 8500), tx('DIEGO', 'REIMBURSEMENT', 8500)]
   assert.equal(rollupOwner(txs, 'DIEGO').reimbursementOwed, 0)
   // Personal purchase alone doesn't touch cash; the reimbursement does.
-  assert.equal(estimateBusinessCash({ revenueCents: 0, expenseCents: 0, ownerTxs: [txs[0]] }), 0)
-  assert.equal(estimateBusinessCash({ revenueCents: 0, expenseCents: 0, ownerTxs: txs }), -8500)
+  assert.equal(estimateBusinessCash({ netRevenueCents: 0, expenseCents: 0, paidLaborCents: 0, ownerTxs: [txs[0]] }), 0)
+  assert.equal(estimateBusinessCash({ netRevenueCents: 0, expenseCents: 0, paidLaborCents: 0, ownerTxs: txs }), -8500)
 })
 
 test('cash estimate: contributions + revenue − expenses − owner cash-out', () => {
   const txs = [tx('DIEGO', 'CONTRIBUTION', 100000), tx('SEBASTIAN', 'WITHDRAWAL', 20000)]
-  assert.equal(estimateBusinessCash({ revenueCents: 70000, expenseCents: 30000, ownerTxs: txs }), 100000 + 70000 - 30000 - 20000)
+  assert.equal(estimateBusinessCash({ netRevenueCents: 70000, expenseCents: 30000, paidLaborCents: 0, ownerTxs: txs }), 100000 + 70000 - 30000 - 20000)
+})
+
+// ── PHASE 0: paid labor must leave the cash estimate ─────────────────────────
+
+test('REGRESSION: cash drops by exactly the labor paid', () => {
+  // Before Phase 0 paidLaborCents did not exist, so money paid to a worker
+  // never left this estimate — and because safe-to-distribute only held back
+  // UNPAID labor, settling a worker made the business look RICHER.
+  const before = estimateBusinessCash({ netRevenueCents: 200000, expenseCents: 0, paidLaborCents: 0, ownerTxs: [] })
+  const after = estimateBusinessCash({ netRevenueCents: 200000, expenseCents: 0, paidLaborCents: 60000, ownerTxs: [] })
+  assert.equal(before, 200000)
+  assert.equal(after, 140000)
+  assert.equal(before - after, 60000)
+})
+
+test('cash estimate uses NET revenue, so a refund reduces cash exactly once', () => {
+  // $2,000 captured with a $200 refund => $1,800 net collected.
+  assert.equal(estimateBusinessCash({ netRevenueCents: 180000, expenseCents: 0, paidLaborCents: 0, ownerTxs: [] }), 180000)
+})
+
+test('operatingProfitCents: labor is a cost in the tax-reserve base', () => {
+  // $2,000 revenue − $300 expenses − $500 labor = $1,200 operating profit.
+  assert.equal(operatingProfitCents({ netRevenueCents: 200000, expenseCents: 30000, laborCents: 50000 }), 120000)
+  // The old base ignored labor entirely and would have said $1,700.
+  assert.notEqual(operatingProfitCents({ netRevenueCents: 200000, expenseCents: 30000, laborCents: 50000 }), 170000)
+})
+
+test('totalReimbursementOwed sums what the business owes every owner', () => {
+  const txs = [
+    tx('DIEGO', 'PERSONAL_PURCHASE', 8000),
+    tx('SEBASTIAN', 'PERSONAL_PURCHASE', 5000),
+    tx('SEBASTIAN', 'REIMBURSEMENT', 2000),
+    tx('DIEGO', 'PERSONAL_PURCHASE', 40000, 'REJECTED'), // never counts
+  ]
+  assert.equal(totalReimbursementOwed(txs, ['DIEGO', 'SEBASTIAN']), 8000 + 3000)
 })
 
 // ── The labor double-count invariant, end to end ─────────────────────────────
@@ -85,7 +120,7 @@ test('a WORKER_PAY expense for a NON-crew helper is a legitimate job cost', () =
   const p = computeJobProfit({
     payments: [{ amount: 70000, status: 'COMPLETED' }],
     crew: [],
-    expenses: [{ amount: 10000 }],
+    expenses: [{ amount: 10000, status: 'APPROVED' }],
   })
   assert.equal(p.netProfitCents, 60000)
 })

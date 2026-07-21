@@ -1,8 +1,9 @@
 import Link from 'next/link'
 import { prisma } from '@/lib/db'
 import { fmtCents } from '@/lib/profit'
-import { moveDayDueCents, jobProfit, jobWarnings } from '@/lib/job-money'
-import { PageHeader, COLORS, Empty, Badge, SoftBadge } from '../_ui'
+import { moveDayDueCents, jobProfit, jobWarnings, jobFinancialCompleteness, JOB_MONEY_PAYMENT_SELECT, JOB_MONEY_EXPENSE_SELECT } from '@/lib/job-money'
+import { completenessLabel } from '@/lib/financial-completeness'
+import { PageHeader, COLORS, Empty, Badge, SoftBadge, Callout, CompletenessBadge } from '../_ui'
 
 export const dynamic = 'force-dynamic'
 
@@ -30,9 +31,11 @@ const STATUS_COLOR: Record<string, string> = {
 
 const MONEY_INCLUDE = {
   customer: { select: { name: true, phone: true } },
-  payments: { select: { amount: true, status: true, isInternalTest: true, stripePaymentIntentId: true, stripeChargeId: true } },
+  // Phase 0: the blessed selects carry refund/dispute + expense status so net
+  // revenue and expense eligibility are computed from real data, not guesses.
+  payments: { select: JOB_MONEY_PAYMENT_SELECT },
   job: { include: { crew: { include: { user: { select: { name: true, payRate: true } } } } } },
-  expenses: { select: { amount: true } },
+  expenses: { select: JOB_MONEY_EXPENSE_SELECT },
 } as const
 
 const cityOf = (addr?: string | null) => {
@@ -86,9 +89,24 @@ export default async function JobsPage({ searchParams }: { searchParams: { statu
 
   const totalOperational = activeStatuses.reduce((s, st) => s + (countByStatus[st] ?? 0), 0)
 
+  // Phase 0: how many of the visible moves are missing financial data. The
+  // per-card badge is easy to skim past; the aggregate is not.
+  const incompleteCount = bookings.filter((b) => {
+    const c = jobFinancialCompleteness(b)
+    return c.status !== 'NOT_APPLICABLE' && !c.isComplete
+  }).length
+  const missingLaborCount = bookings.filter((b) => jobFinancialCompleteness(b).missingLabor).length
+
   return (
     <div>
       <PageHeader title="Jobs" subtitle={`${totalOperational} active job${totalOperational === 1 ? '' : 's'} across the pipeline`} />
+
+      {incompleteCount > 0 && (
+        <Callout tone="warning" title={`${incompleteCount} move${incompleteCount === 1 ? '' : 's'} in this view ${incompleteCount === 1 ? 'has' : 'have'} incomplete financial data.`}>
+          {missingLaborCount > 0 && <>Crew labor has not been recorded for {missingLaborCount} of them, so their profit is overstated. </>}
+          Profit figures below are provisional until the missing information is entered.
+        </Callout>
+      )}
 
       {/* Pipeline stages — each pill filters + shows its count */}
       <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', marginBottom: '14px' }}>
@@ -138,6 +156,7 @@ export default async function JobsPage({ searchParams }: { searchParams: { statu
             const p = jobProfit(b)
             const due = moveDayDueCents(b)
             const warnings = jobWarnings(b)
+            const completeness = jobFinancialCompleteness(b)
             const crew = b.job?.crew ?? []
             return (
               <Link key={b.id} href={`/admin/jobs/${b.id}`} style={{ textDecoration: 'none' }}>
@@ -146,6 +165,9 @@ export default async function JobsPage({ searchParams }: { searchParams: { statu
                     <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '4px', flexWrap: 'wrap' }}>
                       <span style={{ fontSize: '15px', fontWeight: 700, color: COLORS.navy }}>{b.customer.name}</span>
                       <Badge color={STATUS_COLOR[b.status] ?? COLORS.muted}>{STATUS_LABEL[b.status] ?? b.status}</Badge>
+                      {completeness.status !== 'NOT_APPLICABLE' && (
+                        <CompletenessBadge label={completenessLabel(completeness)} complete={completeness.isComplete} />
+                      )}
                     </div>
                     <div style={{ fontSize: '12px', color: COLORS.muted }}>
                       {dateTime(b.scheduledStart ?? b.confirmedDate ?? b.requestedDate)}
@@ -158,9 +180,13 @@ export default async function JobsPage({ searchParams }: { searchParams: { statu
 
                   <div style={moneyCol}>
                     <MiniMoney label="Quoted" value={b.totalEstimate != null ? `$${b.totalEstimate.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : '—'} />
-                    <MiniMoney label="Collected" value={fmtCents(p.grossRevenueCents)} color={COLORS.green} />
+                    <MiniMoney label="Collected" value={fmtCents(p.netRevenueCents)} color={COLORS.green} />
                     <MiniMoney label="Move-day due" value={due > 0 ? fmtCents(due) : '—'} color={due > 0 ? COLORS.amber : COLORS.faint} />
-                    <MiniMoney label="Profit (recorded)" value={fmtCents(p.netProfitCents)} color={p.netProfitCents >= 0 ? COLORS.gold : COLORS.red} />
+                    <MiniMoney
+                      label={completeness.isComplete || completeness.status === 'NOT_APPLICABLE' ? 'Gross profit' : 'Gross profit *'}
+                      value={fmtCents(p.netProfitCents)}
+                      color={completeness.status !== 'NOT_APPLICABLE' && !completeness.isComplete ? COLORS.amber : p.netProfitCents >= 0 ? COLORS.gold : COLORS.red}
+                    />
                   </div>
 
                   {warnings.length > 0 && (

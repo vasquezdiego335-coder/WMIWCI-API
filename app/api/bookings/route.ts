@@ -584,7 +584,23 @@ async function handleBooking(req: NextRequest): Promise<NextResponse> {
     })
   } catch (err) {
     apiLogger.error({ err, bookingId: booking.id }, 'Failed to create Stripe checkout')
-    await prisma.booking.delete({ where: { id: booking.id } })
+    // Roll back the booking we just created — BEST EFFORT ONLY.
+    //
+    // This runs inside an error handler, so an exception here would replace the
+    // payment failure we are reporting, and the customer would get an opaque
+    // 500 instead of "Failed to initialize payment". Since the closeout FK
+    // became ON DELETE RESTRICT, the database can also legitimately refuse this
+    // delete for a booking carrying financial history — that refusal is correct
+    // and must never be weakened. A booking left behind is strictly better than
+    // a misreported payment error: it is logged with its id and can be cleaned
+    // up by hand. The cleanup failure is logged separately, with only the
+    // booking id — never the Stripe error payload or any secret.
+    await prisma.booking.delete({ where: { id: booking.id } }).catch((cleanupErr) => {
+      apiLogger.error(
+        { cleanupErr, bookingId: booking.id },
+        'Could not roll back booking after Stripe failure — left in place for manual review',
+      )
+    })
     return NextResponse.json({ error: 'Failed to initialize payment' }, { status: 500 })
   }
 

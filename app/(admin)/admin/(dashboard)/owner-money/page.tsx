@@ -1,8 +1,9 @@
 import { prisma } from '@/lib/db'
 import { getSession } from '@/lib/auth'
-import { fmtCents, crewPayOwedCents, safeToDistributeCents } from '@/lib/profit'
-import { rollupOwner, estimateBusinessCash } from '@/lib/owner-ledger'
-import { PageHeader, StatCard, StatGrid, Card, COLORS, Empty, MoneyRow, tableStyles as T, Badge } from '../_ui'
+import { fmtCents, crewPayOwedCents, distributablePosition, taxReserveCentsFor } from '@/lib/profit'
+import { rollupOwner, estimateBusinessCash, totalReimbursementOwed, operatingProfitCents } from '@/lib/owner-ledger'
+import { summarizeRevenue, ELIGIBLE_EXPENSE_WHERE, CAPTURED_PAYMENT_WHERE, isPaidCrew } from '@/lib/money-rules'
+import { PageHeader, Card, COLORS, Empty, MoneyRow, tableStyles as T, Badge, Callout } from '../_ui'
 import { OWNER_TX_TYPE_LABELS, OWNER_LABELS, PAYMENT_METHOD_LABELS, APPROVAL_STATUS_COLORS } from '../_labels'
 import OwnerMoneyForm from './OwnerMoneyForm'
 import OwnerMoneyActions from './OwnerMoneyActions'
@@ -29,10 +30,15 @@ export default async function OwnerMoneyPage() {
     )
   }
 
-  const [transactions, revenueAgg, expenseAgg, config, liveJobs] = await Promise.all([
+  const [transactions, revenueRows, expenseAgg, config, liveJobs] = await Promise.all([
     prisma.ownerTransaction.findMany({ orderBy: { occurredOn: 'desc' }, take: 200 }),
-    prisma.payment.aggregate({ where: { status: 'COMPLETED', isInternalTest: false }, _sum: { amount: true } }),
-    prisma.expense.aggregate({ where: { status: { not: 'REJECTED' } }, _sum: { amount: true } }),
+    // Net collected revenue, shared derivation (money-rules) — never the gross
+    // capture, so refunds and lost chargebacks leave cash exactly once.
+    prisma.payment.findMany({
+      where: { ...CAPTURED_PAYMENT_WHERE, isInternalTest: false },
+      select: { amount: true, status: true, isInternalTest: true, refundedAmountCents: true, stripeDisputeId: true, disputeStatus: true },
+    }),
+    prisma.expense.aggregate({ where: ELIGIBLE_EXPENSE_WHERE, _sum: { amount: true } }),
     prisma.businessConfig.findUnique({ where: { id: 'singleton' } }),
     prisma.booking.findMany({
       where: { status: { in: ['IN_PROGRESS', 'COMPLETED'] }, isInternalTest: false },
@@ -49,15 +55,46 @@ export default async function OwnerMoneyPage() {
   const diego = rollupOwner(transactions, 'DIEGO')
   const sebastian = rollupOwner(transactions, 'SEBASTIAN')
 
-  const revenue = revenueAgg._sum.amount ?? 0
-  const expenses = expenseAgg._sum.amount ?? 0
-  const cashEstimate = estimateBusinessCash({ revenueCents: revenue, expenseCents: expenses, ownerTxs: transactions })
+  const revenue = summarizeRevenue(revenueRows)
+  const expenses = expenseAgg._sum?.amount ?? 0
 
-  const unpaidCrew = liveJobs.reduce((s, b) => s + (b.job?.crew ?? [])
-    .filter((c) => c.payStatus !== 'PAID')
-    .reduce((cs, c) => cs + crewPayOwedCents({ actualHours: c.actualHours, scheduledHours: c.scheduledHours, payRate: c.payRate, userPayRate: c.user?.payRate, flatPay: c.flatPay, tips: c.tips, bonus: c.bonus, deductions: c.deductions }), 0), 0)
-  const taxReserve = Math.max(0, Math.round((revenue - expenses) * (cfg.taxPct / 100)))
-  const safe = safeToDistributeCents({ cashAvailableCents: cashEstimate, upcomingWorkerPayCents: unpaidCrew, upcomingBillsCents: 0, taxReserveCents: taxReserve, emergencyReserveCents: cfg.emergencyCents })
+  // ── Labor: PAID leaves cash, UNPAID is held back. A crew row is one or the
+  //    other, never both, so no amount can be subtracted twice. Before Phase 0
+  //    paid labor left the business without ever leaving this calculation —
+  //    marking a worker PAID moved their pay out of the held-back reserve and
+  //    into nothing, which RAISED "safe to distribute" by that amount.
+  const allCrew = liveJobs.flatMap((b) => b.job?.crew ?? [])
+  const payOf = (c: (typeof allCrew)[number]) => crewPayOwedCents({ actualHours: c.actualHours, scheduledHours: c.scheduledHours, payRate: c.payRate, userPayRate: c.user?.payRate, flatPay: c.flatPay, tips: c.tips, bonus: c.bonus, deductions: c.deductions })
+  const paidLabor = allCrew.filter(isPaidCrew).reduce((s, c) => s + payOf(c), 0)
+  const unpaidCrew = allCrew.filter((c) => !isPaidCrew(c)).reduce((s, c) => s + payOf(c), 0)
+  const laborRecorded = allCrew.length > 0
+
+  const cashEstimate = estimateBusinessCash({
+    netRevenueCents: revenue.netCollectedCents,
+    expenseCents: expenses,
+    paidLaborCents: paidLabor,
+    ownerTxs: transactions,
+  })
+
+  // Reimbursements the business owes its owners must clear before profit is
+  // split — otherwise an owner is "distributed" money that is already theirs.
+  const reimbursementsOwed = totalReimbursementOwed(transactions, ['DIEGO', 'SEBASTIAN'])
+
+  // Tax reserve on OPERATING PROFIT (revenue − expenses − labor), not on
+  // revenue-minus-expenses with labor ignored, which overstated the hold-back.
+  const opProfit = operatingProfitCents({ netRevenueCents: revenue.netCollectedCents, expenseCents: expenses, laborCents: paidLabor + unpaidCrew })
+  const taxReserve = taxReserveCentsFor(opProfit, cfg.taxPct)
+
+  const position = distributablePosition({
+    cashAvailableCents: cashEstimate,
+    unpaidLaborCents: unpaidCrew,
+    upcomingBillsCents: 0,
+    ownerReimbursementsOwedCents: reimbursementsOwed,
+    pendingRefundCents: revenue.pendingDisputeCents,
+    taxReserveCents: taxReserve,
+    emergencyReserveCents: cfg.emergencyCents,
+  })
+  const safe = position.distributableCents
 
   return (
     <div>
@@ -90,24 +127,46 @@ export default async function OwnerMoneyPage() {
       </div>
 
       {/* Distributable cash */}
-      <Card title="Available for Distribution" icon="🏦" wide action={<BusinessConfigPanel diego={cfg.diego} sebastian={cfg.sebastian} taxPct={cfg.taxPct} emergencyCents={cfg.emergencyCents} canEdit={!!isOwner} />}>
+      <Card title="Estimated Safe to Distribute" icon="🏦" wide action={<BusinessConfigPanel diego={cfg.diego} sebastian={cfg.sebastian} taxPct={cfg.taxPct} emergencyCents={cfg.emergencyCents} canEdit={!!isOwner} />}>
+        {!laborRecorded && (
+          <Callout tone="warning" title="No crew labor is recorded anywhere in the system.">
+            Labor is a real cost that has not been entered on any move, so estimated business cash
+            and the figure below are <strong>overstated</strong>. This is an estimate for planning,
+            not a finalized distributable profit.
+          </Callout>
+        )}
         <p style={{ fontSize: '12px', color: COLORS.faint, margin: '0 0 12px' }}>
-          Not all business cash is splittable. Obligations + reserves come out first. Cash is estimated from the recorded ledger — set the emergency reserve to reconcile with your real bank balance.
+          An <strong>estimate</strong> from the recorded ledger — not a bank balance and not finalized
+          distributable profit. Cash = owner contributions + net collected revenue − eligible expenses
+          − labor already paid − owner withdrawals, distributions and reimbursements. Everything below
+          the line is money already spoken for. Set the emergency reserve to reconcile with your real
+          bank balance.
         </p>
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0 32px', maxWidth: '640px' }}>
           <MoneyRow label="Estimated business cash" value={fmtCents(cashEstimate)} />
-          <MoneyRow label="− Unpaid worker pay" value={fmtCents(unpaidCrew)} negative />
-          <MoneyRow label={`− Tax reserve (${cfg.taxPct}%)`} value={fmtCents(taxReserve)} negative />
+          <MoneyRow label="− Unpaid worker pay (accrued)" value={fmtCents(unpaidCrew)} negative />
+          <MoneyRow label="− Owner reimbursements owed" value={fmtCents(reimbursementsOwed)} negative />
+          <MoneyRow label="− Disputed money at risk" value={fmtCents(revenue.pendingDisputeCents)} negative />
+          <MoneyRow label={`− Tax reserve (${cfg.taxPct}% of operating profit)`} value={fmtCents(taxReserve)} negative />
           <MoneyRow label="− Emergency reserve" value={fmtCents(cfg.emergencyCents)} negative />
         </div>
         <div style={{ borderTop: '1px solid #F1F1F1', margin: '10px 0', maxWidth: '640px' }} />
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', maxWidth: '640px' }}>
-          <span style={{ fontSize: '14px', fontWeight: 700, color: COLORS.navy }}>Safe to distribute</span>
-          <span style={{ fontSize: '22px', fontWeight: 800, color: safe > 0 ? COLORS.gold : COLORS.muted, fontVariantNumeric: 'tabular-nums' }}>{fmtCents(safe)}</span>
+          <span style={{ fontSize: '14px', fontWeight: 700, color: COLORS.navy }}>
+            {position.shortfallCents > 0 ? 'Shortfall — do not distribute' : 'Estimated safe to distribute'}
+          </span>
+          <span style={{ fontSize: '22px', fontWeight: 800, color: position.shortfallCents > 0 ? COLORS.red : safe > 0 ? COLORS.gold : COLORS.muted, fontVariantNumeric: 'tabular-nums' }}>
+            {fmtCents(position.rawCents)}
+          </span>
         </div>
+        {position.shortfallCents > 0 && (
+          <div style={{ fontSize: '12px', color: COLORS.red, textAlign: 'right', maxWidth: '640px', marginTop: '4px' }}>
+            Obligations exceed estimated cash by {fmtCents(position.shortfallCents)}. Nothing is available to split.
+          </div>
+        )}
         {safe > 0 && (
           <div style={{ fontSize: '12px', color: COLORS.faint, textAlign: 'right', maxWidth: '640px', marginTop: '4px' }}>
-            Diego {fmtCents(Math.round(safe * cfg.diego / 100))} · Sebastian {fmtCents(Math.round(safe * cfg.sebastian / 100))}
+            At the current split — Diego {fmtCents(Math.round(safe * cfg.diego / 100))} · Sebastian {fmtCents(Math.round(safe * cfg.sebastian / 100))}
           </div>
         )}
       </Card>

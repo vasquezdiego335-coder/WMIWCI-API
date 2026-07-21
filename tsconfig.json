@@ -21,5 +21,11 @@
     }
   },
   "include": ["next-env.d.ts", "**/*.ts", "**/*.tsx", ".next/types/**/*.ts"],
-  "exclude": ["node_modules", "email-archive/**", "email-archive"]
+  "exclude": [
+    "node_modules",
+    "email-archive/**",
+    "email-archive",
+    "email-marketing-html/**",
+    "email-marketing-html"
+  ]
 }

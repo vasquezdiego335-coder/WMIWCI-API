@@ -13,6 +13,80 @@ match these definitions or cite this file when it deliberately differs.**
 
 ---
 
+> ## STAGE 3B UPDATE (2026-07-20) — reporting UI and routes
+>
+> See `docs/admin/stage3b-reporting-ui.md`.
+>
+> - Reporting pages and API routes now exist at `/admin/reports` and
+>   `/api/admin/reports/*`. Every response carries a `meta` block declaring
+>   accounting basis, reporting mode, timezone, period bounds and the
+>   finalized/provisional/unusable counts.
+> - Owner-only money is stripped from responses server-side by `shapeForRole()`;
+>   hiding a column in the UI is not a control.
+> - Exports reuse the SAME builder as the screen, so a file can never disagree
+>   with the report it came from.
+> - **DATABASE STILL UNAVAILABLE** (Neon compute quota). Stage 1, 2 and 3
+>   migrations remain unapplied and NO persistence has been verified.
+
+> ## STAGE 3 UPDATE (2026-07-20) — company reporting on top of snapshots
+>
+> See `docs/admin/stage3-reporting-analytics.md`.
+>
+> - Reports read the immutable `FinancialSnapshot` for finalized moves and
+>   **never recalculate them** from current settings. Provisional moves use live
+>   Stage 2 math and are always labelled.
+> - Every report declares a BASIS (cash vs accrual) and a SCOPE (finalized vs
+>   provisional vs combined); a mixed total carries an explicit warning.
+> - Reporting boundaries are business-local (America/New_York) over UTC storage,
+>   DST-safe, with an exclusive end.
+> - Marketing is judged by `Profit ROAS = attributed FINALIZED net profit /
+>   spend`, never by scans, leads or gross revenue.
+> - First-touch attribution is IMMUTABLE; corrections go to an owner-assigned
+>   source and are audited.
+> - Exports neutralize spreadsheet formulas losslessly, allow-list columns by
+>   role, and never log their own contents.
+
+> ## PHASE 2 UPDATE (2026-07-20) — financial closeout + durable snapshots
+>
+> See `docs/admin/phase2-financial-closeout.md`. The hierarchy is now complete
+> and centralized in `src/lib/closeout-calc.ts`:
+>
+> ```
+> net collected − direct job costs        = CASH GROSS PROFIT
+>   − unpaid owner labor value            = ECONOMIC PROFIT
+> cash gross profit − allocated overhead  = COMPANY NET PROFIT
+>   − unpaid owner labor value            = ECONOMIC NET PROFIT
+> company net profit − tax reserve − business reserves
+>   − retained earnings − unresolved liabilities = DISTRIBUTABLE PROFIT
+> ```
+>
+> - **Profit comes only from COLLECTED money.** An outstanding balance is a
+>   receivable and can never reach an owner distribution.
+> - Finalizing writes an **immutable `FinancialSnapshot`**. Changing a rate, an
+>   ownership split, a reserve percentage or an overhead policy can no longer
+>   rewrite a move that was already closed. Reopening supersedes, never deletes.
+> - Blockers are HARD (wrong data — never overridable) or OVERRIDABLE (a
+>   judgement call an owner documents with a reason).
+> - Reimbursement / draw / distribution / labor pay remain four distinct things.
+> - Tax reserve is a % of company net profit, floored at $0 on a loss. Reserves
+>   are PLANNED allocations, not bank transfers.
+
+> ## PHASE 1 UPDATE (2026-07-20) — JobCrew now has a real write path
+>
+> The decision below is UNCHANGED and now enforced by working code. See
+> `docs/admin/phase1-jobcrew-implementation.md`.
+>
+> - Labor is recorded on `JobCrew` with **integer minutes** and a **frozen rate
+>   snapshot** — a later profile-rate change can no longer rewrite a past move.
+> - **Only APPROVED labor is a cost.** DRAFT/SUBMITTED labor is displayed and
+>   warned about but never counted.
+> - **Owner labor is never free**: `UNPAID_OWNER` costs $0 cash and carries an
+>   economic value, giving every move a CASH gross profit and an ECONOMIC profit.
+> - `labor_payments` supports partial payments; `paymentStatus` is derived from
+>   the non-voided rows and **never writes an `Expense`**.
+> - The Discord `crew_jobs` gig board is NOT a competing labor total — it has no
+>   booking, no Job and no app User. See `docs/admin/discord-crew-integration.md`.
+
 ## DECISION: crew labor single source of truth = JobCrew payroll (Option A)
 
 **Crew labor cost comes from `JobCrew` payroll records** (hours × rate, or flat
@@ -77,17 +151,31 @@ payment record must keep it that way.
 
 ### Job profit (implemented — `src/lib/profit.ts` + `src/lib/job-money.ts`)
 
+**CORRECTED IN PHASE 0 (2026-07-20).** Refunds net off REVENUE; they are not a
+cost line. See `docs/admin/phase0-financial-integrity.md`.
+
 ```
-  Revenue collected on the job (COMPLETED, non-test payments)
-− Accrued crew labor            (JobCrew via crewPayOwedCents)
-− Direct job expenses           (Expense rows with bookingId)
-− Payment-processing fees       (estimated 2.9% + 30¢ on Stripe-collected money only)
-− Refunds on the job
-= Net job profit
+  Net collected revenue          (captured − actual refunds − lost chargebacks)
+− Accrued crew labor             (JobCrew via crewPayOwedCents)
+− Eligible direct job expenses   (Expense rows with bookingId, REJECTED excluded)
+− Payment-processing fees        (estimated 2.9% + 30¢ on Stripe-CAPTURED money only)
+= Gross job profit
 ```
 
+It is **gross** profit: company overhead is not yet allocated per move (Phase 3).
+
 Manual cash payments carry **no** processor fee (`isStripePayment` gate).
-Internal-test payments are never revenue anywhere.
+Internal-test payments are never revenue anywhere. Authorized-but-uncaptured
+holds (`PENDING`) are never revenue and are reported separately.
+
+**Every revenue and expense figure in the admin derives from
+`src/lib/money-rules.ts`.** Pages must not write their own `status:` filters —
+that divergence is precisely what produced the Phase 0 defects.
+
+Job profit is always paired with `FinancialCompleteness`
+(`src/lib/financial-completeness.ts`). A crew pay of $0 means "not recorded"
+far more often than it means "free", and no surface may present a profit figure
+without saying which.
 
 ### Operating P&L (defined here; report is roadmap item `reports-pnl`)
 
@@ -107,14 +195,33 @@ guards exist as code: `operatingRevenueCents` / `operatingExpenseCents` in
 
 ### Cash available (estimate — implemented on the Owner Money page)
 
+**CORRECTED IN PHASE 0:** paid crew labor now leaves the estimate. It previously
+did not, and because safe-to-distribute held back only *unpaid* labor, settling a
+worker RAISED the distributable figure by the amount just paid out.
+
 ```
   Owner contributions
-+ Verified cash inflows (captured payments)
-− Business expenses
++ Net collected revenue (captured − refunds − lost chargebacks)
+− Eligible business expenses (REJECTED excluded)
+− Crew labor already PAID
 − Owner withdrawals + distributions
 − Reimbursements paid to owners
 = Estimated business cash
 ```
+
+```
+  Estimated business cash
+− Unpaid (accrued) crew labor
+− Known upcoming bills
+− Owner reimbursements owed
+− Captured money at risk in an OPEN dispute
+− Tax reserve (% of OPERATING PROFIT: revenue − expenses − labor, floored at 0)
+− Emergency reserve
+= Estimated safe to distribute   (may be NEGATIVE — reported as a shortfall)
+```
+
+Labor cannot be subtracted twice: a `JobCrew` row is either `PAID` (out of cash)
+or not (held back), never both.
 
 - A `PERSONAL_PURCHASE` does **not** touch business cash until the
   `REIMBURSEMENT` pays the owner back (the reimbursement is the cash event).
@@ -214,11 +321,25 @@ overwrite. A no-op edit (same value) does not trigger the workflow. Crew-pay and
 payment edit UIs don't exist yet; their adjustment workflow lands here when they
 ship (roadmap: `payroll-editing-ui`, `payroll-payment-records`).
 
-### Refunds — current supported behavior
-`computeJobProfit` counts `REFUNDED` and `PARTIALLY_REFUNDED` payments as a cost
-(they reduce net profit) and excludes them from collected revenue. There is **no
-refund-initiation flow** in the admin — refunds are recorded as payment status
-in Stripe/webhooks, not issued from these pages. A full refund/authorization
+### Refunds — SUPERSEDED BY PHASE 0 (2026-07-20)
+
+> **The behavior previously documented here was arithmetically wrong.** It read:
+> *"`computeJobProfit` counts REFUNDED and PARTIALLY_REFUNDED payments as a cost
+> and excludes them from collected revenue."* Doing both subtracts the refund
+> twice — a refunded payment is already absent from revenue because its status is
+> no longer `COMPLETED`. A $2,000 payment with a $200 refund reported −$2,000
+> instead of +$1,800. This paragraph is kept, struck, as the record of a
+> documented-but-incorrect rule; do not restore it.
+
+**Current behavior.** Refunds net off revenue using the real
+`Payment.refundedAmountCents`, and never appear as a cost. `REFUNDED` /
+`PARTIALLY_REFUNDED` payments remain CAPTURED money whose net collected value is
+`amount − refunded − chargeback`, floored at zero. Full rules, including how an
+unknown partial-refund amount is flagged rather than guessed, are in
+`docs/admin/phase0-financial-integrity.md`.
+
+There is still **no refund-initiation flow** in the admin — refunds are recorded
+from Stripe webhooks, not issued from these pages. A full refund/authorization
 workflow (deposit refund, auth release, cash refund) is a roadmap item
 (`customers-balance-tracking`); it is **not** faked here.
 

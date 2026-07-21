@@ -38,7 +38,7 @@ function booking(over: Partial<RuleBooking> = {}): RuleBooking {
     requestedDate: null, completedAt: null,
     truckAddonDueOnMoveDay: false, truckProvider: null, truckReservationStatus: null, truckReservationNumber: null,
     jobStartedAt: null, crew: [crew()], hasFailedPayment: false, hasWorkerPayExpense: false,
-    moveDayDueCents: 0, grossRevenueCents: 70000, netProfitCents: 40000,
+    moveDayDueCents: 0, netRevenueCents: 70000, netProfitCents: 40000,
     ...over,
   }
 }

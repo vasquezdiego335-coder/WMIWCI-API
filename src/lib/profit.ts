@@ -1,5 +1,6 @@
 // ============================================================================
-// Money math for the admin operating system (owner spec 2026-07-13).
+// Money math for the admin operating system (owner spec 2026-07-13; corrected
+// in Phase 0, owner spec 2026-07-20 — see docs/admin/phase0-financial-integrity.md).
 //
 // Everything is integer CENTS end-to-end — matches deposit_amount / travel_fee
 // and the Expense / OwnerTransaction / JobCrew columns. No Prisma imports here
@@ -8,8 +9,25 @@
 //
 // The owner rule this enforces: every dollar is JOB revenue, a JOB cost, an
 // OWNER transaction, or a GENERAL business expense. Per-job profit =
-//   revenue collected − (crew pay + job expenses + Stripe fees + refunds)
+//   net collected revenue − (crew pay + eligible job expenses + Stripe fees)
+//
+// PHASE 0 CORRECTION: refunds are netted off REVENUE, never added as a cost.
+// The previous version excluded refunded payments from revenue AND subtracted
+// their full face value as a cost, so a $2,000 payment with a $200 refund
+// reported −$2,000 instead of +$1,800. Recognition rules now live in
+// src/lib/money-rules.ts and are shared by every page.
 // ============================================================================
+
+import {
+  summarizeRevenue,
+  eligibleExpenseCents,
+  isPaidCrew,
+  isUnpaidCrew,
+  type PaymentRow,
+  type ExpenseRow,
+  type CrewRow,
+} from './money-rules'
+import { computeLaborPay, hasRateSnapshot } from './labor-calc'
 
 // Standard US Stripe pricing for card charges (2.9% + 30¢). Used to ESTIMATE
 // processing fees on Stripe-collected money only — cash / move-day money has no
@@ -34,7 +52,9 @@ export function dollarsToCents(input: string | number | null | undefined): numbe
   return Math.round(n * 100)
 }
 
-/** Estimated Stripe processing fee for one captured card charge (2.9% + 30¢). */
+/** Estimated Stripe processing fee for one captured card charge (2.9% + 30¢).
+ *  Charged on the ORIGINAL capture: Stripe does not return processing fees when
+ *  a charge is refunded, so a refunded job legitimately ends up fee-negative. */
 export function stripeFeeCents(chargeCents: number): number {
   if (chargeCents <= 0) return 0
   return Math.round(chargeCents * STRIPE_PCT) + STRIPE_FLAT_CENTS
@@ -54,10 +74,19 @@ export interface CrewPayInput {
 }
 
 /** Amount owed to ONE crew member for ONE job, in cents.
- *  flatPay wins over hourly; hours fall back to scheduled when actual isn't
- *  logged yet; the rate falls back to the worker's default. tips + bonus add,
- *  deductions subtract, never below zero. */
+ *
+ *  PHASE 1: when the row carries a rate SNAPSHOT this delegates to
+ *  labor-calc.computeLaborPay, which prices from the snapshot and never from
+ *  the worker's current profile — a raise today must not rewrite last month's
+ *  move. The legacy path below runs only for pre-Phase-1 rows.
+ *
+ *  NOTE: a result of 0 does NOT mean labor was free — it usually means no
+ *  labor data exists at all. Use financial-completeness.ts to tell the two
+ *  apart before showing a profit figure. */
 export function crewPayOwedCents(c: CrewPayInput): number {
+  if (hasRateSnapshot(c as never)) {
+    return computeLaborPay(c as never).cashCostCents
+  }
   const base =
     c.flatPay != null && c.flatPay > 0
       ? c.flatPay
@@ -66,55 +95,116 @@ export function crewPayOwedCents(c: CrewPayInput): number {
   return Math.max(0, Math.round(owed))
 }
 
-// ── Per-job profit ───────────────────────────────────────────────────────────
-
-export interface ProfitPayment {
-  amount: number // cents
-  status: string // PaymentStatus
-  isInternalTest?: boolean
-  isStripe?: boolean // true when collected through Stripe (fee applies)
+/** Total accrued labor for a set of crew rows (paid or not). */
+export function crewLaborCents(crew: (CrewPayInput & CrewRow)[]): number {
+  return crew.reduce((s, c) => s + crewPayOwedCents({ ...c, userPayRate: c.userPayRate ?? c.user?.payRate }), 0)
 }
 
+/** Labor already settled in cash — money that has LEFT the business. */
+export function paidLaborCents(crew: (CrewPayInput & CrewRow)[]): number {
+  return crewLaborCents(crew.filter(isPaidCrew))
+}
+
+/** Labor accrued but not yet paid — an obligation, still inside the cash. */
+export function unpaidLaborCents(crew: (CrewPayInput & CrewRow)[]): number {
+  return crewLaborCents(crew.filter(isUnpaidCrew))
+}
+
+// ── Per-job profit ───────────────────────────────────────────────────────────
+
 export interface JobMoneyInput {
-  payments: ProfitPayment[]
+  payments: (PaymentRow & { isStripe?: boolean })[]
   crew: CrewPayInput[]
-  expenses: { amount: number }[] // job-linked Expense rows (any category)
+  expenses: ExpenseRow[] // job-linked Expense rows (any category)
+  /** PHASE 1: the canonical labor rollup from labor-calc.rollupLabor. When
+   *  supplied it SUPERSEDES `crew` — only APPROVED labor is a cost, and the
+   *  economic (owner-labor) view rides along. `crew` remains for legacy callers
+   *  and tests that predate the labor system. */
+  labor?: {
+    approvedCashCents: number
+    pendingCashCents: number
+    economicCents: number
+    unpaidOwnerValueCents: number
+  }
 }
 
 export interface JobProfit {
-  grossRevenueCents: number // COMPLETED, non-test money collected on this job
-  refundedCents: number // REFUNDED money on this job
-  crewPayCents: number // sum of crew owed
-  expenseCents: number // job-linked expenses
-  stripeFeeCents: number // estimated Stripe fees on Stripe-collected money
-  totalCostsCents: number // crew + expenses + stripe + refunds
-  netProfitCents: number // gross − totalCosts (can be negative)
-  marginPct: number | null // net / gross; null when no revenue yet
+  /** Captured money before refunds. */
+  grossCapturedCents: number
+  /** Actually refunded (from Payment.refundedAmountCents), NOT the face value. */
+  refundedCents: number
+  /** Money withdrawn by lost chargebacks. */
+  chargebackCents: number
+  /** THE revenue figure: gross − refunds − chargebacks. Never negative. */
+  netRevenueCents: number
+  /** Captured money at risk in an open dispute (not yet deducted). */
+  pendingDisputeCents: number
+  /** Authorized holds that were never captured. NOT revenue. */
+  authorizedNotCapturedCents: number
+  crewPayCents: number // APPROVED cash labor (0 usually means "not recorded")
+  /** Calculated but not yet APPROVED labor. Shown, never counted as a cost. */
+  pendingLaborCents: number
+  expenseCents: number // eligible job-linked expenses (REJECTED excluded)
+  stripeFeeCents: number // estimated Stripe fees on Stripe-captured money
+  totalCostsCents: number // crew + expenses + stripe  (refunds are NOT here)
+  netProfitCents: number // netRevenue − totalCosts (can be negative) = CASH gross profit
+  marginPct: number | null // netProfit / netRevenue; null when no revenue yet
+
+  // ── PHASE 1: owner labor, cash vs economic ──
+  /** What the labor was WORTH, including unpaid owner time. Never cash. */
+  economicLaborCents: number
+  /** economicLabor − cash labor: the value the owners personally subsidized. */
+  unpaidOwnerValueCents: number
+  /** netProfit − unpaidOwnerValue. Was this move profitable on its own, or only
+   *  because the owners worked for free? */
+  economicProfitCents: number
+  economicMarginPct: number | null
 }
 
 export function computeJobProfit(input: JobMoneyInput): JobProfit {
-  const completed = input.payments.filter((p) => p.status === 'COMPLETED' && !p.isInternalTest)
-  const grossRevenueCents = completed.reduce((s, p) => s + p.amount, 0)
-  const refundedCents = input.payments
-    .filter((p) => (p.status === 'REFUNDED' || p.status === 'PARTIALLY_REFUNDED') && !p.isInternalTest)
-    .reduce((s, p) => s + p.amount, 0)
-  const crewPayCents = input.crew.reduce((s, c) => s + crewPayOwedCents(c), 0)
-  const expenseCents = input.expenses.reduce((s, e) => s + e.amount, 0)
-  const stripeFeesCents = completed
-    .filter((p) => p.isStripe)
+  const rev = summarizeRevenue(input.payments)
+
+  // Processing fees follow the CAPTURE, not the net: Stripe keeps its fee on a
+  // refunded charge. Only rows that actually went through Stripe are charged.
+  const stripeFeesCents = input.payments
+    .filter((p) => p.isStripe && !p.isInternalTest)
+    .filter((p) => ['COMPLETED', 'PARTIALLY_REFUNDED', 'REFUNDED'].includes(p.status))
     .reduce((s, p) => s + stripeFeeCents(p.amount), 0)
-  const totalCostsCents = crewPayCents + expenseCents + stripeFeesCents + refundedCents
-  const netProfitCents = grossRevenueCents - totalCostsCents
-  const marginPct = grossRevenueCents > 0 ? netProfitCents / grossRevenueCents : null
+
+  // PHASE 1: the labor rollup is authoritative when supplied (only APPROVED
+  // labor is a cost). `crew` is the legacy path for callers that predate it.
+  const crewPayCents = input.labor ? input.labor.approvedCashCents : input.crew.reduce((s, c) => s + crewPayOwedCents(c), 0)
+  const pendingLaborCents = input.labor?.pendingCashCents ?? 0
+  const economicLaborCents = input.labor?.economicCents ?? crewPayCents
+  const unpaidOwnerValueCents = input.labor?.unpaidOwnerValueCents ?? 0
+
+  const expenseCents = eligibleExpenseCents(input.expenses)
+
+  const totalCostsCents = crewPayCents + expenseCents + stripeFeesCents
+  const netProfitCents = rev.netCollectedCents - totalCostsCents
+  const marginPct = rev.netCollectedCents > 0 ? netProfitCents / rev.netCollectedCents : null
+
+  // Economic profit charges the move for owner labor that was never paid.
+  const economicProfitCents = netProfitCents - unpaidOwnerValueCents
+
   return {
-    grossRevenueCents,
-    refundedCents,
+    grossCapturedCents: rev.grossCapturedCents,
+    refundedCents: rev.refundedCents,
+    chargebackCents: rev.chargebackCents,
+    netRevenueCents: rev.netCollectedCents,
+    pendingDisputeCents: rev.pendingDisputeCents,
+    authorizedNotCapturedCents: rev.authorizedNotCapturedCents,
     crewPayCents,
+    pendingLaborCents,
     expenseCents,
     stripeFeeCents: stripeFeesCents,
     totalCostsCents,
     netProfitCents,
     marginPct,
+    economicLaborCents,
+    unpaidOwnerValueCents,
+    economicProfitCents,
+    economicMarginPct: rev.netCollectedCents > 0 ? economicProfitCents / rev.netCollectedCents : null,
   }
 }
 
@@ -127,17 +217,63 @@ export function isStripePayment(p: { stripePaymentIntentId?: string | null; stri
 // ── Distributable owner cash (Owner Money page) ──────────────────────────────
 // Business cash is NOT all splittable. Hold back what's already owed + reserves
 // before showing a "safe to distribute" number.
+//
+// PHASE 0 CORRECTION: paid labor now leaves cash exactly once (inside
+// cashAvailableCents, via estimateBusinessCash) and unpaid labor is held back
+// here — a crew row is one or the other, never both, so double-subtraction is
+// structurally impossible. Owner reimbursements owed and money at risk in open
+// disputes are also held back. The result may be NEGATIVE and is reported as a
+// shortfall rather than silently clamped to zero.
 
 export interface DistributableInput {
-  cashAvailableCents: number // money actually in the business
-  upcomingWorkerPayCents: number // crew owed but not yet paid
+  cashAvailableCents: number // money actually in the business (paid labor already out)
+  unpaidLaborCents: number // accrued crew labor not yet settled
   upcomingBillsCents: number // known unpaid general expenses
+  ownerReimbursementsOwedCents: number // personal purchases awaiting reimbursement
+  pendingRefundCents: number // captured money at risk in an open dispute
   taxReserveCents: number // held for taxes
   emergencyReserveCents: number // rainy-day floor
 }
 
+export interface DistributablePosition {
+  /** Signed result. Negative means obligations exceed cash. */
+  rawCents: number
+  /** What may actually be distributed today (never negative). */
+  distributableCents: number
+  /** How far short the business is when raw is negative. */
+  shortfallCents: number
+  /** Everything held back, for the "what's included" explanation. */
+  totalHeldBackCents: number
+}
+
+/** Full distributable position, including a negative shortfall. */
+export function distributablePosition(i: DistributableInput): DistributablePosition {
+  const totalHeldBackCents =
+    i.unpaidLaborCents +
+    i.upcomingBillsCents +
+    i.ownerReimbursementsOwedCents +
+    i.pendingRefundCents +
+    i.taxReserveCents +
+    i.emergencyReserveCents
+  const rawCents = i.cashAvailableCents - totalHeldBackCents
+  return {
+    rawCents,
+    distributableCents: Math.max(0, rawCents),
+    shortfallCents: Math.max(0, -rawCents),
+    totalHeldBackCents,
+  }
+}
+
+/** Signed safe-to-distribute. Callers that display it must handle the negative
+ *  case (see distributablePosition) — a shortfall must never read as $0 "fine". */
 export function safeToDistributeCents(i: DistributableInput): number {
-  const held =
-    i.upcomingWorkerPayCents + i.upcomingBillsCents + i.taxReserveCents + i.emergencyReserveCents
-  return Math.max(0, i.cashAvailableCents - held)
+  return distributablePosition(i).rawCents
+}
+
+/** Tax reserve on an operating-profit base, not on revenue-minus-expenses.
+ *  Labor is a cost like any other; ignoring it inflated the reserve. Never
+ *  negative — a loss-making period reserves nothing. */
+export function taxReserveCentsFor(operatingProfitCents: number, taxPercent: number): number {
+  if (operatingProfitCents <= 0) return 0
+  return Math.max(0, Math.round(operatingProfitCents * (taxPercent / 100)))
 }

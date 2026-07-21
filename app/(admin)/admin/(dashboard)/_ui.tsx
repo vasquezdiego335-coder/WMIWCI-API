@@ -79,6 +79,52 @@ export function Empty({ children }: { children: React.ReactNode }) {
   return <p style={{ fontSize: '13px', color: COLORS.faint, fontStyle: 'italic', margin: 0 }}>{children}</p>
 }
 
+/** A loud, unmissable banner. Phase 0 uses this for incomplete financial data —
+ *  the owner spec is explicit that a missing-labor warning must be a clear
+ *  warning state, not a subtle tooltip. */
+export function Callout({
+  tone = 'warning',
+  title,
+  children,
+}: {
+  tone?: 'warning' | 'danger' | 'info'
+  title: string
+  children?: React.ReactNode
+}) {
+  const palette = {
+    warning: { bg: '#FFFBEB', border: '#FDE68A', text: '#B45309', icon: '⚠️' },
+    danger: { bg: '#FEF2F2', border: '#FECACA', text: '#B91C1C', icon: '🛑' },
+    info: { bg: '#EFF6FF', border: '#BFDBFE', text: '#1D4ED8', icon: 'ℹ️' },
+  }[tone]
+  return (
+    <div
+      role="alert"
+      style={{
+        backgroundColor: palette.bg,
+        border: `1px solid ${palette.border}`,
+        borderLeft: `4px solid ${palette.text}`,
+        borderRadius: '10px',
+        padding: '12px 14px',
+        margin: '0 0 14px',
+      }}
+    >
+      <div style={{ display: 'flex', gap: '9px', alignItems: 'flex-start' }}>
+        <span style={{ fontSize: '15px', lineHeight: 1.3 }} aria-hidden>{palette.icon}</span>
+        <div style={{ minWidth: 0 }}>
+          <p style={{ fontSize: '13px', fontWeight: 700, color: palette.text, margin: 0, lineHeight: 1.4 }}>{title}</p>
+          {children && <div style={{ fontSize: '12px', color: COLORS.ink, marginTop: '5px', lineHeight: 1.5 }}>{children}</div>}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+/** Complete / Missing labor / … chip for a move's financial record. */
+export function CompletenessBadge({ label, complete, notApplicable }: { label: string; complete: boolean; notApplicable?: boolean }) {
+  const color = notApplicable ? COLORS.faint : complete ? COLORS.green : COLORS.amber
+  return <SoftBadge color={color}>{complete ? '✓ ' : notApplicable ? '' : '⚠ '}{label}</SoftBadge>
+}
+
 /** A money row: label left, amount right. `negative` renders red with a minus. */
 export function MoneyRow({ label, value, strong, negative, positive }: { label: string; value: string; strong?: boolean; negative?: boolean; positive?: boolean }) {
   const color = negative ? COLORS.red : positive ? COLORS.green : COLORS.ink
