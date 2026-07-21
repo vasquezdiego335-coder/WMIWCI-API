@@ -1718,7 +1718,10 @@ model MoveCloseout {
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
 
-  booking   Booking             @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  /// RESTRICT, not Cascade: deleting a booking must never destroy the immutable
+  /// FinancialSnapshot rows hanging off this closeout (P1-2). A booking that
+  /// carries financial history cannot be deleted at all.
+  booking   Booking             @relation(fields: [bookingId], references: [id], onDelete: Restrict)
   snapshots FinancialSnapshot[]
   reserves  ReserveAllocation[]
 
