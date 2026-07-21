@@ -8,6 +8,7 @@ import {
   fetchReport, money, pctText, td, tdNum, ProfitCell, Tag,
   type RevProfitRow,
 } from '../_shared'
+import SavedViews from '../SavedViews'
 
 export const dynamic = 'force-dynamic'
 type SP = Record<string, string | string[] | undefined>
@@ -29,6 +30,7 @@ export default async function RevenueVsProfitReport({ searchParams }: { searchPa
 
   return (
     <PageShell title="Revenue versus profit" subtitle="High revenue is not the same as profit. This report shows the difference.">
+      <SavedViews reportType="revenue-profit" canShare={can(role, 'report.save_shared_view')} />
       <FilterBar
         action="/admin/reports/revenue-profit"
         period={period} basis={basis} scope={scope}

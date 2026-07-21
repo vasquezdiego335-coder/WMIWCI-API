@@ -8,6 +8,7 @@ import {
   fetchReport, money, pctText, td, tdNum, ProfitCell, Tag,
   type CustomerRow,
 } from '../_shared'
+import SavedViews from '../SavedViews'
 
 export const dynamic = 'force-dynamic'
 type SP = Record<string, string | string[] | undefined>
@@ -29,6 +30,7 @@ export default async function CustomerReport({ searchParams }: { searchParams: S
 
   return (
     <PageShell title="Customer profitability" subtitle="Ranked by profit, never by revenue alone.">
+      <SavedViews reportType="customers" canShare={can(role, 'report.save_shared_view')} />
       <FilterBar
         action="/admin/reports/customers"
         period={period} basis={basis} scope={scope}

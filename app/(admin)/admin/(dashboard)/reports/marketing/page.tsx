@@ -8,6 +8,7 @@ import {
   fetchReport, money, pctText, td, tdNum, ProfitCell, Tag,
   type MarketingRow,
 } from '../_shared'
+import SavedViews from '../SavedViews'
 
 export const dynamic = 'force-dynamic'
 type SP = Record<string, string | string[] | undefined>
@@ -29,6 +30,7 @@ export default async function MarketingReport({ searchParams }: { searchParams: 
 
   return (
     <PageShell title="Marketing profitability" subtitle="Judged by Profit ROAS — money made per dollar spent, from finalized moves only.">
+      <SavedViews reportType="marketing" canShare={can(role, 'report.save_shared_view')} />
       <FilterBar
         action="/admin/reports/marketing"
         period={period} basis={basis} scope={scope}

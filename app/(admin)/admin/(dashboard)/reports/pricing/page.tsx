@@ -7,6 +7,7 @@ import {
   PageShell, BasisStrip, EmptyState, FilterBar, ResponsiveTable,
   fetchReport, money, pctText, td, tdNum, ProfitCell, Tag, Row,
 } from '../_shared'
+import SavedViews from '../SavedViews'
 
 export const dynamic = 'force-dynamic'
 type SP = Record<string, string | string[] | undefined>
@@ -28,6 +29,7 @@ export default async function PricingReport({ searchParams }: { searchParams: SP
 
   return (
     <PageShell title="Pricing intelligence" subtitle="What similar moves really cost — from finalized history only.">
+      <SavedViews reportType="pricing" canShare={can(role, 'report.save_shared_view')} />
       <FilterBar
         action="/admin/reports/pricing"
         period={period} basis={basis} scope={scope}

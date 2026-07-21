@@ -8,6 +8,7 @@ import {
   fetchReport, money, pctText, td, tdNum, ProfitCell, Tag,
   type VarianceRow,
 } from '../_shared'
+import SavedViews from '../SavedViews'
 
 export const dynamic = 'force-dynamic'
 type SP = Record<string, string | string[] | undefined>
@@ -29,6 +30,7 @@ export default async function VarianceReport({ searchParams }: { searchParams: S
 
   return (
     <PageShell title="Estimate versus actual" subtitle="Where quotes missed — and whether the scope changed after booking.">
+      <SavedViews reportType="variance" canShare={can(role, 'report.save_shared_view')} />
       <FilterBar
         action="/admin/reports/variance"
         period={period} basis={basis} scope={scope}

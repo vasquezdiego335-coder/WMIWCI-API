@@ -8,6 +8,7 @@ import {
   fetchReport, money, pctText, td, tdNum, ProfitCell, Tag,
   type MoveRow,
 } from '../_shared'
+import SavedViews from '../SavedViews'
 
 export const dynamic = 'force-dynamic'
 type SP = Record<string, string | string[] | undefined>
@@ -29,6 +30,7 @@ export default async function MoveProfitabilityReport({ searchParams }: { search
 
   return (
     <PageShell title="Move profitability" subtitle="Every move in the period, with its financial status.">
+      <SavedViews reportType="moves" canShare={can(role, 'report.save_shared_view')} />
       <FilterBar
         action="/admin/reports/moves"
         period={period} basis={basis} scope={scope}

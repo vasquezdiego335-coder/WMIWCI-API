@@ -167,6 +167,12 @@ enum AuditAction {
   REPORT_EXPORTED
   SAVED_VIEW_CREATED
   SAVED_VIEW_DELETED
+  // P1-3: sharing/un-sharing are their own actions — publishing a view to other
+  // users is the security-relevant transition and must be greppable.
+  SAVED_VIEW_UPDATED
+  SAVED_VIEW_RENAMED
+  SAVED_VIEW_SHARED
+  SAVED_VIEW_UNSHARED
   CAMPAIGN_CREATED
   CAMPAIGN_UPDATED
   CAMPAIGN_SPEND_RECORDED
