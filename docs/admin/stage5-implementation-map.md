@@ -1,5 +1,11 @@
 # Stage 5 — implementation map
 
+> **STATUS: IMPLEMENTED.** This was the pre-build planning record. The built
+> system is documented in `stage5-crew-scheduling.md`; the decisions below were
+> followed (JobCrew extended, not forked; conflict engine pure; availability
+> precedence tested first; CREW routed to `/crew`). Kept for the rationale.
+
+
 **Branch `claude/stage5-crew-scheduling`, based on `origin/main` @ `a4833a5b0`
 ("Claude/stage4 financial workflow (#17)").** Written before any Stage 5 code,
 from reading the repository rather than from assumption.
