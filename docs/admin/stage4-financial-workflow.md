@@ -1,29 +1,32 @@
 # Stage 4 — financial workflow: state of play
 
 **Branch `claude/stage4-financial-workflow`. Last updated 2026-07-21.**
-Honest status: the closeout **calculation** foundation is complete and tested.
-The closeout **workflow** is not yet proven against a database.
+Honest status: the closeout **foundation** is complete, tested and built.
+The closeout **workflow** has still never run against a database.
 
 ## Verdict
 
 ```
-STAGE 4 INCOMPLETE
+STAGE 4 CLOSEOUT FOUNDATION COMPLETE — DEPLOYMENT REQUIRED
 ```
 
-`finalize → snapshot → reopen → version two` has never executed against real
-rows. Until it has, nothing downstream (itemized charges, discounts, Leads,
-marketing) should start — that was the whole point of the ordering.
+Everything the workflow needs now exists in code: the owner can configure the
+rates it depends on, a rehearsal can be run without touching a card, a finalized
+move is a frozen record rather than a live opinion, and every surface and export
+states the 40/30/30 policy. What has NOT happened is
+`finalize → snapshot → reopen → version two` against real rows. Until it has,
+nothing downstream (itemized charges, discounts, Leads, marketing) should start.
 
-## The seven defects, and where they stand
+## The seven defects
 
 | | Defect | Status |
 | --- | --- | --- |
 | D1 | `Payment` could not record how money arrived | ✅ real indexed `method` column + `STRIPE` enum value |
 | D2 | A losing move could never be finalized | ✅ `overAllocated` = requested > available |
-| D3 | A synthetic move could never be closed out | ✅ `NO_PAYMENT_DATA` is OVERRIDABLE **only** when `isInternalTest` |
-| D4 | `generalReserveBp` was a dead column | ✅ now THE company-retained share |
+| D3 | A synthetic move could never be closed out | ✅ `internal-rehearsal.ts` — one gate, four conditions, declared side effects |
+| D4 | `generalReserveBp` was a dead column | ✅ now THE company-retained share, frozen at finalization |
 | D5 | Auto-created Jobs were unaudited | ✅ `JOB_CREATED`, exactly once, race-safe |
-| D6 | No pay rates, no crew users | ⚠️ **detection** shipped; the **editing UI is not built**; rates remain owner-supplied |
+| D6 | No pay rates, no crew users | ✅ detection **and** editing — `/admin/staff` configures per-owner and per-crew rates |
 | D7 | No `BusinessConfig` row in production | ✅ seeded with the owner's policy |
 
 ## The 40/30/30 policy
@@ -33,8 +36,8 @@ FINAL company net profit, after every cost and obligation.
 
 Internally that is `generalReserveBp = 4000` plus a 50/50 owner split of the
 remaining 60%. `src/lib/profit-allocation.ts` is THE presentation model that
-converts the internal representation into the owner's terms — every surface must
-render it rather than the raw split.
+converts the internal representation into the owner's terms — every surface
+renders it rather than the raw split.
 
 ```
 $1,000 net → business $400 · Diego $300 · Sebastian $300
@@ -57,94 +60,162 @@ owner allocations can never exceed available profit.
 | --- | --- |
 | Financial Closeout panel | ✅ |
 | Owner Money → Safe to Distribute | ✅ |
-| Job profit summary | ❌ |
-| Finalization review | ❌ (uses the closeout panel's block) |
-| Snapshot history | ❌ |
-| Reports | ❌ |
-| CSV / XLSX / PDF exports | ❌ |
-| Printable summaries | ❌ |
+| Job Profit & Costs | ✅ |
+| Finalization review | ✅ |
+| Snapshot history | ✅ (each version's OWN frozen figures) |
+| Financial Overview | ✅ |
+| Profit and loss | ✅ (its own section, labelled equity activity) |
+| Move profitability | ✅ per move and per period |
+| Revenue versus profit | ✅ |
+| Customer + marketing profitability | ✅ (exports and API; table columns unchanged) |
+| CSV / XLSX / PDF exports | ✅ eleven allocation columns |
+| Printable closeout summary | ✅ `/admin/closeout-summary/[id]` |
 
-**The unfinished surfaces are the main remaining Stage 4 UI work.** The shared
-model makes them mechanical, but they are not done.
+Every surface shows dollars AND the share of final net profit. The internal
+50/50 is never shown on its own.
 
 ## Snapshot durability
 
 `FinancialSnapshot` stores `businessRetainedBp`, `businessRetainedCents`,
-`roundingRemainderCents`, `distributableProfitCents`, `ownerAllocations` and
-`calculationVersion`. `FINALIZE` freezes `businessRetainedBp` onto
-`MoveCloseout`, and `buildCloseoutView` prefers the frozen rate over live
-config — so a later policy change cannot rewrite a closed move.
+`roundingRemainderCents`, `distributableProfitCents`, `ownerAllocations`,
+`allocationLines` (the resolved lines as PRESENTED), `calculationVersion`,
+`configSource` and `configVersion`.
 
-**Not yet proven:** reports and exports do not read snapshots at all, so the
-"reports use frozen values" requirement is untestable until they do.
+`allocationFromSnapshot` reads them and consults **no live configuration at
+all**. Reports read it for every finalized move. Consequently:
+
+* changing `generalReserveBp` cannot restate a closed move
+* changing the owner split cannot restate a closed move
+* changing an owner's labor rate cannot restate a closed move
+* reopening supersedes v1 and writes v2; v1 stays byte-for-byte as it was
+
+The closeout panel shows the frozen figures and, when live numbers have drifted,
+says so — without changing either.
+
+Snapshots written before Stage 4 have no `allocationLines`; they are restated
+from their existing frozen amounts, still without live config, and contribute
+zero allocation to a period total rather than a guess.
 
 ## D3 — the internal-test rehearsal pathway
 
-One line of behaviour, not a subsystem. When `booking.isInternalTest`,
-`NO_PAYMENT_DATA` drops HARD → OVERRIDABLE. Everything else was already
-enforced by `canOverrideBlocker`:
+`src/lib/internal-rehearsal.ts`. All four conditions must hold:
 
-* OWNER only (`closeout.override_blocker`)
-* written reason, rejected on empty/whitespace
-* audited as `CLOSEOUT_OVERRIDE_USED` with the reason
-* no Stripe, email or SMS — the closeout path calls none of them
-* synthetic revenue already excluded by `money-rules`
+* the booking is `isInternalTest`
+* the actor is an OWNER (`closeout.override_blocker`)
+* a written reason is supplied (whitespace is not a reason)
+* `INTERNAL_REHEARSAL_DISABLED` is not `true`
 
-A real booking cannot take this path: the severity gate refuses an owner with a
-valid reason (422). Omitting the flag defaults to STRICT. The flag unlocks
-nothing else — `LABOR_MISSING_RATE` stays HARD, `REFUND_EXCEEDS_PAYMENT` is
-never softened.
+Order matters: the internal-test check runs FIRST, so a real booking is refused
+with a message about the booking rather than about the person.
 
-## D6 — what the owner must still configure
+Guaranteed non-events, declared in `REHEARSAL_SIDE_EFFECTS` and recorded in the
+audit entry: no Stripe operation, no customer email, no customer SMS, no
+customer Discord message. Synthetic revenue is excluded from reporting by
+`money-rules`. The rehearsal is audited as `CLOSEOUT_REHEARSAL` in addition to
+`CLOSEOUT_OVERRIDE_USED`, so synthetic activity is findable without parsing
+reasons.
 
-`src/lib/financial-setup.ts` reports what is unset; the dashboard shows
-**"Financial setup required"** above the money with a linked checklist. It
-REPORTS ONLY — a test asserts its output contains no number that could be
-mistaken for a configured rate.
+It covers `NO_PAYMENT_DATA` and nothing else. `LABOR_MISSING_RATE` stays HARD;
+`REFUND_EXCEEDS_PAYMENT` is never softened.
 
-Outstanding in production:
+## D6 — labor-rate configuration
 
-* Diego's owner labor value — **owner must set**
-* Sebastian's owner labor value — **owner must set**
-* At least one active crew member — **owner must add**
-* A default rate per crew member — **owner must set**
+`/admin/staff`, owner-only, via `PATCH /api/admin/staff/[id]/rates`.
 
-A missing rate stays a HARD blocker (`LABOR_MISSING_RATE`) and is never treated
-as $0. An owner CASH rate is optional — owners taking no wage is valid.
+Per owner: economic labor rate, optional cash rate, pay type, active, effective
+date, notes, updated-by and updated-at. Per crew member: default hourly rate,
+flat-rate option, role, worker type, active, driver eligibility, crew-leader
+eligibility.
 
-**The editing UI is not built.** Rates cannot currently be set through the admin.
+```
+Financial labor setup
 
-## Migration
+Diego owner labor rate: Not configured
+Sebastian owner labor rate: Not configured
+Active crew members: 0
+```
 
-`20260721180000_stage4_payment_method_and_retained_share` — **additive only**:
-every column nullable or defaulted, two enum values (`PaymentMethod.STRIPE`,
-`AuditAction.JOB_CREATED`), one index. Safe on a live database, no backfill, no
-downtime. The deployed app keeps working if it lands first.
+> Owner labor rates estimate the economic cost of owner work.
+> They are separate from the 30% owner profit allocations.
+
+* A blank rate is **not configured**, never $0. An explicit $0 economic rate is
+  refused with a message offering blank instead.
+* The business-wide `ownerEconomicRateCents` (column default $30/h — a number
+  nobody chose) can no longer answer for an owner. Each owner's gap is reported
+  separately.
+* `buildRateSnapshot` no longer falls back to $30/h for owner labor. Unset means
+  NULL, which surfaces as `LABOR_MISSING_RATE`.
+* Changing a profile rate does not touch any `JobCrew` snapshot.
+* Owner-only, audited as `LABOR_RATE_CONFIGURED` with before and after.
+* A manager on `/admin/staff` is not sent the values at all.
+
+**Still owner-supplied in production:** Diego's rate, Sebastian's rate, and any
+crew members with their rates. The software will not guess them.
+
+## Migrations
+
+Three, all **additive only** — every column nullable or defaulted, enum values
+added, no backfill, no downtime, safe if they land before the code:
+
+* `20260721180000_stage4_payment_method_and_retained_share`
+* `20260721190000_stage4_labor_rate_configuration`
+* `20260721190100_stage4_snapshot_allocation_provenance`
 
 **Not applied anywhere.** No staging database exists.
 
-## Remaining work, in order
+## Deployment sequence
 
-1. Owner rate-configuration UI (D6 editing)
-2. 40/30/30 on the six unfinished surfaces, exports included
-3. Make reports/exports read finalized snapshots, then test frozen values
-4. Open the Stage 4 PR
-5. Back up Neon → merge → `npx prisma migrate deploy` → verify status + health
-6. Run the end-to-end internal closeout and prove finalize → snapshot → reopen →
-   version two
-7. Only then: itemized charges, discounts/credits/write-offs, Leads, marketing
+Do not start until the PR is reviewed.
 
-## Verification at last commit
+1. Review the Stage 4 PR; confirm migrations and matching code are in it.
+2. **Back up production Neon.**
+3. Merge.
+4. Railway runs `npx prisma migrate deploy`.
+5. Confirm `npx prisma migrate status` → `Database schema is up to date!`
+6. Confirm Railway deployment health.
+7. Enter Diego's and Sebastian's labor rates through `/admin/staff`.
+   **Do not enter guessed rates.**
+
+## End-to-end verification (after deployment)
+
+One safe internal closeout rehearsal, on a disposable internal-test booking —
+never a real customer:
+
+1. Create an internal-test booking with no Stripe payment.
+2. Ensure exactly one Job; verify the `JOB_CREATED` audit entry.
+3. Record a synthetic manual test payment; verify `Payment.method` persists.
+4. Assign synthetic labor with a frozen rate; record hours and a break; approve.
+5. Add one approved expense and one rejected expense; verify the rejected one is
+   excluded.
+6. Calculate final company net profit; confirm Business 40 / Diego 30 /
+   Sebastian 30.
+7. Finalize. Re-read the snapshot **from the database**.
+8. Change live configuration; prove the snapshot is unchanged.
+9. Reopen with a reason; add a late synthetic expense; finalize version two.
+10. Verify v1 is unchanged and superseded, and v2 carries the new values.
+11. Remove the disposable records if the environment is meant to stay clean.
+
+Only when that passes does the verdict become
+`STAGE 4 CLOSEOUT FOUNDATION DEPLOYED AND VERIFIED`.
+
+## Verification at this commit
 
 ```
 git diff --check     clean
 npx prisma validate  schema valid
 npx prisma generate  ok
 npx tsc --noEmit     0 errors
-npm test             963/963 pass   (909 at branch point)
+npm test             1068/1068 pass   (963 at the previous commit)
 npm run build        compiled successfully
 ```
 
-Test files added this stage: `profit-policy.test.ts` (19),
-`profit-allocation.test.ts` (14), `stage4-closeout-foundation.test.ts` (18),
-plus `scripts/stage4-closeout-rehearsal.ts`.
+Test files this stage: `profit-policy.test.ts` (19),
+`profit-allocation.test.ts` (14), `stage4-closeout-foundation.test.ts` (20),
+`labor-rates.test.ts` (22), `internal-rehearsal.test.ts` (17),
+`stage4-allocation-reporting.test.ts` (33). All registered in `npm test`.
+
+## After this, in order
+
+1. Deploy and run the end-to-end verification above.
+2. Then, and only then: itemized charges, discounts/credits/write-offs, Leads,
+   marketing, worker operations, Stage 5.
