@@ -34,6 +34,19 @@ export const C = {
   orangeTint: '#FFF0E6',
   orangeInk: '#B8480A',
   navyTint: '#EBEEF3',
+
+  // ── Brand-family neutrals (promoted 2026-07-20) ──────────────────────────
+  // These five were already in use, hard-coded as bare hexes across six
+  // templates and _ui itself. They are legitimate tints of the brand neutrals,
+  // but as magic numbers they could not be audited and drifted invisibly.
+  // Naming them makes the palette test (src/emails/__tests__/brand.test.ts) the
+  // single source of truth: a NEW unnamed hex now fails the build.
+  footerRule: '#DCD7CC', // hairline on the bone footer background
+  dotMuted: '#D8D3C8', // timeline / step dots on bone
+  goldEdge: '#EAD9B0', // gold-tint chip border
+  orangeEdge: '#FBD9C2', // orange-tint chip border
+  onNavyMuted: '#AEB8C6', // secondary text ON the navy panel
+  onNavyStrong: '#F7F7F2', // primary text/badge ON the navy panel (bone)
 } as const
 
 export const FONT =
@@ -266,7 +279,7 @@ export function HeroTruckArt() {
       <tbody>
         <tr>
           <td align="center" style={{ padding: '4px 0' }}>
-            <svg width="320" height="123" viewBox="0 0 520 200" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Move It Clear It — your movers are on the way" style={{ display: 'block', maxWidth: '100%' }}>
+            <svg width="320" height="123" viewBox="0 0 520 200" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Move It Clear It moving truck" style={{ display: 'block', maxWidth: '100%' }}>
               {/* celebration sparkles */}
               <path d="M118 67 L121 74 L128 76 L121 78 L118 85 L115 78 L108 76 L115 74 Z" fill="#D4A24C" />
               <path d="M404 60 L408 68 L416 71 L408 74 L404 82 L400 74 L392 71 L400 68 Z" fill="#D4A24C" />
@@ -312,7 +325,7 @@ export function HeroTruckArt() {
 // ─────────────────────────────────────────────────────────────────────────
 export function AnimatedHero({
   heroGifUrl = HERO_IMG_URL,
-  alt = 'Your movers are on the way',
+  alt = 'Move It Clear It',
   width = 320,
   height = 123,
   children,
@@ -662,8 +675,8 @@ export function Callout({
   children: React.ReactNode
 }) {
   const map = {
-    gold: { bg: C.goldTint, br: '#EAD9B0' },
-    orange: { bg: C.orangeTint, br: '#FBD9C2' },
+    gold: { bg: C.goldTint, br: C.goldEdge },
+    orange: { bg: C.orangeTint, br: C.orangeEdge },
     bone: { bg: C.inset, br: C.hair },
   } as const
   const t = map[tone]
@@ -747,7 +760,9 @@ export function PrimaryButton({ href, label }: { href: string; label: string }) 
               className="cta"
               style={{
                 background: C.orange,
-                color: '#FFFFFF',
+                // Ink-navy label on Ember-orange: ~5.8:1 contrast (passes WCAG AA),
+                // higher than white-on-orange (~3:1). (a11y, owner spec 2026-07-17)
+                color: C.navy,
                 fontFamily: FONT,
                 fontSize: '16px',
                 fontWeight: 700,
@@ -858,6 +873,76 @@ export function ContactRow({
   )
 }
 
+// ═════════════════════════════════════════════════════════════════════════
+//  COMPOSITE BLOCKS (Phase 8 — shared component library).
+//  Every template repeated the same hero card and the same support card. These
+//  two primitives consolidate that. `HeroBlock` is fully parameterized so a
+//  template passes its exact accent/hero/title sizing (no visual drift on
+//  adoption); `SupportBlock` is the byte-identical phone+contact card.
+// ═════════════════════════════════════════════════════════════════════════
+export function HeroBlock({
+  accent = C.orange,
+  hero,
+  pill,
+  pillTone = 'orange',
+  title,
+  sub,
+  titleSize = 26,
+  subMaxWidth = 430,
+}: {
+  /** borderTop accent color for the card. */
+  accent?: string
+  /** The hero visual — an <IconChip/> or <AnimatedHero/>. */
+  hero: React.ReactNode
+  pill?: React.ReactNode
+  pillTone?: 'gold' | 'orange' | 'navy'
+  title: React.ReactNode
+  sub: React.ReactNode
+  /** h1 font-size in px (line-height derives as size + 7). */
+  titleSize?: number
+  subMaxWidth?: number
+}) {
+  return (
+    <Card style={{ borderTop: `3px solid ${accent}` }}>
+      <div className="heropad" style={{ textAlign: 'center' as const }}>
+        {hero}
+        <Spacer h={16} />
+        {pill ? <Pill tone={pillTone}>{pill}</Pill> : null}
+        <h1
+          className="h1"
+          style={{ fontFamily: FONT, fontSize: `${titleSize}px`, lineHeight: `${titleSize + 7}px`, fontWeight: 800, letterSpacing: '-0.4px', color: C.navy, margin: '16px 0 10px' }}
+        >
+          {title}
+        </h1>
+        <p style={{ ...P, marginBottom: 0, maxWidth: `${subMaxWidth}px`, marginLeft: 'auto', marginRight: 'auto' }}>{sub}</p>
+      </div>
+    </Card>
+  )
+}
+
+export function SupportBlock({
+  title,
+  phone,
+  email,
+  website,
+  websiteLabel,
+  labels,
+}: {
+  title: string
+  phone: string
+  email: string
+  website: string
+  websiteLabel: string
+  labels?: { phone?: string; email?: string; website?: string }
+}) {
+  return (
+    <Card>
+      <Eyebrow icon="phone" title={title} tone="navy" />
+      <ContactRow phone={phone} email={email} website={website} websiteLabel={websiteLabel} labels={labels} />
+    </Card>
+  )
+}
+
 // ─────────────────────────────────────────────────────────────────────────
 //  CONTACT STRIP  —  prominent phone + website pills (stack on mobile)
 // ─────────────────────────────────────────────────────────────────────────
@@ -927,7 +1012,10 @@ export function SocialChips({
   tiktok?: string
   google?: string
 }) {
-  const chip = (letter: string, href: string) => (
+  // Phase 3: hide a social chip when its real profile URL isn't configured
+  // (placeholder '#' / empty) — never render a dead social link.
+  const chip = (letter: string, href: string) =>
+    !href || href === '#' ? null : (
     <td style={{ padding: '0 5px' }}>
       <a
         href={href}
@@ -967,18 +1055,12 @@ export function SocialChips({
 // ─────────────────────────────────────────────────────────────────────────
 //  FOOTER
 // ─────────────────────────────────────────────────────────────────────────
-export function Footer({
-  disclaimer,
-  legalExtra,
-  year = new Date().getFullYear(),
-  phone,
-  email,
-  websiteLabel,
-  manageUrl = '#',
-  unsubscribeUrl = '#',
-  social,
-  labels,
-}: {
+// A link is renderable only if it is a real destination — never a placeholder
+// '#' / empty / javascript: URL. Keeps the footer from shipping a dead link.
+const footerLinkOk = (u?: string): u is string =>
+  !!u && u.trim() !== '' && u.trim() !== '#' && !/^javascript:/i.test(u.trim())
+
+export interface FooterProps {
   disclaimer: React.ReactNode
   legalExtra?: React.ReactNode
   year?: number
@@ -987,15 +1069,42 @@ export function Footer({
   websiteLabel: string
   manageUrl?: string
   unsubscribeUrl?: string
+  /** Physical postal address (CAN-SPAM requires it on promotional mail). */
+  postalAddress?: string
+  /**
+   * 'transactional' (default) — a receipt / confirmation / reminder tied to a
+   * booking. CAN-SPAM-exempt: NO unsubscribe row (and we never point unsubscribe
+   * at the booking page). 'marketing' — a promotional nudge: renders the
+   * unsubscribe link (when a real URL is supplied) + the postal address.
+   */
+  kind?: 'transactional' | 'marketing'
   social?: { instagram?: string; facebook?: string; tiktok?: string; google?: string }
   labels?: { manage?: string; unsubscribe?: string; rights?: string }
-}) {
+}
+
+export function Footer({
+  disclaimer,
+  legalExtra,
+  year = new Date().getFullYear(),
+  phone,
+  email,
+  websiteLabel,
+  manageUrl,
+  unsubscribeUrl,
+  postalAddress,
+  kind = 'transactional',
+  social,
+  labels,
+}: FooterProps) {
   const L = {
     manage: 'Manage preferences',
     unsubscribe: 'Unsubscribe',
     rights: 'All rights reserved.',
     ...(labels || {}),
   }
+  // Marketing mail only: show unsubscribe/manage, and only for real URLs.
+  const showUnsub = kind === 'marketing' && footerLinkOk(unsubscribeUrl)
+  const showManage = kind === 'marketing' && footerLinkOk(manageUrl)
   return (
     <Section style={{ padding: '30px 22px 8px', textAlign: 'center' as const }}>
       <div style={{ fontFamily: FONT, fontSize: '14px', fontWeight: 800, letterSpacing: '0.5px', color: C.navy }}>
@@ -1007,7 +1116,7 @@ export function Footer({
 
       <SocialChips {...(social || {})} />
 
-      <div style={{ height: '1px', background: '#DCD7CC', margin: '20px auto', maxWidth: '360px', fontSize: 0, lineHeight: '1px' }}>
+      <div style={{ height: '1px', background: C.footerRule, margin: '20px auto', maxWidth: '360px', fontSize: 0, lineHeight: '1px' }}>
         &nbsp;
       </div>
 
@@ -1022,18 +1131,34 @@ export function Footer({
       <div style={{ fontFamily: FONT, fontSize: '11px', color: C.label, marginTop: '14px' }}>
         &copy; {year} Move It Clear It. {L.rights}
       </div>
-      <div style={{ marginTop: '8px' }}>
-        <a href={manageUrl} style={{ fontFamily: FONT, fontSize: '11px', color: C.muted, textDecoration: 'underline' }}>
-          {L.manage}
-        </a>
-        <span style={{ color: C.label }}> &nbsp;&middot;&nbsp; </span>
-        <a href={unsubscribeUrl} style={{ fontFamily: FONT, fontSize: '11px', color: C.muted, textDecoration: 'underline' }}>
-          {L.unsubscribe}
-        </a>
-      </div>
+
+      {postalAddress && postalAddress.trim() ? (
+        <div style={{ fontFamily: FONT, fontSize: '11px', color: C.label, marginTop: '6px' }}>{postalAddress}</div>
+      ) : null}
+
+      {showManage || showUnsub ? (
+        <div style={{ marginTop: '8px' }}>
+          {showManage ? (
+            <a href={manageUrl} style={{ fontFamily: FONT, fontSize: '11px', color: C.muted, textDecoration: 'underline' }}>
+              {L.manage}
+            </a>
+          ) : null}
+          {showManage && showUnsub ? <span style={{ color: C.label }}> &nbsp;&middot;&nbsp; </span> : null}
+          {showUnsub ? (
+            <a href={unsubscribeUrl} style={{ fontFamily: FONT, fontSize: '11px', color: C.muted, textDecoration: 'underline' }}>
+              {L.unsubscribe}
+            </a>
+          ) : null}
+        </div>
+      ) : null}
     </Section>
   )
 }
+
+// Named intent wrappers (Phase 3). Prefer these at call sites so the email's
+// class is explicit and can't drift: a receipt can never render an unsubscribe.
+export const TransactionalFooter = (props: Omit<FooterProps, 'kind'>) => <Footer {...props} kind="transactional" />
+export const MarketingFooter = (props: Omit<FooterProps, 'kind'>) => <Footer {...props} kind="marketing" />
 
 // ═════════════════════════════════════════════════════════════════════════
 //  ICONS  —  inline SVG (renders in Apple Mail / iOS / Gmail; degrades to the
@@ -1375,7 +1500,7 @@ export function HTimeline({ steps }: { steps: TLStep[] }) {
     }
     return (
       <td width={32} height={32} align="center" valign="middle" style={{ width: '32px', height: '32px', background: '#FFFFFF', border: `2px solid ${C.hair}`, borderRadius: '50%' }}>
-        <span style={{ display: 'inline-block', width: '8px', height: '8px', borderRadius: '50%', background: '#D8D3C8' }}>&nbsp;</span>
+        <span style={{ display: 'inline-block', width: '8px', height: '8px', borderRadius: '50%', background: C.dotMuted }}>&nbsp;</span>
       </td>
     )
   }

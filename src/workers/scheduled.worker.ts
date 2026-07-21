@@ -5,6 +5,8 @@ import { emailQueue, discordQueue, scheduledQueue, smsQueue } from '../lib/queue
 import { queueLogger } from '../lib/logger'
 import { deleteFiles } from '../lib/cloudinary'
 import { runFollowup, type FollowupType } from '../lib/followups'
+import { quoteFollowupBlockReason } from '../lib/journeys'
+import { isSafeUrl } from '../emails/validation'
 import { etDayRange, moveDateInRange, effectiveMoveDate } from '../lib/scheduling'
 import { dayOfMoveSms } from '../lib/waiting-time'
 import type { ScheduledJobData } from '../lib/queues'
@@ -47,43 +49,78 @@ async function processScheduledJob(job: Job<ScheduledJobData>): Promise<void> {
   const log = queueLogger.child({ jobId: job.id, type })
 
   switch (type) {
-    // ── Abandoned checkout recovery (2h after checkout created) ──
-    case 'abandoned-checkout-recovery': {
+    // ── Abandoned checkout recovery — 3 stages, one template ──────
+    // Scheduled by src/lib/journeys.onCheckoutStarted. Each stage re-reads the
+    // booking: the moment the deposit is paid, or the booking is cancelled, or
+    // the move date passes, the remaining stages self-cancel. The email worker's
+    // stillWantedForBooking() checks the SAME conditions once more immediately
+    // before the provider call, so a stage that slips through here still dies.
+    case 'abandoned-checkout-recovery':
+    case 'abandoned-checkout-recovery-2':
+    case 'abandoned-checkout-recovery-3': {
       if (!bookingId) break
+      const stage = type === 'abandoned-checkout-recovery' ? 1 : type === 'abandoned-checkout-recovery-2' ? 2 : 3
       const booking = await prisma.booking.findUnique({
         where: { id: bookingId },
         include: { customer: true },
       })
-      if (!booking || booking.status !== 'PENDING_PAYMENT') {
-        log.info('Booking already paid or cancelled — skipping recovery')
+      if (!booking) break
+      if (booking.status !== 'PENDING_PAYMENT') {
+        log.info({ bookingId, stage, status: booking.status }, 'Booking advanced — skipping recovery stage')
         break
       }
-      await emailQueue.add('abandoned-checkout', {
-        template: 'abandoned-checkout',
+      if (booking.isInternalTest) break
+
+      // Never chase a date that has already gone by.
+      const target = effectiveMoveDate(booking)
+      if (target && target.getTime() + 24 * 3_600_000 < Date.now()) {
+        log.info({ bookingId, stage }, 'Move date passed — skipping recovery stage')
+        break
+      }
+
+      // The continuation URL must be real. An unusable "finish your booking"
+      // link is worse than no email — the guard's URL gate would block it, but
+      // we skip early so the reason is recorded honestly.
+      if (!process.env.APP_URL) {
+        log.warn({ bookingId, stage }, 'APP_URL unset — cannot build a continuation URL; skipping')
+        break
+      }
+      const appUrl = process.env.APP_URL.replace(/\/+$/, '')
+
+      await emailQueue.add(`abandoned-checkout-${stage}`, {
+        // One template, three send times + three subjects (same pattern the
+        // 72h/24h reminder already uses).
+        template: stage === 1 ? 'abandoned-checkout' : stage === 2 ? 'abandoned-checkout-2' : 'abandoned-checkout-3',
         to: booking.customer.email,
         bookingId,
         payload: {
           customerName: booking.customer.name,
           displayId: booking.displayId,
           requestedDate: booking.requestedDate?.toISOString(),
-          checkoutUrl: `${process.env.APP_URL}/api/stripe/checkout?resume=${bookingId}`,
-          portalUrl: `${process.env.APP_URL}/my-booking/${booking.customerToken}`,
+          checkoutUrl: `${appUrl}/api/stripe/checkout?resume=${bookingId}`,
+          portalUrl: `${appUrl}/my-booking/${booking.customerToken}`,
           heroGifUrl: process.env.EMAIL_HERO_GIF_URL || 'https://moveitclearit.com/email/truck-hero.gif',
           locale: booking.customer.locale,
+          journey: 'abandoned',
+          stage,
         },
       })
-      log.info({ bookingId }, 'Abandoned checkout recovery email queued')
+      log.info({ bookingId, stage }, 'Abandoned checkout recovery email queued')
       break
     }
 
-    // ── 24h job reminder ──────────────────────────────────────────
+    // ── 72h / 24h job reminders (transactional) ───────────────────
+    case 'job-reminder-72h':
     case 'job-reminder-24h': {
       if (!bookingId) break
+      const is24h = type === 'job-reminder-24h'
       const booking = await prisma.booking.findUnique({
         where: { id: bookingId },
         include: { customer: true },
       })
       if (!booking || !['CONFIRMED', 'SCHEDULED'].includes(booking.status)) break
+      if (booking.isInternalTest) break
+      const es = booking.customer.locale === 'es'
       await emailQueue.add('job-reminder', {
         template: 'job-reminder',
         to: booking.customer.email,
@@ -93,20 +130,83 @@ async function processScheduledJob(job: Job<ScheduledJobData>): Promise<void> {
           displayId: booking.displayId,
           scheduledStart: booking.scheduledStart?.toISOString(),
           timeLabel: booking.arrivalWindow ?? undefined,
-          leadLabel: booking.customer.locale === 'es' ? 'mañana' : 'tomorrow',
+          leadLabel: is24h ? (es ? 'mañana' : 'tomorrow') : es ? 'en 3 días' : 'in 3 days',
           originAddress: booking.originAddress,
           portalUrl: `${process.env.APP_URL}/my-booking/${booking.customerToken}`,
           heroGifUrl: process.env.EMAIL_HERO_GIF_URL || 'https://moveitclearit.com/email/truck-hero.gif',
           locale: booking.customer.locale,
         },
       })
-      log.info({ bookingId }, '24h job reminder queued')
+      log.info({ bookingId, type }, 'job reminder queued')
+      break
+    }
+
+    // ── Quote follow-up (LEAD-scoped) ─────────────────────────────
+    // Only ever sent for a lead with a REAL quotedAt. quoteFollowupBlockReason
+    // is the shared stop-rule check (converted / lost / move date passed).
+    case 'quote-followup-1':
+    case 'quote-followup-2':
+    case 'quote-followup-final': {
+      const leadId = job.data.leadId
+      if (!leadId) break
+      const lead = await prisma.lead.findUnique({
+        where: { id: leadId },
+        select: {
+          name: true,
+          email: true,
+          status: true,
+          quotedAt: true,
+          bookedAt: true,
+          lostAt: true,
+          moveDate: true,
+          convertedBookingId: true,
+          jobType: true,
+        },
+      })
+      const block = quoteFollowupBlockReason(lead)
+      if (block) {
+        log.info({ leadId, type, reason: block }, 'quote follow-up skipped')
+        break
+      }
+      const stage = type === 'quote-followup-1' ? 1 : type === 'quote-followup-2' ? 2 : 3
+      await emailQueue.add(type, {
+        template: type,
+        to: lead!.email as string,
+        // Carried through the hop so the email worker can recheck the lead
+        // immediately before sending (finding EMAIL-P1-12).
+        leadId,
+        // STABLE business identity: lead + journey stage. The previous key was
+        // the generated queue job id, so a scheduler retry minted a NEW key and
+        // produced a second logical send of the same stage.
+        businessEventKey: `lead:${leadId}:${type}`,
+        payload: {
+          customerName: lead!.name,
+          jobType: lead!.jobType ?? undefined,
+          moveDate: lead!.moveDate?.toISOString(),
+          bookingUrl: `${(process.env.MARKETING_SITE_URL || 'https://www.moveitclearit.com').replace(/\/+$/, '')}/booking-form.html?utm_source=email&utm_medium=lifecycle&utm_campaign=quote-followup&utm_content=stage-${stage}`,
+          locale: 'en',
+          journey: 'quote',
+          stage,
+        },
+      })
+      log.info({ leadId, stage }, 'quote follow-up queued')
       break
     }
 
     // ── 48h post-completion review request ────────────────────────
     case 'review-request-48h': {
       if (!bookingId) break
+      // CONFIGURATION GATE (finding EMAIL-P1-15): never queue a review request
+      // without a verified destination. The old default was a placeholder
+      // Google URL, so an unconfigured environment mailed customers a dead link.
+      const reviewDestination = process.env.GOOGLE_REVIEW_URL?.trim() ?? ''
+      if (!isSafeUrl(reviewDestination)) {
+        log.error(
+          { bookingId, configured: Boolean(reviewDestination) },
+          'GOOGLE_REVIEW_URL is missing or not a valid destination — review request NOT queued'
+        )
+        break
+      }
       const booking = await prisma.booking.findUnique({
         where: { id: bookingId },
         include: { customer: true },
@@ -118,7 +218,7 @@ async function processScheduledJob(job: Job<ScheduledJobData>): Promise<void> {
         bookingId,
         payload: {
           customerName: booking.customer.name,
-          googleReviewUrl: process.env.GOOGLE_REVIEW_URL || 'https://g.page/r/REPLACE_WITH_GOOGLE_REVIEW_LINK/review',
+          googleReviewUrl: reviewDestination,
           portalUrl: `${process.env.APP_URL}/my-booking/${booking.customerToken}`,
           heroGifUrl: process.env.EMAIL_HERO_GIF_URL || 'https://moveitclearit.com/email/truck-hero.gif',
           locale: booking.customer.locale,

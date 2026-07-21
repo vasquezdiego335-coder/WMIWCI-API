@@ -2,7 +2,7 @@ import * as React from 'react'
 import {
   Shell,
   LogoHeader,
-  AnimatedHero,
+  IconChip,
   Card,
   Eyebrow,
   Pill,
@@ -10,8 +10,8 @@ import {
   Checklist,
   Spacer,
   PrimaryButton,
-  ContactRow,
-  Footer,
+  SupportBlock,
+  MarketingFooter,
   C,
   FONT,
   P,
@@ -31,12 +31,18 @@ interface Props {
   amountHold?: string
   portalUrl?: string
   heroGifUrl?: string
+  /** Promotional unsubscribe URL (NEVER the booking page). Optional until the
+      unsubscribe route ships. */
+  unsubscribeUrl?: string
+  postalAddress?: string
   phone?: string
   email?: string
   website?: string
   websiteLabel?: string
   social?: { instagram?: string; facebook?: string; tiktok?: string; google?: string }
   locale?: string
+  /** Recovery stage 1 | 2 | 3 — varies the copy, not the layout. */
+  stage?: number
 }
 
 export default function AbandonedCheckoutEmail({
@@ -46,6 +52,9 @@ export default function AbandonedCheckoutEmail({
   amountHold,
   portalUrl = '#',
   heroGifUrl,
+  unsubscribeUrl,
+  stage = 1,
+  postalAddress,
   phone = '862-640-0625',
   email = 'hello@moveitclearit.com',
   website = 'https://moveitclearit.com',
@@ -58,40 +67,77 @@ export default function AbandonedCheckoutEmail({
     ? new Date(requestedDate).toLocaleDateString(es ? 'es-US' : 'en-US', { weekday: 'long', month: 'long', day: 'numeric', timeZone: 'America/New_York' })
     : undefined
 
+  // ── STAGE COPY (recovery 1 / 2 / 3) ───────────────────────────────────
+  // One template, three send times — the same pattern the 72h/24h reminder
+  // uses. Each stage does a DIFFERENT job rather than repeating the nudge:
+  //   1 (~45 min) — a helpful link back; they may simply have been interrupted
+  //   2 (~24 h)   — answer the objection: what labor-only actually includes
+  //   3 (~72 h)   — ask whether plans changed, and make leaving easy
+  //
+  // NOTHING here claims a countdown, a held slot, or a date about to be taken.
+  // We do not check live availability at send time, so any such line would be
+  // invented scarcity. The earlier "before someone else takes the slot" copy
+  // was removed for exactly that reason.
+  const stageCopy = (s: number) =>
+    es
+      ? {
+          1: { pill: 'Casi listo', h1: 'Tu reserva quedó a medias.', lead: 'Aquí está tu enlace para terminarla.' },
+          2: { pill: 'Qué incluye', h1: '¿Preguntas antes de reservar?', lead: 'Esto es exactamente lo que hacemos.' },
+          3: { pill: '¿Seguimos?', h1: '¿Cambiaron tus planes?', lead: 'Sin problema — solo queremos saber.' },
+        }[s] ?? { pill: 'Casi listo', h1: 'Tu reserva quedó a medias.', lead: '' }
+      : {
+          1: { pill: 'Almost there', h1: 'Your booking is half-finished.', lead: "Here's your link back to it." },
+          2: { pill: "What's included", h1: 'Questions before you book?', lead: "Here's exactly what we do." },
+          3: { pill: 'Still moving?', h1: 'Did your plans change?', lead: "No problem — we'd just like to know." },
+        }[s] ?? { pill: 'Almost there', h1: 'Your booking is half-finished.', lead: '' }
+
+  const sc = stageCopy(stage)
+
   const t = es
     ? {
-        preview: `Tu fecha sigue disponible — termina tu reserva con un depósito de ${money(amountHold, es)}.`,
-        pill: 'Casi listo',
-        h1: 'Tu fecha sigue disponible.',
-        sub: `Hola ${customerName}, empezaste tu reserva pero no completaste el depósito de ${money(amountHold, es)}${dateStr ? ` para el ${dateStr}` : ''}. Asegúrala antes de que alguien más la tome.`,
+        preview: `Termina tu reserva cuando quieras — depósito de ${money(amountHold, es)}.`,
+        pill: sc.pill,
+        h1: sc.h1,
+        sub: `Hola ${customerName}, empezaste tu reserva pero no completaste el depósito de ${money(amountHold, es)}${dateStr ? ` para el ${dateStr}` : ''}. ${sc.lead}`,
         whyTitle: 'Por qué reservar con nosotros',
         why: [
           'Solo mano de obra — pagas por músculo, no por el margen del intermediario.',
-          'Movers profesionales + equipo de mudanza incluido.',
-          'Precio fijo y transparente — sin cargos ocultos.',
-          'Más de 50 mudanzas completadas en Nueva Jersey.',
+          'Cargamos, descargamos, o las dos cosas — tú decides.',
+          'Tú pones el camión de alquiler; nosotros ponemos el equipo de trabajo.',
+          'Equipo local de Nueva Jersey, no un centro de llamadas nacional.',
         ],
         cta: 'Completar mi reserva',
-        holdNote: `El depósito de ${money(amountHold, es)} es una retención — solo asegura tu lugar y se aplica al total de tu mudanza.`,
+        holdNote: `El depósito de ${money(amountHold, es)} es una retención, no un cargo — se aplica al total de tu mudanza.`,
         supportTitle: '¿Preguntas?',
         contactLabels: { phone: 'Llama o escribe', email: 'Correo', website: 'Sitio web' },
         disclaimer: 'Te escribimos porque comenzaste una reserva con nosotros. ¿Ya no la necesitas? Puedes ignorar este correo.',
         footerLabels: { manage: 'Administrar preferencias', unsubscribe: 'Cancelar suscripción', rights: 'Todos los derechos reservados.' },
       }
     : {
-        preview: `Your date is still open — finish your booking with a ${money(amountHold, es)} deposit.`,
-        pill: 'Almost there',
-        h1: 'Your date is still available.',
-        sub: `Hi ${customerName}, you started your booking but didn't finish the ${money(amountHold, es)} deposit${dateStr ? ` for ${dateStr}` : ''}. Lock it in before someone else takes the slot.`,
+        preview: `Finish your booking whenever you're ready — ${money(amountHold, es)} deposit.`,
+        pill: sc.pill,
+        h1: sc.h1,
+        sub: `Hi ${customerName}, you started your booking but didn't finish the ${money(amountHold, es)} deposit${dateStr ? ` for ${dateStr}` : ''}. ${sc.lead}`,
         whyTitle: 'Why book with us',
         why: [
+          // CLAIMS REMOVED (finding EMAIL-P1-14). Each of the following was
+          // asserted with nothing in configuration or data to back it:
+          //  • "moving equipment included" — not a verified service inclusion
+          //  • "flat-rate pricing — no hidden fees" — stairs, travel, truck
+          //    add-on and access fees can all apply, so this was untrue
+          //  • "50+ completed moves across New Jersey" — a hard-coded count
+          //    with no source and no counting rule
+          // What remains is only what the business model itself guarantees.
           'Labor-only — you pay for muscle, not a middleman markup.',
-          'Professional movers + moving equipment included.',
-          'Transparent flat-rate pricing — no hidden fees.',
-          '50+ completed moves across New Jersey.',
+          'We load, unload, or both — you tell us which.',
+          'You keep your own rental truck; we bring the crew.',
+          'Local New Jersey crew, not a national call centre.',
         ],
         cta: 'Complete my booking',
-        holdNote: `The ${money(amountHold, es)} deposit is a hold — it just secures your slot and applies to your move total.`,
+        // "secures your slot" removed (finding EMAIL-P1-14): the hold does not
+        // reserve capacity — the booking still needs owner approval, so the slot
+        // is not guaranteed at this point.
+        holdNote: `The ${money(amountHold, es)} deposit is a hold, not a charge — it applies to your move total.`,
         supportTitle: 'Questions?',
         contactLabels: { phone: 'Call or text', email: 'Email', website: 'Website' },
         disclaimer: "You're receiving this because you started a booking with us. Changed your mind? You can ignore this email.",
@@ -105,7 +151,10 @@ export default function AbandonedCheckoutEmail({
       {/* ── 1 · HERO ─────────────────────────────────────────── */}
       <Card style={{ borderTop: `3px solid ${C.orange}` }}>
         <div className="heropad" style={{ textAlign: 'center' as const }}>
-          <AnimatedHero heroGifUrl={heroGifUrl} />
+          {/* Static booking-progress icon — NOT the truck animation (this is a
+              pre-deposit draft; a moving truck would imply the crew is dispatched). */}
+          <IconChip icon="clipboard" color={C.orangeInk} size={26} dim={64} bg={C.orangeTint} border="none" radius={18} />
+          <Spacer h={16} />
           <Spacer h={16} />
           <Pill tone="orange">{t.pill}</Pill>
           <h1 className="h1" style={{ fontFamily: FONT, fontSize: '26px', lineHeight: '33px', fontWeight: 800, letterSpacing: '-0.4px', color: C.navy, margin: '16px 0 10px' }}>
@@ -133,20 +182,17 @@ export default function AbandonedCheckoutEmail({
       <Spacer h={16} />
 
       {/* ── 4 · SUPPORT ──────────────────────────────────────── */}
-      <Card>
-        <Eyebrow icon="phone" title={t.supportTitle} tone="navy" />
-        <ContactRow phone={phone} email={email} website={website} websiteLabel={websiteLabel} labels={t.contactLabels} />
-      </Card>
+      <SupportBlock title={t.supportTitle} phone={phone} email={email} website={website} websiteLabel={websiteLabel} labels={t.contactLabels} />
 
       {/* ── 5 · FOOTER ───────────────────────────────────────── */}
-      <Footer
+      <MarketingFooter
         disclaimer={t.disclaimer}
         phone={phone}
         email={email}
         websiteLabel={websiteLabel}
         social={social}
-        manageUrl={portalUrl}
-        unsubscribeUrl={portalUrl}
+        unsubscribeUrl={unsubscribeUrl}
+        postalAddress={postalAddress}
         labels={t.footerLabels}
       />
     </Shell>

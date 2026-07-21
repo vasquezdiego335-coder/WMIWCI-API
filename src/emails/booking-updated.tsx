@@ -11,7 +11,7 @@ import {
   Spacer,
   Divider,
   PrimaryButton,
-  ContactRow,
+  SupportBlock,
   Footer,
   IconChip,
   C,
@@ -96,7 +96,7 @@ export default function BookingUpdatedEmail({
     : {
         preview: `We've updated your booking${displayId ? ` (${displayId})` : ''}. Here are the current details.`,
         pill: 'Booking updated',
-        h1: changedLabel ? `We've updated your booking ${changedLabel}.` : "We've updated your booking.",
+        h1: changedLabel ? `We've updated ${changedLabel} on your booking.` : "We've updated your booking.",
         sub: `Hi ${customerName}, the change is done. Here are the current details for your move.`,
         changeTitle: "What changed",
         detTitle: 'Updated details',
@@ -178,10 +178,7 @@ export default function BookingUpdatedEmail({
       <Spacer h={26} />
 
       {/* ── 6 · SUPPORT ──────────────────────────────────────── */}
-      <Card>
-        <Eyebrow icon="phone" title={t.supportTitle} tone="navy" />
-        <ContactRow phone={phone} email={email} website={website} websiteLabel={websiteLabel} labels={t.contactLabels} />
-      </Card>
+      <SupportBlock title={t.supportTitle} phone={phone} email={email} website={website} websiteLabel={websiteLabel} labels={t.contactLabels} />
 
       {/* ── 7 · FOOTER ───────────────────────────────────────── */}
       <Footer

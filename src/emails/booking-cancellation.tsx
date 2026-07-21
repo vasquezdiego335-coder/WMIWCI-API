@@ -6,9 +6,11 @@ import {
   Eyebrow,
   Pill,
   Callout,
+  KVTable,
+  Divider,
   Spacer,
   PrimaryButton,
-  ContactRow,
+  SupportBlock,
   Footer,
   IconChip,
   C,
@@ -21,10 +23,12 @@ import {
 //  BOOKING CANCELLATION  ("Your booking has been cancelled")
 //  Confirms a cancellation and states the payment outcome plainly. refundStatus:
 //    'released'  → hold was never captured; nothing charged
-//    'refunded'  → the $49 (or `amount`) was refunded
+//    'refunded'  → the $49 (or `amount`) was refunded in full
+//    'partial'   → PART refunded, part retained per policy (PARTIALLY_REFUNDED);
+//                  itemized: amountCharged − nonRefundable = refundedAmount
 //    'retained'  → deposit kept per policy (only if literally true)
 //    'custom'    → use `statusText`
-//  Shared _ui kit; bilingual EN/ES.
+//  Every money figure is dynamic — no invented totals. Shared _ui kit; EN/ES.
 // ════════════════════════════════════════════════════════════════════════
 
 interface Props {
@@ -32,8 +36,14 @@ interface Props {
   displayId?: string
   date?: string
   amount?: string
-  refundStatus?: 'released' | 'refunded' | 'retained' | 'custom'
+  refundStatus?: 'released' | 'refunded' | 'partial' | 'retained' | 'custom'
   statusText?: string
+  // Partial-refund itemization (refundStatus === 'partial'). All dynamic.
+  amountCharged?: string // what was actually captured
+  nonRefundable?: string // amount retained per cancellation policy
+  refundedAmount?: string // amount returned to the customer
+  refundMethod?: string // e.g. "Visa ending in 4242" — never "Stripe"
+  refundEta?: string // human ETA, e.g. "5–10 business days"
   rebookUrl?: string
   portalUrl?: string
   phone?: string
@@ -51,6 +61,11 @@ export default function BookingCancellationEmail({
   amount,
   refundStatus = 'released',
   statusText,
+  amountCharged,
+  nonRefundable,
+  refundedAmount,
+  refundMethod,
+  refundEta,
   rebookUrl = 'https://moveitclearit.com/book',
   portalUrl = '#',
   phone = '862-640-0625',
@@ -65,20 +80,32 @@ export default function BookingCancellationEmail({
     ? new Date(date).toLocaleDateString(es ? 'es-US' : 'en-US', { weekday: 'long', month: 'long', day: 'numeric', timeZone: 'America/New_York' })
     : undefined
 
+  const etaEs = refundEta || '5–10 días hábiles'
+  const etaEn = refundEta || '5–10 business days'
   const statusMap = es
     ? {
         released: { title: 'No se te cobró', body: `La retención de ${money(amount, es)} en tu tarjeta fue liberada. Tu banco puede tardar unos días en reflejarlo.` },
-        refunded: { title: `Reembolso de ${money(amount, es)} emitido`, body: 'Emitimos el reembolso a tu método de pago original. Puede tardar 5–10 días hábiles en aparecer.' },
+        refunded: { title: `Reembolso de ${money(amount, es)} emitido`, body: `Emitimos el reembolso a ${refundMethod || 'tu método de pago original'}. Puede tardar ${etaEs} en aparecer.` },
+        partial: { title: `Reembolso parcial de ${money(refundedAmount, es)}`, body: `Reembolsamos ${money(refundedAmount, es)} a ${refundMethod || 'tu método de pago original'}. El resto se retuvo según nuestra política de cancelación. Puede tardar ${etaEs} en aparecer.` },
         retained: { title: 'Sobre tu depósito', body: `Según nuestra política, el depósito de ${money(amount, es)} no es reembolsable. Si tienes preguntas, contáctanos.` },
         custom: { title: 'Estado del pago', body: statusText || '' },
       }
     : {
         released: { title: 'You were not charged', body: `The ${money(amount, es)} hold on your card was released. Your bank may take a few days to reflect it.` },
-        refunded: { title: `${money(amount, es)} refund issued`, body: 'We issued the refund to your original payment method. It can take 5–10 business days to appear.' },
+        refunded: { title: `${money(amount, es)} refund issued`, body: `We issued the refund to ${refundMethod || 'your original payment method'}. It can take ${etaEn} to appear.` },
+        partial: { title: `${money(refundedAmount, es)} partial refund issued`, body: `We refunded ${money(refundedAmount, es)} to ${refundMethod || 'your original payment method'}. The remainder was retained per our cancellation policy. It can take ${etaEn} to appear.` },
         retained: { title: 'About your deposit', body: `Per our policy, the ${money(amount, es)} deposit is non-refundable. If you have questions, reach out any time.` },
         custom: { title: 'Payment status', body: statusText || '' },
       }
   const status = statusMap[refundStatus]
+
+  // Partial-refund itemization — render only the rows we actually have.
+  const refundRows = [
+    { label: es ? 'Cobrado' : 'Amount charged', value: amountCharged ? `$${amountCharged}` : '' },
+    { label: es ? 'Retenido (política)' : 'Retained (policy)', value: nonRefundable ? `-$${nonRefundable}` : '' },
+    { label: es ? 'Reembolsado' : 'Refunded', value: refundedAmount ? `$${refundedAmount}` : '', strong: true },
+  ].filter((r) => r.value)
+  const showItemization = refundStatus === 'partial' && refundRows.length > 0
 
   const t = es
     ? {
@@ -132,7 +159,7 @@ export default function BookingCancellationEmail({
             <tbody>
               <tr>
                 <td width={44} valign="top" style={{ width: '44px' }}>
-                  <IconChip icon="shield" color={C.goldInk} size={19} dim={36} bg="#FFFFFF" border="1px solid #EAD9B0" radius={10} />
+                  <IconChip icon="shield" color={C.goldInk} size={19} dim={36} bg="#FFFFFF" border={`1px solid ${C.goldEdge}`} radius={10} />
                 </td>
                 <td valign="top" style={{ paddingLeft: '4px' }}>
                   <div style={{ fontFamily: FONT, fontSize: '15px', fontWeight: 800, color: C.navy, marginBottom: '4px' }}>{status.title}</div>
@@ -142,6 +169,23 @@ export default function BookingCancellationEmail({
             </tbody>
           </table>
         </Callout>
+      ) : null}
+
+      {/* ── 2b · PARTIAL-REFUND ITEMIZATION (dynamic) ────────── */}
+      {showItemization ? (
+        <>
+          <Spacer h={16} />
+          <Card>
+            <Eyebrow icon="clipboard" title={es ? 'Desglose del reembolso' : 'Refund breakdown'} tone="gold" />
+            <KVTable rows={refundRows} />
+            <Divider my={16} />
+            <div style={{ fontFamily: FONT, fontSize: '12.5px', lineHeight: '20px', color: C.muted }}>
+              {es
+                ? 'La parte retenida cubre la reserva y preparación según nuestra política de cancelación.'
+                : 'The retained portion covers scheduling and prep per our cancellation policy.'}
+            </div>
+          </Card>
+        </>
       ) : null}
 
       {/* ── 3 · CTA ──────────────────────────────────────────── */}
@@ -157,10 +201,7 @@ export default function BookingCancellationEmail({
       <Spacer h={16} />
 
       {/* ── 5 · SUPPORT ──────────────────────────────────────── */}
-      <Card>
-        <Eyebrow icon="phone" title={t.supportTitle} tone="navy" />
-        <ContactRow phone={phone} email={email} website={website} websiteLabel={websiteLabel} labels={t.contactLabels} />
-      </Card>
+      <SupportBlock title={t.supportTitle} phone={phone} email={email} website={website} websiteLabel={websiteLabel} labels={t.contactLabels} />
 
       {/* ── 6 · FOOTER ───────────────────────────────────────── */}
       <Footer
@@ -169,8 +210,6 @@ export default function BookingCancellationEmail({
         email={email}
         websiteLabel={websiteLabel}
         social={social}
-        manageUrl={portalUrl}
-        unsubscribeUrl={portalUrl}
         labels={t.footerLabels}
       />
     </Shell>

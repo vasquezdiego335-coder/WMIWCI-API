@@ -9,7 +9,7 @@ import {
   Spacer,
   Divider,
   PrimaryButton,
-  ContactRow,
+  SupportBlock,
   Footer,
   IconChip,
   C,
@@ -136,10 +136,7 @@ export default function JobCompletionEmail({
       <Spacer h={26} />
 
       {/* ── 5 · SUPPORT ──────────────────────────────────────── */}
-      <Card>
-        <Eyebrow icon="phone" title={t.supportTitle} tone="navy" />
-        <ContactRow phone={phone} email={email} website={website} websiteLabel={websiteLabel} labels={t.contactLabels} />
-      </Card>
+      <SupportBlock title={t.supportTitle} phone={phone} email={email} website={website} websiteLabel={websiteLabel} labels={t.contactLabels} />
 
       {/* ── 6 · FOOTER ───────────────────────────────────────── */}
       <Footer

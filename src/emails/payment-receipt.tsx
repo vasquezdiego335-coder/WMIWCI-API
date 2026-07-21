@@ -10,7 +10,7 @@ import {
   Spacer,
   Divider,
   PrimaryButton,
-  ContactRow,
+  SupportBlock,
   Footer,
   IconChip,
   C,
@@ -34,6 +34,8 @@ interface Props {
   bookingDisplayId?: string // legacy alias for displayId
   date?: string
   method?: string
+  cardBrand?: string // e.g. 'Visa'
+  last4?: string // e.g. '4242'
   captured?: boolean // true = charged; false = authorization hold (not yet captured)
   amountPaid?: string // deposit charged today, e.g. "49.00"
   moveTotal?: string // labor estimate for the move, e.g. "420.00"
@@ -58,6 +60,8 @@ export default function PaymentReceiptEmail({
   bookingDisplayId,
   date,
   method,
+  cardBrand,
+  last4,
   captured = true,
   amountPaid,
   moveTotal,
@@ -102,7 +106,7 @@ export default function PaymentReceiptEmail({
         contactLabels: { phone: 'Llama o escribe', email: 'Correo', website: 'Sitio web' },
         disclaimer: 'Guarda este correo como comprobante. ¿Preguntas sobre tu recibo? Llámanos o escríbenos cuando quieras.',
         footerLabels: { manage: 'Administrar preferencias', unsubscribe: 'Cancelar suscripción', rights: 'Todos los derechos reservados.' },
-        methodDefault: 'Tarjeta (Stripe)',
+        methodDefault: 'Tarjeta',
       }
     : {
         preview: `Receipt for your ${money(amountPaid, es)} payment — Move It Clear It.`,
@@ -124,8 +128,17 @@ export default function PaymentReceiptEmail({
         contactLabels: { phone: 'Call or text', email: 'Email', website: 'Website' },
         disclaimer: 'Keep this email as your proof of payment. Questions about your receipt? Call or text us any time.',
         footerLabels: { manage: 'Manage preferences', unsubscribe: 'Unsubscribe', rights: 'All rights reserved.' },
-        methodDefault: 'Card (Stripe)',
+        methodDefault: 'Card',
       }
+
+  // Payment method shown to the customer — prefer "Visa ending in 4242" over a
+  // generic processor label; never expose "Stripe".
+  const methodDisplay =
+    cardBrand && last4
+      ? es
+        ? `${cardBrand} terminada en ${last4}`
+        : `${cardBrand} ending in ${last4}`
+      : method || t.methodDefault
 
   // Move-breakdown rows (render only what we have).
   const estRows = [
@@ -166,7 +179,7 @@ export default function PaymentReceiptEmail({
             <td className="cardpad" style={{ padding: '22px 30px' }}>
               <div style={{ fontFamily: FONT, fontSize: '11px', fontWeight: 700, letterSpacing: '1.4px', textTransform: 'uppercase' as const, color: C.gold }}>{t.paidToday}</div>
               <div style={{ fontFamily: FONT, fontSize: '30px', fontWeight: 800, color: '#FFFFFF', margin: '6px 0 8px', letterSpacing: '-0.5px' }}>${amountPaid}</div>
-              <span style={{ display: 'inline-block', background: 'rgba(255,255,255,0.10)', color: captured ? '#8FE0B0' : C.gold, border: `1px solid ${captured ? 'rgba(143,224,176,0.4)' : 'rgba(212,162,76,0.4)'}`, borderRadius: '999px', fontFamily: FONT, fontSize: '11px', fontWeight: 700, letterSpacing: '0.4px', padding: '5px 12px' }}>
+              <span style={{ display: 'inline-block', background: 'rgba(255,255,255,0.10)', color: captured ? C.onNavyStrong : C.gold, border: `1px solid ${captured ? 'rgba(247,247,242,0.45)' : 'rgba(212,162,76,0.4)'}`, borderRadius: '999px', fontFamily: FONT, fontSize: '11px', fontWeight: 700, letterSpacing: '0.4px', padding: '5px 12px' }}>
                 {captured ? t.capturedYes : t.capturedNo}
               </span>
             </td>
@@ -183,7 +196,7 @@ export default function PaymentReceiptEmail({
           rows={[
             { label: t.kv.ref, value: ref },
             { label: t.kv.date, value: dateStr },
-            { label: t.kv.method, value: method || t.methodDefault },
+            { label: t.kv.method, value: methodDisplay },
             { label: t.kv.paid, value: `${money(amountPaid, es)}`, strong: true },
           ]}
         />
@@ -209,10 +222,7 @@ export default function PaymentReceiptEmail({
       <Spacer h={26} />
 
       {/* ── 6 · SUPPORT ──────────────────────────────────────── */}
-      <Card>
-        <Eyebrow icon="phone" title={t.supportTitle} tone="navy" />
-        <ContactRow phone={phone} email={email} website={website} websiteLabel={websiteLabel} labels={t.contactLabels} />
-      </Card>
+      <SupportBlock title={t.supportTitle} phone={phone} email={email} website={website} websiteLabel={websiteLabel} labels={t.contactLabels} />
 
       {/* ── 7 · FOOTER ───────────────────────────────────────── */}
       <Footer

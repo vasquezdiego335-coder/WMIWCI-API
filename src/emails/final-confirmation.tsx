@@ -13,7 +13,7 @@ import {
   Divider,
   Spacer,
   PrimaryButton,
-  ContactRow,
+  SupportBlock,
   Footer,
   VSteps,
   IconChip,
@@ -122,8 +122,8 @@ export default function FinalConfirmationEmail({
         expect: [
           { title: 'Llega el equipo', desc: 'Puntuales y listos. Te avisamos cuando vamos en camino.' },
           { title: 'Recorrido', desc: 'Revisamos juntos tus artículos, el acceso y el plan.' },
-          { title: 'Carga', desc: 'Acolchamos, envolvemos y cargamos todo con seguridad.' },
-          { title: 'Transporte', desc: 'Nos dirigimos a tu destino y mantenemos todo a tiempo.' },
+          { title: 'Carga', desc: 'Cargamos todo con cuidado y seguridad.' },
+          { title: 'Al destino', desc: 'Tú conduces el camión de alquiler al destino y nuestro equipo te encuentra allí.' },
           { title: 'Descarga', desc: 'Colocamos cada artículo donde lo quieras.' },
           { title: 'Recorrido final', desc: 'Confirmamos que no falte nada antes de irnos.' },
         ],
@@ -155,8 +155,8 @@ export default function FinalConfirmationEmail({
         expect: [
           { title: 'Crew arrives', desc: 'On time and ready. We’ll text you when we’re en route.' },
           { title: 'Walkthrough', desc: 'We review your items, access, and the plan together.' },
-          { title: 'Loading', desc: 'We pad, wrap, and load everything securely.' },
-          { title: 'Transport', desc: 'We head to your destination and keep things on schedule.' },
+          { title: 'Loading', desc: 'We load everything carefully and securely.' },
+          { title: 'To the destination', desc: 'You drive the rental truck to your destination, and our crew meets you there.' },
           { title: 'Unload', desc: 'We place every item exactly where you want it.' },
           { title: 'Final walkthrough', desc: 'We confirm nothing’s missed before we go.' },
         ],
@@ -208,7 +208,7 @@ export default function FinalConfirmationEmail({
                     <td valign="middle">
                       <div style={{ fontFamily: FONT, fontSize: '11px', fontWeight: 700, letterSpacing: '1.4px', textTransform: 'uppercase' as const, color: C.gold }}>{t.dateLabel}</div>
                       <div style={{ fontFamily: FONT, fontSize: '21px', fontWeight: 800, color: '#FFFFFF', marginTop: '7px', lineHeight: '27px' }}>{dateOnly}</div>
-                      {timeOnly ? <div style={{ fontFamily: FONT, fontSize: '14px', fontWeight: 600, color: '#AEB8C6', marginTop: '4px' }}>{timeOnly}</div> : null}
+                      {timeOnly ? <div style={{ fontFamily: FONT, fontSize: '14px', fontWeight: 600, color: C.onNavyMuted, marginTop: '4px' }}>{timeOnly}</div> : null}
                     </td>
                     <td width={54} align="right" valign="middle" className="hide-sm" style={{ width: '54px' }}>
                       <IconChip icon="calendar" color={C.gold} size={20} dim={46} border="none" radius={13} bg="rgba(212,162,76,0.16)" />
@@ -302,7 +302,7 @@ export default function FinalConfirmationEmail({
           <tbody>
             <tr>
               <td width={44} valign="top" style={{ width: '44px' }}>
-                <IconChip icon="truck" color={C.orange} size={19} dim={36} border="1px solid #FBD9C2" radius={10} />
+                <IconChip icon="truck" color={C.orange} size={19} dim={36} border={`1px solid ${C.orangeEdge}`} radius={10} />
               </td>
               <td valign="top" style={{ paddingLeft: '4px' }}>
                 <div style={{ fontFamily: FONT, fontSize: '15px', fontWeight: 800, color: C.navy, marginBottom: '4px' }}>{t.remindTitle}</div>
@@ -323,10 +323,7 @@ export default function FinalConfirmationEmail({
       <Spacer h={26} />
 
       {/* ── 8 · SUPPORT ──────────────────────────────────────── */}
-      <Card>
-        <Eyebrow icon="phone" title={t.supportTitle} tone="navy" />
-        <ContactRow phone={phone} email={email} website={website} websiteLabel={websiteLabel} labels={t.contactLabels} />
-      </Card>
+      <SupportBlock title={t.supportTitle} phone={phone} email={email} website={website} websiteLabel={websiteLabel} labels={t.contactLabels} />
 
       {/* ── 9 · FOOTER ───────────────────────────────────────── */}
       <Footer

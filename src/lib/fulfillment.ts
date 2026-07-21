@@ -1,4 +1,5 @@
 import { prisma } from './db'
+import { onBookingPaid } from './journeys'
 import { emailQueue, smsQueue, discordQueue, marketingQueue } from './queues'
 import { webhookLogger } from './logger'
 import { t } from './i18n'
@@ -312,6 +313,15 @@ export async function fulfillPaidCheckout(params: {
   }
 
   await Promise.all(tasks)
+
+  // ── STOP RULE: the customer converted ───────────────────────────────────
+  // Cancel every pending abandoned-recovery stage. This is an optimisation, not
+  // the guarantee — each stage also re-reads the booking status at send time
+  // (scheduled.worker) and again in the email worker (stillWantedForBooking),
+  // so a queue we fail to clean still cannot produce a wrong email.
+  await onBookingPaid(bookingId).catch((err) =>
+    log.warn({ err: err instanceof Error ? err.message : String(err) }, 'onBookingPaid cleanup failed (non-fatal)')
+  )
 
   log.info('Checkout fulfilled — booking → PENDING_APPROVAL, all jobs queued')
   return { processed: true, bookingId }

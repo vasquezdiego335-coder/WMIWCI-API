@@ -13,7 +13,7 @@ import {
   Divider,
   Spacer,
   PrimaryButton,
-  ContactRow,
+  SupportBlock,
   Footer,
   VSteps,
   HTimeline,
@@ -220,7 +220,7 @@ export default function PreApprovalEmail({
                     <tbody>
                       <tr>
                         <td valign="middle" style={{ paddingRight: '10px' }}>
-                          <IconChip icon="shield" color={C.goldInk} size={18} dim={34} border="1px solid #EAD9B0" radius={9} />
+                          <IconChip icon="shield" color={C.goldInk} size={18} dim={34} border={`1px solid ${C.goldEdge}`} radius={9} />
                         </td>
                         <td valign="middle">
                           <div style={{ fontFamily: FONT, fontSize: '22px', fontWeight: 800, color: C.navy, letterSpacing: '-0.3px' }}>{t.payBig}</div>
@@ -346,10 +346,7 @@ export default function PreApprovalEmail({
       <Spacer h={26} />
 
       {/* ── 7 · SUPPORT ──────────────────────────────────────── */}
-      <Card>
-        <Eyebrow icon="phone" title={t.supportTitle} tone="navy" />
-        <ContactRow phone={phone} email={email} website={website} websiteLabel={websiteLabel} labels={t.contactLabels} />
-      </Card>
+      <SupportBlock title={t.supportTitle} phone={phone} email={email} website={website} websiteLabel={websiteLabel} labels={t.contactLabels} />
 
       {/* ── 8 · FOOTER ───────────────────────────────────────── */}
       <Footer
