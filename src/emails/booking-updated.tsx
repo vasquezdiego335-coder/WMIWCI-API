@@ -11,12 +11,13 @@ import {
   Spacer,
   Divider,
   PrimaryButton,
-  ContactRow,
+  SupportBlock,
   Footer,
   IconChip,
   C,
   FONT,
   P,
+  money,
 } from './_ui'
 
 // ════════════════════════════════════════════════════════════════════════
@@ -44,6 +45,8 @@ interface Props {
   website?: string
   websiteLabel?: string
   social?: { instagram?: string; facebook?: string; tiktok?: string; google?: string }
+  /** Deposit hold amount shown in the disclaimer. Defaults to the standard $49. */
+  amountHold?: string
   locale?: string
 }
 
@@ -63,6 +66,7 @@ export default function BookingUpdatedEmail({
   website = 'https://moveitclearit.com',
   websiteLabel = 'moveitclearit.com',
   social,
+  amountHold,
   locale = 'en',
 }: Props) {
   const es = (locale ?? 'en').toLowerCase().startsWith('es')
@@ -86,13 +90,13 @@ export default function BookingUpdatedEmail({
         cta: 'Ver mi reserva',
         supportTitle: 'Estamos para ayudarte',
         contactLabels: { phone: 'Llama o escribe', email: 'Correo', website: 'Sitio web' },
-        disclaimer: 'Este correo confirma un cambio en tu reserva. Tu depósito de $49 permanece aplicado a tu mudanza.',
+        disclaimer: `Este correo confirma un cambio en tu reserva. Tu depósito de ${money(amountHold, es)} permanece aplicado a tu mudanza.`,
         footerLabels: { manage: 'Administrar preferencias', unsubscribe: 'Cancelar suscripción', rights: 'Todos los derechos reservados.' },
       }
     : {
         preview: `We've updated your booking${displayId ? ` (${displayId})` : ''}. Here are the current details.`,
         pill: 'Booking updated',
-        h1: changedLabel ? `We've updated your booking ${changedLabel}.` : "We've updated your booking.",
+        h1: changedLabel ? `We've updated ${changedLabel} on your booking.` : "We've updated your booking.",
         sub: `Hi ${customerName}, the change is done. Here are the current details for your move.`,
         changeTitle: "What changed",
         detTitle: 'Updated details',
@@ -102,7 +106,7 @@ export default function BookingUpdatedEmail({
         cta: 'View booking',
         supportTitle: "We're here to help",
         contactLabels: { phone: 'Call or text', email: 'Email', website: 'Website' },
-        disclaimer: 'This email confirms a change to your booking. Your $49 deposit stays applied to your move.',
+        disclaimer: `This email confirms a change to your booking. Your ${money(amountHold, es)} deposit stays applied to your move.`,
         footerLabels: { manage: 'Manage preferences', unsubscribe: 'Unsubscribe', rights: 'All rights reserved.' },
       }
 
@@ -174,10 +178,7 @@ export default function BookingUpdatedEmail({
       <Spacer h={26} />
 
       {/* ── 6 · SUPPORT ──────────────────────────────────────── */}
-      <Card>
-        <Eyebrow icon="phone" title={t.supportTitle} tone="navy" />
-        <ContactRow phone={phone} email={email} website={website} websiteLabel={websiteLabel} labels={t.contactLabels} />
-      </Card>
+      <SupportBlock title={t.supportTitle} phone={phone} email={email} website={website} websiteLabel={websiteLabel} labels={t.contactLabels} />
 
       {/* ── 7 · FOOTER ───────────────────────────────────────── */}
       <Footer

@@ -24,7 +24,7 @@ import {
 } from '../lib/booking-display'
 
 // ════════════════════════════════════════════════════════════════════════
-//  We Move It. We Clear It. — Discord bot actions + gateway client
+//  Move It Clear It. — Discord bot actions + gateway client
 //  ----------------------------------------------------------------------
 //  EXPORTS (do not rename — the discord worker imports these by name):
 //    getDiscordClient, postBookingApprovalCard, postDiscountApprovalCard,

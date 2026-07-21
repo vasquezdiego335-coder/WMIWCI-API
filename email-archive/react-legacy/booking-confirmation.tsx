@@ -28,7 +28,7 @@ export default function BookingConfirmationEmail({
       <Body style={body}>
         <Container style={container}>
           <Section style={header}>
-            <Text style={brandName}>We Move It. We Clear It.</Text>
+            <Text style={brandName}>Move It Clear It.</Text>
             <Text style={tagline}>West Orange, NJ · Essex County</Text>
           </Section>
 
@@ -62,7 +62,7 @@ export default function BookingConfirmationEmail({
 
             <Hr style={hr} />
             <Text style={footer}>
-              We Move It. We Clear It. | 862-640-0625 | hello@moveitclearit.com
+              Move It Clear It. | 862-640-0625 | hello@moveitclearit.com
               <br />
               Labor-only moving service. Customer provides or arranges the truck.
             </Text>

@@ -589,6 +589,11 @@ function queueApprovalNotifier(): ApprovalNotifier {
           to: booking.customer.email,
           bookingId: booking.id,
           payload: {
+            // Phase-4 status gate: this path runs only after a successful
+            // capture+confirm, so the booking is definitively CONFIRMED. Passed
+            // as a literal (not the possibly-stale in-memory booking.status) so
+            // the send-gate can enforce "confirmation only for a confirmed job".
+            bookingStatus: 'CONFIRMED',
             customerName: booking.customer.name,
             displayId: booking.displayId,
             date: when?.toISOString(),

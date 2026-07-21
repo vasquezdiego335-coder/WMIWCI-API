@@ -4,11 +4,12 @@ import {
   LogoHeader,
   Card,
   Eyebrow,
+  IconChip,
   Pill,
   Spacer,
   PrimaryButton,
-  ContactRow,
-  Footer,
+  SupportBlock,
+  MarketingFooter,
   C,
   FONT,
   P,
@@ -26,6 +27,10 @@ interface Props {
   referralUrl?: string
   rewardPercent?: string
   portalUrl?: string
+  /** Promotional unsubscribe URL (NEVER the booking page). Optional until the
+      unsubscribe route ships. */
+  unsubscribeUrl?: string
+  postalAddress?: string
   phone?: string
   email?: string
   website?: string
@@ -40,6 +45,8 @@ export default function ReferralEmail({
   referralUrl = 'https://moveitclearit.com/refer',
   rewardPercent = '15',
   portalUrl = '#',
+  unsubscribeUrl,
+  postalAddress,
   phone = '862-640-0625',
   email = 'hello@moveitclearit.com',
   website = 'https://moveitclearit.com',
@@ -57,7 +64,7 @@ export default function ReferralEmail({
         sub: `Gracias por confiar en nosotros, ${customerName}. ¿Conoces a alguien que se muda? Cuando reserve con tu código, ambos ahorran ${rewardPercent}%.`,
         codeLabel: 'Tu código para compartir',
         cta: 'Compartir con un amigo',
-        how: 'Comparte tu código → tu amigo reserva y ahorra → tú recibes tu descuento en tu próxima mudanza o limpieza.',
+        how: 'Comparte tu código → tu amigo reserva y ahorra → tú recibes tu descuento en tu próxima mudanza.',
         supportTitle: '¿Preguntas?',
         contactLabels: { phone: 'Llama o escribe', email: 'Correo', website: 'Sitio web' },
         disclaimer: 'Te escribimos porque completamos tu mudanza recientemente. El descuento aplica cuando tu referido completa una mudanza pagada.',
@@ -70,7 +77,7 @@ export default function ReferralEmail({
         sub: `Thanks for trusting us, ${customerName}. Know someone who's moving? When they book with your code, you both save ${rewardPercent}%.`,
         codeLabel: 'Your code to share',
         cta: 'Refer a friend',
-        how: 'Share your code → your friend books and saves → you get your discount on your next move or cleanout.',
+        how: 'Share your code → your friend books and saves → you get your discount on your next move.',
         supportTitle: 'Questions?',
         contactLabels: { phone: 'Call or text', email: 'Email', website: 'Website' },
         disclaimer: "You're receiving this because we recently completed your move. The discount applies once your referral completes a paid move.",
@@ -84,7 +91,17 @@ export default function ReferralEmail({
       {/* ── 1 · HERO ─────────────────────────────────────────── */}
       <Card style={{ borderTop: `3px solid ${C.orange}` }}>
         <div className="heropad" style={{ textAlign: 'center' as const }}>
-          <div style={{ fontSize: '30px', lineHeight: '30px' }}>&#127873;</div>
+          {/* BRANDED GRAPHIC — replaces the raw gift emoji (&#127873;) that
+              shipped here before (gap audit 2026-07-17, G2). An emoji is not a
+              brand asset: it renders as a different picture on every platform,
+              is off-palette everywhere, and degrades to tofu on older Outlook.
+              IconChip renders a hosted PNG from the shared icon set at real
+              pixel dimensions in the approved palette (Antique Gold on Bone).
+              It is a STATIC PNG, so there is no animated-GIF first-frame
+              problem. It is decorative — the headline immediately below carries
+              the meaning — so `alt` is intentionally empty, which is the
+              correct accessible treatment for decoration. */}
+          <IconChip icon="sparkle" color={C.gold} size={22} dim={48} bg={C.bone} radius={14} />
           <Spacer h={14} />
           <Pill tone="orange">{t.pill}</Pill>
           <h1 className="h1" style={{ fontFamily: FONT, fontSize: '30px', lineHeight: '36px', fontWeight: 800, letterSpacing: '-0.6px', color: C.navy, margin: '16px 0 10px' }}>
@@ -124,20 +141,17 @@ export default function ReferralEmail({
       <Spacer h={16} />
 
       {/* ── 5 · SUPPORT ──────────────────────────────────────── */}
-      <Card>
-        <Eyebrow icon="phone" title={t.supportTitle} tone="navy" />
-        <ContactRow phone={phone} email={email} website={website} websiteLabel={websiteLabel} labels={t.contactLabels} />
-      </Card>
+      <SupportBlock title={t.supportTitle} phone={phone} email={email} website={website} websiteLabel={websiteLabel} labels={t.contactLabels} />
 
       {/* ── 6 · FOOTER ───────────────────────────────────────── */}
-      <Footer
+      <MarketingFooter
         disclaimer={t.disclaimer}
         phone={phone}
         email={email}
         websiteLabel={websiteLabel}
         social={social}
-        manageUrl={portalUrl}
-        unsubscribeUrl={portalUrl}
+        unsubscribeUrl={unsubscribeUrl}
+        postalAddress={postalAddress}
         labels={t.footerLabels}
       />
     </Shell>

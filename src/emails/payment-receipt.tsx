@@ -10,12 +10,13 @@ import {
   Spacer,
   Divider,
   PrimaryButton,
-  ContactRow,
+  SupportBlock,
   Footer,
   IconChip,
   C,
   FONT,
   P,
+  money,
 } from './_ui'
 
 // ════════════════════════════════════════════════════════════════════════
@@ -33,6 +34,8 @@ interface Props {
   bookingDisplayId?: string // legacy alias for displayId
   date?: string
   method?: string
+  cardBrand?: string // e.g. 'Visa'
+  last4?: string // e.g. '4242'
   captured?: boolean // true = charged; false = authorization hold (not yet captured)
   amountPaid?: string // deposit charged today, e.g. "49.00"
   moveTotal?: string // labor estimate for the move, e.g. "420.00"
@@ -57,8 +60,10 @@ export default function PaymentReceiptEmail({
   bookingDisplayId,
   date,
   method,
+  cardBrand,
+  last4,
   captured = true,
-  amountPaid = '49.00',
+  amountPaid,
   moveTotal,
   remainingBalance,
   truckAddon,
@@ -82,7 +87,7 @@ export default function PaymentReceiptEmail({
 
   const t = es
     ? {
-        preview: `Recibo de tu pago de $${amountPaid} — Move It Clear It.`,
+        preview: `Recibo de tu pago de ${money(amountPaid, es)} — Move It Clear It.`,
         pill: captured ? 'Pago recibido' : 'Autorización (retención)',
         h1: 'Recibo de pago',
         sub: `Gracias, ${customerName}. Aquí está el desglose de tu pago y lo que queda para el día de la mudanza.`,
@@ -94,17 +99,17 @@ export default function PaymentReceiptEmail({
         estTitle: 'Desglose de tu mudanza',
         est: { total: 'Total de la mudanza (mano de obra)', deposit: 'Menos depósito pagado hoy', remain: 'Saldo de mano de obra', truck: 'Cargo por camión (día de mudanza)', travel: 'Cargo por viaje (día de mudanza)', waiting: `Tiempo de espera${waitingMinutes ? ` (${waitingMinutes} min tras la cortesía)` : ''} (día de mudanza)`, due: 'A pagar el día de la mudanza' },
         note: captured
-          ? 'El depósito de $49 se cobró para asegurar tu reserva y se aplica al total de tu mudanza. El saldo restante se paga el día de la mudanza.'
-          : 'El depósito de $49 es una autorización (retención) en tu tarjeta — solo se cobra cuando se aprueba tu reserva. Se aplica al total de tu mudanza.',
+          ? `El depósito de ${money(amountPaid, es)} se cobró para asegurar tu reserva y se aplica al total de tu mudanza. El saldo restante se paga el día de la mudanza.`
+          : `El depósito de ${money(amountPaid, es)} es una autorización (retención) en tu tarjeta — solo se cobra cuando se aprueba tu reserva. Se aplica al total de tu mudanza.`,
         cta: 'Ver mi reserva',
         supportTitle: 'Estamos para ayudarte',
         contactLabels: { phone: 'Llama o escribe', email: 'Correo', website: 'Sitio web' },
         disclaimer: 'Guarda este correo como comprobante. ¿Preguntas sobre tu recibo? Llámanos o escríbenos cuando quieras.',
         footerLabels: { manage: 'Administrar preferencias', unsubscribe: 'Cancelar suscripción', rights: 'Todos los derechos reservados.' },
-        methodDefault: 'Tarjeta (Stripe)',
+        methodDefault: 'Tarjeta',
       }
     : {
-        preview: `Receipt for your $${amountPaid} payment — Move It Clear It.`,
+        preview: `Receipt for your ${money(amountPaid, es)} payment — Move It Clear It.`,
         pill: captured ? 'Payment received' : 'Authorization (hold)',
         h1: 'Payment receipt',
         sub: `Thanks, ${customerName}. Here's the breakdown of what you paid and what's left for move day.`,
@@ -116,20 +121,29 @@ export default function PaymentReceiptEmail({
         estTitle: 'Your move breakdown',
         est: { total: 'Move total (labor)', deposit: 'Less deposit paid today', remain: 'Labor balance', truck: 'Truck add-on (move day)', travel: 'Travel fee (move day)', waiting: `Waiting time${waitingMinutes ? ` (${waitingMinutes} min past grace)` : ''} (move day)`, due: 'Due on move day' },
         note: captured
-          ? 'The $49 deposit was charged to secure your booking and applies to your move total. Any remaining balance is settled on move day.'
-          : 'The $49 deposit is an authorization hold on your card — it is only charged once your booking is approved. It applies to your move total.',
+          ? `The ${money(amountPaid, es)} deposit was charged to secure your booking and applies to your move total. Any remaining balance is settled on move day.`
+          : `The ${money(amountPaid, es)} deposit is an authorization hold on your card — it is only charged once your booking is approved. It applies to your move total.`,
         cta: 'View booking',
         supportTitle: "We're here to help",
         contactLabels: { phone: 'Call or text', email: 'Email', website: 'Website' },
         disclaimer: 'Keep this email as your proof of payment. Questions about your receipt? Call or text us any time.',
         footerLabels: { manage: 'Manage preferences', unsubscribe: 'Unsubscribe', rights: 'All rights reserved.' },
-        methodDefault: 'Card (Stripe)',
+        methodDefault: 'Card',
       }
+
+  // Payment method shown to the customer — prefer "Visa ending in 4242" over a
+  // generic processor label; never expose "Stripe".
+  const methodDisplay =
+    cardBrand && last4
+      ? es
+        ? `${cardBrand} terminada en ${last4}`
+        : `${cardBrand} ending in ${last4}`
+      : method || t.methodDefault
 
   // Move-breakdown rows (render only what we have).
   const estRows = [
     { label: t.est.total, value: moveTotal ? `$${moveTotal}` : '' },
-    { label: t.est.deposit, value: `-$${amountPaid}` },
+    { label: t.est.deposit, value: `-${money(amountPaid, es)}` },
     { label: t.est.remain, value: remainingBalance ? `$${remainingBalance}` : '' },
     { label: t.est.truck, value: truckAddon ? `$${truckAddon}` : '' },
     { label: t.est.travel, value: travelFee ? `$${travelFee}` : '' },
@@ -165,7 +179,7 @@ export default function PaymentReceiptEmail({
             <td className="cardpad" style={{ padding: '22px 30px' }}>
               <div style={{ fontFamily: FONT, fontSize: '11px', fontWeight: 700, letterSpacing: '1.4px', textTransform: 'uppercase' as const, color: C.gold }}>{t.paidToday}</div>
               <div style={{ fontFamily: FONT, fontSize: '30px', fontWeight: 800, color: '#FFFFFF', margin: '6px 0 8px', letterSpacing: '-0.5px' }}>${amountPaid}</div>
-              <span style={{ display: 'inline-block', background: 'rgba(255,255,255,0.10)', color: captured ? '#8FE0B0' : C.gold, border: `1px solid ${captured ? 'rgba(143,224,176,0.4)' : 'rgba(212,162,76,0.4)'}`, borderRadius: '999px', fontFamily: FONT, fontSize: '11px', fontWeight: 700, letterSpacing: '0.4px', padding: '5px 12px' }}>
+              <span style={{ display: 'inline-block', background: 'rgba(255,255,255,0.10)', color: captured ? C.onNavyStrong : C.gold, border: `1px solid ${captured ? 'rgba(247,247,242,0.45)' : 'rgba(212,162,76,0.4)'}`, borderRadius: '999px', fontFamily: FONT, fontSize: '11px', fontWeight: 700, letterSpacing: '0.4px', padding: '5px 12px' }}>
                 {captured ? t.capturedYes : t.capturedNo}
               </span>
             </td>
@@ -182,8 +196,8 @@ export default function PaymentReceiptEmail({
           rows={[
             { label: t.kv.ref, value: ref },
             { label: t.kv.date, value: dateStr },
-            { label: t.kv.method, value: method || t.methodDefault },
-            { label: t.kv.paid, value: `$${amountPaid}`, strong: true },
+            { label: t.kv.method, value: methodDisplay },
+            { label: t.kv.paid, value: `${money(amountPaid, es)}`, strong: true },
           ]}
         />
 
@@ -208,10 +222,7 @@ export default function PaymentReceiptEmail({
       <Spacer h={26} />
 
       {/* ── 6 · SUPPORT ──────────────────────────────────────── */}
-      <Card>
-        <Eyebrow icon="phone" title={t.supportTitle} tone="navy" />
-        <ContactRow phone={phone} email={email} website={website} websiteLabel={websiteLabel} labels={t.contactLabels} />
-      </Card>
+      <SupportBlock title={t.supportTitle} phone={phone} email={email} website={website} websiteLabel={websiteLabel} labels={t.contactLabels} />
 
       {/* ── 7 · FOOTER ───────────────────────────────────────── */}
       <Footer

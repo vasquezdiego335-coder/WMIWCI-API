@@ -2,9 +2,13 @@ import { Worker, Job } from 'bullmq'
 import { randomUUID } from 'node:crypto'
 import { render } from '@react-email/render'
 import { bullConnection } from '../lib/redis'
-import { resend, EMAIL_FROM, EMAIL_REPLY_TO } from '../lib/resend'
 import { prisma } from '../lib/db'
 import { queueLogger } from '../lib/logger'
+import { guardedSend, classifyTemplate } from '../lib/email-guard'
+import { buildMarketingContext, applyMarketingContext } from '../lib/marketing-context'
+import { emailQueue } from '../lib/queues'
+import { bookingEligibility } from '../lib/email-eligibility'
+import { leadEligibility } from '../lib/journeys'
 import type { EmailJobData } from '../lib/queues'
 
 // ── Email template imports ─────────────────────────────────────
@@ -20,6 +24,12 @@ import JobCompletionEmail from '../emails/job-completion'
 import ReviewRequestEmail from '../emails/review-request'
 import AbandonedCheckoutEmail from '../emails/abandoned-checkout'
 import ReferralEmail from '../emails/referral'
+import PaymentFailedEmail from '../emails/payment-failed'
+import InformationRequiredEmail from '../emails/information-required'
+import OperationalAlertEmail from '../emails/operational-alert'
+import FinalInvoiceEmail from '../emails/final-invoice'
+import ReferralRewardEmail from '../emails/referral-reward'
+import QuoteFollowupEmail from '../emails/quote-followup'
 import { emailSubject } from '../lib/i18n'
 
 // ════════════════════════════════════════════════════════════════════════
@@ -53,6 +63,17 @@ const ALLOWED_TEMPLATES = new Set<EmailJobData['template']>([
   'review-request',
   'abandoned-checkout',
   'referral',
+  'payment-failed',
+  'information-required',
+  'operational-alert',
+  'final-invoice',
+  'referral-reward',
+  // ── Lifecycle journeys (src/lib/journeys.ts) ──
+  'abandoned-checkout-2',
+  'abandoned-checkout-3',
+  'quote-followup-1',
+  'quote-followup-2',
+  'quote-followup-final',
 ])
 
 const TEMPLATES: Record<
@@ -70,6 +91,18 @@ const TEMPLATES: Record<
   'review-request': (p) => ReviewRequestEmail(p as any),
   'abandoned-checkout': (p) => AbandonedCheckoutEmail(p as any),
   'referral': (p) => ReferralEmail(p as any),
+  'payment-failed': (p) => PaymentFailedEmail(p as any),
+  'information-required': (p) => InformationRequiredEmail(p as any),
+  'operational-alert': (p) => OperationalAlertEmail(p as any),
+  'final-invoice': (p) => FinalInvoiceEmail(p as any),
+  'referral-reward': (p) => ReferralRewardEmail(p as any),
+  // Recovery stages 2/3 reuse ONE template; `stage` in the payload varies
+  // the copy (same pattern as the 72h/24h reminder).
+  'abandoned-checkout-2': (p) => AbandonedCheckoutEmail({ ...(p as any), stage: 2 }),
+  'abandoned-checkout-3': (p) => AbandonedCheckoutEmail({ ...(p as any), stage: 3 }),
+  'quote-followup-1': (p) => QuoteFollowupEmail({ ...(p as any), stage: 1 }),
+  'quote-followup-2': (p) => QuoteFollowupEmail({ ...(p as any), stage: 2 }),
+  'quote-followup-final': (p) => QuoteFollowupEmail({ ...(p as any), stage: 3 }),
 }
 
 // English fallbacks. Bilingual subjects come from emailSubject(template, locale)
@@ -86,7 +119,31 @@ const SUBJECTS: Record<EmailJobData['template'], string> = {
   'review-request': 'How did we do? Leave us a review',
   'abandoned-checkout': 'Your date is still available',
   'referral': 'Give 15%. Get 15%.',
+  'payment-failed': 'Action required — update your payment method',
+  'information-required': 'We need a few details to schedule your move',
+  'operational-alert': 'An update about your move',
+  'final-invoice': 'Your final invoice',
+  'referral-reward': 'Your referral reward is here',
+  'abandoned-checkout-2': "What's included in a labor-only move",
+  'abandoned-checkout-3': 'Did your moving plans change?',
+  'quote-followup-1': 'Did your quote come through?',
+  'quote-followup-2': 'What "labor-only" actually means',
+  'quote-followup-final': 'Are you still planning your move?',
 }
+
+// ════════════════════════════════════════════════════════════════════════
+//  SEND-TIME STOP RULES — delegated to the CANONICAL predicate.
+//  ---------------------------------------------------------------------
+//  This used to be a hand-written switch that, for 'final-confirmation',
+//  blocked only 'CANCELLED' — while src/emails/status.ts said the template is
+//  truthful ONLY in CONFIRMED/SCHEDULED/IN_PROGRESS/COMPLETED. Two tables, two
+//  answers, and the weaker one was the one that ran (finding EMAIL-P0-02).
+//
+//  There is now exactly one answer: src/lib/email-eligibility.bookingEligibility,
+//  which reloads the booking and applies the status table from status.ts PLUS
+//  the workflow condition the template actually asserts. See that module for why
+//  a status match alone is not sufficient.
+// ════════════════════════════════════════════════════════════════════════
 
 /** Insert a 1x1 open-tracking pixel just before </body> (or append if none). */
 function injectOpenPixel(html: string, src: string): string {
@@ -95,7 +152,7 @@ function injectOpenPixel(html: string, src: string): string {
 }
 
 async function processEmailJob(job: Job<EmailJobData>): Promise<void> {
-  const { template, to, bookingId, notificationId, payload } = job.data
+  const { template, to, bookingId, leadId, businessEventKey, notificationId, payload } = job.data
   const log = queueLogger.child({ jobId: job.id, template, to, bookingId })
 
   log.info('📧 Email job received')
@@ -129,7 +186,21 @@ async function processEmailJob(job: Job<EmailJobData>): Promise<void> {
     throw new Error(`Unknown email template: ${template}`)
   }
 
-  let html = render(component(payload))
+  // COMPLIANCE CONTEXT (finding EMAIL-P1-06). Derived from the RECIPIENT, never
+  // trusted from the payload — a queued job cannot smuggle in someone else's
+  // unsubscribe link, and a promotional template gets the full block (link +
+  // postal address + reason) even when the enqueuer supplied none of it.
+  // An incomplete context does NOT silently degrade: guardedSend blocks the send.
+  const emailClass = classifyTemplate(template)
+  let renderPayload: Record<string, unknown> = payload
+  if (emailClass === 'promotional') {
+    const ctx = buildMarketingContext(to, template, (payload.locale as string) ?? 'en')
+    renderPayload = ctx.ok ? applyMarketingContext(payload, ctx.context) : payload
+  }
+
+  let html = render(component(renderPayload))
+  // Plain-text multipart part — deliverability (spam score) + accessibility.
+  const text = render(component(renderPayload), { plainText: true })
   // Embed the open-tracking pixel. Requires a Notification row to attribute the
   // open to + APP_URL to build the public pixel URL. The token is persisted
   // BEFORE the send, so an open landing the instant the email arrives resolves.
@@ -147,25 +218,87 @@ async function processEmailJob(job: Job<EmailJobData>): Promise<void> {
     (payload.subject as string) ||
     (payload.locale ? emailSubject(template, payload.locale as string) : SUBJECTS[template])
 
-  log.info({ subject }, '📤 Sending email via Resend…')
-  const { data, error } = await resend.emails.send({
-    from: EMAIL_FROM,
+  // ── THE SEND GATE ───────────────────────────────────────────────────────
+  // guardedSend owns suppression, the live state recheck, frequency caps, quiet
+  // hours, payload validation, and the idempotency claim. This worker no longer
+  // talks to Resend directly, so the guard cannot be bypassed here.
+  //
+  // `eventId` anchors the idempotency key. A booking-scoped email is
+  // exactly-once PER BOOKING; without a bookingId we fall back to the queue job
+  // id, which still stops a BullMQ retry from double-sending.
+  log.info({ subject }, '📤 Handing to the send guard…')
+  const outcome = await guardedSend({
     to,
-    reply_to: EMAIL_REPLY_TO,
     subject,
     html,
+    text,
+    template,
+    emailClass,
+    journey: (payload.journey as string) ?? undefined,
+    // IDENTITY PRECEDENCE (finding EMAIL-P1-12): an explicit business-event key
+    // wins, then the booking, then the lead. The queue job id is the LAST
+    // resort — it changes on every scheduler retry, so keying on it lets the
+    // same logical send happen twice.
+    eventId: businessEventKey ?? bookingId ?? leadId ?? job.id ?? undefined,
+    bookingId: bookingId ?? undefined,
+    leadId: leadId ?? undefined,
+    payload: renderPayload,
+    // Live state reload for whichever subject this email is about.
+    recheck: bookingId
+      ? () => bookingEligibility(template, bookingId)
+      : leadId
+      ? () => leadEligibility(leadId)
+      : undefined,
   })
 
-  if (error) {
-    log.error({ error }, 'Resend returned error')
-    // Mark notification failed
-    if (notificationId) {
-      await prisma.notification.update({
-        where: { id: notificationId },
-        data: { status: 'FAILED', error: JSON.stringify(error) },
+  if (!outcome.sent) {
+    // ── TRUTHFUL OUTCOME REPORTING (finding EMAIL-P2-16) ──────────────────
+    // This used to mark EVERY refusal as notification status FAILED, including
+    // quiet-hours and frequency-cap deferrals — so reporting showed a delivery
+    // problem where policy had simply said "later". It also swallowed requeue
+    // errors, meaning a Redis hiccup silently DROPPED a deferred email while
+    // the job reported success.
+    const deferred = Boolean(outcome.retryAt)
+
+    if (deferred) {
+      const delay = Math.max(0, (outcome.retryAt as Date).getTime() - Date.now())
+      log.info({ reason: outcome.reason, delay }, '⏸️ Deferred — re-queueing inside the allowed window')
+
+      if (notificationId) {
+        await prisma.notification
+          .update({
+            where: { id: notificationId },
+            data: { status: 'DEFERRED', error: outcome.reason.slice(0, 500) },
+          })
+          .catch(() => undefined)
+      }
+
+      // A stable jobId keyed on the DEFERRAL REASON (not the attempt) means
+      // repeated deferrals collapse onto one pending job instead of fanning out.
+      // NOT caught: if we cannot re-queue, the email would be lost silently.
+      // Throwing hands it back to BullMQ's own retry, which is durable.
+      await emailQueue.add(template, job.data, {
+        delay,
+        jobId: `${job.id}:deferred:${outcome.reason}`,
       })
+      return
     }
-    throw new Error(`Resend error: ${error.message}`)
+
+    log.warn({ reason: outcome.reason, outcomeClass: outcome.outcomeClass }, '🚫 Send refused by the guard')
+    if (notificationId) {
+      await prisma.notification
+        .update({
+          where: { id: notificationId },
+          // A retryable block is not a terminal failure either — the guard has
+          // left the logical send resumable, so do not report it as dead.
+          data: {
+            status: outcome.outcomeClass === 'retryable' ? 'QUEUED' : 'FAILED',
+            error: outcome.reason.slice(0, 500),
+          },
+        })
+        .catch(() => undefined)
+    }
+    return
   }
 
   // Mark notification sent
@@ -176,7 +309,7 @@ async function processEmailJob(job: Job<EmailJobData>): Promise<void> {
     })
   }
 
-  log.info({ resendId: data?.id }, '✅ Email sent successfully')
+  log.info({ resendId: outcome.providerId }, '✅ Email sent successfully')
 }
 
 // ── Start the worker ──────────────────────────────────────────

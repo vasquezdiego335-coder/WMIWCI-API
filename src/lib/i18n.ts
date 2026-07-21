@@ -14,7 +14,8 @@
 export type Locale = 'en' | 'es'
 
 export const BIZ_PHONE = '862-640-0625'
-export const BIZ_NAME = 'We Move It. We Clear It.'
+// Brand line retired 2026-07-17: "We Move It. We Clear It." → "Move It Clear It."
+export const BIZ_NAME = 'Move It Clear It.'
 
 // Normalize anything that comes off the wire ("EN", "es-US", undefined…) to a
 // supported Locale. Defaults to English.
@@ -144,11 +145,16 @@ const EMAIL_SUBJECTS: Record<string, { en: string; es: string }> = {
   'payment-receipt':     { en: 'Payment received — receipt enclosed',       es: 'Pago recibido — recibo adjunto' },
   'booking-updated':     { en: 'Your booking has been updated',             es: 'Tu reserva ha sido actualizada' },
   'booking-cancellation':{ en: 'Your booking has been cancelled',           es: 'Tu reserva ha sido cancelada' },
+  'payment-failed':{ en: 'Action required — update your payment method', es: 'Acción requerida — actualiza tu método de pago' },
   'job-reminder':        { en: 'Your move is almost here',                  es: 'Tu mudanza ya casi llega' },
   'job-completion':      { en: 'Your move is complete — thank you',         es: 'Tu mudanza está completa — gracias' },
   'review-request':      { en: 'How did we do? Leave us a review',          es: '¿Cómo lo hicimos? Deja tu reseña' },
   'abandoned-checkout':  { en: 'Your date is still available',              es: 'Tu fecha sigue disponible' },
   'referral':            { en: 'Give 15%. Get 15%.',                        es: 'Da 15%. Recibe 15%.' },
+  'information-required':{ en: 'We need a few details to schedule your move', es: 'Necesitamos algunos datos para agendar tu mudanza' },
+  'operational-alert':   { en: 'An update about your move',                 es: 'Una actualización sobre tu mudanza' },
+  'final-invoice':       { en: 'Your final invoice',                        es: 'Tu factura final' },
+  'referral-reward':     { en: 'Your referral reward is here',              es: 'Tu recompensa por recomendarnos ya está aquí' },
 }
 
 export function emailSubject(template: string, locale?: string): string {

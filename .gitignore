@@ -66,3 +66,6 @@ bull-board/
 # fail the production build. Kept locally, never committed.
 email-marketing-html/
 email-marketing-html.zip
+
+# email render previews (test artifacts)
+email-previews/

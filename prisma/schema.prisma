@@ -1,5 +1,5 @@
 // ============================================================
-// PRISMA SCHEMA — We Move It. We Clear It.
+// PRISMA SCHEMA — Move It Clear It
 // Database: PostgreSQL
 // ============================================================
 
@@ -79,6 +79,10 @@ enum NotificationStatus {
   SENT
   FAILED
   SKIPPED
+  /// Policy says "later", not "never" (finding EMAIL-P2-16). Quiet hours, a
+  /// frequency cap, or the transactional-gap rule. Marking these FAILED made
+  /// reporting claim a delivery problem where none existed.
+  DEFERRED
 }
 
 enum JobStatus {
@@ -1354,14 +1358,42 @@ model FollowUpLedger {
   bookingId String   @map("booking_id")
   type      String // review-request | review-reminder | repeat-reminder | referral-ask
   channel   String   @default("both") // sms | email | both
-  status    String   @default("sent") // sent | failed | skipped
+  /// OVERALL state (finding EMAIL-P1-10). This used to default to "sent" and be
+  /// written BEFORE either channel delivered, so the ledger — and every report
+  /// built on it — claimed a delivery that may never have happened. An SMS
+  /// merely ENQUEUED counted as sent. Queueing is not delivery.
+  ///   planned | claimed | deferred | partially_delivered | delivered
+  ///   | failed_retryable | failed_terminal | cancelled | skipped
+  status    String   @default("planned")
   error     String?
+  /// Per-channel truth. `both` no longer hides that one side failed, and a
+  /// retry can target ONLY the failed channel instead of re-sending the one
+  /// that succeeded.
+  ///   not_applicable | pending | queued | delivered | failed
+  emailStatus     String?   @map("email_status")
+  smsStatus       String?   @map("sms_status")
+  emailAttempts   Int       @default(0) @map("email_attempts")
+  smsAttempts     Int       @default(0) @map("sms_attempts")
+  emailProviderId String?   @map("email_provider_id")
+  smsProviderId   String?   @map("sms_provider_id")
+  emailLastError  String?   @map("email_last_error")
+  smsLastError    String?   @map("sms_last_error")
+  /// When a deferred/retryable follow-up may be attempted again.
+  nextAttemptAt   DateTime? @map("next_attempt_at")
+  /// Why a terminal row is terminal (opted-out, not-completed, ineligible…).
+  terminalReason  String?   @map("terminal_reason")
+  /// First delivery on ANY channel. Null until something really shipped.
+  deliveredAt     DateTime? @map("delivered_at")
+  createdAt       DateTime  @default(now()) @map("created_at")
+  updatedAt       DateTime  @updatedAt @map("updated_at")
+  /// Retained for back-compat with existing rows/readers.
   sentAt    DateTime @default(now()) @map("sent_at")
 
   booking Booking @relation(fields: [bookingId], references: [id])
 
   @@unique([bookingId, type])
   @@index([bookingId])
+  @@index([status, nextAttemptAt])
   @@map("followup_ledger")
 }
 
@@ -2028,4 +2060,157 @@ model ReportExport {
   @@index([requestedById])
   @@index([createdAt])
   @@map("report_exports")
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  EMAIL LIFECYCLE (owner spec 2026-07-20) — suppression, send ledger, events.
+//
+//  These three models are the release-blocker foundation the email system was
+//  missing: there was no way to record an unsubscribe, no way to act on a hard
+//  bounce or spam complaint, no durable per-send record, and no idempotency
+//  key — so a worker retry after a successful provider call could resend.
+//
+//  All three are ADDITIVE. Nothing existing reads or writes them yet, so the
+//  migration is safe to apply ahead of the code that uses it.
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Why an address may no longer receive email. Ordered loosely by severity.
+/// UNSUBSCRIBED blocks PROMOTIONAL only; every other reason blocks ALL mail
+/// (a hard-bouncing or complaining address must not be written to at all).
+enum SuppressionReason {
+  UNSUBSCRIBED
+  HARD_BOUNCE
+  SPAM_COMPLAINT
+  INVALID_ADDRESS
+  ADMIN_BLOCK
+  PROVIDER_REJECTED
+}
+
+/// The ONE global do-not-send list, keyed on the lowercased address so it works
+/// for Customers, Leads, and anyone Leadtracking (SendGrid) knows about but this
+/// database does not. `scope` records whether the block is promotional-only.
+model EmailSuppression {
+  id        String            @id @default(cuid())
+  /// Always stored lowercased + trimmed. Unique = the list is idempotent.
+  email     String            @unique
+  reason    SuppressionReason
+  /// 'promotional' (unsubscribe) | 'all' (bounce/complaint/invalid/admin).
+  scope     String            @default("all")
+  /// Where the signal came from: 'unsubscribe-link' | 'resend-webhook' |
+  /// 'leadtracking' | 'admin' | 'sms-stop'.
+  source    String?
+  /// Free-text provider detail (bounce sub-type, complaint feedback id, …).
+  detail    String?
+  createdAt DateTime          @default(now()) @map("created_at")
+  updatedAt DateTime          @updatedAt @map("updated_at")
+
+  @@index([reason])
+  @@index([createdAt])
+  @@map("email_suppressions")
+}
+
+/// One row per attempted send. Claimed BEFORE the provider call, so a crash or
+/// retry after a successful send finds the row and refuses to send again.
+/// `idempotencyKey` is the exactly-once guarantee (see src/lib/email-guard.ts).
+model EmailSend {
+  id             String    @id @default(cuid())
+  /// recipient + template + journey + qualifying-event id + template version.
+  idempotencyKey String    @unique @map("idempotency_key")
+  email          String
+  template       String
+  /// 'transactional' | 'promotional' — drives suppression scope + frequency caps.
+  emailClass     String    @map("email_class")
+  /// Lifecycle journey this send belongs to, when it is part of one.
+  journey        String?
+  bookingId      String?   @map("booking_id")
+  leadId         String?   @map("lead_id")
+  campaign       String?
+  /// ATTEMPT STATE MACHINE (findings EMAIL-P1-03 / EMAIL-P1-04).
+  /// Previously this was 'claimed'|'sent'|'blocked'|'failed', and the unique
+  /// idempotencyKey was consumed by the FIRST outcome whatever it was — so a
+  /// provider 500 or a quiet-hours deferral permanently prevented the email
+  /// from ever being sent. Delivery IDENTITY (the key) is now separate from
+  /// ATTEMPT OUTCOME (this status): a non-terminal row is RESUMED in place.
+  ///   sending           — an attempt is in flight
+  ///   delivered         — provider accepted; terminal, never re-sent
+  ///   provider_rejected — known rejection, no provider id; retryable
+  ///   retry_pending     — awaiting another attempt
+  ///   ambiguous         — request left us, outcome unknown; NEVER auto-resent
+  ///   deferred          — policy says later (quiet hours, caps, gap)
+  ///   blocked_retryable — temporary block (DB outage, missing config/URL)
+  ///   blocked_terminal  — permanent block (hard suppression, ineligible state)
+  ///   failed_terminal   — attempts exhausted
+  status         String    @default("sending")
+  /// Coarse classification for reporting: terminal | retryable | deferred | ambiguous.
+  outcomeClass   String?   @map("outcome_class")
+  /// Why a blocked/deferred row is not sending (machine-readable).
+  blockedReason  String?   @map("blocked_reason")
+  /// Attempt counter across resumes of the SAME logical send.
+  attempts       Int       @default(0)
+  /// Earliest time a deferred/retryable row may be attempted again.
+  nextAttemptAt  DateTime? @map("next_attempt_at")
+  /// Resend message id, once accepted.
+  providerId     String?   @map("provider_id")
+  error          String?
+  sentAt         DateTime? @map("sent_at")
+  createdAt      DateTime  @default(now()) @map("created_at")
+  updatedAt      DateTime  @updatedAt @map("updated_at")
+
+  events EmailEvent[]
+
+  @@index([email])
+  @@index([status])
+  @@index([journey])
+  @@index([bookingId])
+  @@index([leadId])
+  @@index([createdAt])
+  /// Drives the retry/deferral sweep.
+  @@index([status, nextAttemptAt])
+  /// FREQUENCY-CAP QUERY (finding EMAIL-P2-18): countSentSince() filters on
+  /// email + emailClass + status + sentAt. A composite index keeps that a range
+  /// scan rather than a scan of every send to the address.
+  @@index([email, emailClass, status, sentAt])
+  @@map("email_sends")
+}
+
+/// Provider + first-party engagement events. `providerEventId` is unique so a
+/// duplicate webhook delivery is a no-op (providers retry aggressively).
+model EmailEvent {
+  id                 String   @id @default(cuid())
+  /// Provider event id, or a synthesized stable id for first-party events.
+  providerEventId    String   @unique @map("provider_event_id")
+  emailSendId        String?  @map("email_send_id")
+  email              String
+  /// 'delivered' | 'bounced' | 'complained' | 'opened' | 'clicked' |
+  /// 'delivery_delayed' | 'unsubscribed'
+  type               String
+  /// Raw provider payload excerpt for triage (never PII beyond the address).
+  detail             String?
+  /// SIDE-EFFECT PROCESSING STATE (finding EMAIL-P0-01).
+  /// Recording the event and APPLYING its consequence (suppressing a bounced or
+  /// complaining address) are two different things. Previously only the record
+  /// existed, so a failed suppression write left an address permanently
+  /// sendable while the unique providerEventId deduplicated away every retry.
+  /// 'processed'          — no side effect needed, or it completed
+  /// 'side_effect_pending'— a suppression is required and not yet confirmed
+  /// 'side_effect_failed' — the suppression write failed; MUST be retried
+  /// 'dead_letter'        — exhausted retries; needs a human
+  processingStatus   String   @default("processed") @map("processing_status")
+  /// How many times the side effect has been attempted.
+  sideEffectAttempts Int      @default(0) @map("side_effect_attempts")
+  /// Last side-effect error, for triage.
+  sideEffectError    String?  @map("side_effect_error")
+  occurredAt         DateTime @default(now()) @map("occurred_at")
+  createdAt          DateTime @default(now()) @map("created_at")
+  updatedAt          DateTime @updatedAt @map("updated_at")
+
+  emailSend EmailSend? @relation(fields: [emailSendId], references: [id])
+
+  @@index([email])
+  @@index([type])
+  @@index([emailSendId])
+  @@index([occurredAt])
+  /// Drives the retry sweep for unfinished side effects.
+  @@index([processingStatus])
+  @@map("email_events")
 }
