@@ -15,6 +15,7 @@
     "db:seed": "tsx prisma/seed.ts",
     "db:preflight": "tsx scripts/db-preflight.ts",
     "email:preflight": "tsx scripts/email-schema-preflight.ts",
+    "email:doctor": "tsx scripts/email-doctor.ts",
     "db:postcheck": "tsx scripts/db-postcheck.ts",
     "smoke:admin": "tsx scripts/smoke-admin.ts",
     "db:reset": "prisma migrate reset --force && npm run db:seed",
