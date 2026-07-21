@@ -15,6 +15,18 @@ import { csrfHeader } from '../../_client'
 //  be trusted is never presented as if it can.
 // ════════════════════════════════════════════════════════════════════════════
 
+/** The shared 40/30/30 view (src/lib/profit-allocation.ts). */
+export type Allocation = {
+  companyNetProfitCents: number
+  hasDistribution: boolean
+  businessRetainedCents: number
+  businessRetainedBp: number
+  ownerDistributableCents: number
+  lines: { label: string; ofNetProfitBp: number; amountCents: number; isBusiness: boolean }[]
+  roundingRemainderCents: number
+  explanation: string
+}
+
 export type CloseoutData = {
   status: string
   isFinalized: boolean
@@ -51,20 +63,31 @@ export type CloseoutData = {
   blockers: { code: string; message: string; severity: string; section: string }[]
   overrides: { code: string; reason: string; byName?: string; at?: string }[]
   split: { ok: boolean; error?: string; method: string; shares: { owner: string; amountCents: number; percentBp: number }[]; undistributedCents: number } | null
-  /** THE owner-facing 40/30/30 view (src/lib/profit-allocation.ts). */
-  allocation: {
-    companyNetProfitCents: number
-    hasDistribution: boolean
-    businessRetainedCents: number
-    businessRetainedBp: number
-    ownerDistributableCents: number
-    lines: { label: string; ofNetProfitBp: number; amountCents: number; isBusiness: boolean }[]
-    roundingRemainderCents: number
-    explanation: string
-  }
+  /** THE owner-facing 40/30/30 view (src/lib/profit-allocation.ts).
+   *  FROZEN from the snapshot once the move is finalized. */
+  allocation: Allocation
+  allocationBasis: 'FINALIZED' | 'PROVISIONAL'
+  /** Live recomputation — shown next to the frozen one after finalization so
+   *  the owner can see what has changed since, without either being restated. */
+  liveAllocation: Allocation
+  allocationSnapshotVersion: number | null
+  reopenReason: string | null
   unpaidLaborCents: number
   ownerReimbursementOwedCents: number
-  snapshots: { id: string; version: number; createdAt: string; supersededAt: string | null; companyNetProfitCents: number; distributableProfitCents: number }[]
+  snapshots: {
+    id: string
+    version: number
+    createdAt: string
+    supersededAt: string | null
+    companyNetProfitCents: number
+    distributableProfitCents: number
+    createdByName: string | null
+    calculationVersion: string
+    configSource: string | null
+    configVersion: string | null
+    allocation: Allocation
+    deltaFromPreviousCents: number | null
+  }[]
   distributions: { id: string; owner: string; status: string; approvedCents: number; paidCents: number; voided: boolean }[]
 }
 
@@ -93,6 +116,10 @@ export default function FinancialCloseoutPanel({
   const hard = data.blockers.filter((b) => b.severity === 'HARD')
   const overriddenCodes = new Set(data.overrides.map((o) => o.code))
   const unresolved = data.blockers.filter((b) => b.severity === 'OVERRIDABLE' && !overriddenCodes.has(b.code))
+  const nextVersion = (data.snapshots[0]?.version ?? 0) + 1
+  // A finalized move shows its snapshot; this says whether the world has moved
+  // on since. It never changes the snapshot — it only explains the difference.
+  const liveDiffers = data.isFinalized && data.liveAllocation.companyNetProfitCents !== a.companyNetProfitCents
 
   async function act(body: Record<string, unknown>, label: string) {
     setBusy(label); setError(null)
@@ -129,6 +156,9 @@ export default function FinancialCloseoutPanel({
             snapshot v{data.snapshots[0].version} · {new Date(data.snapshots[0].createdAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
           </span>
         )}
+        <a href={`/admin/closeout-summary/${bookingId}`} target="_blank" rel="noreferrer" style={{ fontSize: '12px', color: '#FF5A1F', fontWeight: 600 }}>
+          Printable summary ↗
+        </a>
       </div>
 
       {error && <div style={box('#FEF2F2', '#FECACA', '#B91C1C')} role="alert">{error}</div>}
@@ -245,6 +275,18 @@ export default function FinancialCloseoutPanel({
           share it reads as "the owners take everything and the business keeps
           nothing", which is the opposite of the policy. ── */}
       <Section title="Profit allocation">
+        <div style={{ marginBottom: '6px' }}>
+          <span style={{ ...chip, backgroundColor: data.allocationBasis === 'FINALIZED' ? '#ECFDF5' : '#FFFBEB', color: data.allocationBasis === 'FINALIZED' ? '#065F46' : '#B45309' }}>
+            {data.allocationBasis === 'FINALIZED'
+              ? `FINALIZED · SNAPSHOT V${data.allocationSnapshotVersion}`
+              : 'PROVISIONAL'}
+          </span>
+          {data.allocationBasis === 'PROVISIONAL' && (
+            <span style={{ fontSize: '11px', color: '#B45309', marginLeft: '8px' }}>
+              These figures are a live calculation and may still change at closeout.
+            </span>
+          )}
+        </div>
         <Line label="Final company net profit" value={money(a.companyNetProfitCents)} strong />
         {!a.hasDistribution ? (
           <div style={box('#F9FAFB', '#E5E7EB', '#6B7280')}>
@@ -279,10 +321,60 @@ export default function FinancialCloseoutPanel({
           </p>
         </details>
         {data.split && !data.split.ok && <div style={box('#FEF2F2', '#FECACA', '#B91C1C')}>{data.split.error}</div>}
+        {data.isFinalized && liveDiffers && (
+          <div style={box('#FFFBEB', '#FDE68A', '#B45309')}>
+            <strong>Live figures have moved since this move was finalized.</strong> The snapshot above is
+            the record and does not change. Recomputed today the net profit would be{' '}
+            {money(data.liveAllocation.companyNetProfitCents)}. Reopen with a reason to make a
+            correction — that creates a NEW version and leaves this one intact.
+          </div>
+        )}
         <p style={{ fontSize: '11px', color: '#9CA3AF', margin: '6px 0 0' }}>
           A calculation only — no money moves until a distribution is approved and recorded.
         </p>
       </Section>
+
+      {/* ── Finalization review (Stage 4).
+          Everything that is about to be frozen, on one screen, BEFORE the
+          button is pressed — including what is still missing and what an owner
+          chose to override. ── */}
+      {isOwner && !data.isFinalized && (
+        <Section title={`Finalization review — snapshot v${nextVersion} will be created`}>
+          <Line label="Collected revenue" value={money(f.netCollectedRevenueCents)} />
+          <Line label="Outstanding receivable" value={money(f.outstandingBalanceCents)} hint="never counted as profit" />
+          <Line label="Labor (approved crew)" value={`−${money(f.crewLaborCents)}`} />
+          <Line label="Expenses" value={`−${money(f.directExpenseCents)}`} />
+          <Line label="Owner reimbursements owed" value={`−${money(data.ownerReimbursementOwedCents)}`} />
+          <Line label={`Overhead (${f.overhead.basis})`} value={`−${money(f.overhead.amountCents)}`} />
+          <Line label="Company net profit" value={money(f.profit.companyNetProfitCents)} strong tone={f.profit.companyNetProfitCents < 0 ? '#EF4444' : '#C9A961'} />
+          {a.lines.map((ln) => (
+            <Line key={`review-${ln.label}`} label={`${ln.label} — ${pct(ln.ofNetProfitBp)}`} value={money(ln.amountCents)} tone={ln.isBusiness ? '#0A1628' : '#C9A961'} />
+          ))}
+          {hard.length > 0 && (
+            <div style={box('#FEF2F2', '#FECACA', '#B91C1C')}>
+              <strong>Blocking — cannot be finalized:</strong>
+              <ul style={ul}>{hard.map((b) => <li key={`rv-${b.code}`}>{b.code} — {b.message}</li>)}</ul>
+            </div>
+          )}
+          {unresolved.length > 0 && (
+            <div style={box('#FFFBEB', '#FDE68A', '#B45309')}>
+              <strong>Still missing (needs resolving or an owner override):</strong>
+              <ul style={ul}>{unresolved.map((b) => <li key={`rv2-${b.code}`}>{b.code}</li>)}</ul>
+            </div>
+          )}
+          {data.overrides.length > 0 && (
+            <div style={box('#EFF6FF', '#BFDBFE', '#1D4ED8')}>
+              <strong>Overridden, and recorded on the snapshot:</strong>
+              <ul style={ul}>{data.overrides.map((o) => <li key={`rv3-${o.code}`}>{o.code} — “{o.reason}”</li>)}</ul>
+            </div>
+          )}
+          {hard.length === 0 && unresolved.length === 0 && (
+            <p style={{ fontSize: '12px', color: '#065F46', margin: '6px 0 0' }}>
+              Nothing is outstanding. Finalizing freezes these figures as version {nextVersion}.
+            </p>
+          )}
+        </Section>
+      )}
 
       {/* ── 16. Finalize / reopen ── */}
       {isOwner && (
@@ -337,13 +429,42 @@ export default function FinancialCloseoutPanel({
         </Section>
       )}
 
-      {/* ── 17. Snapshot history ── */}
+      {/* ── 17. Snapshot history ──
+          Every version, with the allocation FROZEN into that version. Nothing
+          here is recomputed: v1 shows what v1 said, even after the policy, the
+          rates or the costs have changed. ── */}
       {data.snapshots.length > 0 && (
         <Section title="Snapshot history">
           {data.snapshots.map((s) => (
-            <div key={s.id} style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px', padding: '5px 0', color: s.supersededAt ? '#9CA3AF' : '#374151' }}>
-              <span>v{s.version} · {new Date(s.createdAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}{s.supersededAt ? ' · superseded' : ' · current'}</span>
-              <span style={{ fontVariantNumeric: 'tabular-nums' }}>net {money(s.companyNetProfitCents)} · dist {money(s.distributableProfitCents)}</span>
+            <div key={s.id} style={{ padding: '8px 0', borderBottom: '1px solid #F9FAFB', color: s.supersededAt ? '#9CA3AF' : '#374151' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', gap: '10px', flexWrap: 'wrap', fontSize: '12px' }}>
+                <span style={{ fontWeight: 700 }}>
+                  v{s.version} · {new Date(s.createdAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
+                  {s.createdByName ? ` · ${s.createdByName}` : ''}
+                  {s.supersededAt ? ' · superseded' : ' · current'}
+                </span>
+                <span style={{ fontVariantNumeric: 'tabular-nums' }}>
+                  net {money(s.companyNetProfitCents)}
+                  {s.deltaFromPreviousCents != null && (
+                    <span style={{ color: s.deltaFromPreviousCents >= 0 ? '#10B981' : '#EF4444' }}>
+                      {' '}({s.deltaFromPreviousCents >= 0 ? '+' : '−'}{money(Math.abs(s.deltaFromPreviousCents))} vs v{s.version - 1})
+                    </span>
+                  )}
+                </span>
+              </div>
+              <div style={{ display: 'flex', gap: '14px', flexWrap: 'wrap', fontSize: '11px', marginTop: '3px' }}>
+                {s.allocation.lines.map((ln) => (
+                  <span key={`${s.id}-${ln.label}`} style={{ fontVariantNumeric: 'tabular-nums' }}>
+                    {ln.label} — {pct(ln.ofNetProfitBp)}: <strong>{money(ln.amountCents)}</strong>
+                  </span>
+                ))}
+              </div>
+              <div style={{ fontSize: '10px', color: '#9CA3AF', marginTop: '3px' }}>
+                calc {s.calculationVersion}
+                {s.configSource ? ` · policy from ${s.configSource}` : ''}
+                {s.configVersion ? ` (${new Date(s.configVersion).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })})` : ''}
+                {s.supersededAt && data.reopenReason ? ` · reopened: “${data.reopenReason}”` : ''}
+              </div>
             </div>
           ))}
         </Section>

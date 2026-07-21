@@ -125,6 +125,76 @@ export function Metric({
   )
 }
 
+/** The 40/30/30 profit allocation, as reports render it (Stage 4).
+ *
+ *  Two things this panel refuses to do: show the internal 50/50 owner split
+ *  without saying it divides the remaining 60%, and present a provisional total
+ *  as if it were settled. A finalized period reads frozen snapshots; a mixed one
+ *  is labelled Provisional and says why. */
+export function AllocationPanel({ allocation }: {
+  allocation: {
+    companyNetProfitCents: number
+    hasDistribution: boolean
+    lines: { label: string; ofNetProfitBp: number; amountCents: number; isBusiness: boolean }[]
+    roundingRemainderCents: number
+    explanation: string
+    basis?: string
+    provisional?: boolean
+  } | null | undefined
+}) {
+  if (!allocation) return null
+  const provisional = allocation.provisional ?? allocation.basis !== 'FINALIZED'
+  const pctOf = (bp: number) => `${Number.isInteger(bp / 100) ? bp / 100 : (bp / 100).toFixed(1)}%`
+
+  return (
+    <div style={{ backgroundColor: '#FFFFFF', border: '1px solid #EFEFEF', borderRadius: '12px', padding: '16px', marginBottom: '18px' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap', marginBottom: '10px' }}>
+        <h2 style={{ fontSize: '13px', fontWeight: 700, color: COLORS.navy, margin: 0 }}>Profit allocation</h2>
+        <Tag color={provisional ? COLORS.amber : COLORS.green}>{provisional ? 'PROVISIONAL' : 'FINALIZED'}</Tag>
+      </div>
+
+      <div style={{ display: 'flex', justifyContent: 'space-between', gap: '12px', paddingBottom: '6px', borderBottom: '1px solid #F3F4F6' }}>
+        <span style={{ fontSize: '13px', color: COLORS.muted }}>Final company net profit</span>
+        <span style={{ fontSize: '17px', fontWeight: 800, color: allocation.companyNetProfitCents < 0 ? COLORS.red : COLORS.navy, fontVariantNumeric: 'tabular-nums' }}>
+          {money(allocation.companyNetProfitCents)}
+        </span>
+      </div>
+
+      {allocation.lines.map((ln) => (
+        <div key={ln.label} style={{ display: 'flex', justifyContent: 'space-between', gap: '12px', padding: '4px 0' }}>
+          <span style={{ fontSize: '13px', color: COLORS.muted }}>{ln.label} — {pctOf(ln.ofNetProfitBp)}</span>
+          <span style={{ fontSize: '14px', fontWeight: 700, color: ln.isBusiness ? COLORS.navy : COLORS.gold, fontVariantNumeric: 'tabular-nums' }}>
+            {money(ln.amountCents)}
+          </span>
+        </div>
+      ))}
+
+      {!allocation.hasDistribution && (
+        <p style={{ fontSize: '12px', color: COLORS.muted, margin: '6px 0 0' }}>
+          {allocation.companyNetProfitCents < 0
+            ? 'This period lost money, so nothing is allocated to the business or to either owner. The loss stands.'
+            : 'There is no profit to allocate in this period.'}
+        </p>
+      )}
+      {allocation.roundingRemainderCents > 0 && (
+        <p style={{ fontSize: '11px', color: COLORS.faint, margin: '4px 0 0' }}>
+          Includes {money(allocation.roundingRemainderCents)} of rounding remainder, which stays with the business.
+        </p>
+      )}
+      {provisional && (
+        <p style={{ fontSize: '11px', color: COLORS.amber, margin: '6px 0 0' }}>
+          Provisional — this period includes moves that have not been financially finalized, so these
+          figures can still change.
+        </p>
+      )}
+      <p style={{ fontSize: '11px', color: COLORS.faint, margin: '6px 0 0', lineHeight: 1.5 }}>
+        {allocation.explanation} The retained share is a general company allocation — it may fund taxes,
+        equipment, insurance, licensing or growth. It is not tax advice.
+      </p>
+    </div>
+  )
+}
+
 export function MetricGrid({ children }: { children: React.ReactNode }) {
   // auto-fill + minmax gives stacked cards on a phone and a grid on desktop,
   // with no fixed-width table to scroll sideways.

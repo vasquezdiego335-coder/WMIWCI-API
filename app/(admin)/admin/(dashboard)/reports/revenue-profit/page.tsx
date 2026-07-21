@@ -4,7 +4,7 @@ import { getSession } from '@/lib/auth'
 import { can, type Role } from '@/lib/permissions'
 import { COLORS } from '../../_ui'
 import {
-  PageShell, BasisStrip, EmptyState, FilterBar, ResponsiveTable,
+  PageShell, BasisStrip, EmptyState, FilterBar, ResponsiveTable, AllocationPanel,
   fetchReport, money, pctText, td, tdNum, ProfitCell, Tag,
   type RevProfitRow,
 } from '../_shared'
@@ -54,7 +54,9 @@ export default async function RevenueVsProfitReport({ searchParams }: { searchPa
           />
           {result.dataState !== 'OK'
             ? <EmptyState state={result.dataState} message={result.dataStateMessage} />
-            : (<ResponsiveTable headers={['Move', 'Revenue', 'Direct costs', 'Cash profit', 'Economic profit', 'Margin', 'Hours', 'Rev/hr', 'Profit/hr', 'Alerts']}>
+            : (<>
+              <AllocationPanel allocation={result.data.allocation} />
+              <ResponsiveTable headers={['Move', 'Revenue', 'Direct costs', 'Cash profit', 'Economic profit', 'Margin', 'Hours', 'Rev/hr', 'Profit/hr', 'Alerts']}>
                 {(result.data.rows as RevProfitRow[]).map((r) => (
                   <tr key={r.bookingId}>
                     <th scope="row" style={{ ...td, textAlign: 'left' }}>
@@ -78,7 +80,8 @@ export default async function RevenueVsProfitReport({ searchParams }: { searchPa
                     </td>
                   </tr>
                 ))}
-              </ResponsiveTable>)}
+              </ResponsiveTable>
+            </>)}
         </>
       )}
     </PageShell>
