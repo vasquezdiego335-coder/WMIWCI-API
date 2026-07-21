@@ -105,14 +105,18 @@ test('D3: crew can never override anything', () => {
 
 // ── D6: financial setup is REPORTED, never guessed ──────────────────────────
 
+// An owner with NO configured rate — the production starting point.
 const owner = { role: 'OWNER', workerType: 'OWNER', name: 'Diego', active: true, payRate: null }
+/** The same owner, with their own economic rate configured (Stage 4). */
+const ratedOwner = { ...owner, ownerEconomicRateCents: 4500 }
 
 test('D6: no BusinessConfig and no rates reports setup required', () => {
   const s = evaluateFinancialSetup({ users: [owner], hasBusinessConfig: false, ownerEconomicRateCents: null })
   assert.equal(s.ready, false)
   assert.equal(s.headline, SETUP_HEADLINE)
   assert.ok(s.outstanding.some((i) => i.key === 'business_config'))
-  assert.ok(s.outstanding.some((i) => i.key === 'owner_economic_rate'))
+  // Stage 4: the rate item is per owner, keyed by name.
+  assert.ok(s.outstanding.some((i) => i.key === 'owner_economic_rate_Diego'))
 })
 
 test('D6: production reality — config exists but no crew and no owner rate', () => {
@@ -121,9 +125,34 @@ test('D6: production reality — config exists but no crew and no owner rate', (
   assert.ok(s.outstanding.some((i) => i.key === 'crew_exists'))
 })
 
+test('D6: the business-wide default does NOT satisfy a per-owner rate', () => {
+  // BusinessConfig.ownerEconomicRateCents has a $30/h column DEFAULT that
+  // nobody chose. Before Stage 4 that made an unconfigured business look
+  // configured from the moment the row was created. Each owner now answers for
+  // their own rate, and the default cannot answer on their behalf.
+  const s = evaluateFinancialSetup({
+    users: [owner, { ...owner, name: 'Sebastian' }, { role: 'CREW', name: 'Worker', active: true, payRate: 2200 }],
+    hasBusinessConfig: true,
+    ownerEconomicRateCents: 3000,
+  })
+  assert.equal(s.ready, false)
+  assert.ok(s.outstanding.some((i) => i.key === 'owner_economic_rate_Diego'))
+  assert.ok(s.outstanding.some((i) => i.key === 'owner_economic_rate_Sebastian'))
+})
+
+test('D6: each owner is reported separately — one configured, one not', () => {
+  const s = evaluateFinancialSetup({
+    users: [ratedOwner, { ...owner, name: 'Sebastian' }, { role: 'CREW', name: 'Worker', active: true, payRate: 2200 }],
+    hasBusinessConfig: true,
+  })
+  assert.equal(s.ready, false)
+  assert.ok(!s.outstanding.some((i) => i.key === 'owner_economic_rate_Diego'))
+  assert.ok(s.outstanding.some((i) => i.key === 'owner_economic_rate_Sebastian'))
+})
+
 test('D6: an active crew member with no rate is outstanding', () => {
   const s = evaluateFinancialSetup({
-    users: [owner, { role: 'CREW', name: 'Worker', active: true, payRate: null }],
+    users: [ratedOwner, { role: 'CREW', name: 'Worker', active: true, payRate: null }],
     hasBusinessConfig: true,
     ownerEconomicRateCents: 3000,
   })
@@ -133,7 +162,7 @@ test('D6: an active crew member with no rate is outstanding', () => {
 
 test('D6: a fully configured business is ready', () => {
   const s = evaluateFinancialSetup({
-    users: [owner, { role: 'CREW', name: 'Worker', active: true, payRate: 2200 }],
+    users: [ratedOwner, { role: 'CREW', name: 'Worker', active: true, payRate: 2200 }],
     hasBusinessConfig: true,
     ownerEconomicRateCents: 3000,
   })
@@ -144,7 +173,7 @@ test('D6: a fully configured business is ready', () => {
 
 test('D6: an inactive crew member with no rate does not block setup', () => {
   const s = evaluateFinancialSetup({
-    users: [owner, { role: 'CREW', name: 'Old', active: false, payRate: null }, { role: 'CREW', name: 'New', active: true, payRate: 2000 }],
+    users: [ratedOwner, { role: 'CREW', name: 'Old', active: false, payRate: null }, { role: 'CREW', name: 'New', active: true, payRate: 2000 }],
     hasBusinessConfig: true,
     ownerEconomicRateCents: 3000,
   })
@@ -153,7 +182,7 @@ test('D6: an inactive crew member with no rate does not block setup', () => {
 
 test('D6: an owner cash rate is OPTIONAL — owners may take no wage', () => {
   const s = evaluateFinancialSetup({
-    users: [owner, { role: 'CREW', name: 'Worker', active: true, payRate: 2200 }],
+    users: [ratedOwner, { role: 'CREW', name: 'Worker', active: true, payRate: 2200 }],
     hasBusinessConfig: true,
     ownerEconomicRateCents: 3000,
   })

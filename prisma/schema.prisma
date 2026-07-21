@@ -158,6 +158,12 @@ enum AuditAction {
   CLOSEOUT_FINALIZED
   CLOSEOUT_REOPENED
   CLOSEOUT_OVERRIDE_USED
+  /// An OWNER rehearsed the closeout on an INTERNAL TEST move (Stage 4 D3).
+  /// Recorded separately from a real override so synthetic activity can be
+  /// found and excluded without reading reasons.
+  CLOSEOUT_REHEARSAL
+  /// A pay or owner-labor rate was configured on a staff profile (Stage 4 D6).
+  LABOR_RATE_CONFIGURED
   CLOSEOUT_TRUCK_SOURCE_CONFIRMED
   CLOSEOUT_BALANCE_WRITTEN_OFF
   CLOSEOUT_DISPUTE_ACKNOWLEDGED
@@ -576,6 +582,30 @@ model User {
   emergencyContactPhone String?        @map("emergency_contact_phone")
   reliabilityRating     Int?           @map("reliability_rating") // 1-5
   performanceNotes      String?        @map("performance_notes")
+
+  // ── Stage 4 labor-rate configuration (owner spec 2026-07-21) ──
+  //    What the OWNER types in through /admin/staff. EVERY rate is nullable on
+  //    purpose: an unset rate is UNKNOWN, never $0, and it keeps
+  //    LABOR_MISSING_RATE a HARD closeout blocker until a human supplies it.
+  //
+  //    Changing anything here must never alter a past move. JobCrew holds the
+  //    frozen snapshot taken at assignment time and is never re-read from this
+  //    profile — see labor-calc.buildRateSnapshot.
+  /// What THIS owner's hour is worth if it had to be hired out. Drives ECONOMIC
+  /// profit only — never cash, never a payable, and entirely separate from the
+  /// 30% owner profit allocations. Null = not configured.
+  ownerEconomicRateCents Int?           @map("owner_economic_rate_cents")
+  /// How this person is paid by default when they ARE paid. Null = unset.
+  defaultPayModel        LaborPayModel? @map("default_pay_model")
+  /// The date the current rate takes effect. Recorded, not enforced — it exists
+  /// so a rate change can be explained later.
+  rateEffectiveOn        DateTime?      @map("rate_effective_on")
+  rateNotes              String?        @map("rate_notes")
+  rateUpdatedById        String?        @map("rate_updated_by_id")
+  rateUpdatedAt          DateTime?      @map("rate_updated_at")
+  /// Eligibility flags used when staffing a move. Not money.
+  canDrive               Boolean        @default(false) @map("can_drive")
+  canLeadCrew            Boolean        @default(false) @map("can_lead_crew")
 
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
@@ -1838,6 +1868,11 @@ model FinancialSnapshot {
   distributableProfitCents Int   @map("distributable_profit_cents")
   /// [{ owner, amountCents, percentBp }] — what each owner was allocated.
   ownerAllocations         Json? @map("owner_allocations")
+  /// The owner-facing 40/30/30 lines EXACTLY as presented at finalization:
+  /// [{ label, ofNetProfitBp, amountCents, isBusiness }]. Stored so a report,
+  /// an export or a printed summary can restate a closed move without ever
+  /// re-reading live BusinessConfig. See src/lib/profit-allocation.ts.
+  allocationLines          Json? @map("allocation_lines")
 
   // provenance
   overheadMethod     OverheadMethod @map("overhead_method")
@@ -1847,6 +1882,14 @@ model FinancialSnapshot {
   /// Flags for anything still incomplete when this was taken.
   incompleteFlags    Json?          @map("incomplete_flags")
   calculationVersion String         @map("calculation_version")
+  /// WHERE the retained rate came from — "closeout.frozen" once a move has been
+  /// finalized before, "business_config" on a first finalization, "default"
+  /// when no policy was configured at all.
+  configSource       String?        @map("config_source")
+  /// WHICH configuration produced it: BusinessConfig.updatedAt at finalization.
+  /// Together with configSource this makes a historical figure explainable
+  /// after the policy has moved on.
+  configVersion      String?        @map("config_version")
 
   supersededAt   DateTime? @map("superseded_at")
   supersededById String?   @map("superseded_by_id")

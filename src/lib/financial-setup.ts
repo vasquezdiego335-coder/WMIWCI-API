@@ -19,6 +19,16 @@ export interface SetupInput {
     active: boolean
     /** Cash rate on the profile, in cents. Null = not configured. */
     payRate?: number | null
+    /**
+     * PER-OWNER economic labor rate (User.ownerEconomicRateCents), in cents.
+     * Null = this owner's rate has not been typed in.
+     *
+     * Stage 4: this is what the owner configures, per person. The business-wide
+     * value below is only a fallback for people who predate it — it must not
+     * make an unconfigured owner look configured, because its column default
+     * ($30/h) is a number nobody chose.
+     */
+    ownerEconomicRateCents?: number | null
   }[]
   /** BusinessConfig.ownerEconomicRateCents; null when there is no config row. */
   ownerEconomicRateCents?: number | null
@@ -63,12 +73,27 @@ export function evaluateFinancialSetup(i: SetupInput): SetupStatus {
       href: '/admin/owner-money',
       done: i.hasBusinessConfig,
     },
-    {
-      key: 'owner_economic_rate',
-      label: "Set the owners' labor value — what an owner hour is worth if it had to be hired",
-      href: '/admin/owner-money',
-      done: (i.ownerEconomicRateCents ?? 0) > 0,
-    },
+    // ── One item PER OWNER (Stage 4). A single business-wide flag could be
+    //    "done" while Diego's rate was still blank — and the column it read has
+    //    a $30/h default nobody chose, so it was done from the day the row was
+    //    created. Each owner now answers for their own rate.
+    ...(owners.length > 0
+      ? owners.map((o) => ({
+          key: `owner_economic_rate_${o.name ?? 'unknown'}`,
+          label: `Set ${o.name ?? 'this owner'}'s owner labor rate — what their hour is worth if it had to be hired`,
+          href: '/admin/staff',
+          done: (o.ownerEconomicRateCents ?? 0) > 0,
+        }))
+      : [
+          // No owner profiles at all: fall back to the business-wide value so
+          // the gap is still reported rather than silently disappearing.
+          {
+            key: 'owner_economic_rate',
+            label: "Set the owners' labor value — what an owner hour is worth if it had to be hired",
+            href: '/admin/staff',
+            done: (i.ownerEconomicRateCents ?? 0) > 0,
+          },
+        ]),
     ...owners.map((o) => ({
       key: `owner_rate_${o.name ?? 'unknown'}`,
       label: `Set ${o.name ?? 'this owner'}'s cash labor rate (optional — leave unset if owners take no wage)`,

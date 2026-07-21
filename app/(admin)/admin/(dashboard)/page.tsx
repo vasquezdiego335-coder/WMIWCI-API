@@ -68,7 +68,7 @@ async function getDashboardData() {
     }),
     // D6 (Stage 4): what the owner still has to configure before ANY move can
     // be closed out. Reported, never guessed — a missing rate is unknown, not $0.
-    prisma.user.findMany({ select: { role: true, workerType: true, name: true, active: true, payRate: true } }),
+    prisma.user.findMany({ select: { role: true, workerType: true, name: true, active: true, payRate: true, ownerEconomicRateCents: true } }),
     prisma.businessConfig.findUnique({ where: { id: 'singleton' } }).catch(() => null),
     // Needs Attention: top open reminders (critical → overdue → due today → rest).
     prisma.reminder.findMany({
@@ -89,7 +89,7 @@ async function getDashboardData() {
   const revenue = summarizeRevenue(thisMonthRevenue)
 
   const setup = evaluateFinancialSetup({
-    users: allUsers.map((u) => ({ role: String(u.role), workerType: String(u.workerType), name: u.name, active: u.active, payRate: u.payRate })),
+    users: allUsers.map((u) => ({ role: String(u.role), workerType: String(u.workerType), name: u.name, active: u.active, payRate: u.payRate, ownerEconomicRateCents: u.ownerEconomicRateCents })),
     ownerEconomicRateCents: businessConfig?.ownerEconomicRateCents ?? null,
     hasBusinessConfig: !!businessConfig,
   })

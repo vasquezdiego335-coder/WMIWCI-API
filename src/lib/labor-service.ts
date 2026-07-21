@@ -24,7 +24,7 @@ import {
 
 /** Business labor policy, read once per request. Falls back to house defaults
  *  when BusinessConfig has not been created yet. */
-export async function loadLaborPolicy(): Promise<{ policy: TimePolicy; overtimeMultiplierPct: number; ownerEconomicRateCents: number }> {
+export async function loadLaborPolicy(): Promise<{ policy: TimePolicy; overtimeMultiplierPct: number; ownerEconomicRateCents: number | null }> {
   const cfg = await prisma.businessConfig.findUnique({ where: { id: 'singleton' } }).catch(() => null)
   return {
     policy: {
@@ -32,7 +32,11 @@ export async function loadLaborPolicy(): Promise<{ policy: TimePolicy; overtimeM
       longShiftReviewMinutes: cfg?.longShiftReviewMinutes ?? DEFAULT_TIME_POLICY.longShiftReviewMinutes,
     },
     overtimeMultiplierPct: cfg?.overtimeMultiplierPct ?? 150,
-    ownerEconomicRateCents: cfg?.ownerEconomicRateCents ?? 3000,
+    // Stage 4: NO house fallback. An owner rate nobody configured is unknown,
+    // and the closeout must say so rather than price owner hours at a number
+    // the owners never agreed to. Per-owner rates live on the User profile and
+    // win over this business-wide value; see labor-rates.ts.
+    ownerEconomicRateCents: cfg?.ownerEconomicRateCents ?? null,
   }
 }
 
