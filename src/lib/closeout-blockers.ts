@@ -47,6 +47,21 @@ export interface CloseoutBlockerInput {
   allocatedToOwnersCents: number
   distributableProfitCents: number
   reservesExceedProfit: boolean
+  /**
+   * D3 — THE internal-test rehearsal switch, and the only thing it unlocks.
+   *
+   * Test payments are correctly excluded from revenue by money-rules, and
+   * NO_PAYMENT_DATA is correctly HARD for a real move. Together those two
+   * correct rules made a synthetic closeout impossible to complete, so the
+   * workflow could never be verified end to end.
+   *
+   * When the booking is `isInternalTest`, NO_PAYMENT_DATA drops to OVERRIDABLE
+   * — which still requires an OWNER, a written reason, and an audit entry
+   * (canOverrideBlocker enforces all three). NOTHING else changes: every other
+   * blocker keeps its severity, and a REAL customer booking can never take
+   * this path.
+   */
+  isInternalTest?: boolean
   // integrity
   hasNegativeValue: boolean
 }
@@ -74,7 +89,11 @@ export function computeCloseoutBlockers(i: CloseoutBlockerInput): Blocker[] {
     out.push(B('RESERVES_EXCEED_PROFIT', 'The reserves you selected are larger than the company net profit on this move.', 'HARD', 'reserves'))
   }
   if (!i.hasCapturedPayment) {
-    out.push(B('NO_PAYMENT_DATA', 'No captured customer payment is recorded on this move, so revenue cannot be trusted.', 'HARD', 'revenue'))
+    // D3: an internal-test move may rehearse past this with an owner's written
+    // reason. A real booking may not — its revenue would genuinely be untrusted.
+    out.push(i.isInternalTest
+      ? B('NO_PAYMENT_DATA', 'No captured customer payment is recorded. This is an INTERNAL TEST move, so an owner may override this to rehearse the closeout. Its figures never reach company reporting.', 'OVERRIDABLE', 'revenue')
+      : B('NO_PAYMENT_DATA', 'No captured customer payment is recorded on this move, so revenue cannot be trusted.', 'HARD', 'revenue'))
   }
   if (i.hasUnknownRefundAmount) {
     out.push(B('UNKNOWN_REFUND_AMOUNT', 'A partial refund on this move has no recorded amount. Revenue cannot be reconciled until it does.', 'HARD', 'refunds'))

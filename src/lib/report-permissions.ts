@@ -14,7 +14,12 @@
 // ============================================================================
 
 import { can, type Role, type Action } from './permissions'
+import { ALLOCATION_EXPORT_COLUMNS } from './profit-allocation'
 import type { ExportColumn } from './export-service'
+
+/** The 40/30/30 block, spread into every export that carries profit. Defined
+ *  once in profit-allocation.ts so no surface can ship half the policy. */
+const ALLOCATION: ExportColumn[] = ALLOCATION_EXPORT_COLUMNS.map((c) => ({ ...c }))
 
 export type ReportType =
   | 'overview' | 'profit-loss' | 'moves' | 'revenue-profit' | 'variance'
@@ -102,6 +107,7 @@ export const REPORT_COLUMNS: Record<ReportType, ExportColumn[]> = {
   overview: [
     { key: 'metric', header: 'Metric' },
     { key: 'value', header: 'Value', money: true },
+    ...ALLOCATION,
   ],
   'profit-loss': [
     { key: 'section', header: 'Section' },
@@ -110,6 +116,7 @@ export const REPORT_COLUMNS: Record<ReportType, ExportColumn[]> = {
     { key: 'previousCents', header: 'Previous period', money: true },
     { key: 'changeCents', header: 'Change', money: true },
     { key: 'changePct', header: 'Change %' },
+    ...ALLOCATION,
   ],
   moves: [
     { key: 'bookingReference', header: 'Move' },
@@ -132,6 +139,7 @@ export const REPORT_COLUMNS: Record<ReportType, ExportColumn[]> = {
     { key: 'marginPct', header: 'Margin %', roles: ['OWNER'] },
     { key: 'marketingSource', header: 'Marketing source' },
     { key: 'isRepeatCustomer', header: 'Repeat customer' },
+    ...ALLOCATION,
   ],
   'revenue-profit': [
     { key: 'bookingReference', header: 'Move' },
@@ -145,6 +153,7 @@ export const REPORT_COLUMNS: Record<ReportType, ExportColumn[]> = {
     { key: 'revenuePerCrewHourCents', header: 'Revenue / crew hour', money: true },
     { key: 'profitPerCrewHourCents', header: 'Profit / crew hour', money: true, roles: ['OWNER'] },
     { key: 'alert', header: 'Alert' },
+    ...ALLOCATION,
   ],
   variance: [
     { key: 'bookingReference', header: 'Move' },
@@ -172,6 +181,7 @@ export const REPORT_COLUMNS: Record<ReportType, ExportColumn[]> = {
     { key: 'finalizedNetProfitCents', header: 'Finalized profit', money: true, roles: ['OWNER'] },
     { key: 'profitRoas', header: 'Profit ROAS', roles: ['OWNER'] },
     { key: 'verdict', header: 'Verdict', roles: ['OWNER'] },
+    ...ALLOCATION,
   ],
   customers: [
     { key: 'customerName', header: 'Customer' },
@@ -184,6 +194,7 @@ export const REPORT_COLUMNS: Record<ReportType, ExportColumn[]> = {
     { key: 'marginPct', header: 'Avg margin %', roles: ['OWNER'] },
     { key: 'acquisitionSource', header: 'Acquisition source' },
     { key: 'isRepeat', header: 'Repeat customer' },
+    ...ALLOCATION,
   ],
   pricing: [
     { key: 'field', header: 'Field' },

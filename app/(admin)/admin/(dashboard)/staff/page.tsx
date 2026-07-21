@@ -1,6 +1,8 @@
 import { prisma } from '@/lib/db'
 import { getSession } from '@/lib/auth'
+import { describeLaborSetup, OWNER_RATE_EXPLANATION, LABOR_SETUP_TITLE, type RateProfile } from '@/lib/labor-rates'
 import StaffActions from './StaffActions'
+import StaffRates from './StaffRates'
 
 export const revalidate = 0
 
@@ -12,6 +14,8 @@ const ROLE_COLORS: Record<string, { bg: string; text: string }> = {
 
 export default async function AdminStaff() {
   const session = await getSession()
+
+  const isOwner = session?.role === 'OWNER'
 
   const staff = await prisma.user.findMany({
     orderBy: [{ role: 'asc' }, { name: 'asc' }],
@@ -25,10 +29,38 @@ export default async function AdminStaff() {
       discordId: true,
       createdAt: true,
       _count: { select: { assignedJobs: true } },
+      // ── Stage 4 rate configuration. Selected ONLY for an owner session:
+      //    pay and owner-labor rates are owner-financial settings, and a
+      //    manager viewing this page must not receive them at all. ──
+      ...(isOwner
+        ? {
+            ownerEconomicRateCents: true as const,
+            payRate: true as const,
+            defaultFlatRateCents: true as const,
+            defaultPayModel: true as const,
+            rateEffectiveOn: true as const,
+            rateNotes: true as const,
+            rateUpdatedAt: true as const,
+            canDrive: true as const,
+            canLeadCrew: true as const,
+            preferredRole: true as const,
+            workerType: true as const,
+          }
+        : {}),
     },
   })
 
-  const isOwner = session?.role === 'OWNER'
+  // The "Financial labor setup" panel. Reports what is configured; it never
+  // supplies a rate of its own — see src/lib/labor-rates.ts.
+  const setup = describeLaborSetup(
+    staff.map((u): RateProfile => ({
+      id: u.id,
+      name: u.name,
+      role: u.role as RateProfile['role'],
+      active: u.active,
+      ownerEconomicRateCents: 'ownerEconomicRateCents' in u ? u.ownerEconomicRateCents : null,
+    })),
+  )
 
   return (
     <div>
@@ -48,11 +80,40 @@ export default async function AdminStaff() {
         )}
       </div>
 
+      {/* ── Financial labor setup (Stage 4, D6) ──
+          Owner-only. "Not configured" is a real answer here: the system refuses
+          to guess what an owner hour is worth, and says so plainly rather than
+          showing a number nobody chose. */}
+      {isOwner && (
+        <div style={{ backgroundColor: '#FFFFFF', borderRadius: '12px', padding: '20px', marginBottom: '24px', boxShadow: '0 1px 4px rgba(0,0,0,0.06)', borderLeft: `4px solid ${setup.ownerRatesReady ? '#10B981' : '#F59E0B'}` }}>
+          <h2 style={{ fontSize: '13px', fontWeight: 700, color: '#0A1628', textTransform: 'uppercase', letterSpacing: '0.06em', margin: '0 0 12px' }}>
+            {LABOR_SETUP_TITLE}
+          </h2>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', maxWidth: '520px' }}>
+            {setup.lines.map((l) => (
+              <div key={l.label} style={{ display: 'flex', justifyContent: 'space-between', gap: '16px', fontSize: '13px' }}>
+                <span style={{ color: '#6B7280' }}>{l.label}</span>
+                <span style={{ fontWeight: 700, color: l.configured ? '#0A1628' : '#B45309', fontVariantNumeric: 'tabular-nums' }}>{l.value}</span>
+              </div>
+            ))}
+          </div>
+          {!setup.ownerRatesReady && (
+            <p style={{ fontSize: '12px', color: '#B45309', margin: '12px 0 0', fontWeight: 600 }}>
+              Financial setup required — a move cannot be financially closed while an owner&rsquo;s labor
+              rate is unknown. A missing rate is never treated as $0.
+            </p>
+          )}
+          <p style={{ fontSize: '12px', color: '#6B7280', margin: '10px 0 0', lineHeight: 1.6, maxWidth: '620px' }}>
+            {OWNER_RATE_EXPLANATION}
+          </p>
+        </div>
+      )}
+
       <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
         {staff.map((u) => {
           const rc = ROLE_COLORS[u.role] ?? ROLE_COLORS.CREW
           return (
-            <div key={u.id} style={{ ...staffCard, opacity: u.active ? 1 : 0.5 }}>
+            <div key={u.id} style={{ ...staffCard, opacity: u.active ? 1 : 0.5, flexDirection: 'column', alignItems: 'stretch' }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: '16px', flex: 1, flexWrap: 'wrap' }}>
                 <div style={avatar}>
                   {u.name.charAt(0).toUpperCase()}
@@ -78,9 +139,34 @@ export default async function AdminStaff() {
                   </div>
                 </div>
               </div>
-              {isOwner && u.id !== session?.userId && (
-                <StaffActions userId={u.id} active={u.active} role={u.role} />
-              )}
+              <div style={{ display: 'flex', gap: '12px', alignItems: 'center', flexWrap: 'wrap', justifyContent: 'space-between' }}>
+                {/* Rates are owner-only. An owner may edit their OWN rate here —
+                    unlike StaffActions, which refuses self-edits so nobody can
+                    deactivate or demote themselves by accident. */}
+                {isOwner && 'ownerEconomicRateCents' in u && (
+                  <StaffRates
+                    userId={u.id}
+                    isOwnerProfile={u.role === 'OWNER'}
+                    fields={{
+                      ownerEconomicRateCents: u.ownerEconomicRateCents ?? null,
+                      payRateCents: u.payRate ?? null,
+                      defaultFlatRateCents: u.defaultFlatRateCents ?? null,
+                      defaultPayModel: (u.defaultPayModel ?? null) as 'HOURLY' | 'FLAT' | 'DAY_RATE' | null,
+                      rateEffectiveOn: u.rateEffectiveOn ? u.rateEffectiveOn.toISOString() : null,
+                      rateNotes: u.rateNotes ?? null,
+                      active: u.active,
+                      canDrive: u.canDrive ?? false,
+                      canLeadCrew: u.canLeadCrew ?? false,
+                      preferredRole: u.preferredRole ?? null,
+                      rateUpdatedAt: u.rateUpdatedAt ? u.rateUpdatedAt.toISOString() : null,
+                      rateUpdatedByName: null,
+                    }}
+                  />
+                )}
+                {isOwner && u.id !== session?.userId && (
+                  <StaffActions userId={u.id} active={u.active} role={u.role} />
+                )}
+              </div>
             </div>
           )
         })}

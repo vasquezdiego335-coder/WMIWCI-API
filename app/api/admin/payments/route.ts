@@ -42,6 +42,10 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         bookingId: d.bookingId,
         amount: d.amountCents,
         status: 'COMPLETED',
+        // D1 (Stage 4): the method is now a real queryable column. `metadata`
+        // keeps its copy for backward compatibility, but the column is the
+        // source of truth — description text no longer carries data.
+        method,
         description: `${method} payment${d.note ? ` — ${d.note}` : ''}`,
         metadata: { manual: true, method, recordedBy: session.name, recordedById: session.userId },
         createdAt,

@@ -4,7 +4,7 @@ import { getSession } from '@/lib/auth'
 import { can, type Role } from '@/lib/permissions'
 import { COLORS } from '../_ui'
 import {
-  PageShell, BasisStrip, Metric, MetricGrid, EmptyState, FilterBar,
+  PageShell, BasisStrip, Metric, MetricGrid, EmptyState, FilterBar, AllocationPanel,
   fetchReport, money, pctText, GLOSSARY,
 } from './_shared'
 
@@ -83,6 +83,10 @@ export default async function ReportsOverview({ searchParams }: { searchParams: 
           {result.dataState !== 'OK' ? (
             <EmptyState state={result.dataState} message={result.dataStateMessage} />
           ) : (
+            <>
+            {/* The owner's policy, stated in the owner's terms, above the
+                metric grid — never the raw 50/50 split on its own. */}
+            <AllocationPanel allocation={result.data.allocation} />
             <MetricGrid>
               {(result.data.metrics as MetricRow[]).map((m) => (
                 <Metric
@@ -100,6 +104,7 @@ export default async function ReportsOverview({ searchParams }: { searchParams: 
                 note={result.data.marginPct == null ? 'No collected revenue in this period' : 'Company net profit ÷ collected revenue'}
               />
             </MetricGrid>
+            </>
           )}
         </>
       )}

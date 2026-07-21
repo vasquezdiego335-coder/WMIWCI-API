@@ -6,6 +6,7 @@ import { can, type Role } from '@/lib/permissions'
 import { buildRateSnapshot, type PayModel, type WorkerType } from '@/lib/labor-calc'
 import { ensureJobForBooking, recalcAssignment, loadLaborPolicy } from '@/lib/labor-service'
 import { canAssignCrew } from '@/lib/labor-guards'
+import { resolveOwnerEconomicRateCents } from '@/lib/labor-rates'
 import { z } from 'zod'
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -68,7 +69,7 @@ export async function POST(req: NextRequest, { params }: { params: { id: string 
 
   const worker = await prisma.user.findUnique({
     where: { id: d.userId },
-    select: { id: true, name: true, active: true, role: true, payRate: true, defaultFlatRateCents: true, workerType: true },
+    select: { id: true, name: true, active: true, role: true, payRate: true, defaultFlatRateCents: true, workerType: true, ownerEconomicRateCents: true },
   })
   if (!worker) return NextResponse.json({ error: 'Worker not found' }, { status: 404 })
   if (!worker.active) {
@@ -87,7 +88,14 @@ export async function POST(req: NextRequest, { params }: { params: { id: string 
     return NextResponse.json({ error: `${worker.name} is already assigned to this move.` }, { status: 409 })
   }
 
-  const { ownerEconomicRateCents, overtimeMultiplierPct } = await loadLaborPolicy()
+  const { ownerEconomicRateCents: businessOwnerRate, overtimeMultiplierPct } = await loadLaborPolicy()
+  // Stage 4: this owner's OWN configured rate wins over the business-wide one.
+  // Resolution never invents a number — an unconfigured owner rate stays null
+  // and surfaces as LABOR_MISSING_RATE at the closeout.
+  const ownerEconomicRateCents = resolveOwnerEconomicRateCents({
+    profileRateCents: worker.ownerEconomicRateCents,
+    businessDefaultCents: businessOwnerRate,
+  })
   const workerType = (d.workerType ?? worker.workerType ?? 'EMPLOYEE') as WorkerType
 
   // Guard the one combination that silently produces free labor: an hourly

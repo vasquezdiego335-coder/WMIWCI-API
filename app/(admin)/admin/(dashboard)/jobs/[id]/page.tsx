@@ -21,6 +21,7 @@ import { isOnBreak } from '@/lib/labor-time'
 import CrewLaborPanel from './CrewLaborPanel'
 import FinancialCloseoutPanel from './FinancialCloseoutPanel'
 import { buildCloseoutView } from '@/lib/closeout-service'
+import { bpToPercentLabel } from '@/lib/profit-allocation'
 import { isSettledForMoney } from '@/lib/financial-completeness'
 import { isEligibleExpense } from '@/lib/money-rules'
 import { Callout, CompletenessBadge } from '../../_ui'
@@ -515,6 +516,51 @@ export default async function JobDetail({ params }: { params: { id: string } }) 
                 Only the deposit is recorded. Use “Record payment” to log move-day cash so profit is accurate.
               </p>
             )}
+
+            {/* ── The 40/30/30 policy on the job profit summary (Stage 4).
+                Rendered from the SHARED allocation model, and from the frozen
+                snapshot once the move is finalized — the same numbers the
+                closeout panel, Owner Money, the reports and the exports show. */}
+            {closeout && (
+              <div style={{ marginTop: '14px', paddingTop: '12px', borderTop: '1px solid #F1F1F1' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: '8px', flexWrap: 'wrap' }}>
+                  <span style={{ fontSize: '11px', fontWeight: 700, color: '#6B7280', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+                    Profit allocation
+                  </span>
+                  <span style={{ fontSize: '10px', fontWeight: 700, padding: '2px 8px', borderRadius: '100px', backgroundColor: closeout.allocationBasis === 'FINALIZED' ? '#ECFDF5' : '#FFFBEB', color: closeout.allocationBasis === 'FINALIZED' ? '#065F46' : '#B45309' }}>
+                    {closeout.allocationBasis === 'FINALIZED'
+                      ? `Finalized · snapshot v${closeout.allocationSnapshotVersion}`
+                      : 'Provisional'}
+                  </span>
+                </div>
+                <div style={{ display: 'flex', justifyContent: 'space-between', gap: '12px', marginTop: '6px' }}>
+                  <span style={{ fontSize: '13px', color: '#6B7280' }}>Final company net profit</span>
+                  <span style={{ fontSize: '15px', fontWeight: 800, color: '#0A1628', fontVariantNumeric: 'tabular-nums' }}>
+                    {cents(closeout.allocation.companyNetProfitCents) ?? '$0.00'}
+                  </span>
+                </div>
+                {closeout.allocation.lines.map((ln) => (
+                  <div key={ln.label} style={{ display: 'flex', justifyContent: 'space-between', gap: '12px', padding: '2px 0' }}>
+                    <span style={{ fontSize: '12px', color: '#6B7280' }}>
+                      {ln.label} — {bpToPercentLabel(ln.ofNetProfitBp)}
+                    </span>
+                    <span style={{ fontSize: '13px', fontWeight: 700, color: ln.isBusiness ? '#0A1628' : '#C9A961', fontVariantNumeric: 'tabular-nums' }}>
+                      {cents(ln.amountCents) ?? '$0.00'}
+                    </span>
+                  </div>
+                ))}
+                {!closeout.allocation.hasDistribution && (
+                  <p style={{ fontSize: '11px', color: '#6B7280', margin: '6px 0 0' }}>
+                    {closeout.allocation.companyNetProfitCents < 0
+                      ? 'This move lost money, so nothing is allocated to anyone. The loss stands and the move can still be finalized.'
+                      : 'No profit to allocate on this move.'}
+                  </p>
+                )}
+                <p style={{ fontSize: '11px', color: '#9CA3AF', margin: '6px 0 0', lineHeight: 1.5 }}>
+                  {closeout.allocation.explanation}
+                </p>
+              </div>
+            )}
           </Card>
 
           {/* Section 7c: Job Expenses (admin OS) */}
@@ -705,6 +751,11 @@ export default async function JobDetail({ params }: { params: { id: string } }) 
               blockers: closeout.blockers,
               overrides: closeout.overrides,
               split: closeout.split,
+              allocation: closeout.allocation,
+              allocationBasis: closeout.allocationBasis,
+              liveAllocation: closeout.liveAllocation,
+              allocationSnapshotVersion: closeout.allocationSnapshotVersion,
+              reopenReason: closeout.reopenReason,
               unpaidLaborCents: closeout.unpaidLaborCents,
               ownerReimbursementOwedCents: closeout.ownerReimbursementOwedCents,
               snapshots: closeout.snapshots.map((sn) => ({
@@ -713,6 +764,12 @@ export default async function JobDetail({ params }: { params: { id: string } }) 
                 supersededAt: sn.supersededAt ? sn.supersededAt.toISOString() : null,
                 companyNetProfitCents: sn.companyNetProfitCents,
                 distributableProfitCents: sn.distributableProfitCents,
+                createdByName: sn.createdByName,
+                calculationVersion: sn.calculationVersion,
+                configSource: sn.configSource,
+                configVersion: sn.configVersion,
+                allocation: sn.allocation,
+                deltaFromPreviousCents: sn.deltaFromPreviousCents,
               })),
               distributions: closeout.distributions,
             }}

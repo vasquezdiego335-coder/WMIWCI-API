@@ -173,6 +173,88 @@ export function toXlsxXml(columns: ExportColumn[], rows: Record<string, unknown>
 </Workbook>`
 }
 
+// ── PDF ─────────────────────────────────────────────────────────────────────
+
+/**
+ * A minimal, dependency-free PDF (1.4) using the built-in Courier font.
+ *
+ * WHY HAND-ROLLED: adding a PDF library to ship one report is a large surface
+ * for a small need, and every alternative renders HTML in a headless browser we
+ * do not run. This writes the handful of objects a text document needs, and the
+ * cell values go through the SAME sanitizer as CSV and XLSX — a PDF is not a
+ * spreadsheet, but a single sanitizer means no format can be forgotten.
+ *
+ * Layout is RECORD-PER-BLOCK ("Header: value" lines), not a grid: a financial
+ * export is 20+ columns wide and a squeezed grid is unreadable, whereas a block
+ * per record stays legible when printed.
+ */
+export function toPdf(columns: ExportColumn[], rows: Record<string, unknown>[], meta: ExportMeta): Buffer {
+  const PAGE_W = 612, PAGE_H = 792, MARGIN = 48, LEADING = 12, SIZE = 9
+  const MAX_LINES = Math.floor((PAGE_H - MARGIN * 2) / LEADING)
+
+  // Courier is a WinAnsi font: characters outside it would render as garbage,
+  // so they are transliterated rather than silently dropped.
+  const ascii = (s: string) =>
+    s.replace(/[–—]/g, '-').replace(/[‘’]/g, "'").replace(/[“”]/g, '"')
+      .replace(/·/g, '-').replace(/[^\x20-\x7e]/g, '?')
+  const esc = (s: string) => ascii(s).replace(/\\/g, '\\\\').replace(/\(/g, '\\(').replace(/\)/g, '\\)')
+
+  const lines: string[] = []
+  for (const m of metaRows(meta)) lines.push(m.join('  '))
+  lines.push('')
+  rows.forEach((r, i) => {
+    lines.push(`--- Record ${i + 1} of ${rows.length} ---`)
+    for (const c of columns) lines.push(`${c.header}: ${sanitizeCell(r[c.key])}`)
+    lines.push('')
+  })
+  if (rows.length === 0) lines.push('(no records)')
+
+  const pages: string[][] = []
+  for (let i = 0; i < lines.length; i += MAX_LINES) pages.push(lines.slice(i, i + MAX_LINES))
+  if (pages.length === 0) pages.push([''])
+
+  // Objects: 1 catalog, 2 pages, 3 font, then (page, content) per page.
+  const objects: string[] = []
+  const pageIds: number[] = []
+  const FIRST_PAGE_OBJ = 4
+  pages.forEach((_, i) => pageIds.push(FIRST_PAGE_OBJ + i * 2))
+
+  objects[1] = '<< /Type /Catalog /Pages 2 0 R >>'
+  objects[2] = `<< /Type /Pages /Kids [${pageIds.map((id) => `${id} 0 R`).join(' ')}] /Count ${pages.length} >>`
+  objects[3] = '<< /Type /Font /Subtype /Type1 /BaseFont /Courier /Encoding /WinAnsiEncoding >>'
+
+  pages.forEach((pageLines, i) => {
+    const pageObj = pageIds[i]
+    const contentObj = pageObj + 1
+    const body =
+      `BT /F1 ${SIZE} Tf ${LEADING} TL 1 0 0 1 ${MARGIN} ${PAGE_H - MARGIN} Tm\n` +
+      pageLines.map((l) => `(${esc(l)}) Tj T*`).join('\n') +
+      '\nET'
+    objects[pageObj] =
+      `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${PAGE_W} ${PAGE_H}] ` +
+      `/Resources << /Font << /F1 3 0 R >> >> /Contents ${contentObj} 0 R >>`
+    objects[contentObj] = `<< /Length ${Buffer.byteLength(body, 'latin1')} >>\nstream\n${body}\nendstream`
+  })
+
+  // Assemble with a real cross-reference table — byte offsets are what make a
+  // PDF openable, so they are computed rather than approximated.
+  let pdf = '%PDF-1.4\n'
+  const offsets: number[] = []
+  for (let i = 1; i < objects.length; i++) {
+    offsets[i] = Buffer.byteLength(pdf, 'latin1')
+    pdf += `${i} 0 obj\n${objects[i]}\nendobj\n`
+  }
+  const xrefAt = Buffer.byteLength(pdf, 'latin1')
+  const count = objects.length // entries 0..N-1
+  pdf += `xref\n0 ${count}\n0000000000 65535 f \n`
+  for (let i = 1; i < objects.length; i++) {
+    pdf += `${String(offsets[i]).padStart(10, '0')} 00000 n \n`
+  }
+  pdf += `trailer\n<< /Size ${count} /Root 1 0 R >>\nstartxref\n${xrefAt}\n%%EOF\n`
+
+  return Buffer.from(pdf, 'latin1')
+}
+
 export const exportFilename = (title: string, format: ExportFormat, at: Date): string => {
   const slug = title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 60)
   const stamp = at.toISOString().slice(0, 10)

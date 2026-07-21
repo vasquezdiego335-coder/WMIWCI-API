@@ -372,12 +372,27 @@ export interface RateSnapshot {
 
 /**
  * Freeze the pay terms onto an assignment. Called ONCE at assignment; after
- * this the worker's profile is irrelevant to this move.
+ * this the worker's profile is irrelevant to this move — which is why changing
+ * a rate in /admin/staff can never restate what a past move cost.
  *
- * An explicit owner-typed rate wins over the profile default. OWNER workers
- * always get an economic rate so unpaid owner labor can be valued later, even
- * if they are being paid cash today.
+ * An explicit owner-typed rate wins over the profile default. OWNER workers get
+ * an economic rate so unpaid owner labor can be valued later, even if they are
+ * being paid cash today.
+ *
+ * STAGE 4: when nobody has configured an owner rate the snapshot records NULL,
+ * not a number. It used to fall back to $30/h — a rate no owner had chosen,
+ * which made unconfigured owner labor look priced and quietly understated the
+ * cost of every move. Null flows through to LABOR_MISSING_RATE, which is the
+ * honest answer: this labor cannot be priced yet.
  */
+/** What an owner hour is worth here, or NULL when nobody has said. The cash
+ *  rate is an acceptable stand-in (an owner being paid $X/h is evidence their
+ *  hour is worth $X/h); a made-up house rate is not. */
+function ownerEconomicRateOf(src: SnapshotSource): number | null {
+  const configured = src.ownerEconomicRateCents ?? src.userProfilePayRateCents ?? null
+  return configured != null && configured > 0 ? nn(configured) : null
+}
+
 export function buildRateSnapshot(src: SnapshotSource): RateSnapshot {
   const explicit = src.hourlyRateCents != null || src.flatPayCents != null || src.dayRateCents != null
   const hourly = src.hourlyRateCents ?? src.userProfilePayRateCents ?? null
@@ -391,10 +406,7 @@ export function buildRateSnapshot(src: SnapshotSource): RateSnapshot {
     flatPayCentsSnapshot: src.payModel === 'FLAT' ? (flat != null ? nn(flat) : null) : null,
     dayRateCentsSnapshot: src.payModel === 'DAY_RATE' ? (src.dayRateCents != null ? nn(src.dayRateCents) : null) : null,
     travelRateCentsSnapshot: src.travelRateCents != null ? nn(src.travelRateCents) : null,
-    economicRateCentsSnapshot:
-      src.workerType === 'OWNER'
-        ? nn(src.ownerEconomicRateCents ?? src.userProfilePayRateCents ?? 3000)
-        : null,
+    economicRateCentsSnapshot: src.workerType === 'OWNER' ? ownerEconomicRateOf(src) : null,
     rateSnapshotSource: explicit ? 'manual' : 'user_profile',
   }
 }

@@ -17,6 +17,11 @@ import {
   loadMovesReport, loadMarketingReport, loadCustomerReport, loadPricingComparables,
   sortMoveRows, paginate, figuresOf, type MoveReportRow,
 } from './reporting-service'
+import {
+  allocationFromTotals, buildProfitAllocation, allocationExportFields,
+  ALLOCATION_EXPLANATION, bpToPercentLabel,
+  type ProfitAllocationView, type AllocationBasis,
+} from './profit-allocation'
 import { formatRoas } from './marketing-profitability'
 import { recommendPrice, computeBreakEven } from './pricing-intelligence'
 import { financialActionsForMove, dedupeActions } from './action-center-financial'
@@ -39,6 +44,46 @@ export interface BuiltReport {
 const centsToNum = (c: number | null | undefined) => (c == null ? null : Math.round(c) / 100)
 const pct = (bp: number | null | undefined) => (bp == null ? null : Math.round(bp) / 100)
 const hours = (minutes: number) => Math.round((minutes / 60) * 100) / 100
+
+// ── The 40/30/30 block, shared by every report ──────────────────────────────
+
+/**
+ * A period's profit allocation, plus the flat fields the exports carry.
+ *
+ * `basis` is never guessed: FINALIZED only when every move in the total is
+ * finalized. A mixed period is labelled PROVISIONAL, because part of it can
+ * still change — a report must not present a total as settled when it is not.
+ */
+function periodAllocation(t: AggregateTotals): { view: ProfitAllocationView; basis: AllocationBasis } {
+  const basis: AllocationBasis = t.provisionalCount === 0 && t.finalizedCount > 0 ? 'FINALIZED' : 'PROVISIONAL'
+  return { view: allocationFromTotals(t), basis }
+}
+
+/** The 40/30/30 lines for ONE move, from whichever figures the row is using. */
+function moveAllocation(r: MoveReportRow): { view: ProfitAllocationView; basis: AllocationBasis } {
+  const f = figuresOf(r)
+  const basis: AllocationBasis = r.isFinalized ? 'FINALIZED' : 'PROVISIONAL'
+  if (!f) {
+    return {
+      view: buildProfitAllocation({ companyNetProfitCents: 0, businessRetainedCents: 0, businessRetainedBp: 0, distributableProfitCents: 0, ownerShares: [] }),
+      basis,
+    }
+  }
+  return {
+    view: buildProfitAllocation({
+      companyNetProfitCents: f.companyNetProfitCents,
+      businessRetainedCents: f.businessRetainedCents ?? 0,
+      businessRetainedBp: f.businessRetainedBp ?? 0,
+      distributableProfitCents: f.distributableProfitCents,
+      ownerShares: f.ownerAllocations ?? [],
+    }),
+    basis,
+  }
+}
+
+/** The allocation as export cells for one row or one period. */
+const allocationCells = (a: { view: ProfitAllocationView; basis: AllocationBasis }, snapshotVersion?: number | null) =>
+  allocationExportFields(a.view, { basis: a.basis, snapshotVersion })
 
 function moveMoney(r: MoveReportRow) {
   const f = figuresOf(r)
@@ -85,6 +130,14 @@ async function buildOverview(req: ResolvedReportRequest): Promise<BuiltReport> {
     note: note ?? null,
   })
 
+  // THE 40/30/30 policy at period level. Finalized moves contribute their
+  // frozen snapshot values; provisional ones contribute a live calculation and
+  // force the block to be labelled Provisional.
+  const alloc = periodAllocation(t)
+  const allocationNote = alloc.basis === 'PROVISIONAL'
+    ? 'Provisional — includes moves that are not financially finalized.'
+    : null
+
   const data = {
     metrics: [
       metric('Billed revenue', t.netBilledRevenueCents, p.netBilledRevenueCents),
@@ -100,7 +153,17 @@ async function buildOverview(req: ResolvedReportRequest): Promise<BuiltReport> {
       metric('Tax reserves', t.taxReserveCents, p.taxReserveCents, 'Planned allocation, not a bank transfer.'),
       metric('Business reserves', t.businessReserveCents, p.businessReserveCents, 'Planned allocation, not a bank transfer.'),
       metric('Distributable profit', t.distributableProfitCents, p.distributableProfitCents),
+      // The policy, in the owner's terms, on the same list as everything else.
+      ...alloc.view.lines.map((ln) =>
+        metric(`${ln.label} — ${bpToPercentLabel(ln.ofNetProfitBp)}`, ln.amountCents, null, allocationNote),
+      ),
     ],
+    allocation: {
+      ...alloc.view,
+      basis: alloc.basis,
+      provisional: alloc.basis === 'PROVISIONAL',
+      explanation: ALLOCATION_EXPLANATION,
+    },
     revenueForBasis: centsToNum(revenueForBasis(t, req.basis)),
     marginPct: pct(t.marginBp),
     counts: { finalized: t.finalizedCount, provisional: t.provisionalCount, incomplete: t.unusableCount, moves: t.moveCount },
@@ -115,7 +178,7 @@ async function buildOverview(req: ResolvedReportRequest): Promise<BuiltReport> {
     data,
     counts: current.counts,
     warnings,
-    exportRows: data.metrics.map((m) => ({ metric: m.metric, value: m.value })),
+    exportRows: data.metrics.map((m) => ({ metric: m.metric, value: m.value, ...allocationCells(alloc) })),
   }
 }
 
@@ -158,11 +221,23 @@ async function buildProfitLoss(req: ResolvedReportRequest): Promise<BuiltReport>
     line('Allocations below profit (equity activity, NOT expenses)', 'Distributable profit', t.distributableProfitCents, p.distributableProfitCents),
   ]
 
+  // The 40/30/30 policy as its own section. It sits BELOW profit and is labelled
+  // equity activity for the same reason the reserves are: an owner allocation
+  // is not an expense, and a P&L that showed it as one would understate profit.
+  const alloc = periodAllocation(t)
+  const priorAlloc = periodAllocation(p)
+  const priorAmount = (label: string) => priorAlloc.view.lines.find((x) => x.label === label)?.amountCents ?? 0
+  const allocationSection = `Profit allocation (${alloc.basis === 'FINALIZED' ? 'finalized' : 'provisional'})`
+  for (const ln of alloc.view.lines) {
+    lines.push(line(allocationSection, `${ln.label} — ${bpToPercentLabel(ln.ofNetProfitBp)}`, ln.amountCents, priorAmount(ln.label)))
+  }
+
   return {
     data: {
       lines,
       marginPct: pct(t.marginBp),
       comparePeriodLabel: req.comparePeriod.label,
+      allocation: { ...alloc.view, basis: alloc.basis, provisional: alloc.basis === 'PROVISIONAL' },
       disclaimer: 'Internal management report. Not a tax return and not an audited financial statement.',
     },
     counts: current.counts,
@@ -171,6 +246,7 @@ async function buildProfitLoss(req: ResolvedReportRequest): Promise<BuiltReport>
       section: l.section, line: l.line, currentCents: l.current,
       previousCents: l.previous, changeCents: l.change,
       changePct: l.changePct ?? l.changeNote,
+      ...allocationCells(alloc),
     })),
   }
 }
@@ -184,7 +260,9 @@ async function buildMoves(req: ResolvedReportRequest): Promise<BuiltReport> {
 
   const shaped = slice.map((r) => {
     const m = moveMoney(r)
+    const a = moveAllocation(r)
     return {
+      allocation: { ...a.view, basis: a.basis },
       bookingId: r.bookingId,
       bookingReference: r.bookingReference ?? r.bookingId.slice(0, 8),
       customerName: r.customerName,
@@ -213,13 +291,22 @@ async function buildMoves(req: ResolvedReportRequest): Promise<BuiltReport> {
     }
   })
 
+  const periodAlloc = periodAllocation(res.totals)
+
   return {
-    data: { rows: shaped, totals: res.totals },
+    data: {
+      rows: shaped,
+      totals: res.totals,
+      // Period totals in the owner's terms. Finalized moves contribute their
+      // frozen snapshot values, so this cannot move when the policy does.
+      allocation: { ...periodAlloc.view, basis: periodAlloc.basis, provisional: periodAlloc.basis === 'PROVISIONAL' },
+    },
     counts: res.counts,
     warnings: res.warnings,
     page: { page: req.query.page, pageSize: req.query.pageSize, total, totalPages },
-    exportRows: shaped.map((r) => ({
+    exportRows: shaped.map(({ allocation, ...r }) => ({
       ...r,
+      ...allocationExportFields(allocation, { basis: allocation.basis }),
       moveDate: r.moveDate ? r.moveDate.slice(0, 10) : '',
       netBilledRevenueCents: centsToNum(r.netBilledRevenueCents),
       netCollectedRevenueCents: centsToNum(r.netCollectedRevenueCents),
@@ -251,7 +338,9 @@ async function buildRevenueProfit(req: ResolvedReportRequest): Promise<BuiltRepo
       alerts.push('High revenue, thin margin')
     }
     if (r.financialStatus !== 'FINALIZED') alerts.push('Provisional — not closed out')
+    const a = moveAllocation(r)
     return {
+      allocation: { ...a.view, basis: a.basis },
       bookingId: r.bookingId,
       bookingReference: r.bookingReference ?? r.bookingId.slice(0, 8),
       customerName: r.customerName,
@@ -268,8 +357,13 @@ async function buildRevenueProfit(req: ResolvedReportRequest): Promise<BuiltRepo
     }
   })
   const sorted = rows.sort((a, b) => (b.netCollectedRevenueCents ?? 0) - (a.netCollectedRevenueCents ?? 0))
+  const periodAlloc = periodAllocation(res.totals)
   return {
-    data: { rows: sorted, totals: res.totals },
+    data: {
+      rows: sorted,
+      totals: res.totals,
+      allocation: { ...periodAlloc.view, basis: periodAlloc.basis, provisional: periodAlloc.basis === 'PROVISIONAL' },
+    },
     counts: res.counts,
     warnings: res.warnings,
     exportRows: sorted.map((r) => ({
@@ -282,6 +376,7 @@ async function buildRevenueProfit(req: ResolvedReportRequest): Promise<BuiltRepo
       revenuePerCrewHourCents: centsToNum(r.revenuePerCrewHourCents),
       profitPerCrewHourCents: centsToNum(r.profitPerCrewHourCents),
       alert: r.alerts.join('; '),
+      ...allocationExportFields(r.allocation, { basis: r.allocation.basis }),
     })),
   }
 }
@@ -322,8 +417,16 @@ async function buildVariance(req: ResolvedReportRequest): Promise<BuiltReport> {
 // ── Marketing ───────────────────────────────────────────────────────────────
 
 async function buildMarketing(req: ResolvedReportRequest, _role: Role): Promise<BuiltReport> {
-  const { results, counts, warnings } = await loadMarketingReport(req)
-  const rows = results.map((r) => ({
+  const { results, allocations, counts, warnings } = await loadMarketingReport(req)
+  const rows = results.map((r) => {
+    const src = allocations[r.sourceKey]
+    // What this channel contributed to the business and to each owner. A
+    // channel with any unfinalized move is labelled provisional.
+    const a = src
+      ? { view: allocationFromTotals(src), basis: (src.allFinalized ? 'FINALIZED' : 'PROVISIONAL') as AllocationBasis }
+      : { view: allocationFromTotals({ companyNetProfitCents: 0, businessRetainedCents: 0, roundingRemainderCents: 0, distributableProfitCents: 0, ownerAllocationCents: {} }), basis: 'PROVISIONAL' as AllocationBasis }
+    return {
+    allocation: { ...a.view, basis: a.basis },
     sourceKey: r.sourceKey,
     spendCents: r.spendCents,
     leads: r.funnel.leads,
@@ -345,7 +448,8 @@ async function buildMarketing(req: ResolvedReportRequest, _role: Role): Promise<
     caveat: r.caveat,
     // The headline the owner needs: revenue can look great while profit does not.
     verdict: r.profitable === false ? 'UNPROFITABLE' : r.profitable === true ? 'PROFITABLE' : 'NOT PROVEN',
-  }))
+    }
+  })
   const sorted = rows.sort((a, b) => b.netOfSpendCents - a.netOfSpendCents)
   return {
     data: { rows: sorted },
@@ -362,6 +466,7 @@ async function buildMarketing(req: ResolvedReportRequest, _role: Role): Promise<
       finalizedNetProfitCents: centsToNum(r.finalizedNetProfitCents),
       profitRoas: r.profitRoas,
       verdict: r.verdict,
+      ...allocationExportFields(r.allocation, { basis: r.allocation.basis }),
     })),
   }
 }
@@ -371,6 +476,13 @@ async function buildMarketing(req: ResolvedReportRequest, _role: Role): Promise<
 async function buildCustomers(req: ResolvedReportRequest): Promise<BuiltReport> {
   const { rows, counts, warnings } = await loadCustomerReport(req)
   const shaped = rows.map((c) => ({
+    // Per-customer allocation: what the business retained and each owner was
+    // allocated on THAT customer's moves. Finalized moves contribute frozen
+    // snapshot values, so this cannot drift when the policy changes.
+    allocation: (() => {
+      const a = periodAllocation(c.totals)
+      return { ...a.view, basis: a.basis }
+    })(),
     customerId: c.customerId,
     customerName: c.customerName,
     moves: c.moves,
@@ -398,6 +510,7 @@ async function buildCustomers(req: ResolvedReportRequest): Promise<BuiltReport> 
       companyNetProfitCents: centsToNum(c.companyNetProfitCents),
       marginPct: pct(c.marginBp), acquisitionSource: c.acquisitionSource,
       isRepeat: c.isRepeat,
+      ...allocationExportFields(c.allocation, { basis: c.allocation.basis }),
     })),
   }
 }
