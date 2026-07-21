@@ -202,6 +202,16 @@ enum AuditAction {
   EMAIL_SEND_RETRIED
   EMAIL_SUPPRESSION_RESTORED
   EMAIL_TEST_SENT
+  EMAIL_CAMPAIGN_CREATED
+  EMAIL_CAMPAIGN_UPDATED
+  EMAIL_CAMPAIGN_APPROVED
+  EMAIL_CAMPAIGN_STATE_CHANGED
+  EMAIL_AUDIENCE_SAVED
+  EMAIL_AUDIENCE_DELETED
+  EMAIL_JOURNEY_CONFIG_UPDATED
+  EMAIL_JOURNEY_CONFIG_RESET
+  EMAIL_AUTOMATION_SAVED
+  EMAIL_AUTOMATION_STATE_CHANGED
 }
 
 // ── Hardening enums (increment 2.1) ──────────────────────────────────────────
@@ -1919,6 +1929,15 @@ enum CampaignStatus {
   PAUSED
   COMPLETED
   ARCHIVED
+  // ── Email campaign lifecycle (owner spec 2026-07-21) ──
+  // Additive. A door-hanger campaign never leaves DRAFT/ACTIVE/PAUSED/…; these
+  // states exist because an EMAIL campaign dispatches to an audience and needs
+  // an explicit validated + approved + scheduled path before it can send.
+  VALIDATING
+  READY
+  SCHEDULED
+  CANCELLED
+  FAILED
 }
 
 enum CampaignChannel {
@@ -1984,6 +2003,13 @@ model MarketingCampaign {
   updatedAt     DateTime @updatedAt @map("updated_at")
 
   spend MarketingSpend[]
+  // ── Email campaign extension (owner spec 2026-07-21) ──
+  // The email specifics live in a 1:1 side table rather than as more nullable
+  // columns here: a door hanger has no template, audience or send window, and
+  // widening the shared Stage 3 model for email-only fields would make every
+  // channel carry them.
+  emailConfig EmailCampaignConfig?
+  emailSends  EmailSend[]
 
   @@index([status])
   @@index([sourceKey])
@@ -2164,7 +2190,29 @@ model EmailSend {
   createdAt      DateTime  @default(now()) @map("created_at")
   updatedAt      DateTime  @updatedAt @map("updated_at")
 
-  events EmailEvent[]
+  // ── DIRECT campaign relation (owner spec 2026-07-21) ──
+  // `campaign` above is the legacy sourceKey STRING and is kept for backward
+  // compatibility and for historical rows whose campaign cannot be identified
+  // reliably. New campaign sends populate BOTH. Reporting prefers the relation
+  // and falls back to the string.
+  //
+  // onDelete: SetNull — deleting or archiving a campaign must NEVER destroy the
+  // record that an email was sent to a real person. The send survives with a
+  // null campaign; the legacy `campaign` string still names what it was.
+  campaignId String? @map("campaign_id")
+
+  /// True for an admin TEST send. Excluded from every conversion, revenue and
+  /// profit figure, and from the frequency-cap counts, so rehearsing a template
+  /// can never move a marketing number or suppress a real customer's email.
+  isTest Boolean @default(false) @map("is_test")
+
+  /// The EmailJourneyConfig version in force when this send was SCHEDULED.
+  /// An owner editing a delay must not retroactively rewrite the decisions
+  /// already made for sends in flight.
+  journeyConfigVersion Int? @map("journey_config_version")
+
+  events   EmailEvent[]
+  campaignRef MarketingCampaign? @relation(fields: [campaignId], references: [id], onDelete: SetNull)
 
   @@index([email])
   @@index([status])
@@ -2172,6 +2220,8 @@ model EmailSend {
   @@index([bookingId])
   @@index([leadId])
   @@index([createdAt])
+  @@index([campaignId])
+  @@index([isTest])
   /// Drives the retry/deferral sweep.
   @@index([status, nextAttemptAt])
   /// FREQUENCY-CAP QUERY (finding EMAIL-P2-18): countSentSince() filters on
@@ -2221,4 +2271,163 @@ model EmailEvent {
   /// Drives the retry sweep for unfinished side effects.
   @@index([processingStatus])
   @@map("email_events")
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  EMAIL MARKETING ADMIN (owner spec 2026-07-21) — audiences, campaign specs,
+//  journey configuration, automations.
+//
+//  ONE RULE GOVERNS ALL FOUR: **no executable logic is ever stored**. Every
+//  Json column here holds a DECLARATIVE structure validated against an explicit
+//  schema in code (src/lib/email-audience.ts, email-journey-config.ts,
+//  email-automation.ts) before it is written and again after it is read. An
+//  unknown filter key, an unapproved trigger or an out-of-range delay FAILS
+//  CLOSED — the row is refused on write, and a row that somehow became invalid
+//  degrades to the safe code defaults rather than running.
+//
+//  Nothing here duplicates MarketingCampaign, MarketingSpend, EmailSuppression,
+//  EmailSend, EmailEvent or the attribution models. EmailCampaignConfig EXTENDS
+//  a MarketingCampaign 1:1; it does not replace it.
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// A saved, VALIDATED audience definition. Stores approved filter keys and
+/// values only — never raw SQL, never a Prisma fragment, never JavaScript.
+model EmailAudience {
+  id          String @id @default(cuid())
+  name        String @unique
+  description String?
+  /// { segment: <approved key>, filters: { …approved keys only… } }
+  /// Validated by src/lib/email-audience.ts on every write AND every read.
+  definition  Json
+  /// Cached from the last preview. Advisory only — the real audience is ALWAYS
+  /// recomputed at dispatch. A preview is not authorization to send.
+  lastPreviewCount   Int?      @map("last_preview_count")
+  lastPreviewAt      DateTime? @map("last_preview_at")
+
+  createdById   String?  @map("created_by_id")
+  createdByName String?  @map("created_by_name")
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @updatedAt @map("updated_at")
+
+  campaigns EmailCampaignConfig[]
+
+  @@index([createdAt])
+  @@map("email_audiences")
+}
+
+/// The EMAIL specifics of a MarketingCampaign. 1:1 — the campaign identity,
+/// source key, channel and spend stay on MarketingCampaign.
+model EmailCampaignConfig {
+  id         String @id @default(cuid())
+  campaignId String @unique @map("campaign_id")
+
+  /// Must be a key in the template registry. Arbitrary HTML is never accepted.
+  template   String
+  /// Optional subject override. Only honoured for templates that support it.
+  subject    String?
+  audienceId String? @map("audience_id")
+
+  /// When the campaign should dispatch. Null = not scheduled yet.
+  scheduledAt DateTime? @map("scheduled_at")
+
+  // ── Explicit owner approval. A campaign NEVER launches on creation. ──
+  approvedById   String?   @map("approved_by_id")
+  approvedByName String?   @map("approved_by_name")
+  approvedAt     DateTime? @map("approved_at")
+
+  // ── Attribution (mirrors the Stage 3 fields a booking carries) ──
+  utmSource   String? @map("utm_source")
+  utmMedium   String? @map("utm_medium")
+  utmCampaign String? @map("utm_campaign")
+  utmContent  String? @map("utm_content")
+  discountCode String? @map("discount_code")
+
+  /// Result of the last validation run: { ok, errors[], warnings[], checkedAt }.
+  validation Json?
+  /// Why a campaign is CANCELLED or FAILED, in words.
+  statusNote String? @map("status_note")
+
+  dispatchedAt DateTime? @map("dispatched_at")
+  /// How many recipients were actually claimed at dispatch.
+  dispatchedCount Int? @map("dispatched_count")
+
+  createdById   String?  @map("created_by_id")
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @updatedAt @map("updated_at")
+
+  campaign MarketingCampaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  audience EmailAudience?    @relation(fields: [audienceId], references: [id], onDelete: SetNull)
+
+  @@index([audienceId])
+  @@index([scheduledAt])
+  @@map("email_campaign_configs")
+}
+
+/// Owner overrides for ONE lifecycle journey. The code constants in
+/// src/lib/journeys.ts remain the SAFE DEFAULTS: a missing row, a disabled row
+/// or an invalid row all mean "use the defaults". `version` increments on every
+/// saved change and is stamped onto sends scheduled under it, so editing a
+/// delay never rewrites a decision already made.
+model EmailJourneyConfig {
+  id         String @id @default(cuid())
+  journeyKey String @unique @map("journey_key")
+  enabled    Boolean @default(true)
+  version    Int     @default(1)
+
+  /// { stages: [{ type, delayMs, template }], stopRules: {…}, caps: {…},
+  ///   quietHours: {…} } — validated by src/lib/email-journey-config.ts.
+  config Json
+
+  updatedById   String?  @map("updated_by_id")
+  updatedByName String?  @map("updated_by_name")
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @updatedAt @map("updated_at")
+
+  @@map("email_journey_configs")
+}
+
+/// A marketing automation: trigger -> delay -> approved template, with stop
+/// rules. Definitions are VERSIONED and immutable once used; an automation in
+/// flight keeps the version that scheduled it.
+model EmailAutomation {
+  id          String @id @default(cuid())
+  name        String @unique
+  description String?
+  /// DRAFT | VALIDATING | TEST | ACTIVE | PAUSED | ARCHIVED
+  status      String @default("DRAFT")
+  /// Points at the version currently in force.
+  activeVersion Int? @map("active_version")
+
+  createdById   String?  @map("created_by_id")
+  createdByName String?  @map("created_by_name")
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @updatedAt @map("updated_at")
+
+  versions EmailAutomationVersion[]
+
+  @@index([status])
+  @@map("email_automations")
+}
+
+/// One immutable version of an automation definition. Never edited in place —
+/// a change writes a NEW version, so a run already in progress can always be
+/// traced to the exact rules that scheduled it.
+model EmailAutomationVersion {
+  id           String @id @default(cuid())
+  automationId String @map("automation_id")
+  version      Int
+
+  /// { trigger, audience, stages[], stopRules, caps, quietHours, maxStages }
+  /// Validated by src/lib/email-automation.ts on write AND on read.
+  definition Json
+
+  createdById   String?  @map("created_by_id")
+  createdByName String?  @map("created_by_name")
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  automation EmailAutomation @relation(fields: [automationId], references: [id], onDelete: Cascade)
+
+  @@unique([automationId, version])
+  @@index([automationId])
+  @@map("email_automation_versions")
 }

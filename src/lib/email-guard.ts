@@ -319,6 +319,20 @@ export type GuardedSendInput = {
   bookingId?: string
   leadId?: string
   campaign?: string
+  /**
+   * DIRECT campaign relation (owner spec 2026-07-21). `campaign` above stays
+   * the legacy sourceKey string; both are written so reporting can prefer the
+   * relation and fall back to the string for historical rows.
+   */
+  campaignId?: string
+  /**
+   * Admin TEST send. Recorded on the ledger row so a rehearsal can never be
+   * counted as a conversion, as revenue, or against a real customer's
+   * frequency cap. It does NOT relax any gate — a test runs the full guard.
+   */
+  isTest?: boolean
+  /** EmailJourneyConfig version in force when this send was scheduled. */
+  journeyConfigVersion?: number
   /** Payload for the required-field + URL-safety gate. */
   payload?: Record<string, unknown>
   /**
@@ -359,6 +373,9 @@ async function recordBlock(
         bookingId: input.bookingId ?? null,
         leadId: input.leadId ?? null,
         campaign: input.campaign ?? null,
+        campaignId: input.campaignId ?? null,
+        isTest: input.isTest ?? false,
+        journeyConfigVersion: input.journeyConfigVersion ?? null,
         status,
         outcomeClass: blockClass,
         blockedReason: reason.slice(0, 500),
@@ -388,7 +405,9 @@ async function recordBlock(
 /** Count PROMOTIONAL sends to this address inside a rolling window. */
 async function countSentSince(email: string, since: Date): Promise<number> {
   return prisma.emailSend.count({
-    where: { email, emailClass: 'promotional', status: 'delivered', sentAt: { gte: since } },
+    // `isTest: false` — rehearsing a promotional template must never consume a
+    // real customer's frequency budget and silently suppress the genuine send.
+    where: { email, emailClass: 'promotional', status: 'delivered', isTest: false, sentAt: { gte: since } },
   })
 }
 
@@ -422,6 +441,9 @@ async function claimOrResumeSend(
         bookingId: input.bookingId ?? null,
         leadId: input.leadId ?? null,
         campaign: input.campaign ?? null,
+        campaignId: input.campaignId ?? null,
+        isTest: input.isTest ?? false,
+        journeyConfigVersion: input.journeyConfigVersion ?? null,
         status: 'sending',
         outcomeClass: null,
         attempts: 1,
