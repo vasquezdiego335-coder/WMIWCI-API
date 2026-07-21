@@ -111,6 +111,9 @@ enum AuditAction {
   DISCOUNT_APPLIED
   DISCOUNT_APPROVED
   DISCOUNT_DENIED
+  /// A Job row was auto-created for a booking (D5, Stage 4). Distinct from
+  /// JOB_STARTED, which means the crew actually began work.
+  JOB_CREATED
   JOB_STARTED
   JOB_COMPLETED
   FILE_UPLOADED
@@ -332,6 +335,10 @@ enum ExpenseStatus {
 // Shared across expenses, owner transactions, and crew pay — how money moved.
 enum PaymentMethod {
   CASH
+  /// Processed by Stripe (deposit capture, refund). Distinct from CARD, which
+  /// is a card taken outside Stripe. profit.isStripePayment() still keys off
+  /// the Stripe ids — this value is for reporting and filtering.
+  STRIPE
   CARD
   ZELLE
   VENMO
@@ -924,6 +931,12 @@ model Payment {
   amount                Int // in cents
   currency              String        @default("usd")
   status                PaymentStatus @default(PENDING)
+  /// HOW the money arrived (D1, Stage 4). Nullable because historical rows
+  /// predate the column and their method is genuinely unknown — never guess.
+  /// Stripe-originated rows are backfilled to STRIPE only where a Stripe id
+  /// proves it. `metadata.method` is kept for compatibility but is no longer
+  /// the source of truth.
+  method                PaymentMethod?
   // Internal checkout tests (owner-flagged; mirrors Stripe metadata.internal_test).
   // EXCLUDED from every revenue aggregate/report. Never affects payment status.
   isInternalTest        Boolean       @default(false) @map("is_internal_test")
@@ -944,6 +957,7 @@ model Payment {
 
   @@index([bookingId])
   @@index([status])
+  @@index([method])
   @@map("payments")
 }
 
@@ -1750,6 +1764,9 @@ model MoveCloseout {
   taxReserveBp        Int?            @map("tax_reserve_bp") // basis points of company net profit
   taxReserveCents     Int?            @map("tax_reserve_cents")
   taxReserveReason    String?         @map("tax_reserve_reason")
+  /// The company-retained share in basis points, FROZEN at finalization so a
+  /// later BusinessConfig change can never rewrite a closed move (D4).
+  businessRetainedBp  Int?            @map("business_retained_bp")
   splitMethod         SplitMethod?    @map("split_method")
   splitReason         String?         @map("split_reason")
 
@@ -1808,6 +1825,13 @@ model FinancialSnapshot {
 
   // reserves + distribution
   taxReserveCents          Int   @map("tax_reserve_cents")
+  /// 40/30/30 policy, as applied to THIS move at THIS moment (Stage 4).
+  /// Rate + resolved dollars are both stored so the snapshot explains itself
+  /// without re-reading BusinessConfig.
+  businessRetainedBp       Int   @default(0) @map("business_retained_bp")
+  businessRetainedCents    Int   @default(0) @map("business_retained_cents")
+  /// Integer-cent remainder after the owner shares; stays with the business.
+  roundingRemainderCents   Int   @default(0) @map("rounding_remainder_cents")
   businessReserveCents     Int   @map("business_reserve_cents")
   retainedEarningsCents    Int   @map("retained_earnings_cents")
   unresolvedLiabilityCents Int   @map("unresolved_liability_cents")

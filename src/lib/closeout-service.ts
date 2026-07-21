@@ -135,6 +135,10 @@ export async function buildCloseoutView(bookingId: string): Promise<CloseoutView
     reserves: {
       taxReserveBp: closeout?.taxReserveBp ?? (cfg?.taxReservePercent != null ? cfg.taxReservePercent * 100 : 0),
       taxReserveFixedCents: closeout?.taxReserveCents,
+      // D4 — the company-retained share (owner policy 2026-07-21: 40%).
+      // SNAPSHOT on a finalized closeout so a later config change cannot
+      // rewrite history; live config only for a move not yet finalized.
+      businessRetainedBp: closeout?.businessRetainedBp ?? cfg?.generalReserveBp ?? 0,
       businessReserveCents,
       retainedEarningsCents,
       // Money already owed: unpaid approved crew labor + owner reimbursements.

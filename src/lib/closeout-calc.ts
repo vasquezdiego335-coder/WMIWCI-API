@@ -187,7 +187,17 @@ export interface ReserveInput {
   taxReserveBp?: number | null
   /** A fixed tax amount, overriding the percentage when set. */
   taxReserveFixedCents?: number | null
-  /** Named business reserves (truck fund, emergency, …). */
+  /**
+   * THE COMPANY-RETAINED SHARE, in basis points of FINAL company net profit
+   * (BusinessConfig.generalReserveBp). Owner policy 2026-07-21 = 4000 (40%).
+   *
+   * Applied ONLY to positive net profit, and only AFTER every cost and
+   * overhead — never to customer revenue, the quote, or collected payments.
+   * D4: this was a dead column until now.
+   */
+  businessRetainedBp?: number | null
+  /** Named business reserves entered by hand (truck fund, emergency, …).
+   *  ADDITIVE to the retained share above; the two are never the same money. */
   businessReserveCents?: number | null
   retainedEarningsCents?: number | null
   /** Money the business already owes: unpaid approved labor + owner
@@ -197,41 +207,70 @@ export interface ReserveInput {
 
 export interface ReserveResult {
   taxReserveCents: number
+  /** The policy share of profit the business keeps (generalReserveBp). */
+  businessRetainedCents: number
+  businessRetainedBp: number
   businessReserveCents: number
   retainedEarningsCents: number
   unresolvedLiabilityCents: number
   totalHeldBackCents: number
+  /** Profit available to allocate at all: net profit − liabilities, floored. */
+  availableForAllocationCents: number
   distributableProfitCents: number
-  /** True when hold-backs exceeded profit and distributable was floored at 0. */
+  /** True only when REQUESTED allocations exceed what is available. */
   overAllocated: boolean
 }
 
 /**
- *   distributable = company net profit
- *                 − tax reserve − business reserve − retained earnings
- *                 − unresolved liabilities
+ *   available     = max(0, company net profit − unresolved liabilities)
+ *   retained      = generalReserveBp of POSITIVE net profit  (40% policy)
+ *   distributable = available − retained − tax − manual reserves − retained earnings
  *
- * A percentage-based tax reserve is FLOORED AT ZERO on a loss: you do not
- * reserve tax on money you did not make. Distributable is likewise floored at
- * zero — a loss produces nothing to split, never a negative allocation.
+ * D2 — WHY `overAllocated` IS NOT `raw < 0`:
+ *   A loss with NO requested allocation is not over-allocated. The old rule
+ *   compared hold-backs against a negative profit, so every unprofitable move
+ *   raised a HARD RESERVES_EXCEED_PROFIT blocker and could never be finalized —
+ *   with a message that misdescribed the cause. Over-allocation now means what
+ *   it says: somebody asked for more than exists.
+ *
+ * A loss therefore produces zero of everything and stays finalizable. Reserving
+ * nothing against a loss is correct, not an error.
  */
 export function computeReserves(i: ReserveInput): ReserveResult {
   const profit = i.companyNetProfitCents
+  const positiveProfit = Math.max(0, profit)
+  const unresolvedLiabilityCents = nn(i.unresolvedLiabilityCents)
+
+  // What could be allocated at all, before any policy is applied.
+  const availableForAllocationCents = Math.max(0, profit - unresolvedLiabilityCents)
+
+  // D4 — the company-retained share, from BusinessConfig.generalReserveBp.
+  // floor() by applyBp; any rounding remainder stays with the business because
+  // the owner shares are computed from what is LEFT after this line.
+  const businessRetainedBp = nn(i.businessRetainedBp)
+  const businessRetainedCents = Math.min(availableForAllocationCents, applyBp(positiveProfit, businessRetainedBp))
+
   const taxReserveCents =
-    i.taxReserveFixedCents != null ? nn(i.taxReserveFixedCents) : applyBp(Math.max(0, profit), nn(i.taxReserveBp))
+    i.taxReserveFixedCents != null ? nn(i.taxReserveFixedCents) : applyBp(positiveProfit, nn(i.taxReserveBp))
   const businessReserveCents = nn(i.businessReserveCents)
   const retainedEarningsCents = nn(i.retainedEarningsCents)
-  const unresolvedLiabilityCents = nn(i.unresolvedLiabilityCents)
-  const totalHeldBackCents = taxReserveCents + businessReserveCents + retainedEarningsCents + unresolvedLiabilityCents
-  const raw = profit - totalHeldBackCents
+
+  const requestedAllocations =
+    businessRetainedCents + taxReserveCents + businessReserveCents + retainedEarningsCents
+  const totalHeldBackCents = requestedAllocations + unresolvedLiabilityCents
+
   return {
     taxReserveCents,
+    businessRetainedCents,
+    businessRetainedBp,
     businessReserveCents,
     retainedEarningsCents,
     unresolvedLiabilityCents,
     totalHeldBackCents,
-    distributableProfitCents: Math.max(0, raw),
-    overAllocated: raw < 0,
+    availableForAllocationCents,
+    distributableProfitCents: Math.max(0, availableForAllocationCents - requestedAllocations),
+    // Only a genuine over-ask is an error. Zero requested against a loss is not.
+    overAllocated: requestedAllocations > availableForAllocationCents,
   }
 }
 

@@ -149,13 +149,44 @@ export async function recalcJobAssignments(jobId: string): Promise<void> {
 
 /** Resolve (or create) the `Job` row for a booking — crew attach to the Job, and
  *  a booking that has not been approved yet has none. */
-export async function ensureJobForBooking(bookingId: string): Promise<string> {
+export async function ensureJobForBooking(
+  bookingId: string,
+  audit?: { source: string; userId?: string | null },
+): Promise<string> {
+  // D5 (Stage 4): a Job appearing on a move used to be invisible in the
+  // activity log. Detect whether THIS call is the one that created it, so the
+  // audit entry is written exactly once — an upsert that found an existing row
+  // must not log a second creation.
+  const existing = await prisma.job.findUnique({ where: { bookingId }, select: { id: true } })
+  if (existing) return existing.id
+
   const job = await prisma.job.upsert({
     where: { bookingId },
     update: {},
     create: { bookingId, status: 'SCHEDULED' },
-    select: { id: true },
+    select: { id: true, createdAt: true },
   })
+
+  // Concurrency: two callers can both miss the findUnique and race into the
+  // upsert. Only one row is ever created (unique bookingId), so gate the audit
+  // write on this booking having no JOB_CREATED entry yet.
+  const already = await prisma.auditLog.count({ where: { bookingId, action: 'JOB_CREATED' } })
+  if (already === 0) {
+    await prisma.auditLog.create({
+      data: {
+        action: 'JOB_CREATED',
+        bookingId,
+        userId: audit?.userId ?? null,
+        details: {
+          jobId: job.id,
+          source: audit?.source ?? 'unspecified',
+          previousState: 'no Job',
+          newState: 'Job created',
+          status: 'SCHEDULED',
+        },
+      },
+    }).catch(() => { /* an audit failure must never block the assignment */ })
+  }
   return job.id
 }
 
