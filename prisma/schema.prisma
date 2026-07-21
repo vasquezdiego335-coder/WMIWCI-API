@@ -194,6 +194,14 @@ enum AuditAction {
   REMINDER_RESTORED
   FINANCIAL_ADJUSTMENT
   WORKER_PAY_OVERRIDE
+  // ── Email Marketing admin (owner spec 2026-07-21) ──
+  // Every operator action that changes what a customer receives leaves a trace.
+  // Purely additive: no existing value is renamed or removed, so the migration
+  // cannot invalidate a historical audit row.
+  EMAIL_SCHEDULED_CANCELLED
+  EMAIL_SEND_RETRIED
+  EMAIL_SUPPRESSION_RESTORED
+  EMAIL_TEST_SENT
 }
 
 // ── Hardening enums (increment 2.1) ──────────────────────────────────────────
