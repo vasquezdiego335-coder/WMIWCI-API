@@ -58,10 +58,24 @@ export default async function EmailCampaignsPage({ searchParams }: { searchParam
       prisma.marketingCampaign.findMany({
         where: { channel: 'EMAIL' },
         orderBy: { createdAt: 'desc' },
-        include: { emailConfig: { include: { audience: { select: { name: true } } } } },
+        include: {
+          emailConfig: { include: { audience: { select: { name: true } } } },
+          // Execution truth: recent runs, with recipient counts joined below.
+          emailRuns: { orderBy: { startedAt: 'desc' }, take: 2 },
+        },
       }),
     ])
     audiences = aud
+    const runIds = camps.flatMap((c) => c.emailRuns.map((r) => r.id))
+    const recipientGroups = runIds.length
+      ? await prisma.emailCampaignRecipient.groupBy({ by: ['runId', 'status'], where: { runId: { in: runIds } }, _count: { _all: true } })
+      : []
+    const countsByRun = new Map<string, Record<string, number>>()
+    for (const g of recipientGroups) {
+      const entry = countsByRun.get(g.runId) ?? {}
+      entry[g.status] = g._count._all
+      countsByRun.set(g.runId, entry)
+    }
     manageRows = camps.map((c) => ({
       id: c.id,
       name: c.name,
@@ -75,6 +89,19 @@ export default async function EmailCampaignsPage({ searchParams }: { searchParam
       approvedAt: c.emailConfig?.approvedAt ? c.emailConfig.approvedAt.toISOString() : null,
       statusNote: c.emailConfig?.statusNote ?? null,
       validation: (c.emailConfig?.validation ?? null) as never,
+      runs: c.emailRuns.map((r) => ({
+        id: r.id,
+        status: r.status,
+        totalRecipients: r.totalRecipients,
+        sentCount: r.sentCount,
+        skippedCount: r.skippedCount,
+        failedCount: r.failedCount,
+        cancelledCount: r.cancelledCount,
+        recipientCounts: countsByRun.get(r.id) ?? {},
+        startedAt: r.startedAt.toISOString(),
+        completedAt: r.completedAt ? r.completedAt.toISOString() : null,
+        error: r.error,
+      })),
     }))
   } catch (err) {
     manageError = err instanceof Error ? err.message : String(err)
@@ -90,7 +117,12 @@ export default async function EmailCampaignsPage({ searchParams }: { searchParam
       <EmailTabs active="/admin/email-marketing/campaigns" isOwner={isOwner} />
 
       <div style={{ marginBottom: '20px' }}>
-        <CampaignComposer templates={templates} audiences={audiences} campaigns={manageRows} />
+        <CampaignComposer
+          templates={templates}
+          audiences={audiences}
+          campaigns={manageRows}
+          promotionsEnabled={process.env.EMAIL_PROMOTIONS_ENABLED === 'true'}
+        />
         {manageError && (
           <p style={{ fontSize: '12px', color: COLORS.red, marginTop: '10px' }}>Campaign management unavailable: {manageError}</p>
         )}

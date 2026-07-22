@@ -14,6 +14,7 @@ export const EMAIL_TABS: Array<{ href: string; label: string; ownerOnly?: boolea
   { href: '/admin/email-marketing/suppressions', label: 'Suppressions' },
   { href: '/admin/email-marketing/deliverability', label: 'Deliverability' },
   { href: '/admin/email-marketing/campaigns', label: 'Campaigns', ownerOnly: true },
+  { href: '/admin/email-marketing/leads', label: 'Leads', ownerOnly: true },
   { href: '/admin/email-marketing/audiences', label: 'Audiences', ownerOnly: true },
   { href: '/admin/email-marketing/automations', label: 'Automations', ownerOnly: true },
   { href: '/admin/email-marketing/test-send', label: 'Test send', ownerOnly: true },

@@ -13,6 +13,20 @@ import { useRouter } from 'next/navigation'
 type Template = { key: string; name: string }
 type Audience = { id: string; name: string }
 
+type RunRow = {
+  id: string
+  status: string
+  totalRecipients: number
+  sentCount: number
+  skippedCount: number
+  failedCount: number
+  cancelledCount: number
+  recipientCounts: Record<string, number>
+  startedAt: string
+  completedAt: string | null
+  error: string | null
+}
+
 type CampaignRow = {
   id: string
   name: string
@@ -26,6 +40,7 @@ type CampaignRow = {
   approvedAt: string | null
   statusNote: string | null
   validation: { ok: boolean; errors: string[]; warnings: string[]; checkedAt: string } | null
+  runs: RunRow[]
 }
 
 const C = { navy: '#0A1628', orange: '#FF5A1F', green: '#10B981', red: '#EF4444', amber: '#F59E0B', muted: '#6B7280', faint: '#9CA3AF', line: '#F1F1F1' }
@@ -39,10 +54,12 @@ export default function CampaignComposer({
   templates,
   audiences,
   campaigns,
+  promotionsEnabled,
 }: {
   templates: Template[]
   audiences: Audience[]
   campaigns: CampaignRow[]
+  promotionsEnabled: boolean
 }) {
   const router = useRouter()
   const [open, setOpen] = useState(false)
@@ -85,7 +102,7 @@ export default function CampaignComposer({
     }
   }
 
-  async function act(id: string, action: string, status?: string) {
+  async function act(id: string, action: string, status?: string, runId?: string) {
     let note: string | undefined
     if (status === 'CANCELLED' || status === 'FAILED') {
       const reason = prompt(`Reason for marking this campaign ${status}?`)
@@ -96,14 +113,16 @@ export default function CampaignComposer({
       if (!confirm(`Move this campaign to ${status}?\n\nOnce ${status}, it may put email in front of real customers.`)) return
     }
     if (action === 'approve' && !confirm('Approve this campaign for sending?\n\nThis is the owner authorization step and is recorded in the audit log.')) return
+    if (action === 'dispatch' && !confirm('Start sending this campaign NOW?\n\nThe audience is resolved from current data, frozen into a run, and real customers receive email. This is recorded in the audit log.')) return
+    if (action === 'cancel_run' && !confirm('Cancel the remaining recipients of this run?\n\nAlready-sent emails are unaffected; everyone still pending is marked cancelled.')) return
 
-    setBusy(id + action + (status ?? ''))
+    setBusy(id + action + (status ?? '') + (runId ?? ''))
     setErrors([])
     try {
       const res = await fetch('/api/admin/email-marketing/campaigns', {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id, action, status, note }),
+        body: JSON.stringify({ id, action, status, note, runId }),
       })
       const body = await res.json()
       if (!res.ok) setErrors([body.error ?? `Failed (${res.status})`])
@@ -152,6 +171,16 @@ export default function CampaignComposer({
           >
             {busy === 'create' ? 'Creating…' : 'Create draft'}
           </button>
+        </div>
+      )}
+
+      {!promotionsEnabled && (
+        <div style={{ ...card, marginBottom: '14px', borderColor: `${C.amber}66`, backgroundColor: '#FFFBEB' }}>
+          <p style={{ fontSize: '12px', color: '#92400E', margin: 0, lineHeight: 1.5 }}>
+            <strong>Promotional sending is globally disabled</strong> (EMAIL_PROMOTIONS_ENABLED is not set). Campaigns can be
+            drafted, validated, approved and scheduled — but <strong>dispatch will refuse</strong> until the switch is
+            deliberately enabled after the staging rehearsal.
+          </p>
         </div>
       )}
 
@@ -215,10 +244,71 @@ export default function CampaignComposer({
                   {t}
                 </SmallBtn>
               ))}
+              {(c.status === 'SCHEDULED' || c.status === 'ACTIVE') && c.approvedAt && !c.runs.some((r) => !['CANCELLED', 'COMPLETED', 'COMPLETED_WITH_ERRORS', 'FAILED'].includes(r.status)) && (
+                <SmallBtn onClick={() => act(c.id, 'dispatch')} busy={busy === c.id + 'dispatch'} tone={C.orange}>
+                  ▶ Start sending
+                </SmallBtn>
+              )}
             </div>
+
+            {c.runs.map((r) => (
+              <RunCard key={r.id} run={r} busy={busy} onAct={(action) => act(c.id, action, undefined, r.id)} campaignId={c.id} />
+            ))}
           </div>
         ))
       )}
+    </div>
+  )
+}
+
+// ── Run progress + execution controls ───────────────────────────────────
+// The execution truth for one dispatch: recipient-state counts recomputed
+// from rows (never a trusted counter), plus the controls the run's state
+// machine actually allows.
+
+const RUN_COLOR: Record<string, string> = {
+  PREPARING: C.amber, QUEUED: '#3B82F6', SENDING: C.orange, PAUSED: C.amber,
+  CANCELLING: C.red, CANCELLED: C.faint, COMPLETED: C.green, COMPLETED_WITH_ERRORS: C.amber, FAILED: C.red,
+}
+
+function RunCard({ run, busy, onAct, campaignId }: { run: RunRow; busy: string | null; onAct: (action: string) => void; campaignId: string }) {
+  const rc = run.recipientCounts
+  const pending = (rc.PENDING ?? 0) + (rc.SENDING ?? 0) + (rc.DEFERRED ?? 0)
+  const sendable = run.status === 'QUEUED' || run.status === 'SENDING'
+  const isBusy = (a: string) => busy === campaignId + a + run.id
+  return (
+    <div style={{ marginTop: '10px', padding: '12px 14px', borderRadius: '10px', border: `1px solid ${C.line}`, backgroundColor: '#FAFAFA' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+        <span style={{ fontSize: '10px', fontWeight: 700, padding: '2px 9px', borderRadius: '100px', color: '#FFF', backgroundColor: RUN_COLOR[run.status] ?? C.faint }}>
+          RUN {run.status.replace(/_/g, ' ')}
+        </span>
+        <span style={{ fontSize: '11px', color: C.muted }}>
+          started {new Date(run.startedAt).toLocaleString('en-US', { timeZone: 'America/New_York' })} ET
+        </span>
+      </div>
+      <div style={{ display: 'flex', gap: '14px', flexWrap: 'wrap', margin: '8px 0', fontSize: '12px', color: '#374151' }}>
+        <span><strong>{run.totalRecipients}</strong> recipients</span>
+        <span style={{ color: C.green }}><strong>{rc.SENT ?? 0}</strong> sent</span>
+        {pending > 0 && <span style={{ color: '#3B82F6' }}><strong>{pending}</strong> pending</span>}
+        {(rc.FAILED ?? 0) > 0 && <span style={{ color: C.red }}><strong>{rc.FAILED}</strong> failed</span>}
+        {(rc.UNSUBSCRIBED ?? 0) > 0 && <span style={{ color: C.muted }}>{rc.UNSUBSCRIBED} unsubscribed</span>}
+        {(rc.SUPPRESSED ?? 0) > 0 && <span style={{ color: C.muted }}>{rc.SUPPRESSED} suppressed</span>}
+        {(rc.INELIGIBLE ?? 0) > 0 && <span style={{ color: C.muted }}>{rc.INELIGIBLE} no longer eligible</span>}
+        {(rc.CONTEXT_INVALID ?? 0) > 0 && <span style={{ color: C.amber }}>{rc.CONTEXT_INVALID} context invalid</span>}
+        {(rc.SKIPPED ?? 0) > 0 && <span style={{ color: C.muted }}>{rc.SKIPPED} skipped</span>}
+        {(rc.CANCELLED ?? 0) > 0 && <span style={{ color: C.muted }}>{rc.CANCELLED} cancelled</span>}
+      </div>
+      {run.error && <p style={{ fontSize: '12px', color: C.red, margin: '0 0 8px' }}>✗ {run.error}</p>}
+      <div style={{ display: 'flex', gap: '7px', flexWrap: 'wrap' }}>
+        {sendable && <SmallBtn onClick={() => onAct('pause_run')} busy={isBusy('pause_run')} tone={C.amber}>Pause</SmallBtn>}
+        {run.status === 'PAUSED' && <SmallBtn onClick={() => onAct('resume_run')} busy={isBusy('resume_run')} tone={C.green}>Resume</SmallBtn>}
+        {(sendable || run.status === 'PAUSED') && (
+          <SmallBtn onClick={() => onAct('cancel_run')} busy={isBusy('cancel_run')} tone={C.red}>Cancel remaining</SmallBtn>
+        )}
+        {((rc.FAILED ?? 0) > 0 || run.status === 'COMPLETED_WITH_ERRORS') && (
+          <SmallBtn onClick={() => onAct('retry_failed')} busy={isBusy('retry_failed')} tone={C.orange}>Retry failed</SmallBtn>
+        )}
+      </div>
     </div>
   )
 }

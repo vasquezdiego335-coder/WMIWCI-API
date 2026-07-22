@@ -51,7 +51,7 @@ export async function POST(req: NextRequest, { params }: { params: { id: string 
   await prisma.auditLog
     .create({
       data: {
-        action: 'LEAD_STATUS_CHANGED',
+        action: 'EMAIL_LEAD_QUOTED',
         userId: session?.userId ?? null,
         details: {
           event: 'lead_quoted',

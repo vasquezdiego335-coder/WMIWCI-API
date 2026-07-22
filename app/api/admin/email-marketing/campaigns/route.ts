@@ -28,6 +28,9 @@ import {
   type CampaignValidation,
 } from '@/lib/email-campaign'
 import { validateAudienceDefinition, previewAudience } from '@/lib/email-audience'
+import { dispatchCampaign, pauseRun, resumeRun, cancelRun, retryFailedRecipients } from '@/lib/email-campaign-dispatch'
+import { promotionsEnabled, type RecipientState } from '@/lib/email-campaign-run'
+import { templateAllowsSegment } from '@/lib/email-recipient-context'
 import { z } from 'zod'
 
 const log = apiLogger.child({ route: 'admin/email-marketing/campaigns' })
@@ -43,12 +46,29 @@ export async function GET(): Promise<NextResponse> {
     const campaigns = await prisma.marketingCampaign.findMany({
       where: { channel: 'EMAIL' },
       orderBy: { createdAt: 'desc' },
-      ...withConfig,
+      include: {
+        ...withConfig.include,
+        // Execution truth for the admin: the most recent runs with their
+        // recipient-state counts, so "ACTIVE" is never shown without evidence.
+        emailRuns: { orderBy: { startedAt: 'desc' }, take: 3 },
+      },
     })
+    const runIds = campaigns.flatMap((c) => c.emailRuns.map((r) => r.id))
+    const recipientCounts = runIds.length
+      ? await prisma.emailCampaignRecipient.groupBy({ by: ['runId', 'status'], where: { runId: { in: runIds } }, _count: { _all: true } })
+      : []
+    const countsByRun = new Map<string, Record<string, number>>()
+    for (const g of recipientCounts) {
+      const entry = countsByRun.get(g.runId) ?? {}
+      entry[g.status] = g._count._all
+      countsByRun.set(g.runId, entry)
+    }
     return NextResponse.json({
+      promotionsEnabled: promotionsEnabled(),
       campaigns: campaigns.map((c) => ({
         ...c,
         allowedTransitions: allowedTransitions(c.status as CampaignState),
+        emailRuns: c.emailRuns.map((r) => ({ ...r, recipientCounts: countsByRun.get(r.id) ?? {} })),
       })),
     })
   } catch (err) {
@@ -133,7 +153,9 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
 const PatchSchema = z.object({
   id: z.string().trim().min(1),
-  action: z.enum(['update', 'validate', 'approve', 'transition']),
+  action: z.enum(['update', 'validate', 'approve', 'transition', 'dispatch', 'pause_run', 'resume_run', 'cancel_run', 'retry_failed']),
+  /** For the run-control actions. */
+  runId: z.string().trim().optional(),
   /** For action:'transition'. */
   status: z.string().trim().optional(),
   /** For action:'update'. */
@@ -162,7 +184,7 @@ export async function PATCH(req: NextRequest): Promise<NextResponse> {
 
   const parsed = PatchSchema.safeParse(await req.json().catch(() => null))
   if (!parsed.success) return NextResponse.json({ error: 'Invalid request.' }, { status: 400 })
-  const { id, action, patch, note } = parsed.data
+  const { id, action, patch, note, runId } = parsed.data
 
   const campaign = await prisma.marketingCampaign.findUnique({ where: { id }, ...withConfig })
   if (!campaign || campaign.channel !== 'EMAIL') {
@@ -172,6 +194,34 @@ export async function PATCH(req: NextRequest): Promise<NextResponse> {
   if (!config) return NextResponse.json({ error: 'This campaign has no email configuration.' }, { status: 409 })
 
   const state = campaign.status as CampaignState
+  const actor = { userId: session?.userId ?? null, name: session?.name ?? null }
+
+  // ── dispatch — start sending NOW ──
+  // Every gate re-runs inside dispatchCampaign (state, approval freshness,
+  // fresh validation, the EMAIL_PROMOTIONS_ENABLED master switch, template↔
+  // audience compatibility). Idempotent: a second call while a run is
+  // unfinished returns that run.
+  if (action === 'dispatch') {
+    const result = await dispatchCampaign(id, actor)
+    if (!result.ok) return NextResponse.json({ error: result.error }, { status: 409 })
+    return NextResponse.json({ ok: true, runId: result.runId, totalRecipients: result.totalRecipients, alreadyRunning: result.alreadyRunning })
+  }
+
+  // ── run controls — pause / resume / cancel / retry ──
+  if (action === 'pause_run' || action === 'resume_run' || action === 'cancel_run' || action === 'retry_failed') {
+    if (!runId) return NextResponse.json({ error: 'A runId is required.' }, { status: 400 })
+    const run = await prisma.emailCampaignRun.findUnique({ where: { id: runId }, select: { campaignId: true } })
+    if (!run || run.campaignId !== id) return NextResponse.json({ error: 'That run does not belong to this campaign.' }, { status: 404 })
+    if (action === 'retry_failed') {
+      const result = await retryFailedRecipients(runId, actor)
+      if (!result.ok) return NextResponse.json({ error: result.error }, { status: 409 })
+      return NextResponse.json({ ok: true, reopened: result.reopened })
+    }
+    const fn = action === 'pause_run' ? pauseRun : action === 'resume_run' ? resumeRun : cancelRun
+    const result = await fn(runId, actor)
+    if (!result.ok) return NextResponse.json({ error: result.error }, { status: 409 })
+    return NextResponse.json({ ok: true, runStatus: result.status })
+  }
 
   // ── update ──
   if (action === 'update') {
@@ -235,7 +285,19 @@ export async function PATCH(req: NextRequest): Promise<NextResponse> {
     let preview = null
     if (audience) {
       const a = validateAudienceDefinition(audience)
-      if (a.ok) preview = await previewAudience(a.definition)
+      if (a.ok) {
+        preview = await previewAudience(a.definition)
+        // Template ↔ segment compatibility (dispatch would refuse it anyway;
+        // surfacing it at validation stops a doomed campaign being approved).
+        const compat = templateAllowsSegment(config.template, a.definition.segment)
+        if (!compat.ok) {
+          result.ok = false
+          result.errors.push(compat.error)
+        }
+      }
+    }
+    if (!promotionsEnabled()) {
+      result.warnings.push('EMAIL_PROMOTIONS_ENABLED is off — this campaign can be approved and scheduled, but dispatch will refuse until the switch is deliberately enabled.')
     }
 
     await prisma.$transaction([

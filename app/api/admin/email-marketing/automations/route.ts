@@ -24,6 +24,7 @@ import {
 } from '@/lib/email-automation'
 import { STOP_RULES, LOCKED_STOP_RULES, MIN_DELAY_MS, MAX_DELAY_MS, MAX_STAGES } from '@/lib/email-journey-config'
 import { SEGMENTS } from '@/lib/email-audience'
+import { promotionsEnabled } from '@/lib/email-campaign-run'
 import { z } from 'zod'
 
 const log = apiLogger.child({ route: 'admin/email-marketing/automations' })
@@ -37,6 +38,30 @@ export async function GET(): Promise<NextResponse> {
     const rows = await prisma.emailAutomation.findMany({
       orderBy: { updatedAt: 'desc' },
       include: { versions: { orderBy: { version: 'desc' }, take: 10 } },
+    })
+
+    // Runtime truth: enrollment counts per automation + upcoming steps, so
+    // "ACTIVE" is shown with evidence of what is actually enrolled/running.
+    const enrollmentGroups = await prisma.emailAutomationEnrollment.groupBy({
+      by: ['automationId', 'status'],
+      _count: { _all: true },
+    })
+    const enrollmentsByAutomation = new Map<string, Record<string, number>>()
+    for (const g of enrollmentGroups) {
+      const entry = enrollmentsByAutomation.get(g.automationId) ?? {}
+      entry[g.status] = g._count._all
+      enrollmentsByAutomation.set(g.automationId, entry)
+    }
+    const upcoming = await prisma.emailAutomationEnrollment.findMany({
+      where: { status: 'ACTIVE', nextRunAt: { not: null } },
+      orderBy: { nextRunAt: 'asc' },
+      take: 25,
+      select: { automationId: true, email: true, currentStage: true, nextRunAt: true, stopReason: true },
+    })
+    const stops = await prisma.emailAutomationEnrollment.groupBy({
+      by: ['automationId', 'stopReason'],
+      where: { status: 'STOPPED', stopReason: { not: null } },
+      _count: { _all: true },
     })
 
     const automations = rows.map((a) => {
@@ -57,11 +82,19 @@ export async function GET(): Promise<NextResponse> {
         summary: validated?.ok ? describeAutomation(validated.definition) : null,
         invalidReason: validated && !validated.ok ? validated.errors.join(' ') : null,
         versions: a.versions.map((v) => ({ version: v.version, createdAt: v.createdAt, createdByName: v.createdByName })),
+        enrollments: enrollmentsByAutomation.get(a.id) ?? {},
+        upcomingSteps: upcoming.filter((u) => u.automationId === a.id).slice(0, 5),
+        stopReasons: stops
+          .filter((s) => s.automationId === a.id)
+          .map((s) => ({ reason: s.stopReason, count: s._count._all })),
       }
     })
 
     return NextResponse.json({
       automations,
+      // The HONEST runtime indicator: an automation only actually sends when
+      // the master promotional switch is on AND the worker process is running.
+      runtime: { promotionsEnabled: promotionsEnabled() },
       vocabulary: {
         triggers: APPROVED_TRIGGERS,
         segments: SEGMENTS,
