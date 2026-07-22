@@ -222,6 +222,18 @@ export type ScheduledJobData = {
     | 'quote-followup-1'
     | 'quote-followup-2'
     | 'quote-followup-final'
+    // ── Campaign dispatch runtime (owner spec 2026-07-22) ──
+    //    Producers: email-campaign-dispatch.ts. Payload shapes are validated
+    //    in the worker case before any I/O.
+    | 'campaign-batch' // payload: { runId, batchIndex }
+    | 'campaign-recipient-retry' // payload: { recipientId }
+    | 'campaign-sweep' // cron: dispatch due campaigns + recover stale runs
+    // ── Automation runtime (owner spec 2026-07-22) ──
+    //    Producers: email-automation-runtime.ts.
+    | 'automation-stage' // payload: { enrollmentId, stageIndex }
+    | 'automation-sweep' // cron: requeue due stages + time-based triggers
+    // ── Balance reminder (post-completion, real amounts only) ──
+    | 'balance-reminder-post' // bookingId; rechecks customerBalance at send
   bookingId?: string
   /** Set instead of bookingId for lead-scoped journeys (quote follow-up). */
   leadId?: string
