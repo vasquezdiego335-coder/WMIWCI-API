@@ -145,6 +145,15 @@ export async function suppress(input: SuppressInput): Promise<SuppressionResult>
   const scope = scopeForReason(input.reason)
   const detail = input.detail?.slice(0, 500) ?? null
 
+  // LOCKED STOP RULE: a suppression ends every ACTIVE automation enrollment
+  // for the address the moment it lands — unsubscribe/bounce/complaint are
+  // never overridable. Dynamic import breaks the guard→suppression→runtime
+  // cycle; fire-and-forget because the send guard is the authoritative block
+  // even if this cleanup fails.
+  import('./email-automation-runtime')
+    .then((m) => m.stopEnrollmentsFor({ email }, `suppressed:${String(input.reason).toLowerCase()}`))
+    .catch(() => undefined)
+
   try {
     if (scope === 'all') {
       // A total block always wins. One statement, no read-modify-write window:

@@ -27,6 +27,7 @@ import { scheduledQueue } from './queues'
 import { queueLogger } from './logger'
 import { nextAllowedTime } from './email-guard'
 import { effectiveMoveDate } from './email-eligibility'
+import { fireBookingTrigger, fireLeadTrigger, stopEnrollmentsFor } from './email-automation-runtime'
 
 const log = queueLogger.child({ mod: 'journeys' })
 
@@ -134,6 +135,11 @@ async function cancel(jobId: string): Promise<void> {
  * Idempotent: stable jobIds mean a second call replaces rather than duplicates.
  */
 export async function onCheckoutStarted(bookingId: string): Promise<void> {
+  // Owner automations on this trigger enroll regardless of the journey flag —
+  // they carry their own ACTIVE + EMAIL_PROMOTIONS_ENABLED gates. Fire-and-
+  // forget: a trigger failure must never break checkout.
+  void fireBookingTrigger('booking_started', bookingId)
+
   if (!enabled('abandoned')) {
     log.info({ bookingId }, 'abandoned-recovery journey disabled — not scheduling')
     return
@@ -153,6 +159,11 @@ export async function onCheckoutStarted(bookingId: string): Promise<void> {
  */
 export async function onBookingPaid(bookingId: string): Promise<void> {
   await Promise.all(ABANDONED_STAGES.map((s) => cancel(jobIdFor('abandoned', s.type, bookingId))))
+  // Payment is BOTH a trigger (payment_captured automations) and a stop
+  // condition — but ONLY for abandonment-type sequences. A paid deposit is
+  // the normal path; it must not end a move-date or post-move automation.
+  void fireBookingTrigger('payment_captured', bookingId)
+  void stopEnrollmentsFor({ bookingId }, 'deposit_paid', { triggers: ['booking_started', 'booking_abandoned'] })
   log.info({ bookingId }, 'abandoned-recovery cancelled (booking paid)')
 }
 
@@ -197,6 +208,10 @@ export async function onMoveDateSet(bookingId: string, moveDate: Date | null): P
  * worse than the send-time recheck already guards against.
  */
 export async function onBookingConfirmed(bookingId: string): Promise<void> {
+  // Owner automations enroll regardless of the journey flag (they have their
+  // own gates); the pre-move reminder scheduling below keeps its flag.
+  void fireBookingTrigger('booking_confirmed', bookingId)
+
   if (!enabled('reminders')) return
   const b = await prisma.booking
     .findUnique({
@@ -225,7 +240,36 @@ export async function onBookingCancelled(bookingId: string): Promise<void> {
     ),
   ]
   await Promise.all(ids.map(cancel))
+  // A cancelled booking has no truthful promotional automation left —
+  // unconditional stop for every enrollment on it.
+  void stopEnrollmentsFor({ bookingId }, 'booking_cancelled')
+  // The post-completion balance reminder dies with the booking too.
+  await cancel(jobIdFor('balance', 'balance-reminder-post', bookingId))
   log.info({ bookingId, cancelled: ids.length }, 'all journeys cancelled (booking cancelled)')
+}
+
+// ── BALANCE REMINDER (post-completion, real amounts only) ───────────────
+//  Anchor: the booking transitions to COMPLETED. One reminder at +24h IF a
+//  real outstanding balance exists — the worker recomputes
+//  job-money.customerBalance() at send time, so a payment recorded in the
+//  meantime, a cancellation, or a zero balance all kill it. The email is the
+//  existing final-invoice template with the DYNAMIC amounts; nothing is
+//  hardcoded and no release/forfeiture claim is made (no business logic
+//  enforces one).
+export const BALANCE_REMINDER_DELAY_MS = 24 * HOUR
+
+export async function onBookingCompletedBalance(bookingId: string): Promise<void> {
+  // Completion is also the move_completed automation trigger.
+  void fireBookingTrigger('move_completed', bookingId)
+
+  if (!enabled('balance')) return
+  await enqueue(
+    'balance-reminder-post',
+    { bookingId },
+    new Date(Date.now() + BALANCE_REMINDER_DELAY_MS),
+    jobIdFor('balance', 'balance-reminder-post', bookingId)
+  )
+  log.info({ bookingId }, 'post-completion balance reminder scheduled')
 }
 
 /**
@@ -236,6 +280,9 @@ export async function onBookingCancelled(bookingId: string): Promise<void> {
  * we never send a quote sequence when no real quote exists.
  */
 export async function onQuoteCreated(leadId: string): Promise<void> {
+  // Owner automations on quote_created enroll independently of the journey flag.
+  void fireLeadTrigger('quote_created', leadId)
+
   if (!enabled('quote')) return
 
   const lead = await prisma.lead.findUnique({
@@ -270,6 +317,9 @@ export async function onQuoteCreated(leadId: string): Promise<void> {
  */
 export async function onLeadClosed(leadId: string): Promise<void> {
   await Promise.all(QUOTE_STAGES.map((s) => cancel(jobIdFor('quote', s.type, leadId))))
+  // Converted or lost — the booking journey owns them now. Unconditional,
+  // mirroring quoteFollowupBlockReason's own unconditional 'lead_converted'.
+  void stopEnrollmentsFor({ leadId }, 'lead_closed')
   log.info({ leadId }, 'quote follow-up cancelled (lead closed)')
 }
 

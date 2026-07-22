@@ -240,6 +240,15 @@ export async function ingestLeadSafe(input: LeadInput, context: string): Promise
   try {
     const res = await createOrUpdateLead(input)
     apiLogger.info({ leadId: res.lead.id, isNew: res.isNew, context }, 'lead persisted')
+    // lead_created automation trigger — a NEW lead only, never a repeat
+    // submission merge. Dynamically imported so this module keeps its
+    // queue-free import graph (the offline tests never open Redis), and
+    // fire-and-forget so a trigger failure can never lose the lead.
+    if (res.isNew) {
+      import('./email-automation-runtime')
+        .then((m) => m.fireLeadTrigger('lead_created', res.lead.id))
+        .catch((err) => apiLogger.warn({ err: String(err) }, 'lead_created trigger failed (non-fatal)'))
+    }
     return res
   } catch (err) {
     apiLogger.error({ err: err instanceof Error ? err.message : String(err), context }, 'lead persistence failed (non-fatal)')

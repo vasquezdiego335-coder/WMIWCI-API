@@ -4,7 +4,7 @@ import { prisma } from '@/lib/db'
 import { emailQueue } from '@/lib/queues'
 import { apiLogger } from '@/lib/logger'
 import { onBookingCompleted } from '@/lib/followups'
-import { onBookingCancelled, onBookingConfirmed } from '@/lib/journeys'
+import { onBookingCancelled, onBookingConfirmed, onBookingCompletedBalance } from '@/lib/journeys'
 import { confirmationScheduleData } from '@/lib/scheduling'
 import { approveBooking, declineBooking } from '@/lib/booking-approval'
 import { z } from 'zod'
@@ -187,6 +187,14 @@ export async function POST(req: NextRequest, { params }: { params: { id: string 
       await onBookingCompleted(params.id)
     } catch (err) {
       apiLogger.error({ err: err instanceof Error ? err.message : String(err), bookingId: params.id }, 'onBookingCompleted failed (non-fatal)')
+    }
+    // Post-completion balance reminder (+ the move_completed automation
+    // trigger). Recomputes customerBalance() at send time — a zero balance,
+    // a payment recorded meanwhile, or a cancellation kills it.
+    try {
+      await onBookingCompletedBalance(params.id)
+    } catch (err) {
+      apiLogger.error({ err: err instanceof Error ? err.message : String(err), bookingId: params.id }, 'onBookingCompletedBalance failed (non-fatal)')
     }
   }
 
