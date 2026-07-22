@@ -221,6 +221,13 @@ enum AuditAction {
   EMAIL_JOURNEY_CONFIG_RESET
   EMAIL_AUTOMATION_SAVED
   EMAIL_AUTOMATION_STATE_CHANGED
+  // ── Email dispatch runtime (owner spec 2026-07-22) ──
+  EMAIL_CAMPAIGN_DISPATCHED
+  EMAIL_CAMPAIGN_RUN_PAUSED
+  EMAIL_CAMPAIGN_RUN_RESUMED
+  EMAIL_CAMPAIGN_RUN_CANCELLED
+  EMAIL_CAMPAIGN_RETRY_INITIATED
+  EMAIL_LEAD_QUOTED
 }
 
 // ── Hardening enums (increment 2.1) ──────────────────────────────────────────
@@ -2077,6 +2084,7 @@ model MarketingCampaign {
   // channel carry them.
   emailConfig EmailCampaignConfig?
   emailSends  EmailSend[]
+  emailRuns   EmailCampaignRun[]
 
   @@index([status])
   @@index([sourceKey])
@@ -2470,7 +2478,8 @@ model EmailAutomation {
   createdAt     DateTime @default(now()) @map("created_at")
   updatedAt     DateTime @updatedAt @map("updated_at")
 
-  versions EmailAutomationVersion[]
+  versions    EmailAutomationVersion[]
+  enrollments EmailAutomationEnrollment[]
 
   @@index([status])
   @@map("email_automations")
@@ -2497,4 +2506,168 @@ model EmailAutomationVersion {
   @@unique([automationId, version])
   @@index([automationId])
   @@map("email_automation_versions")
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  EMAIL DISPATCH RUNTIME (owner spec 2026-07-22) — the EXECUTION layer the
+//  admin models above configure. A campaign that reaches SCHEDULED/ACTIVE is
+//  dispatched into an immutable EmailCampaignRun with one row per recipient;
+//  an ACTIVE automation enrolls subjects into EmailAutomationEnrollment rows
+//  that execute stage by stage. Neither table replaces EmailSend — every
+//  provider outcome still lives on the canonical ledger, and both tables link
+//  to it by emailSendId. These are ORCHESTRATION records, not a second
+//  delivery-analytics system.
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// One immutable dispatch of an email campaign. The campaign CONFIG may be
+/// edited later; the run carries a frozen `snapshot` of exactly what was sent
+/// (template, subject, audience definition, UTM, discount), so an edit can
+/// never silently rewrite what an active run is doing.
+model EmailCampaignRun {
+  id         String @id @default(cuid())
+  campaignId String @map("campaign_id")
+
+  /// RUN STATE MACHINE (src/lib/email-campaign-run.ts):
+  ///   PREPARING → QUEUED → SENDING → COMPLETED | COMPLETED_WITH_ERRORS
+  ///   plus PAUSED, CANCELLING → CANCELLED, and FAILED (preparation died).
+  status String @default("PREPARING")
+
+  /// Frozen campaign config at dispatch: { template, subject, audience,
+  /// utm, discountCode, journeyKey }. THIS is what recipients receive.
+  snapshot Json
+
+  /// The final preflight verdict at dispatch time (validation + audience
+  /// preview + promo-flag check), for the admin to inspect afterwards.
+  preflight Json?
+
+  totalRecipients Int @default(0) @map("total_recipients")
+  /// Denormalized progress counters — recomputed from recipient rows by the
+  /// finalizer, never incremented blindly.
+  sentCount      Int @default(0) @map("sent_count")
+  skippedCount   Int @default(0) @map("skipped_count")
+  failedCount    Int @default(0) @map("failed_count")
+  cancelledCount Int @default(0) @map("cancelled_count")
+
+  /// Why a FAILED run failed, in words.
+  error String?
+
+  startedById   String?   @map("started_by_id")
+  startedByName String?   @map("started_by_name")
+  startedAt     DateTime  @default(now()) @map("started_at")
+  completedAt   DateTime? @map("completed_at")
+  updatedAt     DateTime  @updatedAt @map("updated_at")
+
+  campaign   MarketingCampaign        @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  recipients EmailCampaignRecipient[]
+
+  @@index([campaignId])
+  @@index([status])
+  @@index([startedAt])
+  @@map("email_campaign_runs")
+}
+
+/// One recipient of one campaign run. `@@unique([runId, email])` is the
+/// dedupe guarantee: a recipient can exist once per run, so repeated dispatch
+/// calls, batch retries and worker restarts cannot mint duplicates. Terminal
+/// delivery truth stays on EmailSend (linked via emailSendId); this row records
+/// the ORCHESTRATION outcome (queued/sent/skipped and the machine-readable why).
+model EmailCampaignRecipient {
+  id    String @id @default(cuid())
+  runId String @map("run_id")
+
+  /// Normalized (lowercased, trimmed) — matches EmailSend.email.
+  email      String
+  name       String?
+  customerId String? @map("customer_id")
+  leadId     String? @map("lead_id")
+  bookingId  String? @map("booking_id")
+
+  /// RECIPIENT STATE MACHINE (src/lib/email-campaign-run.ts):
+  ///   PENDING → SENDING → SENT
+  ///   PENDING → DEFERRED (quiet hours / caps; retried later)
+  ///   PENDING → SUPPRESSED | UNSUBSCRIBED | INELIGIBLE | CONTEXT_INVALID |
+  ///             SKIPPED | FAILED | CANCELLED
+  status String @default("PENDING")
+
+  /// Machine-readable reason for every non-SENT terminal state
+  /// (e.g. 'unsubscribed', 'context_missing:reviewUrl', 'cap_daily').
+  reason String?
+
+  /// Which bounded batch this recipient was queued in.
+  batchIndex Int? @map("batch_index")
+  /// Orchestration attempts (batch passes that reached this row).
+  attempts Int @default(0)
+
+  /// The canonical delivery ledger row, once a send was attempted.
+  /// Opens/clicks/bounces live THERE (EmailSend → EmailEvent), not here.
+  emailSendId String? @unique @map("email_send_id")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  run EmailCampaignRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+
+  @@unique([runId, email])
+  @@index([runId, status])
+  @@index([email])
+  @@map("email_campaign_recipients")
+}
+
+/// One subject (booking / lead / customer) enrolled in one VERSION of an
+/// automation. `dedupeKey` is unique — a re-fired trigger under the same
+/// version is a no-op, which is the enrollment-level exactly-once guarantee.
+/// The stage-level guarantee is the EmailSend idempotency key.
+model EmailAutomationEnrollment {
+  id           String @id @default(cuid())
+  automationId String @map("automation_id")
+  /// The IMMUTABLE version this enrollment runs under. An edit that writes a
+  /// new version never rewrites an enrollment already in flight.
+  version Int
+
+  /// `automation:<automationId>:v<version>:<subjectKey>` — see
+  /// src/lib/email-automation-runtime.ts enrollmentDedupeKey().
+  dedupeKey String @unique @map("dedupe_key")
+
+  /// 'booking' | 'lead' | 'customer'
+  subjectType String  @map("subject_type")
+  bookingId   String? @map("booking_id")
+  leadId      String? @map("lead_id")
+  customerId  String? @map("customer_id")
+  /// Normalized recipient address at enrollment time.
+  email String
+
+  /// The APPROVED_TRIGGERS key that fired this enrollment.
+  trigger String
+  /// What was true when the trigger fired (ids + the values that qualified).
+  triggerSnapshot Json? @map("trigger_snapshot")
+
+  /// ACTIVE | COMPLETED | STOPPED | FAILED
+  status String @default("ACTIVE")
+  /// Machine-readable stop reason ('lead_converted', 'unsubscribed', …).
+  stopReason String? @map("stop_reason")
+
+  /// Index of the NEXT stage to execute (0-based).
+  currentStage Int @default(0) @map("current_stage")
+  /// When the next stage is due. Anchored to enrolledAt + stage delay, so a
+  /// worker restart can never compress or stretch the sequence.
+  nextRunAt DateTime? @map("next_run_at")
+
+  /// Per-stage execution history: [{ stage, key, at, outcome, reason }].
+  history Json?
+
+  lastEvaluatedAt DateTime? @map("last_evaluated_at")
+  completedAt     DateTime? @map("completed_at")
+  error           String?
+
+  enrolledAt DateTime @default(now()) @map("enrolled_at")
+  updatedAt  DateTime @updatedAt @map("updated_at")
+
+  automation EmailAutomation @relation(fields: [automationId], references: [id], onDelete: Cascade)
+
+  @@index([automationId, status])
+  @@index([status, nextRunAt])
+  @@index([email])
+  @@index([bookingId])
+  @@index([leadId])
+  @@map("email_automation_enrollments")
 }

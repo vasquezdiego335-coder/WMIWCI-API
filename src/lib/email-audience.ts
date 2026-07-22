@@ -437,33 +437,83 @@ export async function previewAudience(def: AudienceDefinition): Promise<Audience
   }
 }
 
-/**
- * The DISPATCH-time audience. Deliberately a separate function from
- * `previewAudience`, and deliberately returns the recipients rather than a
- * count: an audience previewed on Monday must never be the list that sends on
- * Friday. Suppression is re-checked here AND again inside the send guard for
- * every individual message.
- */
-export async function resolveAudienceForDispatch(def: AudienceDefinition): Promise<{ recipients: Candidate[]; preview: AudiencePreview }> {
-  const preview = await previewAudience(def)
-  if (preview.error) return { recipients: [], preview }
+/** One candidate excluded at dispatch, with the machine-readable why. */
+export type ExcludedCandidate = { candidate: Candidate; reason: string }
 
+export type DetailedAudience = {
+  /** Deduped, valid, unsuppressed — the people a dispatch may mail. */
+  eligible: Candidate[]
+  /** Everyone else the segment matched, each with a named reason. */
+  excluded: ExcludedCandidate[]
+  /** True when the segment hit MAX_AUDIENCE — the real audience is larger. */
+  truncated: boolean
+}
+
+/**
+ * The DISPATCH-time audience, with every exclusion kept as a ROW rather than
+ * a count — the campaign run records each skipped person and why, so "why
+ * didn't X get this?" has an answer. Suppression is re-checked here AND again
+ * inside the send guard for every individual message.
+ */
+export async function resolveAudienceDetailed(def: AudienceDefinition): Promise<DetailedAudience> {
   const candidates = await resolveCandidates(def)
+  const truncated = candidates.length >= MAX_AUDIENCE
+
   const seen = new Set<string>()
   const unique: Candidate[] = []
+  const excluded: ExcludedCandidate[] = []
   for (const c of candidates) {
     const key = normalizeEmail(c.email)
-    if (!key || !EMAIL_RE.test(key) || seen.has(key)) continue
+    if (!key || !EMAIL_RE.test(key)) {
+      excluded.push({ candidate: c, reason: 'invalid_address' })
+      continue
+    }
+    if (seen.has(key)) {
+      excluded.push({ candidate: { ...c, email: key }, reason: 'duplicate' })
+      continue
+    }
     seen.add(key)
     unique.push({ ...c, email: key })
   }
 
   const emails = unique.map((c) => c.email)
-  const [suppressed, optedOut] = await Promise.all([
-    prisma.emailSuppression.findMany({ where: { email: { in: emails } }, select: { email: true } }),
+  const [suppressions, optedOut] = await Promise.all([
+    prisma.emailSuppression.findMany({ where: { email: { in: emails } }, select: { email: true, reason: true } }),
     prisma.customer.findMany({ where: { email: { in: emails }, marketingOptOut: true }, select: { email: true } }),
   ])
-  const blocked = new Set([...suppressed.map((s) => s.email), ...optedOut.map((c) => normalizeEmail(c.email))])
+  const suppressionByEmail = new Map(suppressions.map((s) => [s.email, s.reason as string]))
+  const optOut = new Set(optedOut.map((c) => normalizeEmail(c.email)))
 
-  return { recipients: unique.filter((c) => !blocked.has(c.email)), preview }
+  const eligible: Candidate[] = []
+  for (const c of unique) {
+    const suppressionReason = suppressionByEmail.get(c.email)
+    if (suppressionReason === 'UNSUBSCRIBED') {
+      excluded.push({ candidate: c, reason: 'unsubscribed' })
+      continue
+    }
+    if (suppressionReason) {
+      excluded.push({ candidate: c, reason: `suppressed:${suppressionReason.toLowerCase()}` })
+      continue
+    }
+    if (optOut.has(c.email)) {
+      excluded.push({ candidate: c, reason: 'marketing_opt_out' })
+      continue
+    }
+    eligible.push(c)
+  }
+
+  return { eligible, excluded, truncated }
+}
+
+/**
+ * The DISPATCH-time audience. Deliberately a separate function from
+ * `previewAudience`, and deliberately returns the recipients rather than a
+ * count: an audience previewed on Monday must never be the list that sends on
+ * Friday.
+ */
+export async function resolveAudienceForDispatch(def: AudienceDefinition): Promise<{ recipients: Candidate[]; preview: AudiencePreview }> {
+  const preview = await previewAudience(def)
+  if (preview.error) return { recipients: [], preview }
+  const detailed = await resolveAudienceDetailed(def)
+  return { recipients: detailed.eligible, preview }
 }
