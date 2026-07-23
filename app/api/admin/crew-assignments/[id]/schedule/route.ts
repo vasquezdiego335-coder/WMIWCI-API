@@ -114,7 +114,7 @@ export async function POST(req: NextRequest, { params }: { params: { id: string 
     for (const code of d.overrideCodes ?? []) {
       const found = conflicts.find((c) => c.code === code)
       await tx.conflictOverride.create({ data: { jobId: row.jobId, jobCrewId: params.id, userId: row.userId, code, details: (found?.detail ?? {}) as never, reason: d.reason ?? '', overriddenById: session.userId } })
-      await audit('CONFLICT_OVERRIDDEN', { code, reason: d.reason ?? null }, tx as never)
+      await audit('CONFLICT_OVERRIDDEN', { jobCrewId: params.id, workerUserId: row.userId, code, reason: d.reason ?? null }, tx as never)
     }
   })
 

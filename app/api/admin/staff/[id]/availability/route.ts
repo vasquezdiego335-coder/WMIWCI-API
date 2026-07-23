@@ -34,7 +34,7 @@ const RuleSchema = z.object({
 const ExceptionSchema = z.object({
   type: z.literal('exception'),
   kind: z.enum(['ADMIN_BLOCK', 'UNAVAILABLE_FULL', 'UNAVAILABLE_PARTIAL', 'AVAILABLE_OVERRIDE', 'VACATION', 'LEAVE']),
-  date: z.string(),
+  date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Use YYYY-MM-DD'),
   startMinute: z.number().int().min(0).max(1440).nullable().optional(),
   endMinute: z.number().int().min(0).max(1440).nullable().optional(),
   timezone: z.string().max(64).default('America/New_York'),
@@ -66,6 +66,12 @@ export async function POST(req: NextRequest, { params }: { params: { id: string 
 
   if ((d.kind === 'UNAVAILABLE_PARTIAL' || d.kind === 'AVAILABLE_OVERRIDE') && (d.startMinute == null || d.endMinute == null)) {
     return NextResponse.json({ error: 'A partial window needs a start and end time.' }, { status: 422 })
+  }
+  if (d.startMinute != null && d.endMinute != null && d.endMinute <= d.startMinute) {
+    return NextResponse.json({ error: 'The end time must be after the start time.' }, { status: 422 })
+  }
+  if (Number.isNaN(new Date(`${d.date}T00:00:00Z`).getTime())) {
+    return NextResponse.json({ error: 'The date is not a valid calendar date.' }, { status: 422 })
   }
   const row = await prisma.availabilityException.create({
     data: {

@@ -16,7 +16,17 @@ export async function GET(): Promise<NextResponse> {
   const session = await getSession()
   if (!session) return NextResponse.json({ error: 'Authentication required' }, { status: 401 })
   if (session.role !== 'OWNER') return NextResponse.json({ error: 'Owner only' }, { status: 403 })
-  const invitations = await prisma.crewInvitation.findMany({ orderBy: { createdAt: 'desc' }, take: 100 })
+  // The token is the acceptance credential — it is never returned in a list.
+  const invitations = await prisma.crewInvitation.findMany({
+    orderBy: { createdAt: 'desc' },
+    take: 100,
+    select: {
+      id: true, email: true, name: true, phone: true, role: true, workerType: true,
+      initialRateCents: true, initialSkills: true, canDrive: true, status: true,
+      expiresAt: true, invitedById: true, acceptedByUserId: true, acceptedAt: true,
+      cancelledAt: true, cancelledById: true, resentAt: true, resendCount: true, createdAt: true,
+    },
+  })
   return NextResponse.json({ invitations })
 }
 

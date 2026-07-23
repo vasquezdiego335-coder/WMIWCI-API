@@ -44,8 +44,13 @@ export async function PATCH(req: NextRequest, { params }: { params: { id: string
   for (const k of ['phone', 'workerStatus', 'skills', 'canDrive', 'canDriveCustomerVehicle', 'canLeadCrew', 'preferredRole', 'performanceNotes'] as const) {
     if (d[k] !== undefined) data[k] = d[k]
   }
-  if (d.licenseExpiresAt !== undefined) data.licenseExpiresAt = d.licenseExpiresAt ? new Date(d.licenseExpiresAt) : null
-  if (d.startDate !== undefined) data.startDate = d.startDate ? new Date(d.startDate) : null
+  for (const k of ['licenseExpiresAt', 'startDate'] as const) {
+    if (d[k] === undefined) continue
+    if (!d[k]) { data[k] = null; continue }
+    const dt = new Date(d[k] as string)
+    if (Number.isNaN(dt.getTime())) return NextResponse.json({ error: `${k} is not a valid date.` }, { status: 422 })
+    data[k] = dt
+  }
 
   const updated = await prisma.user.update({ where: { id: params.id }, data })
 

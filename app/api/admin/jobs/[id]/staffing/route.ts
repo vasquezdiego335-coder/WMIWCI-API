@@ -58,8 +58,24 @@ export async function PUT(req: NextRequest, { params }: { params: { id: string }
   if (!parsed.success) return NextResponse.json({ error: 'Invalid request', issues: parsed.error.flatten() }, { status: 422 })
   const d = parsed.data
 
-  const job = await prisma.job.findUnique({ where: { id: params.id }, select: { id: true, bookingId: true, staffingReq: { select: { id: true } } } })
+  const job = await prisma.job.findUnique({
+    where: { id: params.id },
+    select: { id: true, bookingId: true, staffingReq: { select: { id: true, minWorkers: true, requiredWorkers: true, requiredDrivers: true } } },
+  })
   if (!job) return NextResponse.json({ error: 'Job not found' }, { status: 404 })
+
+  // Cross-field sanity on the EFFECTIVE values (incoming merged over stored/defaults):
+  // a job can never require more drivers than workers, and the minimum can never
+  // exceed the required count.
+  const effRequired = d.requiredWorkers ?? job.staffingReq?.requiredWorkers ?? 2
+  const effDrivers = d.requiredDrivers ?? job.staffingReq?.requiredDrivers ?? 1
+  const effMin = d.minWorkers ?? job.staffingReq?.minWorkers ?? 1
+  if (effDrivers > effRequired) {
+    return NextResponse.json({ error: `Required drivers (${effDrivers}) cannot exceed required workers (${effRequired}).` }, { status: 422 })
+  }
+  if (effMin > effRequired) {
+    return NextResponse.json({ error: `Minimum workers (${effMin}) cannot exceed required workers (${effRequired}).` }, { status: 422 })
+  }
 
   const data: Record<string, unknown> = { updatedById: session.userId }
   for (const k of ['minWorkers', 'requiredWorkers', 'preferredWorkers', 'requiredDrivers', 'requiresLead', 'requiredSkills', 'expectedBreakMinutes', 'additionalStops', 'hasStairs', 'hasElevator', 'longCarry', 'heavyItems', 'packing', 'assembly', 'customerProvidedTruck', 'rentalTruckPickup', 'drivingRequired', 'outOfState', 'loadingLocation', 'unloadingLocation', 'workerInstructions', 'privateNotes'] as const) {
