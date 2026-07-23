@@ -10,7 +10,7 @@ import { useEffect, useState } from 'react'
 //    so the owner sees the full map without hitting 404s. Collapsed groups
 //    persist in localStorage. ──
 
-type Item = { href?: string; label: string; icon: string; soon?: boolean }
+type Item = { href?: string; label: string; icon: string; soon?: boolean; beta?: boolean }
 type Group = { title: string; items: Item[] }
 
 const GROUPS: Group[] = [
@@ -46,7 +46,7 @@ const GROUPS: Group[] = [
   {
     title: 'Growth',
     items: [
-      { label: 'Email Marketing', icon: '✉️', soon: true },
+      { href: '/admin/email-marketing', label: 'Email Marketing', icon: '✉️', beta: true },
       { href: '/admin/discounts', label: 'Discounts', icon: '🏷' },
       { label: 'Referrals', icon: '🤝', soon: true },
       { label: 'Marketing Sources', icon: '🧭', soon: true },
@@ -150,6 +150,7 @@ export default function Sidebar({ name, role }: { name: string; role: string }) 
                     >
                       <span style={navIcon}>{item.icon}</span>
                       <span style={{ flex: 1 }}>{item.label}</span>
+                      {item.beta && <span style={betaTag}>beta</span>}
                     </Link>
                   )
                 })}
@@ -174,6 +175,11 @@ const brandLine: React.CSSProperties = { color: '#FF5A1F', fontWeight: 700, font
 const groupHeader: React.CSSProperties = { display: 'flex', alignItems: 'center', justifyContent: 'space-between', width: '100%', padding: '10px 20px 6px', background: 'none', border: 'none', color: '#8B9BC1', fontSize: '10px', fontWeight: 700, letterSpacing: '0.08em', textTransform: 'uppercase', cursor: 'pointer' }
 const navItem: React.CSSProperties = { display: 'flex', alignItems: 'center', gap: '10px', padding: '8px 20px', fontSize: '13px', textDecoration: 'none', lineHeight: 1.2 }
 const navIcon: React.CSSProperties = { fontSize: '14px', width: '18px', textAlign: 'center', flexShrink: 0 }
+// BETA: built and owner-only until the staging scenarios pass. Unlike `soon`,
+// a beta item IS a working link — the badge sets the expectation, it does not
+// disable the page.
+const betaTag: React.CSSProperties = { fontSize: '8px', fontWeight: 700, letterSpacing: '0.05em', color: '#FF5A1F', border: '1px solid #FF5A1F55', borderRadius: '4px', padding: '1px 4px', textTransform: 'uppercase' }
+
 const soonTag: React.CSSProperties = { fontSize: '8px', fontWeight: 700, letterSpacing: '0.05em', color: '#5A6B8C', border: '1px solid #33415A', borderRadius: '4px', padding: '1px 4px', textTransform: 'uppercase' }
 const signOutBox: React.CSSProperties = { padding: '14px 20px', borderTop: '1px solid rgba(255,255,255,0.08)', backgroundColor: '#0A1628' }
 const signOutBtn: React.CSSProperties = { background: 'none', border: '1px solid rgba(255,255,255,0.2)', color: '#CBD5E1', fontSize: '12px', padding: '8px 12px', borderRadius: '6px', cursor: 'pointer', width: '100%' }

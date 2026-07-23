@@ -9,6 +9,9 @@ import { quoteFollowupBlockReason } from '../lib/journeys'
 import { isSafeUrl } from '../emails/validation'
 import { etDayRange, moveDateInRange, effectiveMoveDate } from '../lib/scheduling'
 import { dayOfMoveSms } from '../lib/waiting-time'
+import { processCampaignBatch, processRecipientRetry, sweepCampaignRuns } from '../lib/email-campaign-dispatch'
+import { executeAutomationStage, sweepAutomationEnrollments } from '../lib/email-automation-runtime'
+import { customerBalance, JOB_MONEY_PAYMENT_SELECT } from '../lib/job-money'
 import type { ScheduledJobData } from '../lib/queues'
 
 type DigestBooking = {
@@ -353,6 +356,113 @@ async function processScheduledJob(job: Job<ScheduledJobData>): Promise<void> {
       break
     }
 
+    // ── CAMPAIGN DISPATCH RUNTIME (owner spec 2026-07-22) ─────────
+    // All real work lives in src/lib/email-campaign-dispatch.ts; these cases
+    // validate the payload and dispatch. Every send inside goes through
+    // guardedSend, and every job id is deterministic, so a BullMQ retry or a
+    // duplicate enqueue resumes the same logical work.
+    case 'campaign-batch': {
+      const runId = typeof payload?.runId === 'string' ? payload.runId : null
+      const batchIndex = typeof payload?.batchIndex === 'number' && Number.isInteger(payload.batchIndex) ? payload.batchIndex : null
+      if (!runId || batchIndex === null || batchIndex < 0) {
+        log.error({ payload }, 'campaign-batch payload invalid — dropped')
+        break
+      }
+      const result = await processCampaignBatch(runId, batchIndex)
+      log.info({ runId, batchIndex, ...result }, 'campaign batch processed')
+      break
+    }
+
+    case 'campaign-recipient-retry': {
+      const recipientId = typeof payload?.recipientId === 'string' ? payload.recipientId : null
+      if (!recipientId) {
+        log.error({ payload }, 'campaign-recipient-retry payload invalid — dropped')
+        break
+      }
+      await processRecipientRetry(recipientId)
+      break
+    }
+
+    case 'campaign-sweep': {
+      // Cron: dispatch due SCHEDULED campaigns, re-open stale claims,
+      // re-enqueue lost batches, finalize settled runs.
+      const result = await sweepCampaignRuns()
+      log.info(result, 'campaign sweep complete')
+      break
+    }
+
+    // ── AUTOMATION RUNTIME (owner spec 2026-07-22) ────────────────
+    case 'automation-stage': {
+      const enrollmentId = typeof payload?.enrollmentId === 'string' ? payload.enrollmentId : null
+      const stageIndex = typeof payload?.stageIndex === 'number' && Number.isInteger(payload.stageIndex) ? payload.stageIndex : null
+      if (!enrollmentId || stageIndex === null || stageIndex < 0) {
+        log.error({ payload }, 'automation-stage payload invalid — dropped')
+        break
+      }
+      const outcome = await executeAutomationStage(enrollmentId, stageIndex)
+      log.info({ enrollmentId, stageIndex, outcome }, 'automation stage processed')
+      break
+    }
+
+    case 'automation-sweep': {
+      // Cron: requeue due-but-idle stages (restart recovery, un-pause) and
+      // evaluate the grounded time-based triggers (inactive customers,
+      // approaching move dates, abandonment, review/referral eligibility).
+      const result = await sweepAutomationEnrollments()
+      log.info(result, 'automation sweep complete')
+      break
+    }
+
+    // ── Post-completion balance reminder (real amounts ONLY) ──────
+    // Scheduled by journeys.onBookingCompletedBalance at completion +24h.
+    // Everything is recomputed HERE, at send time: a payment recorded in the
+    // meantime, a cancellation, or a zero balance all skip with a named
+    // reason. Amounts come from job-money.customerBalance — never hardcoded.
+    case 'balance-reminder-post': {
+      if (!bookingId) break
+      const booking = await prisma.booking.findUnique({
+        where: { id: bookingId },
+        include: { payments: { select: JOB_MONEY_PAYMENT_SELECT }, customer: true },
+      })
+      if (!booking || !booking.customer?.email) break
+      if (booking.isInternalTest) break
+      if (booking.status !== 'COMPLETED') {
+        log.info({ bookingId, status: booking.status }, 'balance reminder skipped — booking not COMPLETED')
+        break
+      }
+      const balance = customerBalance(booking as never)
+      if (balance.outstandingCents <= 0) {
+        log.info({ bookingId }, 'balance reminder skipped — nothing owed')
+        break
+      }
+      if (!process.env.APP_URL) {
+        log.warn({ bookingId }, 'APP_URL unset — cannot build the portal link; balance reminder skipped')
+        break
+      }
+      const base = process.env.APP_URL.replace(/\/+$/, '')
+      const dollars = (cents: number) => (cents / 100).toFixed(2)
+      await emailQueue.add('final-invoice', {
+        template: 'final-invoice',
+        to: booking.customer.email,
+        bookingId,
+        // Exactly-once per booking for this reminder, across every retry.
+        businessEventKey: `booking:${bookingId}:balance-reminder-post`,
+        payload: {
+          customerName: booking.customer.name,
+          displayId: booking.displayId,
+          date: booking.completedAt?.toISOString(),
+          grandTotal: dollars(balance.finalBilledCents),
+          amountPaid: dollars(balance.collectedCents),
+          balanceDue: dollars(balance.outstandingCents),
+          portalUrl: `${base}/my-booking/${booking.customerToken}`,
+          locale: booking.customer.locale,
+          journey: 'balance',
+        },
+      })
+      log.info({ bookingId, outstandingCents: balance.outstandingCents }, 'balance reminder queued')
+      break
+    }
+
     default:
       log.warn({ type }, 'Unknown scheduled job type')
   }
@@ -391,7 +501,26 @@ async function registerCronJobs(): Promise<void> {
     }
   )
 
-  queueLogger.info('Daily schedule cron jobs registered (7 AM + 7 PM ET)')
+  // ── Email dispatch runtime sweeps (owner spec 2026-07-22) ──
+  // campaign-sweep: every 5 min — dispatches due SCHEDULED campaigns,
+  // re-opens stale recipient claims, re-enqueues lost batches, finalizes
+  // settled runs. automation-sweep: every 15 min — requeues due stages
+  // (restart / un-pause recovery) and evaluates the grounded time-based
+  // triggers. Both are cheap no-ops when there is nothing to do, and every
+  // action they take is individually idempotent, so the cadence is a
+  // freshness knob rather than a correctness one.
+  await scheduledQueue.add(
+    'campaign-sweep',
+    { type: 'campaign-sweep' },
+    { repeat: { pattern: '*/5 * * * *' }, jobId: 'cron:campaign-sweep' }
+  )
+  await scheduledQueue.add(
+    'automation-sweep',
+    { type: 'automation-sweep' },
+    { repeat: { pattern: '*/15 * * * *' }, jobId: 'cron:automation-sweep' }
+  )
+
+  queueLogger.info('Cron jobs registered (daily digests + campaign/automation sweeps)')
 }
 
 export function startScheduledWorker() {

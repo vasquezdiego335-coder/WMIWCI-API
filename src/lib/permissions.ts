@@ -107,6 +107,21 @@ export type Action =
   | 'marketing.record_spend' // record campaign cost
   | 'marketing.correct_attribution' // owner-assign a source — audited
   | 'pricing.view_intelligence' // historical comparables + recommendations
+  // ── Email Marketing (owner spec 2026-07-21) ──
+  // The split follows one principle: a MANAGER runs email OPERATIONS (what was
+  // sent, what bounced, why something did not go out) but does not hold the
+  // controls that change what customers receive, expose the full customer email
+  // list, or reveal company profit.
+  | 'email.view' // overview, templates, journeys, delivery state
+  | 'email.view_recipients' // see full recipient addresses (masked otherwise)
+  | 'email.view_attribution' // email → booking → collected revenue → PROFIT
+  | 'email.manage_journey' // pause or resume a lifecycle journey
+  | 'email.cancel_scheduled' // cancel a pending scheduled send
+  | 'email.retry_send' // deliberately re-drive a non-delivered send
+  | 'email.manage_suppression' // restore a restorable suppression
+  | 'email.manage_campaign' // create/activate/pause an EMAIL campaign
+  | 'email.send_test' // send a test to the approved test recipient
+  | 'email.configure' // sender identity, caps, quiet hours, flags
   // Bookings
   | 'booking.approve' // approve a PENDING_APPROVAL booking (captures the $49 hold)
   | 'booking.decline' // decline/deny before capture (releases the hold)
@@ -175,10 +190,49 @@ const OWNER_ONLY: Action[] = [
   'report.save_shared_view',
   // Overwriting how a customer was attributed changes marketing history.
   'marketing.correct_attribution',
+  // ── Email Marketing — BETA (owner spec 2026-07-21) ──
+  // The whole section is OWNER-ONLY for the Beta release, including `email.view`.
+  // The manager-operational split below is the POST-BETA design and is already
+  // implemented everywhere else in the code; enabling it is deleting the
+  // entries in EMAIL_BETA_OWNER_ONLY, nothing more.
+  'email.view',
+  'email.cancel_scheduled',
+  'email.send_test',
+  // The full recipient list IS the customer list. A manager sees the operational
+  // record (template, status, why it was blocked) with addresses masked.
+  'email.view_recipients',
+  // Attribution ends in FINALIZED COMPANY NET PROFIT — the same authority line
+  // already drawn by money.view_company_profit and report.view_financial.
+  'email.view_attribution',
+  // Pausing a journey silently stops customer communication (including move
+  // reminders). That is a business decision, not an operational toggle.
+  'email.manage_journey',
+  // Re-driving a send can put a second copy of an email in a real inbox.
+  'email.retry_send',
+  // Lifting a suppression re-opens mail to someone who asked us to stop.
+  'email.manage_suppression',
+  // Activating a campaign mails a whole audience at once.
+  'email.manage_campaign',
+  // Sender identity, frequency caps and quiet hours govern every customer send.
+  'email.configure',
 ]
 
 // Everything not owner-only is available to OWNER + MANAGER. CREW is limited to
 // the narrow self-service set above (and is blocked from /admin by middleware).
+/**
+ * BETA SCOPE. These three actions are owner-only ONLY because Email Marketing
+ * has not passed staging. They are the manager-operational set: viewing send
+ * state, cancelling a queued send, and sending a test to the approved test
+ * recipient. When the staging scenarios pass, remove these three entries from
+ * OWNER_ONLY above and managers gain exactly this much and no more.
+ *
+ * Everything else in the email section stays owner-only permanently.
+ */
+export const EMAIL_BETA_OWNER_ONLY: Action[] = ['email.view', 'email.cancel_scheduled', 'email.send_test']
+
+/** True while Email Marketing is owner-only Beta. Drives the BETA badge. */
+export const EMAIL_MARKETING_BETA = true
+
 export function can(role: Role | null | undefined, action: Action): boolean {
   if (role === 'OWNER') return true
   if (role === 'CREW') return CREW_ALLOWED.includes(action)

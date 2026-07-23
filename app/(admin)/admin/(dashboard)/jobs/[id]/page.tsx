@@ -27,6 +27,8 @@ import { isEligibleExpense } from '@/lib/money-rules'
 import { Callout, CompletenessBadge } from '../../_ui'
 import ExpenseForm from '../../ExpenseForm'
 import { EXPENSE_CATEGORY_LABELS } from '../../_labels'
+import EmailTimeline from './EmailTimeline'
+import { can } from '@/lib/permissions'
 
 export const revalidate = 0
 
@@ -669,6 +671,15 @@ export default async function JobDetail({ params }: { params: { id: string } }) 
               </div>
             ))}
           </Card>
+
+          {/* Section 10b: the send guard's own ledger — including refusals.
+              "Communications" above shows what was handed off to be sent; this
+              shows what was CONSIDERED, and why anything was not sent. */}
+          <EmailTimeline
+            bookingId={booking.id}
+            customerEmail={booking.customer?.email}
+            maySeeRecipients={can(session?.role as never, 'email.view_recipients')}
+          />
 
           {/* ── Crew & Labor (Phase 1, owner spec 2026-07-20) ──
               The canonical labor record for this move. Assign crew, enter or

@@ -240,9 +240,113 @@ export async function ingestLeadSafe(input: LeadInput, context: string): Promise
   try {
     const res = await createOrUpdateLead(input)
     apiLogger.info({ leadId: res.lead.id, isNew: res.isNew, context }, 'lead persisted')
+    // lead_created automation trigger — a NEW lead only, never a repeat
+    // submission merge. Dynamically imported so this module keeps its
+    // queue-free import graph (the offline tests never open Redis), and
+    // fire-and-forget so a trigger failure can never lose the lead.
+    if (res.isNew) {
+      import('./email-automation-runtime')
+        .then((m) => m.fireLeadTrigger('lead_created', res.lead.id))
+        .catch((err) => apiLogger.warn({ err: String(err) }, 'lead_created trigger failed (non-fatal)'))
+    }
     return res
   } catch (err) {
     apiLogger.error({ err: err instanceof Error ? err.message : String(err), context }, 'lead persistence failed (non-fatal)')
+    return null
+  }
+}
+
+// ════════════════════════════════════════════════════════════════════════
+//  LEAD LIFECYCLE TRANSITIONS (email-journey trigger sites, 2026-07-21)
+//  ---------------------------------------------------------------------
+//  These write the previously-unwritten conversion columns (quotedAt / bookedAt
+//  / convertedBookingId). They own the DB write ONLY — never the queue side
+//  effect, so leads.ts stays free of any journeys/queue import and its offline
+//  tests never open a Redis connection. The caller (an API route) fires
+//  onQuoteCreated / onLeadClosed after a truthy return. Both fail SOFT: a lead
+//  transition is a convenience over the authoritative booking record.
+// ════════════════════════════════════════════════════════════════════════
+
+/**
+ * PURE: the patch that records a genuine quote on a lead. `quotedAt` is stamped
+ * only if it was not already set (so a re-quote does not restart the recovery
+ * clock), the lead advances to QUOTE_SENT from an OPEN status, and a real
+ * estimate is filled only when one is supplied and none exists yet.
+ */
+export function buildQuoteUpdate(
+  existing: { status: LeadStatus; quotedAt: Date | null; estimatedValue: number | null },
+  now: Date,
+  estimatedValueCents?: number | null
+): { data: Record<string, unknown>; newlyQuoted: boolean } {
+  const data: Record<string, unknown> = { lastActivityAt: now }
+  const newlyQuoted = existing.quotedAt == null
+  if (newlyQuoted) data.quotedAt = now
+  if (OPEN_STATUSES.includes(existing.status) && existing.status !== LeadStatus.QUOTE_SENT) {
+    data.status = LeadStatus.QUOTE_SENT
+  }
+  if (existing.estimatedValue == null && typeof estimatedValueCents === 'number' && estimatedValueCents > 0) {
+    data.estimatedValue = estimatedValueCents
+  }
+  return { data, newlyQuoted }
+}
+
+/**
+ * Record that a real quote was given to a lead. Returns true only when this call
+ * NEWLY stamped `quotedAt` — the signal the caller uses to decide whether to
+ * start the quote follow-up sequence (a re-quote must not re-fire it). A lead
+ * already closed (BOOKED/LOST) is refused: there is nothing left to quote.
+ */
+export async function markLeadQuoted(
+  leadId: string,
+  opts: { estimatedValueCents?: number | null; now?: Date } = {}
+): Promise<{ newlyQuoted: boolean; leadId: string } | null> {
+  const now = opts.now ?? new Date()
+  try {
+    const lead = await prisma.lead.findUnique({
+      where: { id: leadId },
+      select: { id: true, status: true, quotedAt: true, estimatedValue: true },
+    })
+    if (!lead) return null
+    if (lead.status === LeadStatus.BOOKED || lead.status === LeadStatus.LOST) return null
+    const { data, newlyQuoted } = buildQuoteUpdate(lead, now, opts.estimatedValueCents)
+    await prisma.lead.update({ where: { id: lead.id }, data })
+    apiLogger.info({ leadId: lead.id, newlyQuoted }, 'lead marked quoted')
+    return { newlyQuoted, leadId: lead.id }
+  } catch (err) {
+    apiLogger.error({ err: err instanceof Error ? err.message : String(err), leadId }, 'markLeadQuoted failed (non-fatal)')
+    return null
+  }
+}
+
+/**
+ * A booking was created for this email → convert a matching OPEN lead so quote
+ * follow-ups stop, and the conversion is visible to audiences and attribution
+ * (both already READ convertedBookingId / bookedAt). Idempotent and best-effort:
+ * returns the converted leadId, or null when there was no open lead (the common
+ * case — most bookings are not from a tracked lead).
+ */
+export async function markLeadConverted(
+  email: string | null | undefined,
+  bookingId: string,
+  now: Date = new Date()
+): Promise<string | null> {
+  const normalized = normalizeEmail(email)
+  if (!normalized) return null
+  try {
+    const lead = await prisma.lead.findFirst({
+      where: { email: normalized, status: { in: OPEN_STATUSES } },
+      orderBy: { createdAt: 'desc' },
+      select: { id: true },
+    })
+    if (!lead) return null
+    await prisma.lead.update({
+      where: { id: lead.id },
+      data: { status: LeadStatus.BOOKED, bookedAt: now, convertedBookingId: bookingId, lastActivityAt: now },
+    })
+    apiLogger.info({ leadId: lead.id, bookingId }, 'lead converted (booking created)')
+    return lead.id
+  } catch (err) {
+    apiLogger.error({ err: err instanceof Error ? err.message : String(err), bookingId }, 'markLeadConverted failed (non-fatal)')
     return null
   }
 }

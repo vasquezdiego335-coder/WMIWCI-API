@@ -97,9 +97,31 @@ Post-job follow-ups additionally carry their own older caps in
 
 ---
 
-## Known gap
+## Trigger wiring (2026-07-21)
 
-`onMoveDateSet` and `onQuoteCreated` are **implemented and tested but not yet
-called** from a trigger site — there is no confirmed-date hook and no admin
-"mark quoted" action that calls them. They are wired for the caller that adds
-them. Abandoned recovery, post-job, and cancellation stops **are** wired.
+Every hardcoded lifecycle journey is now called from a real event site:
+
+| Journey | Fired by |
+|---|---|
+| Abandoned recovery start | `POST /api/bookings` → `onCheckoutStarted` |
+| Abandoned recovery stop (paid) | `fulfillment.ts` → `onBookingPaid` |
+| Pre-move reminders (re-)anchor | booking approval (admin status route + Discord `handleApprove`) → `onBookingConfirmed` → `onMoveDateSet`. A customer reschedule sets the booking back to `PENDING_APPROVAL`, so re-approval re-anchors; the stable jobId means the old reminder is replaced, not duplicated. |
+| Quote follow-up start | owner records a real quote: `POST /api/admin/email-marketing/leads/[id]/quote` → `markLeadQuoted` (stamps `Lead.quotedAt`) → `onQuoteCreated`. Fires only on the FIRST stamp, so a re-quote cannot restart it. |
+| Quote follow-up stop (booked) | `POST /api/bookings` → `markLeadConverted` (stamps `convertedBookingId`/`bookedAt`) → `onLeadClosed` |
+| All journeys stop (cancelled) | booking status route → `onBookingCancelled` |
+
+`markLeadConverted` also populates the conversion columns that the audience
+builder and attribution already read, so a lead who books now correctly leaves
+the `new_leads_no_booking` / `quoted_leads_no_booking` segments.
+
+## Still owner-driven only (BETA, behind the flag)
+
+The **owner-configured campaign and custom-automation dispatch executor** is the
+one part not yet built: an owner can create, validate, approve, schedule and
+activate a campaign or automation (state machine + audience preview + test send
+all work), but nothing yet resolves the audience at the scheduled time and drives
+`guardedSend` for each recipient. This is deliberately gated — the overview page
+states promotional sending stays disabled behind its flag until a staging
+rehearsal passes. Building it safely needs a per-template real-context layer (the
+promotional templates carry booking/lead-specific fields), which is why it is a
+separate, reviewed build rather than a generic broadcaster.

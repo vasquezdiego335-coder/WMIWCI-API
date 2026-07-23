@@ -85,7 +85,9 @@ export default async function AdminCustomers({
               return (
                 <tr key={c.id} style={tr}>
                   <td style={td}>
-                    <div style={{ fontWeight: '500', color: '#0A1628' }}>{c.name}</div>
+                    <Link href={`/admin/customers/${c.id}`} style={{ fontWeight: '500', color: '#0A1628', textDecoration: 'none' }}>
+                      {c.name}
+                    </Link>
                     <div style={{ fontSize: '11px', color: '#9CA3AF' }}>{c.email}</div>
                   </td>
                   <td style={td}>{c.phone ?? '—'}</td>

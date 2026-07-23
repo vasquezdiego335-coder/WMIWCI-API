@@ -40,11 +40,15 @@ const EXPECTED: Expectation[] = [
       'booking_id', 'lead_id', 'campaign', 'status', 'outcome_class',
       'blocked_reason', 'attempts', 'next_attempt_at', 'provider_id', 'error',
       'sent_at', 'created_at', 'updated_at',
+      // Email marketing admin (2026-07-21).
+      'campaign_id', 'is_test', 'journey_config_version',
     ],
     indexes: [
       'email_sends_idempotency_key_key',
       'email_sends_status_next_attempt_at_idx',
       'email_sends_email_class_status_sent_at_idx',
+      'email_sends_campaign_id_idx',
+      'email_sends_is_test_idx',
     ],
     constraints: ['email_sends_status_check', 'email_sends_email_class_check'],
   },
@@ -69,6 +73,57 @@ const EXPECTED: Expectation[] = [
     ],
     indexes: ['followup_ledger_status_next_attempt_at_idx'],
     constraints: ['followup_ledger_status_check'],
+  },
+  // -- Email marketing admin (owner spec 2026-07-21) --
+  // These five tables back the campaign composer, the audience builder, journey
+  // configuration and automations. Without them the admin pages fail on read.
+  {
+    table: 'email_audiences',
+    columns: [
+      'id', 'name', 'description', 'definition',
+      'last_preview_count', 'last_preview_at',
+      'created_by_id', 'created_by_name', 'created_at', 'updated_at',
+    ],
+    indexes: ['email_audiences_name_key'],
+  },
+  {
+    table: 'email_campaign_configs',
+    columns: [
+      'id', 'campaign_id', 'template', 'subject', 'audience_id', 'scheduled_at',
+      'approved_by_id', 'approved_by_name', 'approved_at',
+      'utm_source', 'utm_medium', 'utm_campaign', 'utm_content', 'discount_code',
+      'validation', 'status_note', 'dispatched_at', 'dispatched_count',
+      'created_by_id', 'created_at', 'updated_at',
+    ],
+    indexes: ['email_campaign_configs_campaign_id_key'],
+    // The audience FK is SET NULL: deleting an audience must not delete the
+    // record of a campaign that used it.
+    constraints: ['email_campaign_configs_campaign_id_fkey', 'email_campaign_configs_audience_id_fkey'],
+  },
+  {
+    table: 'email_journey_configs',
+    columns: [
+      'id', 'journey_key', 'enabled', 'version', 'config',
+      'updated_by_id', 'updated_by_name', 'created_at', 'updated_at',
+    ],
+    indexes: ['email_journey_configs_journey_key_key'],
+    constraints: ['email_journey_configs_version_positive'],
+  },
+  {
+    table: 'email_automations',
+    columns: [
+      'id', 'name', 'description', 'status', 'active_version',
+      'created_by_id', 'created_by_name', 'created_at', 'updated_at',
+    ],
+    indexes: ['email_automations_name_key'],
+    constraints: ['email_automations_status_known'],
+  },
+  {
+    table: 'email_automation_versions',
+    columns: ['id', 'automation_id', 'version', 'definition', 'created_by_id', 'created_by_name', 'created_at'],
+    // The unique pair IS the immutability guarantee for a versioned definition.
+    indexes: ['email_automation_versions_automation_id_version_key'],
+    constraints: ['email_automation_versions_automation_id_fkey', 'email_automation_versions_version_positive'],
   },
 ]
 
@@ -146,6 +201,54 @@ async function main() {
   else if (!names.includes('DEFERRED')) {
     problems.push("enum NotificationStatus is missing 'DEFERRED' — deferrals will fail to record")
   } else ok.push('NotificationStatus includes DEFERRED')
+
+  // -- Enum additions the admin depends on (2026-07-21) --
+  const enumLabels = async (typname: string): Promise<string[]> => {
+    const rows = await prisma.$queryRawUnsafe<Array<{ enumlabel: string }>>(
+      `SELECT e.enumlabel FROM pg_enum e
+         JOIN pg_type t ON t.oid = e.enumtypid
+        WHERE t.typname = $1`,
+      typname
+    )
+    return rows.map((r) => r.enumlabel)
+  }
+
+  const campaignStates = await enumLabels('CampaignStatus')
+  const neededStates = ['VALIDATING', 'READY', 'SCHEDULED', 'CANCELLED', 'FAILED']
+  const missingStates = neededStates.filter((v) => !campaignStates.includes(v))
+  if (campaignStates.length === 0) problems.push('enum CampaignStatus not found')
+  else if (missingStates.length) {
+    problems.push(`enum CampaignStatus is missing ${missingStates.join(', ')} - the campaign lifecycle cannot advance`)
+  } else ok.push('CampaignStatus carries the email campaign lifecycle states')
+
+  const auditActions = await enumLabels('AuditAction')
+  const neededActions = [
+    'EMAIL_SCHEDULED_CANCELLED', 'EMAIL_SEND_RETRIED', 'EMAIL_SUPPRESSION_RESTORED', 'EMAIL_TEST_SENT',
+    'EMAIL_CAMPAIGN_CREATED', 'EMAIL_CAMPAIGN_UPDATED', 'EMAIL_CAMPAIGN_APPROVED', 'EMAIL_CAMPAIGN_STATE_CHANGED',
+    'EMAIL_AUDIENCE_SAVED', 'EMAIL_AUDIENCE_DELETED', 'EMAIL_JOURNEY_CONFIG_UPDATED', 'EMAIL_JOURNEY_CONFIG_RESET',
+    'EMAIL_AUTOMATION_SAVED', 'EMAIL_AUTOMATION_STATE_CHANGED',
+  ]
+  const missingActions = neededActions.filter((v) => !auditActions.includes(v))
+  if (missingActions.length) {
+    problems.push(`enum AuditAction is missing ${missingActions.join(', ')} - admin actions will throw when audited`)
+  } else ok.push('AuditAction carries every email admin action')
+
+  // -- THE DELETE RULE THAT MATTERS --
+  // email_sends.campaign_id must be ON DELETE SET NULL. If a migration were
+  // hand-edited to CASCADE, deleting a campaign would erase the record that
+  // real people were emailed - silently, and only discovered afterwards.
+  const fk = await prisma.$queryRawUnsafe<Array<{ confdeltype: string }>>(
+    `SELECT confdeltype FROM pg_constraint WHERE conname = 'email_sends_campaign_id_fkey'`
+  )
+  if (fk.length === 0) {
+    problems.push('email_sends_campaign_id_fkey not found - the campaign relation was never created')
+  } else if (fk[0].confdeltype !== 'n') {
+    // 'n' = SET NULL, 'c' = CASCADE, 'a' = NO ACTION, 'r' = RESTRICT
+    problems.push(
+      `email_sends.campaign_id has delete rule '${fk[0].confdeltype}' but MUST be SET NULL ('n'). ` +
+        'Deleting a campaign would destroy send history.'
+    )
+  } else ok.push('email_sends.campaign_id deletes SET NULL (send history survives campaign deletion)')
 
   for (const line of ok) console.log(`  OK    ${line}`)
   if (problems.length) {
