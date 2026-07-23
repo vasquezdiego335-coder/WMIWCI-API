@@ -42,7 +42,7 @@ test('cancellation is two-phase: CANCELLING → CANCELLED only', () => {
 })
 
 test('terminal run states allow nothing', () => {
-  for (const s of RUN_TERMINAL_STATES) {
+  for (const s of Array.from(RUN_TERMINAL_STATES)) {
     for (const to of ['QUEUED', 'SENDING', 'PAUSED', 'PREPARING'] as RunState[]) {
       assert.ok(!canTransitionRun(s, to).ok, `${s} → ${to} must be refused`)
     }

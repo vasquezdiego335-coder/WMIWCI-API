@@ -314,7 +314,15 @@ export async function fireLeadTrigger(trigger: TriggerKey, leadId: string): Prom
   }
 }
 
-/** Queue one stage with the STABLE id automationJobId() was built for. */
+/**
+ * Queue one stage with the STABLE id automationJobId() was built for.
+ *
+ * BullMQ GOTCHA handled here: adding a job whose id matches a COMPLETED job
+ * still inside the removeOnComplete window is silently ignored. A stage that
+ * ran but did not advance (automation paused, promo switch off, not-due
+ * restart race) must be re-schedulable — so a finished job under this id is
+ * REMOVED first, while a genuinely pending one means there is nothing to do.
+ */
 async function scheduleStageJob(
   enrollmentId: string,
   automationId: string,
@@ -326,14 +334,23 @@ async function scheduleStageJob(
   const stage = def.stages[stageIndex]
   if (!stage) return
   const subjectKey = enrollmentId // the enrollment IS the subject identity now
+  const jobId = automationJobId(automationId, version, stage.key, subjectKey)
   const delay = Math.max(0, stageDueAt(enrolledAt, def, stageIndex).getTime() - Date.now())
-  await scheduledQueue
-    .add(
-      'automation-stage',
-      { type: 'automation-stage', payload: { enrollmentId, stageIndex } },
-      { delay, jobId: automationJobId(automationId, version, stage.key, subjectKey) }
-    )
-    .catch((err) => log.warn({ err: String(err), enrollmentId, stageIndex }, 'stage enqueue failed — sweep will recover'))
+  try {
+    const existing = await scheduledQueue.getJob(jobId)
+    if (existing) {
+      const state = await existing.getState().catch(() => 'unknown')
+      if (state === 'completed' || state === 'failed') {
+        await existing.remove().catch(() => undefined)
+      } else {
+        // Already delayed/waiting/active — the stage is on its way.
+        return
+      }
+    }
+    await scheduledQueue.add('automation-stage', { type: 'automation-stage', payload: { enrollmentId, stageIndex } }, { delay, jobId })
+  } catch (err) {
+    log.warn({ err: String(err), enrollmentId, stageIndex }, 'stage enqueue failed — sweep will recover')
+  }
 }
 
 // ── Stage execution ─────────────────────────────────────────────────────
