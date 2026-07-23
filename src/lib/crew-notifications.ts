@@ -17,6 +17,7 @@ import { prisma } from './db'
 import { apiLogger } from './logger'
 
 export type AssignmentNotificationType =
+  | 'ASSIGNED' // a direct assignment (no offer step) — the worker's first notice
   | 'OFFERED' | 'CHANGED' | 'CANCELLED' | 'REMINDER' | 'REPORT_TIME_REMINDER'
   | 'LOCATION_CHANGED' | 'DRIVER_CHANGED' | 'LEAD_CHANGED' | 'UNACKNOWLEDGED'
   | 'DECLINED' | 'NO_SHOW' | 'AWAITING_APPROVAL' | 'UNDERSTAFFED'

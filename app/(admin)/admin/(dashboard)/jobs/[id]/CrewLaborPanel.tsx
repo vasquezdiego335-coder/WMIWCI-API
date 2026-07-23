@@ -218,7 +218,7 @@ export default function CrewLaborPanel({
 
       {/* Add crew */}
       {showAdd ? (
-        <AddCrewForm bookingId={bookingId} staff={staff} assigned={assignments.map((a) => a.userId)} onCall={call} onDone={() => setShowAdd(false)} busy={busy} />
+        <AddCrewForm bookingId={bookingId} staff={staff} assigned={assignments.map((a) => a.userId)} isOwner={isOwner} onDone={() => setShowAdd(false)} busy={busy} />
       ) : (
         <Btn primary wide onClick={() => setShowAdd(true)}>+ Add crew member</Btn>
       )}
@@ -396,24 +396,65 @@ function RowEditor({
 
 // ── Add crew ────────────────────────────────────────────────────────────────
 function AddCrewForm({
-  bookingId, staff, assigned, onCall, onDone, busy,
+  bookingId, staff, assigned, isOwner, onDone, busy,
 }: {
   bookingId: string
   staff: StaffOption[]
   assigned: string[]
-  onCall: (url: string, method: string, body?: unknown, label?: string) => Promise<boolean>
+  isOwner: boolean
   onDone: () => void
   busy: string | null
 }) {
+  const router = useRouter()
   const available = staff.filter((s) => !assigned.includes(s.id))
   const [userId, setUserId] = useState(available[0]?.id ?? '')
   const [role, setRole] = useState('CREW_MEMBER')
   const [payModel, setPayModel] = useState('HOURLY')
   const [rate, setRate] = useState('')
   const [flat, setFlat] = useState('')
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  // Conflicts returned by the server on a refused save. Warnings can be
+  // overridden by an OWNER with a written reason; hard blocks cannot.
+  const [conflicts, setConflicts] = useState<{ code: string; severity: string; message: string }[]>([])
+  const [overrideReason, setOverrideReason] = useState('')
 
   const worker = staff.find((s) => s.id === userId)
   const profileRate = worker?.payRateCents != null ? (worker.payRateCents / 100).toFixed(2) : null
+  const warnings = conflicts.filter((c) => c.severity === 'OVERRIDABLE_WARNING')
+  const hardBlocks = conflicts.filter((c) => c.severity === 'HARD_BLOCK')
+
+  async function submit(withOverrides: boolean) {
+    setSaving(true); setError(null)
+    try {
+      const res = await fetch(`/api/admin/jobs/${bookingId}/crew`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...csrfHeader() },
+        body: JSON.stringify({
+          userId,
+          role,
+          payModel,
+          workerType: worker?.workerType,
+          hourlyRateCents: payModel === 'HOURLY' && rate ? Math.round(Number(rate) * 100) : undefined,
+          flatPayCents: payModel === 'FLAT' && flat ? Math.round(Number(flat) * 100) : undefined,
+          dayRateCents: payModel === 'DAY_RATE' && flat ? Math.round(Number(flat) * 100) : undefined,
+          ...(withOverrides ? { overrideCodes: warnings.map((w) => w.code), overrideReason } : {}),
+        }),
+      })
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok) {
+        setError(data.error ?? 'Something went wrong.')
+        setConflicts(Array.isArray(data.conflicts) ? data.conflicts : [])
+        return
+      }
+      router.refresh()
+      onDone()
+    } catch {
+      setError('Network error — nothing was saved.')
+    } finally {
+      setSaving(false)
+    }
+  }
 
   return (
     <div style={editor}>
@@ -459,23 +500,34 @@ function AddCrewForm({
       <p style={{ fontSize: '11px', color: '#6B7280', margin: '0 0 8px' }}>
         The rate is <strong>locked in</strong> when you assign. Changing a profile rate later will not change what this move cost.
       </p>
+      {error && (
+        <p style={{ fontSize: '12px', color: '#B91C1C', margin: '0 0 8px' }}>{error}</p>
+      )}
+      {conflicts.length > 0 && (
+        <div style={{ backgroundColor: '#FEF3C7', border: '1px solid #FCD34D', borderRadius: '8px', padding: '10px 12px', marginBottom: '8px' }}>
+          {hardBlocks.map((c) => (
+            <p key={c.code} style={{ fontSize: '12px', color: '#B91C1C', margin: '0 0 4px' }}>⛔ {c.message}</p>
+          ))}
+          {warnings.map((c) => (
+            <p key={c.code} style={{ fontSize: '12px', color: '#92400E', margin: '0 0 4px' }}>⚠ {c.message}</p>
+          ))}
+          {hardBlocks.length === 0 && warnings.length > 0 && (isOwner ? (
+            <div style={{ marginTop: '8px' }}>
+              <input
+                value={overrideReason}
+                onChange={(e) => setOverrideReason(e.target.value)}
+                placeholder="Reason for overriding (required)"
+                style={{ ...input, marginBottom: '6px' }}
+              />
+              <Btn primary busy={saving} onClick={() => submit(true)}>Override & assign anyway</Btn>
+            </div>
+          ) : (
+            <p style={{ fontSize: '11px', color: '#92400E', margin: '4px 0 0' }}>Only an owner can override these warnings.</p>
+          ))}
+        </div>
+      )}
       <div style={actionRow}>
-        <Btn
-          primary
-          busy={busy === 'add'}
-          onClick={async () => {
-            const ok = await onCall(`/api/admin/jobs/${bookingId}/crew`, 'POST', {
-              userId,
-              role,
-              payModel,
-              workerType: worker?.workerType,
-              hourlyRateCents: payModel === 'HOURLY' && rate ? Math.round(Number(rate) * 100) : undefined,
-              flatPayCents: payModel === 'FLAT' && flat ? Math.round(Number(flat) * 100) : undefined,
-              dayRateCents: payModel === 'DAY_RATE' && flat ? Math.round(Number(flat) * 100) : undefined,
-            }, 'add')
-            if (ok) onDone()
-          }}
-        >Assign</Btn>
+        <Btn primary busy={saving || busy === 'add'} onClick={() => submit(false)}>Assign</Btn>
         <Btn onClick={onDone}>Cancel</Btn>
       </div>
     </div>

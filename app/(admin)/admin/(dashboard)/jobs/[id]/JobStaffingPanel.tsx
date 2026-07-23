@@ -43,7 +43,21 @@ export default function JobStaffingPanel({ jobId, isOwner, canManage }: { jobId:
     try {
       const res = await fetch(`/api/admin/crew-assignments/${assignmentId}/schedule`, { method: 'POST', headers: { 'Content-Type': 'application/json', ...csrfHeader() }, body: JSON.stringify(body) })
       const j = await res.json().catch(() => ({}))
-      if (!res.ok) { setErr(j.error ?? 'Action failed.'); return }
+      if (!res.ok) {
+        // Warnings can be overridden by an OWNER with a written reason; the
+        // server stores the override + audits it. Hard blocks stay blocked.
+        const conflicts: { code: string; severity: string; message: string }[] = Array.isArray(j.conflicts) ? j.conflicts : []
+        const warnings = conflicts.filter((c) => c.severity === 'OVERRIDABLE_WARNING')
+        const hardBlocked = conflicts.some((c) => c.severity === 'HARD_BLOCK')
+        if (isOwner && !hardBlocked && warnings.length > 0) {
+          const reason = window.prompt(`${warnings.map((w) => w.message).join('\n')}\n\nOverride these warnings? Enter a reason:`)
+          if (reason?.trim()) {
+            await act(assignmentId, { ...body, overrideCodes: warnings.map((w) => w.code), reason }, label)
+            return
+          }
+        }
+        setErr(j.error ?? 'Action failed.'); return
+      }
       await load()
     } catch { setErr('Network error.') } finally { setBusy(null) }
   }

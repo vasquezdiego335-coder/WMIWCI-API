@@ -7,6 +7,9 @@ import { buildRateSnapshot, type PayModel, type WorkerType } from '@/lib/labor-c
 import { ensureJobForBooking, recalcAssignment, loadLaborPolicy } from '@/lib/labor-service'
 import { canAssignCrew } from '@/lib/labor-guards'
 import { resolveOwnerEconomicRateCents } from '@/lib/labor-rates'
+import { canSaveAssignment } from '@/lib/scheduling-guards'
+import { previewAssignmentConflicts } from '@/lib/scheduling-service'
+import { scheduleAssignmentNotification } from '@/lib/crew-notifications'
 import { z } from 'zod'
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -40,6 +43,10 @@ const CreateSchema = z.object({
   reportTime: z.string().datetime().nullable().optional(),
   workerVisibleNotes: z.string().trim().max(2000).nullable().optional(),
   privateAdminNotes: z.string().trim().max(2000).nullable().optional(),
+  // Overriding a scheduling warning at creation: owner-only, reason required
+  // (enforced by canSaveAssignment — the same guard the schedule route uses).
+  overrideCodes: z.array(z.string().max(80)).optional(),
+  overrideReason: z.string().trim().max(1000).optional(),
 })
 
 export async function GET(_req: NextRequest, { params }: { params: { id: string } }): Promise<NextResponse> {
@@ -131,6 +138,32 @@ export async function POST(req: NextRequest, { params }: { params: { id: string 
     return NextResponse.json({ error: 'The scheduled end is before the scheduled start.' }, { status: 422 })
   }
 
+  // ── Stage 5: the conflict engine gates CREATION too, server-side. Creation
+  //    previously ran no conflict checks at all — a direct POST could put a
+  //    suspended worker, an unavailable worker or an overlapping shift on a job
+  //    with no record. Same guard as the schedule route: a HARD_BLOCK is
+  //    refused outright; an OVERRIDABLE_WARNING needs an owner override + a
+  //    written reason, which is stored as a ConflictOverride and audited.
+  const conflicts = await previewAssignmentConflicts({
+    jobId,
+    userId: worker.id,
+    startAt: scheduledStartAt,
+    endAt: scheduledEndAt,
+    reportTime: d.reportTime ? new Date(d.reportTime) : null,
+    isDriver: d.isDriver ?? (d.role === 'DRIVER'),
+    isLead: d.role === 'CREW_LEADER',
+    breakMinutes: d.scheduledBreakMinutes ?? null,
+  })
+  const conflictGate = canSaveAssignment({
+    role: session.role as Role,
+    conflicts,
+    overriddenCodes: d.overrideCodes ?? [],
+    overrideReason: d.overrideReason,
+  })
+  if (!conflictGate.allow) {
+    return NextResponse.json({ error: conflictGate.error, conflicts }, { status: conflictGate.status })
+  }
+
   const created = await prisma.$transaction(async (tx) => {
     const data = {
       jobId,
@@ -177,6 +210,18 @@ export async function POST(req: NextRequest, { params }: { params: { id: string 
       ? await tx.jobCrew.update({ where: { id: existing.id }, data: { ...data, cancelledAt: null, cancelReason: null, declinedAt: null } })
       : await tx.jobCrew.create({ data })
 
+    // Record every override the owner supplied, tied to the finding it waived.
+    for (const code of d.overrideCodes ?? []) {
+      const found = conflicts.find((c) => c.code === code)
+      if (!found) continue // an override for a conflict that was not raised is ignored, not stored
+      await tx.conflictOverride.create({
+        data: { jobId, jobCrewId: row.id, userId: worker.id, code, details: (found.detail ?? {}) as never, reason: d.overrideReason ?? '', overriddenById: session.userId },
+      })
+      await tx.auditLog.create({
+        data: { action: 'CONFLICT_OVERRIDDEN', userId: session.userId, bookingId: booking.id, details: { jobCrewId: row.id, code, reason: d.overrideReason ?? null, by: session.name } as never },
+      })
+    }
+
     await tx.auditLog.create({
       data: {
         action: 'CREW_ASSIGNED',
@@ -204,6 +249,9 @@ export async function POST(req: NextRequest, { params }: { params: { id: string 
   })
 
   await recalcAssignment(created.id)
+  // The worker is told about a NEW assignment exactly once (idempotent ledger;
+  // a revive of the same row reuses the same dedupe key and stays silent).
+  await scheduleAssignmentNotification({ jobCrewId: created.id, type: 'ASSIGNED' }).catch(() => {})
   apiLogger.info({ jobCrewId: created.id, bookingId: booking.id, worker: worker.name }, 'Crew assigned')
   return NextResponse.json(created, { status: 201 })
 }
