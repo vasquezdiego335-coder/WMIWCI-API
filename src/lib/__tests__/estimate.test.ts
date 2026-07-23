@@ -1,139 +1,221 @@
 // Offline unit tests for the canonical booking estimate (src/lib/estimate.ts).
 // Run: npm test  (tsx --test)  — no DB, no network.
 //
-// The whole point of this file is Part 1's guarantee: the number the customer
-// sees on the booking form and the number the server stores/emails CANNOT
-// silently disagree. The `FORM_*` constants below are a byte-for-byte copy of
-// the booking form's own tables (WMIWCI-SITE/public/booking-form.html); the
-// parity matrix recomputes the form's headline independently and asserts the
-// server module produces the identical total for every combination.
+// The guarantee: the number the customer sees on the booking form and the
+// number the server stores/emails CANNOT silently disagree. Since the
+// 2026-07-21 cutover both sides read the SAME price book (pricing-config.ts) —
+// the server imports it directly, the form loads the generated mirror — so this
+// file tests the CALCULATION, and pricing-parity.test.ts tests that the mirror
+// still matches its source.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { computeEstimate, storedTotalEstimate, MOVE_SIZES, ACCESS_MODIFIERS } from '../estimate'
+import { computeEstimate, storedTotalEstimate, MOVE_SIZES, TRUCK_ADDON_DOLLARS } from '../estimate'
+import { PACKAGES, TRUCK_PICKUP_RETURN } from '../pricing-config'
 
-// ── The exact bug scenario: 1BR + stairs + heavy items ──────────────────────
-// Form showed $699 (599 + 40 + 60); server used to store $599. They must match.
-test('estimate: 1BR + stairs + heavy items = $699 (the regression)', () => {
-  const est = computeEstimate({ serviceType: '1br', stairs: true, heavyItems: true })
-  assert.equal(est.base, 599)
-  assert.equal(est.accessAddons, 100)
-  assert.equal(est.travel, 0)
-  assert.equal(est.estimatedTotal, 699)
-  assert.equal(storedTotalEstimate({ serviceType: '1br', stairs: true, heavyItems: true }), 699)
+// ── Base prices come from the config, not a local table ─────────────────────
+test('estimate: every base price is the config price', () => {
+  for (const pkg of Object.values(PACKAGES)) {
+    assert.equal(MOVE_SIZES[pkg.key].price, pkg.price.amount ?? 0, `${pkg.key} base`)
+  }
+  assert.equal(computeEstimate({ serviceType: '1br' }).base, 649)
+  assert.equal(computeEstimate({ serviceType: '2br' }).base, 779)
+  assert.equal(computeEstimate({ serviceType: 'little-studio' }).base, 379)
 })
 
-// ── Travel is IN the total but flagged due-on-move-day ──────────────────────
-test('estimate: travel fee is included in the total and in dueOnMoveDay', () => {
-  const est = computeEstimate({ serviceType: '2br', travelFeeCents: 5000 })
-  assert.equal(est.base, 699)
-  assert.equal(est.travel, 50)
-  assert.equal(est.estimatedTotal, 749) // 699 + 50 travel
-  assert.equal(est.dueOnMoveDay, 50)
+test('estimate: 3BR+ are floors and flag review, never a settled flat rate', () => {
+  for (const key of ['3br', '4br', '5br']) {
+    const est = computeEstimate({ serviceType: key })
+    assert.equal(est.baseIsStarting, true, `${key} must be a floor`)
+    assert.equal(est.requiresReview, true, `${key} must require review`)
+    assert.ok(est.reviewReasons.some((r) => /review/i.test(r)), `${key} needs a stated reason`)
+  }
+  // A 2BR is a real flat rate — no review, not a floor.
+  const twoBr = computeEstimate({ serviceType: '2br' })
+  assert.equal(twoBr.baseIsStarting, false)
+  assert.equal(twoBr.requiresReview, false)
 })
 
-// ── Truck add-on is NOT in the estimatedTotal (its own move-day line) ───────
-test('estimate: truck add-on is move-day only, never in estimatedTotal', () => {
-  const est = computeEstimate({ serviceType: '1br', truckAddonDueOnMoveDay: true })
-  assert.equal(est.estimatedTotal, 599) // truck NOT added
-  assert.equal(est.truckAddon, 50)
-  assert.equal(est.dueOnMoveDay, 50)
+// ── Stairs: PER ADDRESS, first flight included ──────────────────────────────
+test('estimate: stairs are per address — first flight free, 2nd $40, 3rd $70', () => {
+  assert.equal(computeEstimate({ serviceType: '1br', pickupStairFlights: 1 }).accessAddons, 0)
+  assert.equal(computeEstimate({ serviceType: '1br', pickupStairFlights: 2 }).accessAddons, 40)
+  assert.equal(computeEstimate({ serviceType: '1br', pickupStairFlights: 3 }).accessAddons, 70)
+
+  // Both ends charge independently: 2 flights at pickup + 3 at drop-off.
+  const both = computeEstimate({ serviceType: '1br', pickupStairFlights: 2, dropoffStairFlights: 3 })
+  assert.equal(both.accessAddons, 110)
+  assert.equal(both.estimatedTotal, 649 + 110)
 })
 
-// ── Every access add-on lands in the total, none silently discarded ─────────
-test('estimate: all access add-ons contribute to the total', () => {
+test('estimate: 4+ flights is review-gated, never silently summed', () => {
+  const est = computeEstimate({ serviceType: '1br', pickupStairFlights: 5 })
+  assert.equal(est.accessAddons, 0, 'a review line must not be added to the total')
+  assert.equal(est.requiresReview, true)
+  assert.equal(est.reviewLines.length, 1)
+  assert.equal(est.reviewLines[0].display, 'Starting at $100')
+  assert.equal(est.reviewLines[0].pendingReview, true)
+})
+
+// ── Long carry: PER LOCATION ────────────────────────────────────────────────
+test('estimate: carry distance tiers — <100ft free, 40, 75, review', () => {
+  assert.equal(computeEstimate({ serviceType: '1br', pickupCarryFeet: 99 }).accessAddons, 0)
+  assert.equal(computeEstimate({ serviceType: '1br', pickupCarryFeet: 100 }).accessAddons, 40)
+  assert.equal(computeEstimate({ serviceType: '1br', pickupCarryFeet: 250 }).accessAddons, 40)
+  assert.equal(computeEstimate({ serviceType: '1br', pickupCarryFeet: 251 }).accessAddons, 75)
+  assert.equal(computeEstimate({ serviceType: '1br', pickupCarryFeet: 400 }).accessAddons, 75)
+
+  const far = computeEstimate({ serviceType: '1br', pickupCarryFeet: 401 })
+  assert.equal(far.accessAddons, 0)
+  assert.equal(far.requiresReview, true)
+})
+
+// ── Heavy items: by WEIGHT ──────────────────────────────────────────────────
+test('estimate: heavy items are $50 / $100 by weight — never $75 / $125', () => {
+  const light = computeEstimate({ serviceType: '1br', heavyItems: [{ label: 'Safe', pounds: 200 }] })
+  assert.equal(light.accessAddons, 50)
+
+  const mid = computeEstimate({ serviceType: '1br', heavyItems: [{ label: 'Gun safe', pounds: 300 }] })
+  assert.equal(mid.accessAddons, 100)
+
+  // Boundaries.
+  assert.equal(computeEstimate({ serviceType: '1br', heavyItems: [{ pounds: 249 }] }).accessAddons, 50)
+  assert.equal(computeEstimate({ serviceType: '1br', heavyItems: [{ pounds: 250 }] }).accessAddons, 100)
+  assert.equal(computeEstimate({ serviceType: '1br', heavyItems: [{ pounds: 399 }] }).accessAddons, 100)
+})
+
+test('estimate: NORMAL large furniture gets no surcharge at all', () => {
+  // A sectional and an armoire, both under 150 lb — the oversized-furniture fee
+  // that must never exist. Total is the bare package price.
   const est = computeEstimate({
-    serviceType: 'full-studio', // 509
-    stairs: true, // 40
-    longWalk: true, // 30
-    heavyItems: true, // 60
-    elevatorAccess: 'far', // 25
-    parkingDistance: 'far', // 50
-    buildingYear: 'old', // 40
+    serviceType: '2br',
+    heavyItems: [
+      { label: 'Sectional sofa', pounds: 140 },
+      { label: 'Armoire', pounds: 120 },
+      { label: 'Large mirror', pounds: 40 },
+    ],
   })
-  assert.equal(est.accessAddons, 40 + 30 + 60 + 25 + 50 + 40)
-  assert.equal(est.estimatedTotal, 509 + 245)
-  assert.equal(est.accessLines.length, 6)
-  assert.ok(est.accessLines.every((l) => l.timing === 'included'))
+  assert.equal(est.accessAddons, 0, 'normal furniture must not be surcharged')
+  assert.equal(est.reviewLines.length, 0)
+  assert.equal(est.estimatedTotal, 779)
 })
 
-// ── Zero-cost access selections don't create phantom lines ──────────────────
-test('estimate: zero-value access selections add nothing', () => {
-  const est = computeEstimate({ serviceType: '1br', elevatorAccess: 'close', parkingDistance: 'door', buildingYear: 'newer' })
-  assert.equal(est.accessAddons, 0)
-  assert.equal(est.estimatedTotal, 599)
-  assert.equal(est.accessLines.length, 0)
+test('estimate: 400lb+ and piano/safe are review or custom quote, never priced', () => {
+  const heavy = computeEstimate({ serviceType: '1br', heavyItems: [{ label: 'Slate table', pounds: 450 }] })
+  assert.equal(heavy.accessAddons, 0)
+  assert.equal(heavy.reviewLines[0].display, 'Pending review')
+  assert.equal(heavy.requiresReview, true)
+
+  const piano = computeEstimate({ serviceType: '1br', heavyItems: [{ label: 'Upright piano', isPianoOrSafe: true }] })
+  assert.equal(piano.accessAddons, 0)
+  assert.equal(piano.reviewLines[0].display, 'Custom quote')
+  assert.equal(piano.reviewLines[0].label, 'Upright piano')
 })
 
-// ── storedTotalEstimate: null only when genuinely empty ─────────────────────
-test('estimate: storedTotalEstimate is null with no size and no fees', () => {
+// ── Additional stops ────────────────────────────────────────────────────────
+test('estimate: extra stops are $75 / $125 / custom — the $20–$40 fee is gone', () => {
+  assert.equal(computeEstimate({ serviceType: '1br', additionalStops: [{ miles: 5 }] }).accessAddons, 75)
+  assert.equal(computeEstimate({ serviceType: '1br', additionalStops: [{ miles: 20 }] }).accessAddons, 125)
+
+  const far = computeEstimate({ serviceType: '1br', additionalStops: [{ label: 'Storage unit', miles: 40 }] })
+  assert.equal(far.accessAddons, 0)
+  assert.equal(far.reviewLines[0].display, 'Custom quote')
+
+  // Two stops both bill.
+  assert.equal(computeEstimate({ serviceType: '1br', additionalStops: [{ miles: 3 }, { miles: 8 }] }).accessAddons, 150)
+})
+
+// ── Removed charges ─────────────────────────────────────────────────────────
+test('estimate: the building-age surcharge is GONE', () => {
+  // buildingYear is no longer an input at all; a difficult building is an
+  // explicit, reviewed $50 instead of a silent $40.
+  const est = computeEstimate({ serviceType: '1br', pickupDifficultBuilding: true })
+  assert.equal(est.accessAddons, 0, 'difficult access must not auto-charge')
+  assert.equal(est.reviewLines[0].display, '$50')
+  assert.equal(est.reviewLines[0].pendingReview, true)
+})
+
+test('estimate: a normal elevator is never charged', () => {
+  // No elevator input at all → nothing.
+  assert.equal(computeEstimate({ serviceType: '1br' }).accessAddons, 0)
+  // Only genuinely difficult elevator access, and only after review.
+  const hard = computeEstimate({ serviceType: '1br', pickupDifficultElevator: true })
+  assert.equal(hard.accessAddons, 0)
+  assert.equal(hard.reviewLines[0].display, '$40–$75')
+})
+
+// ── Travel ──────────────────────────────────────────────────────────────────
+test('estimate: travel ladder 50 / 100 / 150 / custom by drive time', () => {
+  assert.equal(computeEstimate({ serviceType: '2br', travelMinutes: 15 }).travel, 0)
+  assert.equal(computeEstimate({ serviceType: '2br', travelMinutes: 30 }).travel, 50)
+  assert.equal(computeEstimate({ serviceType: '2br', travelMinutes: 50 }).travel, 100)
+  assert.equal(computeEstimate({ serviceType: '2br', travelMinutes: 75 }).travel, 150)
+
+  const far = computeEstimate({ serviceType: '2br', travelMinutes: 120 })
+  assert.equal(far.travel, 0, 'over 90 minutes is a custom quote, not a number')
+  assert.equal(far.requiresReview, true)
+})
+
+test('estimate: travel is IN the total and also flagged due-on-move-day', () => {
+  const est = computeEstimate({ serviceType: '2br', travelFeeCents: 5000 })
+  assert.equal(est.base, 779)
+  assert.equal(est.travel, 50)
+  assert.equal(est.estimatedTotal, 829)
+  assert.equal(est.dueOnMoveDay, 50)
+})
+
+// ── The two $49 charges ─────────────────────────────────────────────────────
+test('estimate: truck add-on is $49, on its own line, NOT in estimatedTotal', () => {
+  assert.equal(TRUCK_ADDON_DOLLARS, 49)
+  assert.equal(TRUCK_ADDON_DOLLARS, TRUCK_PICKUP_RETURN.amount)
+
+  const est = computeEstimate({ serviceType: '1br', truckAddonDueOnMoveDay: true })
+  assert.equal(est.truckAddon, 49)
+  assert.equal(est.estimatedTotal, 649, 'the add-on must stay out of the quote total')
+  assert.equal(est.dueOnMoveDay, 49)
+})
+
+test('estimate: truck add-on is never discountable', () => {
+  assert.equal(TRUCK_PICKUP_RETURN.discountable, false)
+})
+
+// ── Legacy inputs (pre-cutover browser tab) ─────────────────────────────────
+test('estimate: legacy booleans map to the LOWEST tier and never crash', () => {
+  const est = computeEstimate({ serviceType: '1br', stairs: true, longWalk: true })
+  // stairs:true → 2nd flight ($40); longWalk:true → 100ft ($40).
+  assert.equal(est.accessAddons, 80)
+  assert.equal(est.estimatedTotal, 729)
+})
+
+test('estimate: a weightless legacy heavy-item checkbox becomes a REVIEW line', () => {
+  const est = computeEstimate({ serviceType: '1br', legacyHeavyItems: true })
+  assert.equal(est.accessAddons, 0, 'never guess a weight into a charge')
+  assert.equal(est.requiresReview, true)
+  assert.equal(est.reviewLines[0].display, 'Pending review')
+})
+
+// ── Stored total ────────────────────────────────────────────────────────────
+test('storedTotalEstimate: matches the headline whenever a size is chosen', () => {
+  const inputs = { serviceType: '1br', pickupStairFlights: 2, heavyItems: [{ pounds: 200 }] }
+  assert.equal(computeEstimate(inputs).estimatedTotal, 649 + 40 + 50)
+  assert.equal(storedTotalEstimate(inputs), 739)
+})
+
+test('storedTotalEstimate: null when there is genuinely nothing to estimate', () => {
   assert.equal(storedTotalEstimate({}), null)
-  assert.equal(storedTotalEstimate({ serviceType: 'not-sure' }), 0) // known size (Need a Quote) → 0, not null
-  assert.equal(storedTotalEstimate({ travelFeeCents: 5000 }), 50) // fee with no size still surfaces
+  assert.equal(storedTotalEstimate({ serviceType: 'not-sure' }), null)
 })
 
-// ════════════════════════════════════════════════════════════════════════
-//  FORM PARITY — the anti-divergence guarantee.
-//  A byte-for-byte copy of the form's SERVICES + MODIFIERS + headline formula.
-//  If anyone edits the server constants without the form (or vice-versa and
-//  updates this copy), the matrix assertion fails.
-// ════════════════════════════════════════════════════════════════════════
-const FORM_SERVICES: Record<string, number> = {
-  'little-studio': 359, 'half-studio': 409, 'full-studio': 509, '1br': 599,
-  '2br': 699, '3br': 949, '4br': 1249, '5br': 1549, 'not-sure': 0,
-}
-const FORM_MODIFIERS = {
-  stairs: 40, longWalk: 30, heavyItems: 60,
-  elevator: { none: 0, close: 0, far: 25 } as Record<string, number>,
-  parking: { door: 0, short: 0, medium: 25, far: 50 } as Record<string, number>,
-  building: { newer: 0, mid: 0, old: 40, unsure: 0, '': 0 } as Record<string, number>,
-}
-// The form's headline formula: base + access add-ons + travel (truck excluded).
-function formHeadline(inp: {
-  serviceType: string; stairs?: boolean; longWalk?: boolean; heavyItems?: boolean
-  elevatorAccess?: string; parkingDistance?: string; buildingYear?: string; travelFeeCents?: number
-}): number {
-  const base = FORM_SERVICES[inp.serviceType] ?? 0
-  let addons = 0
-  if (inp.stairs) addons += FORM_MODIFIERS.stairs
-  if (inp.longWalk) addons += FORM_MODIFIERS.longWalk
-  if (inp.heavyItems) addons += FORM_MODIFIERS.heavyItems
-  addons += FORM_MODIFIERS.elevator[inp.elevatorAccess ?? ''] || 0
-  addons += FORM_MODIFIERS.parking[inp.parkingDistance ?? ''] || 0
-  addons += FORM_MODIFIERS.building[inp.buildingYear ?? ''] || 0
-  return base + addons + (inp.travelFeeCents ?? 0) / 100
-}
-
-test('estimate: server constants match the form tables exactly', () => {
-  for (const [k, v] of Object.entries(FORM_SERVICES)) assert.equal(MOVE_SIZES[k]?.price, v, `size ${k}`)
-  assert.equal(ACCESS_MODIFIERS.stairs, FORM_MODIFIERS.stairs)
-  assert.equal(ACCESS_MODIFIERS.longWalk, FORM_MODIFIERS.longWalk)
-  assert.equal(ACCESS_MODIFIERS.heavyItems, FORM_MODIFIERS.heavyItems)
-  assert.equal(ACCESS_MODIFIERS.elevator.far, FORM_MODIFIERS.elevator.far)
-  assert.equal(ACCESS_MODIFIERS.parking.far, FORM_MODIFIERS.parking.far)
-  assert.equal(ACCESS_MODIFIERS.parking.medium, FORM_MODIFIERS.parking.medium)
-  assert.equal(ACCESS_MODIFIERS.building.old, FORM_MODIFIERS.building.old)
-})
-
-test('estimate: form headline == server estimatedTotal across a full matrix', () => {
-  const sizes = Object.keys(FORM_SERVICES)
-  const elevators = ['none', 'close', 'far', '']
-  const parkings = ['door', 'short', 'medium', 'far', '']
-  const buildings = ['newer', 'mid', 'old', 'unsure', '']
-  const travels = [0, 5000]
-  let checked = 0
-  for (const serviceType of sizes)
-    for (const stairs of [false, true])
-      for (const longWalk of [false, true])
-        for (const heavyItems of [false, true])
-          for (const elevatorAccess of elevators)
-            for (const parkingDistance of parkings)
-              for (const buildingYear of buildings)
-                for (const travelFeeCents of travels) {
-                  const inp = { serviceType, stairs, longWalk, heavyItems, elevatorAccess, parkingDistance, buildingYear, travelFeeCents }
-                  const server = computeEstimate(inp).estimatedTotal
-                  const form = formHeadline(inp)
-                  assert.equal(server, form, `mismatch for ${JSON.stringify(inp)}`)
-                  checked++
-                }
-  assert.ok(checked > 5000, `expected a large matrix, checked ${checked}`)
+test('estimate: a review line is never displayed as $0', () => {
+  const est = computeEstimate({
+    serviceType: '5br',
+    pickupStairFlights: 6,
+    heavyItems: [{ pounds: 800 }],
+    additionalStops: [{ miles: 100 }],
+  })
+  for (const line of est.reviewLines) {
+    assert.notEqual(line.display, '$0', `${line.label} rendered as $0`)
+    assert.ok(line.display.length > 0)
+    assert.equal(line.pendingReview, true)
+  }
+  assert.ok(est.reviewLines.length >= 3)
 })

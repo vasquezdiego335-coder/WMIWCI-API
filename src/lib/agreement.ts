@@ -12,7 +12,7 @@
 // ============================================================
 
 // Bump this whenever AGREEMENT_TEXT changes. Override via env if you prefer.
-export const AGREEMENT_VERSION = process.env.AGREEMENT_VERSION?.trim() || 'v2-2026-06'
+export const AGREEMENT_VERSION = process.env.AGREEMENT_VERSION?.trim() || 'v3-2026-07'
 
 /* ────────────────────────────────────────────────────────────
    PASTE / EDIT AGREEMENT TEXT BELOW.
@@ -45,7 +45,7 @@ We are not responsible for: pre-existing damage to furniture or property; damage
 After the job is completed: no refunds will be issued; no additional trips are included; extra work requires a new agreement and new price.
 
 6. PAYMENT TERMS
-A $49 booking fee is authorized today via Stripe — this is a hold, not a charge. We capture the $49 only when we approve your booking; if we deny it, the hold is released and you are never charged. The remaining balance for the move is due before or immediately after completion. If you add the Truck Pickup & Return option, the +$50 add-on is due on move day and is not charged today. Accepted balance payment methods: Cash, Zelle, Cash App, or Venmo.
+A $49 booking fee is authorized today via Stripe — this is a hold, not a charge. We capture the $49 only when we approve your booking; if we deny it, the hold is released and you are never charged. The remaining balance for the move is due before or immediately after completion. If you add the Truck Pickup & Return option, the +$49 add-on is due on move day and is not charged today. Truck pickup and driving require our manual approval before your booking is confirmed. Accepted balance payment methods: Cash, Zelle, Cash App, or Venmo.
 
 By checking the agreement box and submitting your booking, you acknowledge that you have read and agree to all terms above. Move It Clear It. is a labor-only service and is NOT a licensed moving carrier or DOT-regulated transportation company.`
 

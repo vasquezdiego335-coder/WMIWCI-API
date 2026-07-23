@@ -18,7 +18,6 @@ import { offerRescheduleToCustomer } from "@/lib/reschedule";
 import { t } from "@/lib/i18n";
 import { formatEastern } from "@/lib/scheduling";
 import { authorizeOwnerAction, type DiscordActor } from "@/lib/discord-auth";
-import { decideDiscount, type DiscountAction } from "@/lib/discount-decision";
 import { accessSections } from "@/lib/booking-access";
 import {
   buildJobCard,
@@ -32,6 +31,10 @@ import { apiLogger } from "@/lib/logger";
 import { outboxEnabled, emitRescheduleRequested } from "@/outbox/integration";
 
 export const runtime = "nodejs";
+
+/** Retained only so pre-cutover Discord cards still route somewhere sane —
+ *  the door-hanger discount rule itself was deleted 2026-07-21. */
+type DiscountAction = "approve" | "deny";
 
 // ── Discord interaction type / response constants ──────────────────────────
 const TYPE_PING = 1;
@@ -296,96 +299,26 @@ function discountDecidedCard(
 // on move day), never to the $49 booking hold.
 async function handleDiscountDecision(
   bookingId: string | undefined,
-  action: DiscountAction,
-  actor: DiscordActor,
+  _action: DiscountAction,
+  _actor: DiscordActor,
 ) {
-  const approverName = actor.username;
+  // DOOR-HANGER CAMPAIGN RETIRED 2026-07-21 (owner decision).
+  //
+  // It approved 30% off the move — three times the 10% public cap in
+  // DISCOUNT_POLICY — and disagreed with the admin route, which wrote 10% for
+  // the same click. No new pending discounts are created any more (the
+  // trigger in fulfillment.ts and the code path in POST /api/bookings are
+  // gone), but a CARD POSTED BEFORE THE CUTOVER is still clickable in
+  // Discord. This handler therefore stays wired and refuses, rather than
+  // being deleted and 404-ing an owner who clicks an old card.
+  //
+  // The Prisma DiscountType enum values are intentionally retained so
+  // historical bookings still read correctly.
   if (!bookingId) return ephemeral("⚠️ This button is missing its booking reference.");
-
-  const booking = await prisma.booking.findUnique({
-    where: { id: bookingId },
-    include: { customer: true },
-  });
-  if (!booking) return ephemeral("⚠️ Booking not found for this discount request.");
-
-  const decision = decideDiscount(booking.discountType, action);
-
-  // Idempotent: a second click on an already-decided request re-shows the
-  // decided card (approved) or explains it's already handled.
-  if (!decision.ok) {
-    if (decision.reason === "already_approved") {
-      return NextResponse.json({
-        type: RES_UPDATE_MESSAGE,
-        data: discountDecidedCard(booking, approverName, true, booking.discountPercent ?? 30),
-      });
-    }
-    if (decision.reason === "already_denied") {
-      return NextResponse.json({
-        type: RES_UPDATE_MESSAGE,
-        data: discountDecidedCard(booking, approverName, false, booking.discountPercent ?? 10),
-      });
-    }
-    return ephemeral(
-      `⚠️ No pending door-hanger discount to ${action} (currently ${booking.discountType ?? "none"}).`,
-    );
-  }
-
-  // CONCURRENCY GUARD — atomically CLAIM the PENDING → APPROVED/DENIED transition.
-  // Postgres serializes this conditional UPDATE, so of two simultaneous owner
-  // clicks exactly one gets count === 1; the loser gets count === 0 and is told
-  // it was already handled. No double approval, no double denial.
-  const claim = await prisma.booking.updateMany({
-    where: { id: booking.id, discountType: "DOOR_HANGER_PENDING" },
-    data: { discountType: decision.nextType!, discountPercent: decision.nextPercent! },
-  });
-  if (claim.count === 0) {
-    const fresh = await prisma.booking.findUnique({ where: { id: booking.id }, include: { customer: true } });
-    const approvedNow = fresh?.discountType === "DOOR_HANGER_APPROVED";
-    if (fresh && (approvedNow || fresh.discountType === "DOOR_HANGER_DENIED")) {
-      return NextResponse.json({
-        type: RES_UPDATE_MESSAGE,
-        data: discountDecidedCard(fresh, approverName, approvedNow, fresh.discountPercent ?? (approvedNow ? 30 : 10)),
-      });
-    }
-    return ephemeral("⏳ This discount was just handled by another owner — no action taken.");
-  }
-
-  await prisma.auditLog
-    .create({
-      data: {
-        action: action === "approve" ? "DISCOUNT_APPROVED" : "DISCOUNT_DENIED",
-        bookingId: booking.id,
-        details: {
-          event: action === "approve" ? "approve_discount" : "deny_discount",
-          discordUserId: actor.userId ?? null,
-          decidedBy: approverName,
-          previousStatus: "DOOR_HANGER_PENDING",
-          newStatus: decision.nextType,
-          discountPercent: decision.nextPercent,
-          discountCode: booking.discountCode ?? null,
-          result: "success",
-        },
-      },
-    })
-    .catch((err) =>
-      apiLogger.warn(
-        { bookingId: booking.id, err: err instanceof Error ? err.message : String(err) },
-        "discount audit log write failed (non-fatal)",
-      ),
-    );
-
-  // MESSAGING POLICY: no customer email/SMS here (the system sends only the
-  // pre-approval + final-confirmation pairs). The discount adjusts the move
-  // total the customer sees in their portal.
-  apiLogger.info(
-    { bookingId: booking.id, action, by: approverName, percent: decision.nextPercent },
-    `Door-hanger discount ${action === "approve" ? "approved" : "denied"} via Discord`,
+  return ephemeral(
+    "🎟️ The door-hanger discount campaign has been retired, so this button no longer applies a discount.\n" +
+      "Public discounts are capped at 10%. To give this customer a discount, set it on the booking in the admin dashboard.",
   );
-
-  return NextResponse.json({
-    type: RES_UPDATE_MESSAGE,
-    data: discountDecidedCard(booking, approverName, action === "approve", decision.nextPercent!),
-  });
 }
 
 // ════════════════════════════════════════════════════════════════════════

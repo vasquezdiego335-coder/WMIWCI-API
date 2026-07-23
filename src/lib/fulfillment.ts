@@ -294,23 +294,10 @@ export async function fulfillPaidCheckout(params: {
     )
   )
 
-  // 6) Door-hanger discount approval card (only if one is pending)
-  if (booking.discountType === 'DOOR_HANGER_PENDING') {
-    tasks.push(
-      enqueue('discord:discount-request', () =>
-        discordQueue.add('discount-request', {
-          type: 'discount-request',
-          bookingId,
-          payload: {
-            bookingId,
-            displayId: booking.displayId,
-            customerName: booking.customer.name,
-            discountCode: booking.discountCode,
-          },
-        })
-      )
-    )
-  }
+  // 6) Door-hanger discount approval card — REMOVED 2026-07-21 (owner
+  //    decision). The campaign approved 30%, over the 10% public cap, so no
+  //    new approval card is ever created. Historical DiscountType enum values
+  //    are retained in the schema so existing bookings still read correctly.
 
   await Promise.all(tasks)
 
