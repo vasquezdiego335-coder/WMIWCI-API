@@ -21,6 +21,18 @@ const StatusSchema = z.object({
   status: z.string(),
 })
 
+// Deadline guard for queue enqueues (same idiom as notify.ts/journeys.ts):
+// BullMQ's .add() awaits connection readiness, which never settles during a
+// Redis outage — an un-raced await here HUNG this route indefinitely
+// (observed in the release staging rehearsal). The .catch at each call site
+// already handles the failure; this makes the failure actually happen.
+function withDeadline<T>(p: Promise<T>, ms = 5000): Promise<T> {
+  return Promise.race([
+    p,
+    new Promise<T>((_, reject) => setTimeout(() => reject(new Error(`queue enqueue timed out after ${ms}ms (Redis?)`)), ms)),
+  ])
+}
+
 export async function POST(req: NextRequest, { params }: { params: { id: string } }): Promise<NextResponse> {
   const session = await getSession()
   if (!session || !['OWNER', 'MANAGER'].includes(session.role)) {
@@ -157,13 +169,13 @@ export async function POST(req: NextRequest, { params }: { params: { id: string 
           rebookUrl: `${appBase}/book`,
           locale: booking.customer.locale,
         }
-    await emailQueue
-      .add(label, { template: label, to: booking.customer.email, bookingId: params.id, payload })
-      .catch((err) => apiLogger.error({ err: err instanceof Error ? err.message : String(err), bookingId: params.id }, `${label} email enqueue failed (non-fatal)`))
+    await withDeadline(
+      emailQueue.add(label, { template: label, to: booking.customer.email, bookingId: params.id, payload })
+    ).catch((err) => apiLogger.error({ err: err instanceof Error ? err.message : String(err), bookingId: params.id }, `${label} email enqueue failed (non-fatal)`))
   }
   if (booking.customer.email && newStatus === 'COMPLETED') {
-    await emailQueue
-      .add('job-completion', {
+    await withDeadline(
+      emailQueue.add('job-completion', {
         template: 'job-completion',
         to: booking.customer.email,
         bookingId: params.id,
@@ -176,7 +188,7 @@ export async function POST(req: NextRequest, { params }: { params: { id: string 
           locale: booking.customer.locale,
         },
       })
-      .catch((err) => apiLogger.error({ err: err instanceof Error ? err.message : String(err), bookingId: params.id }, 'job-completion email enqueue failed (non-fatal)'))
+    ).catch((err) => apiLogger.error({ err: err instanceof Error ? err.message : String(err), bookingId: params.id }, 'job-completion email enqueue failed (non-fatal)'))
   }
 
   // Phase 3: kick off the post-move follow-up sequence (review/repeat/referral).
