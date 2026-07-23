@@ -8,9 +8,18 @@ changes a Railway variable, or needs a connection string pasted anywhere.
 
 ---
 
-## 0. READ THIS FIRST — two scenarios cannot be run yet
+## 0. READ THIS FIRST — superseded 2026-07-22
 
-**Campaign dispatch and automation execution have no worker.**
+**The gap this section describes is CLOSED.** Branch
+`claude/email-marketing-dispatch-complete` adds the campaign dispatch
+executor, the automation enrollment/stage runtime, and their worker cases.
+See `docs/email/dispatch-runtime.md` (architecture) and
+`docs/email/dispatch-staging-rehearsal.md` (the rehearsal for the new layer —
+run it IN ADDITION to this runbook). The table below is kept for the history
+of what was true when this document was written.
+
+**Original text (2026-07-21):** campaign dispatch and automation execution
+have no worker.
 
 Verified by grep against the branch: nothing in `src/` or `app/` calls
 `resolveAudienceForDispatch()`, `canDispatch()`, or `automationJobId()`, and
