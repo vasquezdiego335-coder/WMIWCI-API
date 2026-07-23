@@ -113,11 +113,23 @@ async function enqueue(
   )
 }
 
-/** Best-effort removal of a pending stage. Absent/active jobs are not errors. */
+/** Best-effort removal of a pending stage. Absent/active jobs are not errors.
+ *  Time-boxed like `enqueue` above: with `maxRetriesPerRequest: null` (the
+ *  BullMQ requirement) ioredis retries a command FOREVER, so an un-raced
+ *  `getJob` during a Redis outage would hang the booking cancel / confirm /
+ *  reschedule REQUEST instead of failing soft. The send-time recheck is the
+ *  real stop — losing one best-effort removal is never worse than that. */
 async function cancel(jobId: string): Promise<void> {
   try {
-    const job = await scheduledQueue.getJob(jobId)
-    if (job) await job.remove()
+    const job = await Promise.race([
+      scheduledQueue.getJob(jobId),
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error('scheduledQueue.getJob timed out (Redis?)')), 5000)),
+    ])
+    if (job)
+      await Promise.race([
+        job.remove(),
+        new Promise<never>((_, reject) => setTimeout(() => reject(new Error('job.remove timed out (Redis?)')), 5000)),
+      ])
   } catch (err) {
     // A job that already started cannot be removed — the send-time recheck is
     // what actually stops it. This is exactly why cancellation is not the only

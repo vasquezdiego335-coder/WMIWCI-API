@@ -24,9 +24,25 @@ let _webhookRetryQueue: Queue | undefined
 let _scheduledQueue: Queue | undefined
 let _marketingQueue: Queue | undefined
 
+// ── Error guard ─────────────────────────────────────────────────────
+//  BullMQ forwards ioredis connection failures as EventEmitter 'error'
+//  events on the Queue. Node KILLS the process on an unlistened 'error'
+//  event — so without this listener, the first such event during a Redis
+//  outage takes down the whole web app (observed in the release staging
+//  rehearsal: one raw ECONNREFUSED print, then exit 1). The queue op
+//  itself still fails or retries per ioredis policy; this listener only
+//  stops the event from being process-fatal.
+function guardQueue(q: Queue): Queue {
+  q.on('error', (err) => {
+    // eslint-disable-next-line no-console
+    console.warn(`[queue:${q.name}] Redis error (non-fatal): ${err instanceof Error ? err.message : String(err)}`)
+  })
+  return q
+}
+
 // ── Named queue getters ─────────────────────────────────────────────
 export function getEmailQueue(): Queue {
-  if (!_emailQueue) _emailQueue = new Queue('email', {
+  if (!_emailQueue) _emailQueue = guardQueue(new Queue('email', {
     connection: getLazyBullConnection(),
     defaultJobOptions: {
       attempts: 3,
@@ -34,12 +50,12 @@ export function getEmailQueue(): Queue {
       removeOnComplete: { count: 500 },
       removeOnFail: { count: 200 },
     },
-  })
+  }))
   return _emailQueue
 }
 
 export function getSmsQueue(): Queue {
-  if (!_smsQueue) _smsQueue = new Queue('sms', {
+  if (!_smsQueue) _smsQueue = guardQueue(new Queue('sms', {
     connection: getLazyBullConnection(),
     defaultJobOptions: {
       attempts: 3,
@@ -47,12 +63,12 @@ export function getSmsQueue(): Queue {
       removeOnComplete: { count: 200 },
       removeOnFail: { count: 100 },
     },
-  })
+  }))
   return _smsQueue
 }
 
 export function getDiscordQueue(): Queue {
-  if (!_discordQueue) _discordQueue = new Queue('discord', {
+  if (!_discordQueue) _discordQueue = guardQueue(new Queue('discord', {
     connection: getLazyBullConnection(),
     defaultJobOptions: {
       attempts: 5,
@@ -60,12 +76,12 @@ export function getDiscordQueue(): Queue {
       removeOnComplete: { count: 500 },
       removeOnFail: { count: 200 },
     },
-  })
+  }))
   return _discordQueue
 }
 
 export function getWebhookRetryQueue(): Queue {
-  if (!_webhookRetryQueue) _webhookRetryQueue = new Queue('webhook-retry', {
+  if (!_webhookRetryQueue) _webhookRetryQueue = guardQueue(new Queue('webhook-retry', {
     connection: getLazyBullConnection(),
     defaultJobOptions: {
       attempts: 5,
@@ -73,12 +89,12 @@ export function getWebhookRetryQueue(): Queue {
       removeOnComplete: { count: 100 },
       removeOnFail: { count: 100 },
     },
-  })
+  }))
   return _webhookRetryQueue
 }
 
 export function getScheduledQueue(): Queue {
-  if (!_scheduledQueue) _scheduledQueue = new Queue('scheduled', {
+  if (!_scheduledQueue) _scheduledQueue = guardQueue(new Queue('scheduled', {
     connection: getLazyBullConnection(),
     defaultJobOptions: {
       attempts: 3,
@@ -86,12 +102,12 @@ export function getScheduledQueue(): Queue {
       removeOnComplete: { count: 200 },
       removeOnFail: { count: 100 },
     },
-  })
+  }))
   return _scheduledQueue
 }
 
 export function getMarketingQueue(): Queue {
-  if (!_marketingQueue) _marketingQueue = new Queue('marketing', {
+  if (!_marketingQueue) _marketingQueue = guardQueue(new Queue('marketing', {
     connection: getLazyBullConnection(),
     defaultJobOptions: {
       attempts: 5,
@@ -99,7 +115,7 @@ export function getMarketingQueue(): Queue {
       removeOnComplete: { count: 200 },
       removeOnFail: { count: 100 },
     },
-  })
+  }))
   return _marketingQueue
 }
 
