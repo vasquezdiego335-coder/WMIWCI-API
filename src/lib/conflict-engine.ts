@@ -188,9 +188,15 @@ export function detectAssignmentConflicts(ctx: AssignmentConflictContext): Confl
     }
     // Travel buffer — ESTIMATED. Previous job ends, this one starts (report time
     // preferred). No routing: a configured buffer, halved when the addresses match.
+    // Only a shift that actually PRECEDES this one can be a "previous job" — a
+    // Thursday booking is not a late predecessor of a Monday assignment.
+    // (2026-07 staging rehearsal regression: any later-week shift used to spam
+    // PREVIOUS_JOB_ENDS_LATE because only end-vs-report-time was compared.)
     const prevEnd = oe
     const nextStart = ms(a.reportTime) ?? start
-    if (prevEnd != null && nextStart != null && prevEnd <= nextStart) {
+    const thisStart = start ?? nextStart
+    const precedes = os != null && thisStart != null && os < thisStart
+    if (precedes && prevEnd != null && nextStart != null && prevEnd <= nextStart) {
       const gap = minutesBetween(prevEnd, nextStart)
       const sameAddr = normAddr(other.originAddress) && normAddr(other.originAddress) === normAddr(a.originAddress)
       const needed = sameAddr ? p.sameAddressBufferMinutes : p.travelBufferMinutes
@@ -199,7 +205,7 @@ export function detectAssignmentConflicts(ctx: AssignmentConflictContext): Confl
       }
     }
     // Previous job ending after this report time is a stronger phrasing of the same risk.
-    if (prevEnd != null && nextStart != null && prevEnd > nextStart) {
+    if (precedes && prevEnd != null && nextStart != null && prevEnd > nextStart) {
       out.push(C('PREVIOUS_JOB_ENDS_LATE', 'OVERRIDABLE_WARNING', 'A previous job for this worker ends after this report time.', { otherJobId: other.jobId }))
     }
   }

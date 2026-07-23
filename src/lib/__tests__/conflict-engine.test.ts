@@ -221,3 +221,50 @@ test('every documented code is exported', () => {
   assert.ok(ALL_CONFLICT_CODES.length >= 26)
   assert.ok(new Set(ALL_CONFLICT_CODES).size === ALL_CONFLICT_CODES.length)
 })
+
+// ── regression: a FUTURE shift is not a "previous job" ──────────────────────
+// Found in the 2026-07 staging rehearsal: a worker with a Thursday assignment
+// got PREVIOUS_JOB_ENDS_LATE on a Monday assignment, because the check only
+// compared end-vs-report-time and never asked whether the other shift actually
+// PRECEDES this one. Any later-week booking spammed the warning.
+
+test('a later-week shift raises no previous-job or travel warning', () => {
+  const conflicts = detectAssignmentConflicts({
+    worker: { active: true, workerStatus: 'ACTIVE', isDriverEligible: true, isLeadEligible: true, skills: [], rateResolvable: true },
+    assignment: {
+      jobId: 'j-mon',
+      startAt: '2026-07-27T13:00:00.000Z', // Monday
+      endAt: '2026-07-27T17:00:00.000Z',
+      reportTime: '2026-07-27T12:45:00.000Z',
+      isDriver: false, isLead: false,
+    },
+    jobStatus: 'SCHEDULED',
+    otherShifts: [
+      { jobId: 'j-thu', startAt: '2026-07-30T12:00:00.000Z', endAt: '2026-07-30T15:00:00.000Z' }, // Thursday
+    ],
+    availability: null,
+    alreadyAssigned: false,
+  })
+  assert.equal(conflicts.some((c) => c.code === 'PREVIOUS_JOB_ENDS_LATE'), false)
+  assert.equal(conflicts.some((c) => c.code === 'INSUFFICIENT_TRAVEL_BUFFER'), false)
+})
+
+test('a genuinely late-running predecessor still raises PREVIOUS_JOB_ENDS_LATE', () => {
+  const conflicts = detectAssignmentConflicts({
+    worker: { active: true, workerStatus: 'ACTIVE', isDriverEligible: true, isLeadEligible: true, skills: [], rateResolvable: true },
+    assignment: {
+      jobId: 'j-late',
+      startAt: '2026-07-27T16:00:00.000Z',
+      endAt: '2026-07-27T20:00:00.000Z',
+      reportTime: '2026-07-27T15:30:00.000Z',
+      isDriver: false, isLead: false,
+    },
+    jobStatus: 'SCHEDULED',
+    otherShifts: [
+      { jobId: 'j-early', startAt: '2026-07-27T11:00:00.000Z', endAt: '2026-07-27T15:45:00.000Z' }, // same day, ends after report
+    ],
+    availability: null,
+    alreadyAssigned: false,
+  })
+  assert.equal(conflicts.some((c) => c.code === 'PREVIOUS_JOB_ENDS_LATE'), true)
+})
