@@ -1,8 +1,10 @@
 import { prisma } from '@/lib/db'
 import { getSession } from '@/lib/auth'
+import Link from 'next/link'
 import { describeLaborSetup, OWNER_RATE_EXPLANATION, LABOR_SETUP_TITLE, type RateProfile } from '@/lib/labor-rates'
 import StaffActions from './StaffActions'
 import StaffRates from './StaffRates'
+import InviteCrew from './InviteCrew'
 
 export const revalidate = 0
 
@@ -69,16 +71,21 @@ export default async function AdminStaff() {
           <h1 style={h1}>Staff</h1>
           <p style={subtitle}>{staff.length} team members</p>
         </div>
-        {/* The secure invite flow (expiring one-time token, owner-only, single
-            use, audit-logged) is not built yet. Until then this shows a disabled
-            chip instead of a link to a 404. Team members are currently added via
-            the `npm run hash-password` + seed script. */}
-        {isOwner && (
-          <span style={{ ...inviteBtn, opacity: 0.5, cursor: 'not-allowed' }} title="Invite flow coming soon — add team members via the setup script for now" aria-disabled="true">
-            + Invite team member (soon)
-          </span>
-        )}
+        {/* Stage 5: the real invitation flow (owner-only, expiring token,
+            duplicate-protected, audited). Account creation from an accepted
+            invite still depends on the auth onboarding step — documented in the
+            invite panel, not faked. */}
+        {isOwner && <InviteCrew />}
       </div>
+
+      {/* Owners-can-staff message when there is no crew yet — zero crew is not a
+          failure state when the owners do the jobs. */}
+      {isOwner && setup.activeCrewLine.value === '0' && (
+        <div style={{ backgroundColor: '#EFF6FF', border: '1px solid #BFDBFE', borderRadius: '12px', padding: '14px 16px', marginBottom: '20px', fontSize: '13px', color: '#1E3A8A', lineHeight: 1.6 }}>
+          <strong>No crew accounts yet — that is fine.</strong> Diego and Sebastian can staff jobs as owners
+          (assign them to a job with worker type OWNER). Add crew here when the business hires workers.
+        </div>
+      )}
 
       {/* ── Financial labor setup (Stage 4, D6) ──
           Owner-only. "Not configured" is a real answer here: the system refuses
@@ -120,7 +127,7 @@ export default async function AdminStaff() {
                 </div>
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '2px' }}>
-                    <span style={{ fontWeight: '600', color: '#0A1628', fontSize: '15px' }}>{u.name}</span>
+                    <Link href={`/admin/staff/${u.id}`} style={{ fontWeight: '600', color: '#0A1628', fontSize: '15px', textDecoration: 'none' }}>{u.name}</Link>
                     <span style={{ ...roleBadge, backgroundColor: rc.bg, color: rc.text }}>{u.role}</span>
                     {!u.active && <span style={{ ...roleBadge, backgroundColor: '#FEE2E2', color: '#991B1B' }}>INACTIVE</span>}
                   </div>

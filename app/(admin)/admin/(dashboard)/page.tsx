@@ -94,14 +94,24 @@ async function getDashboardData() {
     hasBusinessConfig: !!businessConfig,
   })
 
-  return { setup, todayBookings, pendingApproval, pendingDiscounts, revenue, thisMonthExpenses, totalBookings, outstandingBalances, unpaidCrew, movesMissingLabor, liveJobCount: liveJobs.length, attentionReminders }
+  // Stage 5: staffing attention for the next 14 days.
+  const { loadSchedulingBoard } = await import('@/lib/scheduling-service')
+  const board = await loadSchedulingBoard({ start: new Date(), end: new Date(Date.now() + 14 * 24 * 60 * 60 * 1000) }).catch(() => ({ jobs: [] as never[] }))
+  const staffing = {
+    unstaffed: board.jobs.filter((j) => j.liveCount === 0).length,
+    understaffed: board.jobs.filter((j) => j.liveCount > 0 && j.liveCount < j.requiredWorkers).length,
+    missingDriver: board.jobs.filter((j) => j.requiredDrivers > 0 && j.driverCount < j.requiredDrivers).length,
+    unacknowledged: board.jobs.reduce((s, j) => s + j.unacknowledged, 0),
+  }
+
+  return { setup, todayBookings, pendingApproval, pendingDiscounts, revenue, thisMonthExpenses, totalBookings, outstandingBalances, unpaidCrew, movesMissingLabor, liveJobCount: liveJobs.length, attentionReminders, staffing }
 }
 
 const SEVERITY_ICON: Record<string, string> = { CRITICAL: '🚨', HIGH: '⚠️', MEDIUM: '🟠', LOW: '🔹', INFO: 'ℹ️' }
 
 export default async function AdminDashboard() {
   const session = await getSession()
-  const { setup, todayBookings, pendingApproval, pendingDiscounts, revenue, thisMonthExpenses, totalBookings, outstandingBalances, unpaidCrew, movesMissingLabor, liveJobCount, attentionReminders } = await getDashboardData()
+  const { setup, todayBookings, pendingApproval, pendingDiscounts, revenue, thisMonthExpenses, totalBookings, outstandingBalances, unpaidCrew, movesMissingLabor, liveJobCount, attentionReminders, staffing } = await getDashboardData()
 
   const revenueCents = revenue.netCollectedCents
   const expenseCents = thisMonthExpenses._sum?.amount ?? 0
@@ -138,6 +148,19 @@ export default async function AdminDashboard() {
           <strong> overstated</strong> until it is entered. Revenue and expense totals are
           unaffected. Assign the crew and enter their hours in <strong>Crew &amp; Labor</strong> on
           each move. <Link href="/admin/jobs" style={{ color: '#FF5A1F', fontWeight: 700 }}>Review those moves →</Link>
+        </Callout>
+      )}
+
+      {/* Stage 5: staffing attention. Each number links to the scheduling board
+          where it can actually be resolved — no decorative counts. */}
+      {(staffing.unstaffed + staffing.understaffed + staffing.missingDriver + staffing.unacknowledged) > 0 && (
+        <Callout tone="warning" title="Jobs need staffing attention in the next two weeks.">
+          {[
+            staffing.unstaffed > 0 ? `${staffing.unstaffed} unstaffed` : null,
+            staffing.understaffed > 0 ? `${staffing.understaffed} understaffed` : null,
+            staffing.missingDriver > 0 ? `${staffing.missingDriver} missing a driver` : null,
+            staffing.unacknowledged > 0 ? `${staffing.unacknowledged} unacknowledged assignment${staffing.unacknowledged === 1 ? '' : 's'}` : null,
+          ].filter(Boolean).join(' · ')}. <Link href="/admin/scheduling" style={{ color: '#FF5A1F', fontWeight: 700 }}>Open the scheduling board →</Link>
         </Callout>
       )}
 

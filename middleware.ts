@@ -7,6 +7,11 @@ const PROTECTED_ROUTES: { pattern: RegExp; roles: UserRole[] }[] = [
   { pattern: /^\/admin(\/|$)/, roles: [UserRole.OWNER, UserRole.MANAGER] },
   { pattern: /^\/api\/admin/, roles: [UserRole.OWNER, UserRole.MANAGER] },
   { pattern: /^\/api\/files\/upload/, roles: [UserRole.OWNER, UserRole.MANAGER, UserRole.CREW] },
+  // ── Stage 5: the crew operational surface. CREW may reach it (and only it);
+  //    owners and managers may use the same worker view while keeping their own
+  //    permissions. Route handlers still enforce own-assignment ownership.
+  { pattern: /^\/crew(\/|$)/, roles: [UserRole.OWNER, UserRole.MANAGER, UserRole.CREW] },
+  { pattern: /^\/api\/crew/, roles: [UserRole.OWNER, UserRole.MANAGER, UserRole.CREW] },
 ]
 
 // ── Rate limiting ─────────────────────────────────────────────
@@ -88,6 +93,8 @@ export const config = {
     '/admin/staff',
     '/admin/schedule/:path*',
     '/admin/schedule',
+    '/admin/scheduling/:path*',
+    '/admin/scheduling',
     '/admin/queues/:path*',
     '/admin/queues',
     // Stage 3B: reporting pages must be auth-gated by the middleware too, not
@@ -110,5 +117,9 @@ export const config = {
     '/admin/logs',
     '/admin',  // protect the root /admin page
     '/api/admin/:path*',
+    // Stage 5 crew operational surface.
+    '/crew/:path*',
+    '/crew',
+    '/api/crew/:path*',
   ],
 }

@@ -21,6 +21,10 @@ const CREW_ALLOWED: Action[] = [
   'labor.clock_self',
   'labor.submit_hours',
   'labor.view_own_labor',
+  // ── Stage 5: a crew member acts only on their OWN assignments. Ownership of
+  //    the row is checked at the route; the matrix only grants the capability.
+  'assignment.view_own',
+  'assignment.acknowledge_own',
 ]
 
 // Stage 3: MANAGER additionally does NOT get company profit reporting. They run
@@ -122,6 +126,17 @@ export type Action =
   | 'email.manage_campaign' // create/activate/pause an EMAIL campaign
   | 'email.send_test' // send a test to the approved test recipient
   | 'email.configure' // sender identity, caps, quiet hours, flags
+  // ── Stage 5 crew management + scheduling (owner spec 2026-07-21) ──
+  | 'staff.view' // see the staff list and profiles (no rate values for a manager)
+  | 'staff.manage' // edit profile, skills, driver eligibility, license — owner only
+  | 'staff.invite' // invite a new crew member — owner only
+  | 'staff.deactivate' // deactivate / reactivate a worker — owner only
+  | 'staff.manage_availability' // edit a worker's availability rules + exceptions
+  | 'schedule.view' // see the scheduling board and calendar staffing
+  | 'schedule.manage' // create / edit / cancel assignments, set staffing requirements
+  | 'schedule.override_conflicts' // waive an overridable scheduling warning — owner only
+  | 'assignment.view_own' // a worker sees their OWN assignments
+  | 'assignment.acknowledge_own' // a worker acknowledges / declines their OWN assignment
   // Bookings
   | 'booking.approve' // approve a PENDING_APPROVAL booking (captures the $49 hold)
   | 'booking.decline' // decline/deny before capture (releases the hold)
@@ -215,6 +230,17 @@ const OWNER_ONLY: Action[] = [
   'email.manage_campaign',
   // Sender identity, frequency caps and quiet hours govern every customer send.
   'email.configure',
+  // ── Stage 5 (owner spec 2026-07-21) ──
+  // Editing a person's profile, skills, driver eligibility or license is staff
+  // administration; inviting and deactivating change who can work at all.
+  // Those are owner authority. Running the SCHEDULE (assigning workers, setting
+  // requirements, editing availability) is operations and stays OWNER+MANAGER.
+  'staff.manage',
+  'staff.invite',
+  'staff.deactivate',
+  // Waiving a scheduling warning is a documented judgement call — owner only,
+  // like overriding a closeout blocker.
+  'schedule.override_conflicts',
 ]
 
 // Everything not owner-only is available to OWNER + MANAGER. CREW is limited to

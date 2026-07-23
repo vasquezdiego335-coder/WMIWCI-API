@@ -164,6 +164,31 @@ enum AuditAction {
   CLOSEOUT_REHEARSAL
   /// A pay or owner-labor rate was configured on a staff profile (Stage 4 D6).
   LABOR_RATE_CONFIGURED
+  // ── Stage 5 crew management (owner spec 2026-07-21) ──
+  STAFF_INVITED
+  INVITATION_RESENT
+  INVITATION_CANCELLED
+  INVITATION_ACCEPTED
+  STAFF_DEACTIVATED
+  STAFF_REACTIVATED
+  STAFF_PROFILE_UPDATED
+  STAFF_SKILLS_CHANGED
+  STAFF_DRIVER_STATUS_CHANGED
+  AVAILABILITY_RULE_CREATED
+  AVAILABILITY_RULE_UPDATED
+  AVAILABILITY_RULE_DELETED
+  AVAILABILITY_EXCEPTION_CREATED
+  AVAILABILITY_EXCEPTION_DELETED
+  STAFFING_REQUIREMENT_CHANGED
+  ASSIGNMENT_OFFERED
+  ASSIGNMENT_ACKNOWLEDGED
+  ASSIGNMENT_DECLINED
+  ASSIGNMENT_REPLACED
+  ASSIGNMENT_DRIVER_CHANGED
+  ASSIGNMENT_LEAD_CHANGED
+  ASSIGNMENT_COMPLETED
+  ASSIGNMENT_NO_SHOW
+  CONFLICT_OVERRIDDEN
   CLOSEOUT_TRUCK_SOURCE_CONFIRMED
   CLOSEOUT_BALANCE_WRITTEN_OFF
   CLOSEOUT_DISPUTE_ACKNOWLEDGED
@@ -471,6 +496,51 @@ enum CrewAssignmentStatus {
   NO_SHOW
 }
 
+// ── Stage 5 crew management (owner spec 2026-07-21) ──────────────────────────
+
+/// OPERATIONAL availability of a worker. Deliberately separate from `role`
+/// (auth), `workerType` (pay) and the legacy `active` boolean. A person who is
+/// ON_LEAVE is still an employee; a SUSPENDED person keeps every historical row.
+enum WorkerStatus {
+  ACTIVE
+  INACTIVE
+  ON_LEAVE
+  UNAVAILABLE
+  SUSPENDED
+}
+
+/// The closed skill vocabulary. Stored as a native array on User and on a
+/// job's staffing requirement.
+enum CrewSkill {
+  PACKING
+  FURNITURE_PROTECTION
+  ASSEMBLY
+  HEAVY_ITEMS
+  STAIR_CARRY
+  DRIVING
+  LEAD
+  LOADING
+  UNLOADING
+}
+
+/// A date-specific availability exception. Precedence order is encoded in
+/// availability-engine.ts, not here.
+enum AvailabilityExceptionKind {
+  ADMIN_BLOCK // administrative hard-unavailable — highest precedence
+  UNAVAILABLE_FULL // worker unavailable all day
+  UNAVAILABLE_PARTIAL // unavailable for a window
+  AVAILABLE_OVERRIDE // explicitly available despite recurring rules
+  VACATION
+  LEAVE
+}
+
+enum InvitationStatus {
+  PENDING
+  ACCEPTED
+  EXPIRED
+  CANCELLED
+}
+
 /// How the recorded time got there — an audit signal, not a workflow state.
 enum TimeEntrySource {
   CLOCK // crew tapped clock in / out
@@ -632,13 +702,32 @@ model User {
   canDrive               Boolean        @default(false) @map("can_drive")
   canLeadCrew            Boolean        @default(false) @map("can_lead_crew")
 
+  // ── Stage 5 crew management (owner spec 2026-07-21) ──
+  //    workerStatus is the OPERATIONAL availability of a person, kept separate
+  //    from `role` (auth), `workerType` (how they're paid) and `active` (the
+  //    legacy on/off). A deactivated worker keeps every historical row.
+  workerStatus            WorkerStatus @default(ACTIVE) @map("worker_status")
+  /// Operational capabilities. A native enum array — additive and defaulted.
+  skills                  CrewSkill[]  @default([]) @map("skills")
+  /// Driver's-license expiry; a past date makes the person an ineligible driver.
+  licenseExpiresAt        DateTime?    @map("license_expires_at")
+  /// May drive a customer-rented truck (some rental agreements restrict this).
+  canDriveCustomerVehicle Boolean      @default(false) @map("can_drive_customer_vehicle")
+  startDate               DateTime?    @map("start_date")
+  deactivatedAt           DateTime?    @map("deactivated_at")
+  deactivationReason      String?      @map("deactivation_reason")
+  createdById             String?      @map("created_by_id")
+  updatedById             String?      @map("updated_by_id")
+
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
 
   // Relations
-  availability Availability[]
-  assignedJobs JobCrew[]
-  auditLogs    AuditLog[]
+  availability        Availability[]
+  assignedJobs        JobCrew[]
+  auditLogs           AuditLog[]
+  availabilityRules   AvailabilityRule[]
+  availabilityExceptions AvailabilityException[]
 
   @@map("users")
 }
@@ -1028,9 +1117,10 @@ model Job {
   updatedAt    DateTime  @updatedAt @map("updated_at")
 
   // Relations
-  booking Booking   @relation(fields: [bookingId], references: [id])
-  crew    JobCrew[]
-  files   File[]
+  booking     Booking                 @relation(fields: [bookingId], references: [id])
+  crew        JobCrew[]
+  files       File[]
+  staffingReq JobStaffingRequirement?
 
   @@index([status])
   @@map("jobs")
@@ -1088,6 +1178,30 @@ model JobCrew {
   cancelledAt      DateTime?            @map("cancelled_at")
   cancelReason     String?              @map("cancel_reason")
   assignmentNotes  String?              @map("assignment_notes")
+
+  // ── Stage 5 scheduling (owner spec 2026-07-21) ──
+  //    JobCrew stays THE assignment record; these fill the gaps Stage 5 needs
+  //    without a competing table. All nullable/defaulted so existing rows read
+  //    cleanly and Stage 4 closeout reads are unaffected.
+  offeredAt          DateTime? @map("offered_at")
+  /// When the worker acknowledged (accepted). Distinct from acceptedAt only so a
+  /// re-request after a material change can be tracked without losing the first.
+  acknowledgedAt     DateTime? @map("acknowledged_at")
+  /// Set when a material schedule change invalidates a prior acknowledgment; the
+  /// worker must acknowledge again. Cleared on re-acknowledgment.
+  acknowledgmentStaleAt DateTime? @map("acknowledgment_stale_at")
+  declineReason      String?   @map("decline_reason")
+  removedAt          DateTime? @map("removed_at")
+  removalReason      String?   @map("removal_reason")
+  completedAt        DateTime? @map("completed_at")
+  noShowAt           DateTime? @map("no_show_at")
+  /// When this worker should ARRIVE — may differ from the job's start.
+  reportTime         DateTime? @map("report_time")
+  /// Explicit driver designation. Not inferred from free text or role alone.
+  isDriver           Boolean   @default(false) @map("is_driver")
+  /// Notes the WORKER may see, kept apart from privateAdminNotes.
+  workerVisibleNotes String?   @map("worker_visible_notes")
+  privateAdminNotes  String?   @map("private_admin_notes")
 
   // ── Scheduled time ──
   scheduledStartAt       DateTime? @map("scheduled_start_at")
@@ -1242,6 +1356,165 @@ model DayBlock {
 
   @@index([date])
   @@map("day_blocks")
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+//  STAGE 5 — crew scheduling (owner spec 2026-07-21)
+//  Supporting tables around the existing User / Job / JobCrew records. None of
+//  these is a second assignment source of truth — JobCrew stays canonical.
+// ════════════════════════════════════════════════════════════════════════════
+
+/// Recurring weekly availability. Times are integer MINUTES-from-midnight in the
+/// stored `timezone`, so comparisons are explicit rather than string-parsed.
+/// Multiple rows per (user, dayOfWeek) express multiple blocks in a day.
+model AvailabilityRule {
+  id          String   @id @default(cuid())
+  userId      String   @map("user_id")
+  dayOfWeek   Int      @map("day_of_week") // 0 = Sunday … 6 = Saturday
+  startMinute Int      @map("start_minute") // minutes from midnight, local
+  endMinute   Int      @map("end_minute")
+  timezone    String   @default("America/New_York")
+  effectiveFrom DateTime? @map("effective_from") @db.Date
+  effectiveTo   DateTime? @map("effective_to") @db.Date
+  active      Boolean  @default(true)
+  notes       String?
+  createdById String?  @map("created_by_id")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, dayOfWeek])
+  @@map("availability_rules")
+}
+
+/// A date-specific exception that overrides the recurring rules for one worker.
+model AvailabilityException {
+  id          String                    @id @default(cuid())
+  userId      String                    @map("user_id")
+  kind        AvailabilityExceptionKind
+  date        DateTime                  @db.Date
+  /// For UNAVAILABLE_PARTIAL / AVAILABLE_OVERRIDE — the window, minutes local.
+  startMinute Int?                      @map("start_minute")
+  endMinute   Int?                      @map("end_minute")
+  timezone    String                    @default("America/New_York")
+  reason      String?
+  createdById String?                   @map("created_by_id")
+  createdAt   DateTime                  @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, date])
+  @@index([date])
+  @@map("availability_exceptions")
+}
+
+/// What a job NEEDS, distinct from who is assigned. One row per job.
+model JobStaffingRequirement {
+  id               String      @id @default(cuid())
+  jobId            String      @unique @map("job_id")
+  minWorkers       Int         @default(1) @map("min_workers")
+  requiredWorkers  Int         @default(2) @map("required_workers")
+  preferredWorkers Int?        @map("preferred_workers")
+  requiredDrivers  Int         @default(1) @map("required_drivers")
+  requiresLead     Boolean     @default(true) @map("requires_lead")
+  requiredSkills   CrewSkill[] @default([]) @map("required_skills")
+
+  estimatedStartAt DateTime? @map("estimated_start_at")
+  estimatedEndAt   DateTime? @map("estimated_end_at")
+  reportTime       DateTime? @map("report_time")
+  expectedBreakMinutes Int?  @map("expected_break_minutes")
+  additionalStops  Int       @default(0) @map("additional_stops")
+
+  // Job characteristics — inform staffing and pay, never the customer price.
+  hasStairs           Boolean @default(false) @map("has_stairs")
+  hasElevator         Boolean @default(false) @map("has_elevator")
+  longCarry           Boolean @default(false) @map("long_carry")
+  heavyItems          Boolean @default(false) @map("heavy_items")
+  packing             Boolean @default(false)
+  assembly            Boolean @default(false)
+  customerProvidedTruck Boolean @default(false) @map("customer_provided_truck")
+  rentalTruckPickup   Boolean @default(false) @map("rental_truck_pickup")
+  drivingRequired     Boolean @default(true) @map("driving_required")
+  outOfState          Boolean @default(false) @map("out_of_state")
+
+  loadingLocation   String? @map("loading_location")
+  unloadingLocation String? @map("unloading_location")
+  workerInstructions String? @map("worker_instructions")
+  privateNotes      String? @map("private_notes")
+
+  createdById String?  @map("created_by_id")
+  updatedById String?  @map("updated_by_id")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  job Job @relation(fields: [jobId], references: [id], onDelete: Cascade)
+
+  @@map("job_staffing_requirements")
+}
+
+/// A pending crew invitation. The token is the acceptance credential; the actual
+/// auth account is created by the existing setup flow (see the invitation docs).
+model CrewInvitation {
+  id             String           @id @default(cuid())
+  email          String
+  name           String
+  phone          String?
+  role           UserRole         @default(CREW)
+  workerType     CrewWorkerType   @default(EMPLOYEE) @map("worker_type")
+  initialRateCents Int?           @map("initial_rate_cents")
+  initialSkills  CrewSkill[]      @default([]) @map("initial_skills")
+  canDrive       Boolean          @default(false) @map("can_drive")
+  token          String           @unique
+  status         InvitationStatus @default(PENDING)
+  expiresAt      DateTime         @map("expires_at")
+  invitedById    String           @map("invited_by_id")
+  acceptedByUserId String?        @map("accepted_by_user_id")
+  acceptedAt     DateTime?        @map("accepted_at")
+  cancelledAt    DateTime?        @map("cancelled_at")
+  cancelledById  String?          @map("cancelled_by_id")
+  resentAt       DateTime?        @map("resent_at")
+  resendCount    Int              @default(0) @map("resend_count")
+  createdAt      DateTime         @default(now()) @map("created_at")
+
+  @@index([email])
+  @@index([status])
+  @@map("crew_invitations")
+}
+
+/// A documented override of a scheduling conflict. Records exactly what was
+/// waved through and by whom, so an overridden warning is auditable forever.
+model ConflictOverride {
+  id            String   @id @default(cuid())
+  jobId         String   @map("job_id")
+  jobCrewId     String?  @map("job_crew_id")
+  userId        String?  @map("user_id") // the worker the conflict was about
+  code          String
+  details       Json?
+  reason        String
+  overriddenById String  @map("overridden_by_id")
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  @@index([jobId])
+  @@index([jobCrewId])
+  @@map("conflict_overrides")
+}
+
+/// The scheduled/sent state of one assignment notification. `dedupeKey` makes
+/// the queue job idempotent: re-enqueuing the same key never doubles a reminder.
+model AssignmentNotification {
+  id             String    @id @default(cuid())
+  jobCrewId      String    @map("job_crew_id")
+  type           String
+  dedupeKey      String    @unique @map("dedupe_key")
+  scheduledFor   DateTime? @map("scheduled_for")
+  sentAt         DateTime? @map("sent_at")
+  cancelledAt    DateTime? @map("cancelled_at")
+  providerResult String?   @map("provider_result")
+  createdAt      DateTime  @default(now()) @map("created_at")
+
+  @@index([jobCrewId])
+  @@map("assignment_notifications")
 }
 
 model File {
