@@ -3,6 +3,7 @@ import { getSession } from '@/lib/auth'
 import { prisma } from '@/lib/db'
 import { can, type Role } from '@/lib/permissions'
 import { isLiveStatus, isAcknowledged } from '@/lib/assignment-lifecycle'
+import { isPortalEligible } from '@/lib/scheduling-guards'
 
 // ════════════════════════════════════════════════════════════════════════════
 //  A worker's OWN assignments (Stage 5). GET only. Returns ONLY authorized,
@@ -16,6 +17,11 @@ export async function GET(): Promise<NextResponse> {
   const session = await getSession()
   if (!session) return NextResponse.json({ error: 'Authentication required' }, { status: 401 })
   if (!can(session.role as Role, 'assignment.view_own')) return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
+
+  // The JWT outlives a deactivation — re-check the live row on every request.
+  const worker = await prisma.user.findUnique({ where: { id: session.userId }, select: { active: true, workerStatus: true } })
+  const eligible = isPortalEligible(worker ? { active: worker.active, workerStatus: String(worker.workerStatus) } : null)
+  if (!eligible.allow) return NextResponse.json({ error: eligible.error }, { status: eligible.status })
 
   const rows = await prisma.jobCrew.findMany({
     where: { userId: session.userId },

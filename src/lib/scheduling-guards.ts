@@ -101,6 +101,23 @@ export function canDeactivateWorker(ctx: {
   return { allow: true }
 }
 
+/**
+ * May this worker use the crew portal RIGHT NOW? Sessions are stateless JWTs
+ * that outlive a deactivation by up to their expiry, so every /api/crew route
+ * re-checks the live row: a deactivated or suspended worker is refused even
+ * with a still-valid cookie. A missing row (deleted account) is refused too.
+ */
+export function isPortalEligible(worker: { active: boolean; workerStatus: string } | null | undefined): GuardDecision {
+  if (!worker) return { allow: false, status: 403, error: 'This account no longer exists.' }
+  if (!worker.active || worker.workerStatus === 'INACTIVE') {
+    return { allow: false, status: 403, error: 'This account is deactivated. Contact the office if you believe this is a mistake.' }
+  }
+  if (worker.workerStatus === 'SUSPENDED') {
+    return { allow: false, status: 403, error: 'This account is suspended. Contact the office.' }
+  }
+  return { allow: true }
+}
+
 /** Inviting a new crew member: owner authority; never grants OWNER by default. */
 export function canInviteCrew(ctx: { role: Role | null | undefined; targetRole: string }): GuardDecision {
   if (!ctx.role) return { allow: false, status: 401, error: 'Authentication required.' }

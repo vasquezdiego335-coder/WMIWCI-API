@@ -4,7 +4,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
   canManageSchedule, canSaveAssignment, canChangeAssignmentStatus,
-  canActOnOwnAssignment, canDeactivateWorker, canInviteCrew,
+  canActOnOwnAssignment, canDeactivateWorker, canInviteCrew, isPortalEligible,
 } from '../scheduling-guards'
 import type { Conflict } from '../conflict-engine'
 
@@ -86,4 +86,20 @@ test('inviting is owner-only and never grants OWNER', () => {
   const owner = canInviteCrew({ role: 'OWNER', targetRole: 'OWNER' })
   assert.equal(owner.allow, false)
   assert.equal(owner.allow === false && owner.status, 422)
+})
+
+// ── crew portal eligibility (stateless JWT re-check) ────────────────────────
+
+test('portal eligibility refuses deactivated, suspended and missing workers', () => {
+  assert.equal(isPortalEligible({ active: true, workerStatus: 'ACTIVE' }).allow, true)
+  assert.equal(isPortalEligible({ active: true, workerStatus: 'ON_LEAVE' }).allow, true)
+  const gone = isPortalEligible(null)
+  assert.equal(gone.allow, false)
+  const inactive = isPortalEligible({ active: false, workerStatus: 'INACTIVE' })
+  assert.equal(inactive.allow, false)
+  assert.equal(inactive.allow === false && inactive.status, 403)
+  const flagOnly = isPortalEligible({ active: false, workerStatus: 'ACTIVE' })
+  assert.equal(flagOnly.allow, false) // the legacy boolean alone is enough to refuse
+  const suspended = isPortalEligible({ active: true, workerStatus: 'SUSPENDED' })
+  assert.equal(suspended.allow, false)
 })

@@ -1,6 +1,7 @@
 import { prisma } from '@/lib/db'
 import { getSession } from '@/lib/auth'
 import { isLiveStatus, isAcknowledged } from '@/lib/assignment-lifecycle'
+import { isPortalEligible } from '@/lib/scheduling-guards'
 import CrewAssignmentCard from './CrewAssignmentCard'
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -16,6 +17,17 @@ const time = (d: Date | null) => (d ? new Date(d).toLocaleString('en-US', { week
 export default async function CrewHome() {
   const session = await getSession()
   if (!session) return null
+
+  // The JWT outlives a deactivation — check the live row before showing work.
+  const workerRow = await prisma.user.findUnique({ where: { id: session.userId }, select: { active: true, workerStatus: true } })
+  const eligible = isPortalEligible(workerRow ? { active: workerRow.active, workerStatus: String(workerRow.workerStatus) } : null)
+  if (!eligible.allow) {
+    return (
+      <div style={{ backgroundColor: '#fff', borderRadius: '12px', padding: '24px', textAlign: 'center', color: '#6B7280', fontSize: '14px' }}>
+        {eligible.error}
+      </div>
+    )
+  }
 
   const rows = await prisma.jobCrew.findMany({
     where: { userId: session.userId },

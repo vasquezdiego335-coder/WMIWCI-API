@@ -5,6 +5,7 @@ import { can, type Role } from '@/lib/permissions'
 import { validateTimeEntry, hasBlockingIssue } from '@/lib/labor-time'
 import { recalcAssignment, loadLaborPolicy, otherShiftsFor } from '@/lib/labor-service'
 import { buildClockUpdate, type ClockAction } from '@/lib/labor-clock'
+import { isPortalEligible } from '@/lib/scheduling-guards'
 import { z } from 'zod'
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -23,6 +24,11 @@ export async function POST(req: NextRequest, { params }: { params: { id: string 
   const session = await getSession()
   if (!session) return NextResponse.json({ error: 'Authentication required' }, { status: 401 })
   const role = session.role as Role
+
+  // The JWT outlives a deactivation — re-check the live row on every request.
+  const actingWorker = await prisma.user.findUnique({ where: { id: session.userId }, select: { active: true, workerStatus: true } })
+  const eligible = isPortalEligible(actingWorker ? { active: actingWorker.active, workerStatus: String(actingWorker.workerStatus) } : null)
+  if (!eligible.allow) return NextResponse.json({ error: eligible.error }, { status: eligible.status })
 
   const a = await prisma.jobCrew.findUnique({
     where: { id: params.id },
