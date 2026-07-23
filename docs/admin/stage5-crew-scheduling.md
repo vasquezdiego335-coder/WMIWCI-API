@@ -193,9 +193,15 @@ clock/break/approve.
 `crew-notifications.ts`. Idempotency via `AssignmentNotification.dedupeKey`:
 re-enqueuing the same key never doubles a message. A material change cancels
 obsolete reminders (`cancelObsoleteReminders`) before scheduling replacements
-(`replaceAssignmentReminders`). Importing the module never starts a worker — the
-lazy queue getters stay lazy. Provider results are recorded where the worker
-reports them back.
+(`replaceAssignmentReminders`). Importing the module never starts a worker.
+
+**Delivery status (verified in the 2026-07 staging rehearsal): LEDGER-ONLY.**
+The `AssignmentNotification` rows are written idempotently, but no queue job is
+enqueued and no worker consumes them yet — `sentAt`/`providerResult` stay null.
+Nothing contacts a worker until a delivery worker is wired to the ledger (SMS or
+email through the existing lazy queue getters). This is deliberate for launch
+safety (no accidental sends), and it means the "workers get told" half of Part N
+is a documented follow-up, not a shipped behavior.
 
 ## APIs
 
