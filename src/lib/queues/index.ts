@@ -227,6 +227,10 @@ export type ScheduledJobData = {
     | 'job-reminder-24h'
     | 'review-request-48h'
     | 'file-cleanup'
+    // Daily lead hygiene (owner review 2026-07-24): ages inactive partial
+    // captures to ABANDONED, then purges long-abandoned ones per the retention
+    // policy. Never touches quoted/converted leads or consent proof.
+    | 'lead-maintenance'
     | 'daily-schedule-morning'
     | 'daily-schedule-evening'
     // ── Phase 3 post-move follow-ups (handled by runFollowup in followups.ts) ──

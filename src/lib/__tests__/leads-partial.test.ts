@@ -8,6 +8,10 @@ import {
   lifecycleForStep,
   hasPromotionalConsent,
   partialLeadBlockedFromPromo,
+  isAbandonable,
+  purgeAbandonedLeads,
+  ABANDON_AFTER_DAYS,
+  PURGE_ABANDONED_AFTER_DAYS,
   type PartialLeadStore,
   type PartialLeadDeps,
   type ExistingPartialLead,
@@ -218,6 +222,68 @@ test('door-hanger attribution is preserved on the created lead', async () => {
   const row = Array.from(rows.values())[0]
   assert.equal(row.utmCampaign, 'west_orange_july_2026')
   assert.match(row.landingPage ?? '', /doorhanger_en_v1/)
+})
+
+test('RACE: two concurrent captures for one session produce ONE lead, not two', async () => {
+  const { store, rows } = makeStore()
+  // Simulate the real race: the create fails (sibling request won), and the
+  // sibling's row is now visible. The loser must UPDATE, never duplicate.
+  let firstCreate = true
+  const racing: PartialLeadStore = {
+    ...store,
+    async create(data) {
+      if (firstCreate) {
+        firstCreate = false
+        // the "winner" commits its row, then our create loses
+        await store.create(data)
+        throw new Error('unique constraint violation')
+      }
+      return store.create(data)
+    },
+  }
+  const res = await capturePartialLead({ email: 'race@x.com', bookingSessionId: 'sess-race' }, deps(racing))
+  assert.equal(res?.isNew, false, 'the losing request must fall back to an update')
+  assert.equal(rows.size, 1, 'exactly ONE lead may exist for the session')
+})
+
+test('RACE: a genuine store failure still surfaces (not silently swallowed here)', async () => {
+  const { store } = makeStore()
+  const broken: PartialLeadStore = {
+    ...store,
+    async create() { throw new Error('db down') },
+    async findBySessionId() { return null },
+    async findOpenPartialByEmail() { return null },
+  }
+  await assert.rejects(
+    () => capturePartialLead({ email: 'x@y.com', bookingSessionId: 's' }, deps(broken)),
+    /db down/
+  )
+})
+
+// ── Abandonment + retention ──────────────────────────────────────────────────
+
+test('isAbandonable: only inactive, unquoted, unconverted partial captures', () => {
+  const old = new Date(NOW.getTime() - 30 * 24 * 3600_000)
+  const base = { lifecycle: 'PARTIAL', status: 'NEW', quotedAt: null, convertedBookingId: null, lastActivityAt: old }
+  assert.equal(isAbandonable(base, NOW), true)
+  // recent activity → not abandoned
+  assert.equal(isAbandonable({ ...base, lastActivityAt: NOW }, NOW), false)
+  // a real quote is not abandonment
+  assert.equal(isAbandonable({ ...base, quotedAt: old }, NOW), false)
+  // converted / booked / lost are never abandoned
+  assert.equal(isAbandonable({ ...base, convertedBookingId: 'b1' }, NOW), false)
+  assert.equal(isAbandonable({ ...base, status: 'BOOKED' }, NOW), false)
+  assert.equal(isAbandonable({ ...base, status: 'LOST' }, NOW), false)
+  // ordinary CRM leads (no partial lifecycle) are out of scope
+  assert.equal(isAbandonable({ ...base, lifecycle: null }, NOW), false)
+  assert.equal(isAbandonable({ ...base, lifecycle: 'CONVERTED' }, NOW), false)
+})
+
+test('retention constants are sane and purge can be disabled', async () => {
+  assert.ok(ABANDON_AFTER_DAYS >= 1)
+  assert.ok(PURGE_ABANDONED_AFTER_DAYS >= 0)
+  // 0 disables purging entirely — proven by the guard in purgeAbandonedLeads
+  assert.equal(await purgeAbandonedLeads(NOW, 0), 0)
 })
 
 test('capturePartialLeadSafe never throws — a store failure returns null', async () => {

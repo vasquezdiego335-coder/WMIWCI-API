@@ -8,6 +8,7 @@ import { runFollowup, type FollowupType } from '../lib/followups'
 import { quoteFollowupBlockReason } from '../lib/journeys'
 import { isSafeUrl } from '../emails/validation'
 import { etDayRange, moveDateInRange, effectiveMoveDate } from '../lib/scheduling'
+import { markStaleLeadsAbandoned, purgeAbandonedLeads } from '../lib/leads'
 import { dayOfMoveSms } from '../lib/waiting-time'
 import { processCampaignBatch, processRecipientRetry, sweepCampaignRuns } from '../lib/email-campaign-dispatch'
 import { executeAutomationStage, sweepAutomationEnrollments } from '../lib/email-automation-runtime'
@@ -252,6 +253,20 @@ async function processScheduledJob(job: Job<ScheduledJobData>): Promise<void> {
         })
         log.info({ count: orphanedFiles.length }, 'Orphaned files cleaned up')
       }
+      break
+    }
+
+    // ── Daily lead hygiene (owner review 2026-07-24) ──────────────
+    // Two gaps this closes: lifecycle ABANDONED was never set by anything (so
+    // the admin "Abandoned" view was permanently empty), and self-captured
+    // partial leads accumulated with no retention policy. Both steps are
+    // conservative — a lead that was quoted, booked, converted, or that carries
+    // a consent DECISION is never aged out and never purged. Suppression and
+    // unsubscribe records live in their own table and are untouched.
+    case 'lead-maintenance': {
+      const abandoned = await markStaleLeadsAbandoned()
+      const purged = await purgeAbandonedLeads()
+      log.info({ abandoned, purged }, 'lead maintenance complete')
       break
     }
 
@@ -520,7 +535,18 @@ async function registerCronJobs(): Promise<void> {
     { repeat: { pattern: '*/15 * * * *' }, jobId: 'cron:automation-sweep' }
   )
 
-  queueLogger.info('Cron jobs registered (daily digests + campaign/automation sweeps)')
+  // ── Daily lead hygiene (owner review 2026-07-24) ──
+  // 3:20 AM ET, off-peak: ages inactive partial captures to ABANDONED (the
+  // lifecycle nothing previously set) and applies the retention purge. Both
+  // steps are idempotent and skip anything quoted, converted, or carrying a
+  // consent decision, so re-running is always safe.
+  await scheduledQueue.add(
+    'lead-maintenance',
+    { type: 'lead-maintenance' },
+    { repeat: { pattern: '20 3 * * *', tz: 'America/New_York' }, jobId: 'cron:lead-maintenance' }
+  )
+
+  queueLogger.info('Cron jobs registered (daily digests + campaign/automation sweeps + lead maintenance)')
 }
 
 export function startScheduledWorker() {

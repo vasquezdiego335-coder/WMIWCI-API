@@ -618,8 +618,26 @@ export async function capturePartialLead(
   }
   // Need at least a valid email to CREATE (a bare session id is not a person).
   if (!email) return null
-  const lead = await deps.store.create(buildPartialLeadCreate(input, now))
-  return { lead, isNew: true }
+
+  // RACE WINDOW (owner review 2026-07-24): the booking form fires capture from
+  // FIVE triggers (debounce, blur, nav, consent toggle, exit beacon). Two of
+  // them can land within milliseconds, so both can miss the lookup above and
+  // both reach CREATE — producing exactly the duplicate lead this feature
+  // promises never to make. If the create fails for ANY reason, re-run the
+  // lookup: the sibling request has almost certainly committed its row by now,
+  // and we update that instead of losing the capture.
+  try {
+    const lead = await deps.store.create(buildPartialLeadCreate(input, now))
+    return { lead, isNew: true }
+  } catch (err) {
+    const raced = (sessionId ? await deps.store.findBySessionId(sessionId) : null) ??
+      (await deps.store.findOpenPartialByEmail(email))
+    if (raced) {
+      const lead = await deps.store.update(raced.id, buildPartialLeadUpdate(raced, input, now))
+      return { lead, isNew: false }
+    }
+    throw err // genuinely failed (DB down) — capturePartialLeadSafe logs + swallows
+  }
 }
 
 let _partialDeps: PartialLeadDeps | undefined
@@ -675,6 +693,87 @@ export async function capturePartialLeadSafe(
       'partial lead capture failed (non-fatal)'
     )
     return null
+  }
+}
+
+// ── ABANDONMENT + RETENTION (owner review 2026-07-24) ────────────────────────
+//  Two gaps found in review:
+//    • lifecycle ABANDONED was defined and filterable in the admin but NOTHING
+//      ever set it, so the "Abandoned" view was permanently empty and stale
+//      partial leads sat in PARTIAL forever.
+//    • nothing ever cleaned up self-abandoned captures, so a form that anyone
+//      can type an email into grows without bound (spec Stage 17).
+//  Both are deliberately CONSERVATIVE: they only ever touch self-captured
+//  partial leads that were never quoted and never converted, and they NEVER
+//  delete consent or suppression proof (that must outlive the lead itself).
+
+/** Days of inactivity before a partial capture is considered abandoned. */
+export const ABANDON_AFTER_DAYS = Math.max(1, Number(process.env.LEAD_ABANDON_AFTER_DAYS) || 14)
+/** Days an ABANDONED partial lead is retained before purge. 0 disables purging. */
+export const PURGE_ABANDONED_AFTER_DAYS = Math.max(0, Number(process.env.LEAD_PURGE_AFTER_DAYS) || 180)
+
+/** PURE: may this lead be marked ABANDONED? Only an untouched partial capture —
+ *  never one that was quoted, booked, converted, or already closed. */
+export function isAbandonable(
+  lead: { lifecycle?: string | null; status?: string | null; quotedAt?: Date | null; convertedBookingId?: string | null; lastActivityAt?: Date | null; createdAt?: Date | null },
+  now: Date,
+  afterDays: number = ABANDON_AFTER_DAYS
+): boolean {
+  if (lead.lifecycle !== 'PARTIAL' && lead.lifecycle !== 'IN_PROGRESS') return false
+  if (lead.quotedAt || lead.convertedBookingId) return false // a real quote/booking is not abandonment
+  if (lead.status === 'BOOKED' || lead.status === 'LOST') return false
+  const last = lead.lastActivityAt ?? lead.createdAt
+  if (!last) return false
+  return now.getTime() - last.getTime() > afterDays * 24 * 60 * 60 * 1000
+}
+
+/** Transition inactive partial captures to ABANDONED. Idempotent, bounded, and
+ *  non-destructive (a status/consent/quote is never altered). Returns the count. */
+export async function markStaleLeadsAbandoned(now: Date = new Date(), afterDays: number = ABANDON_AFTER_DAYS): Promise<number> {
+  const cutoff = new Date(now.getTime() - afterDays * 24 * 60 * 60 * 1000)
+  try {
+    const res = await prisma.lead.updateMany({
+      where: {
+        lifecycle: { in: [LeadLifecycle.PARTIAL, LeadLifecycle.IN_PROGRESS] },
+        quotedAt: null,
+        convertedBookingId: null,
+        status: { notIn: [LeadStatus.BOOKED, LeadStatus.LOST] },
+        OR: [{ lastActivityAt: { lt: cutoff } }, { lastActivityAt: null, createdAt: { lt: cutoff } }],
+      },
+      data: { lifecycle: LeadLifecycle.ABANDONED },
+    })
+    if (res.count) apiLogger.info({ count: res.count, afterDays }, 'partial leads marked abandoned')
+    return res.count
+  } catch (err) {
+    apiLogger.error({ err: err instanceof Error ? err.message : String(err) }, 'markStaleLeadsAbandoned failed (non-fatal)')
+    return 0
+  }
+}
+
+/** Purge long-abandoned partial captures (privacy/retention). Deletes ONLY
+ *  self-captured leads that were never quoted, never converted, and never
+ *  expressed a marketing choice — so consent proof is never destroyed.
+ *  EmailSuppression rows live in their own table and are untouched by design. */
+export async function purgeAbandonedLeads(now: Date = new Date(), afterDays: number = PURGE_ABANDONED_AFTER_DAYS): Promise<number> {
+  if (afterDays <= 0) return 0 // purging disabled
+  const cutoff = new Date(now.getTime() - afterDays * 24 * 60 * 60 * 1000)
+  try {
+    const res = await prisma.lead.deleteMany({
+      where: {
+        lifecycle: LeadLifecycle.ABANDONED,
+        quotedAt: null,
+        convertedBookingId: null,
+        // Never delete a record that carries a consent DECISION — that is the
+        // evidence we relied on to email (or not email) this person.
+        emailMarketingConsent: null,
+        updatedAt: { lt: cutoff },
+      },
+    })
+    if (res.count) apiLogger.info({ count: res.count, afterDays }, 'abandoned leads purged (retention)')
+    return res.count
+  } catch (err) {
+    apiLogger.error({ err: err instanceof Error ? err.message : String(err) }, 'purgeAbandonedLeads failed (non-fatal)')
+    return 0
   }
 }
 
