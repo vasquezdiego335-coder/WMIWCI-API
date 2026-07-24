@@ -34,8 +34,25 @@ export function unsafeUrlReason(url: string | undefined | null): string | null {
   // It was the hard-coded default for GOOGLE_REVIEW_URL, so an unconfigured
   // environment mailed customers a review link pointing at a dead Google page.
   // A URL that still contains its own setup instructions is not configured.
-  if (/REPLACE_WITH|REPLACE_ME|YOUR[-_]?DOMAIN|CHANGE[-_]?ME|PLACEHOLDER|TEST[-_]?ONLY|INSERT[-_]?URL/i.test(u)) {
+  // MARKER LIST WIDENED (production incident 2026-07-24): APP_URL was left as
+  // `https://PASTE_YOUR_LIVE_URL_HERE`, which matched NONE of the markers below
+  // and so shipped to a real inbox as a 404 link. Every "paste/insert/replace
+  // your … here" phrasing a setup doc might use is now covered.
+  if (/REPLACE_WITH|REPLACE_ME|YOUR[-_]?(DOMAIN|LIVE|SITE|APP|URL|HOST)|CHANGE[-_]?ME|PLACEHOLDER|TEST[-_]?ONLY|INSERT[-_]?URL|PASTE|[-_]HERE\b|\bTODO\b|\bFIXME\b/i.test(u)) {
     return 'placeholder marker in URL (not configured)'
+  }
+
+  // ── STRUCTURAL CATCH-ALL: an UNDERSCORE IN THE HOSTNAME ──────────────────
+  // Underscores are illegal in DNS hostnames, so a host containing one can
+  // never resolve — it is always a placeholder or a typo, whatever words it
+  // uses. This is the principled version of the marker list above: it catches
+  // the NEXT unconfigured value without anyone having to predict its wording.
+  // (Only the host is examined; underscores in a path or query are legitimate.)
+  try {
+    const host = new URL(u).hostname
+    if (host.includes('_')) return 'invalid hostname (underscore — unconfigured placeholder)'
+  } catch {
+    return 'unparseable URL'
   }
   if (/\b(example\.(com|org|net)|test\.test|foo\.bar)\b/i.test(u)) return 'example/test domain'
 

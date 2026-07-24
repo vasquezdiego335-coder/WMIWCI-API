@@ -97,3 +97,36 @@ for (const [name, el] of all) {
     assert.equal(bad.length, 0, `${name} unsafe hrefs: ${bad.map(([h, r]) => `${h} (${r})`).join(', ')}`)
   })
 }
+
+// ── PLACEHOLDER URL REGRESSION (production incident 2026-07-24) ──────────────
+// APP_URL was left as `https://PASTE_YOUR_LIVE_URL_HERE` in production. It is a
+// structurally valid absolute https URL, so it passed every check and shipped to
+// a real inbox as a 404 link — the exact failure the placeholder gate exists to
+// prevent. These lock the fix: the wording-based markers AND the structural
+// "underscore in a hostname is illegal in DNS" catch-all.
+test('placeholder URLs are refused (the exact production value + variants)', () => {
+  for (const url of [
+    'https://PASTE_YOUR_LIVE_URL_HERE',
+    'https://PASTE_YOUR_LIVE_URL_HERE/my-booking/abc123',
+    'https://your-live-url-here.com',
+    'https://ADD_YOUR_URL',
+    'https://REPLACE_ME.com',
+    'https://YOUR_DOMAIN.com',
+  ]) {
+    assert.ok(unsafeUrlReason(url) !== null, `must be refused: ${url}`)
+    assert.equal(isSafeUrl(url), false, `isSafeUrl must be false: ${url}`)
+  }
+})
+
+test('an underscore in the HOSTNAME is always refused; in a path it is fine', () => {
+  // DNS hostnames cannot contain underscores, so such a host can never resolve.
+  assert.ok(unsafeUrlReason('https://not_a_real_host.com') !== null)
+  // ...but a path/query underscore is perfectly legitimate.
+  assert.equal(unsafeUrlReason('https://moveitclearit.com/path_with_underscore?a=b_c'), null)
+})
+
+test('real production URLs still pass (no false positives)', () => {
+  assert.equal(unsafeUrlReason('https://moveitclearit.com/my-booking/abc'), null)
+  assert.equal(unsafeUrlReason('https://www.moveitclearit.com/quote?src=qr&utm_source=door_hanger'), null)
+  assert.equal(unsafeUrlReason('mailto:hello@moveitclearit.com'), null)
+})
