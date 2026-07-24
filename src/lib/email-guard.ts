@@ -270,6 +270,10 @@ const DEFERRAL_REASONS: ReadonlySet<string> = new Set([
   'cap_daily',
   'cap_weekly',
   'cap_monthly',
+  // Global kill switch is a DEFERRAL, never terminal: an operator toggling
+  // EMAIL_SENDING_ENABLED back on must let the retry sweep resume every held
+  // send, not lose them.
+  'email_sending_disabled',
 ])
 
 export type BlockClass = 'terminal' | 'retryable' | 'deferred'
@@ -527,6 +531,18 @@ export async function guardedSend(input: GuardedSendInput): Promise<SendOutcome>
   const refuse = async (reason: string, retryAt?: Date): Promise<SendOutcome> => {
     const { id, blockClass } = await recordBlock(key, input, emailClass, reason, retryAt)
     return { sent: false, reason, emailSendId: id, retryAt, outcomeClass: blockClass }
+  }
+
+  // ── 0. GLOBAL KILL SWITCH (owner spec 2026-07-24) ─────────────────────
+  // EMAIL_SENDING_ENABLED=false stops EVERY email — transactional, journeys,
+  // automations, campaigns, follow-ups, test sends, outbox + BullMQ workers —
+  // because all of them funnel through guardedSend(). Explicit 'false' ONLY, so
+  // an unset var never silently disables the transactional mail that already
+  // works. Recorded as a DEFERRAL (no provider call is made), so flipping the
+  // switch back on lets the retry sweep resume every held send.
+  if (process.env.EMAIL_SENDING_ENABLED === 'false') {
+    l.warn('blocked: global kill switch (EMAIL_SENDING_ENABLED=false)')
+    return refuse('email_sending_disabled', new Date(Date.now() + 15 * 60_000))
   }
 
   // ── 1. recipient format ───────────────────────────────────────────────
