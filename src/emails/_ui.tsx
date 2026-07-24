@@ -60,6 +60,12 @@ export const FONT =
 //          {ASSET_BASE}/icons/{name}-{tone}@2x.png, {ASSET_BASE}/social/{name}.png
 export const ASSET_BASE = (process.env.EMAIL_ASSET_BASE_URL || 'https://moveitclearit.com/email').replace(/\/+$/, '')
 
+// The logo PNG (public/logo/icon.png in THIS app) is served from the app's own
+// origin, so it deploys atomically with the templates — no dependency on the
+// marketing site being redeployed. Falls back to the brand domain if APP_URL is
+// unset (the SVG + PNG also live at moveitclearit.com/logo/).
+export const LOGO_URL = `${(process.env.APP_URL || 'https://moveitclearit.com').replace(/\/+$/, '')}/logo/icon.png`
+
 // Safe money phrase. Prints "$X" ONLY when a real amount is supplied; otherwise a
 // neutral phrase — so a missing prop can NEVER silently render a guessed "$49".
 export function money(amount?: string | number | null, es = false): string {
@@ -83,6 +89,11 @@ export const HERO_ANIM_CSS = `
   @media screen and (-webkit-min-device-pixel-ratio:0) and (min-resolution:.001dpcm){
     .hero-svg{display:block!important;}
     .hero-gif{display:none!important;}
+  }
+  /* Dark-mode: the navy wordmark would vanish on a dark background, so flip it
+     to bone. The icon tile + gold tagline already read in both modes. */
+  @media (prefers-color-scheme:dark){
+    .mic-wordmark{color:${C.bone}!important;}
   }
 `
 
@@ -167,34 +178,28 @@ export function Shell({
 export function LogoHeader() {
   return (
     <Section style={{ padding: '18px 8px 28px', textAlign: 'center' as const }}>
-      {/* LOGO — Move It Clear It chevron mark + wordmark (reproduces public/logo/icon.svg).
-          For the exact art in every client, host a PNG of that SVG and swap the mark cell for:
-          <Img src="https://moveitclearit.com/logo/icon.png" width="50" height="50" alt="Move It Clear It" /> */}
+      {/* LOGO — the real Move It Clear It chevron mark (public/logo/icon.svg,
+          rasterized to /logo/icon.png). The mark is a self-contained navy tile
+          with the orange chevron, so it reads in BOTH light and dark mode. The
+          navy wordmark next to it flips to bone in dark mode via `.mic-wordmark`
+          (HERO_ANIM_CSS, injected by Shell + HeroAnimStyle). */}
       <table role="presentation" cellPadding={0} cellSpacing={0} border={0} align="center" style={{ margin: '0 auto' }}>
         <tbody>
           <tr>
             <td valign="middle" style={{ paddingRight: '13px' }}>
-              <table role="presentation" cellPadding={0} cellSpacing={0} border={0}>
-                <tbody>
-                  <tr>
-                    <td
-                      width={50}
-                      height={50}
-                      align="center"
-                      valign="middle"
-                      style={{ width: '50px', height: '50px', background: C.navy, borderRadius: '14px', textAlign: 'center' as const }}
-                    >
-                      <span style={{ fontFamily: FONT, fontSize: '26px', lineHeight: '50px', fontWeight: 900, color: C.orange }}>{'❯'}</span>
-                    </td>
-                  </tr>
-                </tbody>
-              </table>
+              <Img
+                src={LOGO_URL}
+                width={50}
+                height={50}
+                alt="Move It Clear It"
+                style={{ display: 'block', width: '50px', height: '50px', borderRadius: '14px' }}
+              />
             </td>
             <td valign="middle" align="left">
-              <div style={{ fontFamily: FONT, fontSize: '21px', lineHeight: '23px', fontWeight: 800, letterSpacing: '1.4px', color: C.navy }}>
+              <div className="mic-wordmark" style={{ fontFamily: FONT, fontSize: '21px', lineHeight: '23px', fontWeight: 800, letterSpacing: '1.4px', color: C.navy }}>
                 MOVE IT CLEAR IT
               </div>
-              <div style={{ fontFamily: FONT, fontSize: '9.5px', fontWeight: 700, letterSpacing: '1.8px', color: C.gold, textTransform: 'uppercase' as const, marginTop: '6px' }}>
+              <div className="mic-tagline" style={{ fontFamily: FONT, fontSize: '9.5px', fontWeight: 700, letterSpacing: '1.8px', color: C.gold, textTransform: 'uppercase' as const, marginTop: '6px' }}>
                 Premium Labor Moving
               </div>
             </td>
