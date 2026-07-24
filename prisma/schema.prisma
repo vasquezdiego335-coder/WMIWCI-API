@@ -1917,7 +1917,12 @@ model Lead {
   @@index([phone])
   @@index([lastActivityAt])
   @@index([bookingSessionId])
-  @@map("leads")
+  // Own table (owner spec 2026-07-24). The Neon DB is SHARED with the marketing
+  // tracker, whose raw-SQL `leads` table (mention_code/source_code/ts/…) collides
+  // with this Prisma model and made every `prisma.lead.*` call fail. Mapping to a
+  // dedicated `crm_leads` table decouples the two; the tracker's `leads` is left
+  // untouched.
+  @@map("crm_leads")
 }
 
 /// Action Center reminder (increment 2, owner spec 2026-07-13). Rows are
