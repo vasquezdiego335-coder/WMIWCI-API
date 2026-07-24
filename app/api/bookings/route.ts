@@ -218,6 +218,14 @@ const BookingSchema = z.object({
   // "Where did you find us?" self-report from the booking-form dropdown.
   foundUs: z.string().transform(sanitizeText).pipe(z.string().max(40)).optional(),
 
+  // ── Partial-lead linkage + promotional consent (owner spec 2026-07-24) — all
+  //    optional/additive. bookingSessionId lets markLeadConverted find + convert
+  //    the exact partial lead captured in Step 1; marketingConsent (tri-state:
+  //    present only when the visitor toggled the box) is propagated to the
+  //    Customer. Absent on any tab opened before this cutover — safely ignored. ──
+  bookingSessionId: z.string().transform(sanitizeText).pipe(z.string().max(80)).optional(),
+  marketingConsent: z.boolean().optional(),
+
   // ── Moving Service Agreement (hard-required) ──
   // Must be literally true — booking + Stripe session are refused otherwise.
   agreementAccepted: z.literal(true, {
@@ -717,7 +725,13 @@ async function handleBooking(req: NextRequest): Promise<NextResponse> {
   // audiences and attribution already read) and stop any quote follow-up
   // sequence for it. Best-effort: never blocks the booking response.
   try {
-    const convertedLeadId = await markLeadConverted(customer.email, booking.id)
+    const convertedLeadId = await markLeadConverted(customer.email, booking.id, {
+      // Match the exact partial lead captured in Step 1 (session first, then
+      // email) and propagate the visitor's promotional consent onto the Customer.
+      bookingSessionId: data.bookingSessionId,
+      marketingConsent: data.marketingConsent,
+      consentSource: 'booking_step_1',
+    })
     if (convertedLeadId) await onLeadClosed(convertedLeadId)
   } catch (err) {
     apiLogger.error({ err: err instanceof Error ? err.message : String(err), bookingId: booking.id }, 'lead conversion failed (non-fatal)')

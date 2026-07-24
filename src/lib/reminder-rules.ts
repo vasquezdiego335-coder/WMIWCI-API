@@ -119,6 +119,11 @@ export interface RuleLead {
   createdAt: Date
   quotedAt: Date | null
   updatedAt: Date
+  /** Partial-booking lifecycle (owner spec 2026-07-24). PARTIAL/IN_PROGRESS/
+   *  ABANDONED leads are browsed on the Leads page, not pushed as individual
+   *  owner reminders (a self-abandoned Step-1 email is not a missed callback).
+   *  Null on ordinary CRM leads — their reminder behavior is unchanged. */
+  lifecycle?: string | null
 }
 
 export interface RuleCustomer {
@@ -470,10 +475,16 @@ export function evaluateOwnerTransactions(txs: RuleOwnerTx[], now: Date): Remind
     }))
 }
 
+// Self-abandoned booking-form leads (a Step-1 email left behind) are worked as a
+// browseable segment on the Leads page — not surfaced as individual "call them
+// back" owner reminders, which would flood the Action Center with tire-kickers.
+const PARTIAL_BOOKING_LIFECYCLES = new Set(['PARTIAL', 'IN_PROGRESS', 'ABANDONED'])
+
 export function evaluateLeads(leads: RuleLead[], now: Date): ReminderCandidate[] {
   const out: ReminderCandidate[] = []
   for (const l of leads) {
-    if (l.status === 'NEW' && now.getTime() - l.createdAt.getTime() > DAY) {
+    const isPartialBooking = !!l.lifecycle && PARTIAL_BOOKING_LIFECYCLES.has(l.lifecycle)
+    if (!isPartialBooking && l.status === 'NEW' && now.getTime() - l.createdAt.getTime() > DAY) {
       out.push({
         reminderType: 'lead-not-contacted', category: 'LEADS', severity: 'HIGH',
         title: `Lead not contacted: ${l.name}`,

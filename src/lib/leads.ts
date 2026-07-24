@@ -22,7 +22,7 @@
 //  Dependency-injected (LeadDeps) so the dedupe decision + field mapping are
 //  unit-tested offline with an in-memory store.
 // ════════════════════════════════════════════════════════════════════════
-import { LeadSource, LeadStatus } from '@prisma/client'
+import { LeadSource, LeadStatus, LeadLifecycle } from '@prisma/client'
 import { prisma } from './db'
 import { apiLogger } from './logger'
 
@@ -319,34 +319,387 @@ export async function markLeadQuoted(
 }
 
 /**
- * A booking was created for this email → convert a matching OPEN lead so quote
- * follow-ups stop, and the conversion is visible to audiences and attribution
- * (both already READ convertedBookingId / bookedAt). Idempotent and best-effort:
- * returns the converted leadId, or null when there was no open lead (the common
- * case — most bookings are not from a tracked lead).
+ * A booking was created → convert a matching OPEN lead so quote follow-ups stop,
+ * and the conversion is visible to audiences and attribution (both already READ
+ * convertedBookingId / bookedAt). Idempotent and best-effort: returns the
+ * converted leadId, or null when there was no open lead (the common case — most
+ * bookings are not from a tracked lead).
+ *
+ * PARTIAL-LEAD AWARE (owner spec 2026-07-24): matches a partial-booking lead by
+ * `bookingSessionId` FIRST (the form's dedup key), then falls back to email;
+ * stamps `lifecycle=CONVERTED`; and propagates the person's promotional consent
+ * onto the durable Customer record. Consent propagation is TRI-STATE and never
+ * touches suppression: a value is written only when one is known (from the
+ * booking payload or already stored on the lead).
  */
 export async function markLeadConverted(
   email: string | null | undefined,
   bookingId: string,
-  now: Date = new Date()
+  opts: {
+    now?: Date
+    bookingSessionId?: string | null
+    /** From the booking payload's Step-1 checkbox; undefined = not re-sent. */
+    marketingConsent?: boolean | null
+    consentSource?: string | null
+    consentVersion?: string | null
+  } = {}
 ): Promise<string | null> {
+  const now = opts.now ?? new Date()
   const normalized = normalizeEmail(email)
-  if (!normalized) return null
+  const sessionId = clean(opts.bookingSessionId)
+  if (!normalized && !sessionId) return null
   try {
-    const lead = await prisma.lead.findFirst({
-      where: { email: normalized, status: { in: OPEN_STATUSES } },
-      orderBy: { createdAt: 'desc' },
-      select: { id: true },
-    })
-    if (!lead) return null
-    await prisma.lead.update({
-      where: { id: lead.id },
-      data: { status: LeadStatus.BOOKED, bookedAt: now, convertedBookingId: bookingId, lastActivityAt: now },
-    })
-    apiLogger.info({ leadId: lead.id, bookingId }, 'lead converted (booking created)')
-    return lead.id
+    // Session first (a partial lead may not yet carry the final email), then email.
+    let lead =
+      sessionId
+        ? await prisma.lead.findFirst({
+            where: { bookingSessionId: sessionId, status: { in: OPEN_STATUSES } },
+            orderBy: { createdAt: 'desc' },
+            select: { id: true, email: true, emailMarketingConsent: true },
+          })
+        : null
+    if (!lead && normalized) {
+      lead = await prisma.lead.findFirst({
+        where: { email: normalized, status: { in: OPEN_STATUSES } },
+        orderBy: { createdAt: 'desc' },
+        select: { id: true, email: true, emailMarketingConsent: true },
+      })
+    }
+
+    // Effective consent to propagate: an explicit booking-payload value wins,
+    // otherwise whatever the partial lead already recorded. `undefined` ⇒ leave
+    // both records untouched (do not infer a decision — owner spec S2).
+    const explicit = typeof opts.marketingConsent === 'boolean' ? opts.marketingConsent : undefined
+    const effectiveConsent = explicit ?? (lead ? lead.emailMarketingConsent ?? undefined : undefined)
+
+    if (lead) {
+      const data: Record<string, unknown> = {
+        status: LeadStatus.BOOKED,
+        bookedAt: now,
+        convertedBookingId: bookingId,
+        lastActivityAt: now,
+        lifecycle: LeadLifecycle.CONVERTED,
+      }
+      if (explicit !== undefined) {
+        data.emailMarketingConsent = explicit
+        data.marketingConsentAt = now
+        if (clean(opts.consentSource)) data.marketingConsentSource = clean(opts.consentSource)
+        if (clean(opts.consentVersion)) data.marketingConsentVersion = clean(opts.consentVersion)
+      }
+      await prisma.lead.update({ where: { id: lead.id }, data })
+      apiLogger.info({ leadId: lead.id, bookingId }, 'lead converted (booking created)')
+    }
+
+    // Propagate positive/negative consent to the durable Customer record so
+    // promotional audiences can honor it after the lead is closed. Only writes a
+    // known boolean; never creates or clears an EmailSuppression row.
+    if (effectiveConsent !== undefined && normalized) {
+      await prisma.customer
+        .updateMany({
+          where: { email: normalized },
+          data: { emailMarketingConsent: effectiveConsent, marketingConsentAt: now },
+        })
+        .catch((err) =>
+          apiLogger.warn({ err: String(err), bookingId }, 'customer consent propagation failed (non-fatal)')
+        )
+    }
+
+    return lead ? lead.id : null
   } catch (err) {
     apiLogger.error({ err: err instanceof Error ? err.message : String(err), bookingId }, 'markLeadConverted failed (non-fatal)')
     return null
   }
+}
+
+// ════════════════════════════════════════════════════════════════════════
+//  PARTIAL BOOKING LEAD CAPTURE (owner spec 2026-07-24)
+//  ---------------------------------------------------------------------
+//  Fires the moment a valid email is entered in the booking form's Step 1 —
+//  BEFORE Continue / pricing / Stripe — so a door-hanger scan that abandons
+//  still becomes ONE properly-attributed lead. Separate from createOrUpdateLead
+//  because:
+//    • it dedups by bookingSessionId FIRST (a stable per-request id the form
+//      keeps in localStorage), so refreshes / re-typing never spawn duplicates;
+//    • it records the partial LIFECYCLE + furthest step + TRI-STATE marketing
+//      consent, none of which the CRM ingestion path carries;
+//    • it is SILENT — it never fires the `lead_created` promotional automation
+//      trigger, so a self-abandoned Step-1 email is never enrolled in a
+//      marketing sequence. Consent is required for promotional reach (the
+//      audience resolver gates PARTIAL/IN_PROGRESS/ABANDONED leads on it).
+//
+//  Pure builders + an injectable PartialLeadStore keep the dedup decision and
+//  field mapping unit-tested offline, exactly like createOrUpdateLead.
+// ════════════════════════════════════════════════════════════════════════
+
+export type PartialLeadInput = {
+  email?: string | null
+  firstName?: string | null
+  lastName?: string | null
+  phone?: string | null
+  /** Stable per-request id from the form (localStorage). PRIMARY dedup key. */
+  bookingSessionId?: string | null
+  /** Furthest booking step reached, e.g. "card1".."card5" / "submitted". */
+  formStep?: string | null
+  /** TRI-STATE: true = opted in, false = explicit withdrawal, undefined = the
+   *  visitor never touched the checkbox (leave any stored value untouched). */
+  marketingConsent?: boolean
+  consentSource?: string | null
+  consentVersion?: string | null
+  /** Free-form source string (utm_source or a client-derived channel). */
+  source?: string | null
+  foundUs?: string | null
+  utmSource?: string | null
+  utmMedium?: string | null
+  utmCampaign?: string | null
+  utmContent?: string | null
+  utmTerm?: string | null
+  landingPage?: string | null
+  referrer?: string | null
+  promoCode?: string | null
+  estimatedValue?: number | null // cents
+}
+
+/** Order used to only ever ADVANCE lifecycle, never regress it. */
+const LIFECYCLE_RANK: Record<string, number> = {
+  PARTIAL: 0,
+  IN_PROGRESS: 1,
+  ABANDONED: 1, // a sibling terminal-ish state; never overrides a real advance
+  SUBMITTED: 2,
+  CONVERTED: 3,
+}
+
+/** Map the furthest step reached to a partial lifecycle. `card1` (just the email)
+ *  is PARTIAL; any later step is IN_PROGRESS; an explicit "submitted" is SUBMITTED. */
+export function lifecycleForStep(formStep?: string | null): LeadLifecycle {
+  const s = (formStep ?? '').trim().toLowerCase()
+  if (s === 'submitted') return LeadLifecycle.SUBMITTED
+  if (!s || s === 'card1' || s === 'contact' || s === '1') return LeadLifecycle.PARTIAL
+  return LeadLifecycle.IN_PROGRESS
+}
+
+/** Compose the Lead.name (required, non-null) from first/last. */
+function composePartialName(input: PartialLeadInput): string | null {
+  const parts = [clean(input.firstName), clean(input.lastName)].filter(Boolean)
+  return parts.length ? parts.join(' ') : null
+}
+
+/** The consent columns to MERGE into an update — ONLY when a boolean is supplied.
+ *  Pure; returns an empty object when the visitor never interacted (leave stored
+ *  consent untouched). Update-path only (create always sets an explicit value). */
+function partialConsentPatch(input: PartialLeadInput, now: Date): Record<string, unknown> {
+  if (typeof input.marketingConsent !== 'boolean') return {}
+  return {
+    emailMarketingConsent: input.marketingConsent,
+    marketingConsentAt: now,
+    marketingConsentSource: clean(input.consentSource) ?? 'booking_step_1',
+    marketingConsentVersion: clean(input.consentVersion),
+  }
+}
+
+/** Row to CREATE for a fresh partial lead. Pure. Status NEW keeps it an OPEN,
+ *  dedup-able CRM row; `lifecycle` marks it as a partial-booking lead. On CREATE
+ *  the consent columns are set explicitly (null when the box was never touched). */
+export function buildPartialLeadCreate(input: PartialLeadInput, now: Date) {
+  const consented = typeof input.marketingConsent === 'boolean'
+  return {
+    name: composePartialName(input) ?? 'Booking lead',
+    phone: clean(input.phone),
+    email: normalizeEmail(input.email),
+    source: mapLeadSource(input.source),
+    status: LeadStatus.NEW,
+    lifecycle: lifecycleForStep(input.formStep),
+    bookingSessionId: clean(input.bookingSessionId),
+    formStep: clean(input.formStep),
+    jobType: 'booking-form',
+    utmSource: clean(input.utmSource),
+    utmMedium: clean(input.utmMedium),
+    utmCampaign: clean(input.utmCampaign),
+    utmContent: clean(input.utmContent),
+    utmTerm: clean(input.utmTerm),
+    landingPage: clean(input.landingPage),
+    referrer: clean(input.referrer),
+    promoCode: clean(input.promoCode),
+    estimatedValue: input.estimatedValue ?? null,
+    lastActivityAt: now,
+    emailMarketingConsent: consented ? (input.marketingConsent as boolean) : null,
+    marketingConsentAt: consented ? now : null,
+    marketingConsentSource: consented ? (clean(input.consentSource) ?? 'booking_step_1') : null,
+    marketingConsentVersion: consented ? clean(input.consentVersion) : null,
+  }
+}
+
+export type ExistingPartialLead = {
+  id: string
+  status: LeadStatus
+  name: string
+  phone: string | null
+  email: string | null
+  bookingSessionId: string | null
+  lifecycle: LeadLifecycle | null
+  emailMarketingConsent: boolean | null
+  formStep: string | null
+  estimatedValue: number | null
+  utmSource: string | null
+  utmCampaign: string | null
+  landingPage: string | null
+  referrer: string | null
+  promoCode: string | null
+}
+
+/** Patch to UPDATE an existing lead from a repeat partial submission. Pure:
+ *  bumps activity, ADVANCES lifecycle only (never regresses / never leaves
+ *  CONVERTED), always tracks the latest step, fills blank attribution, and
+ *  applies TRI-STATE consent (a fresh unchecked load — marketingConsent
+ *  undefined — leaves any stored consent untouched). */
+export function buildPartialLeadUpdate(existing: ExistingPartialLead, input: PartialLeadInput, now: Date) {
+  const fillIfBlank = <T>(cur: T | null, next: T | null | undefined): T | null => (cur == null ? (next ?? null) : cur)
+
+  // Lifecycle: never downgrade. CONVERTED/SUBMITTED are sticky terminal-ish.
+  const candidate = lifecycleForStep(input.formStep)
+  const curRank = existing.lifecycle ? LIFECYCLE_RANK[existing.lifecycle] ?? 0 : -1
+  const nextLifecycle = (LIFECYCLE_RANK[candidate] ?? 0) > curRank ? candidate : (existing.lifecycle ?? candidate)
+
+  const data: Record<string, unknown> = {
+    lastActivityAt: now,
+    lifecycle: nextLifecycle,
+    // Always keep the LATEST step + estimate (they move forward as the form fills).
+    formStep: clean(input.formStep) ?? existing.formStep,
+    bookingSessionId: existing.bookingSessionId ?? clean(input.bookingSessionId),
+    // Name/phone/attribution: fill blanks only — never clobber curated data.
+    name: existing.name && existing.name !== 'Booking lead' && existing.name !== 'Website lead'
+      ? existing.name
+      : (composePartialName(input) ?? existing.name),
+    phone: fillIfBlank(existing.phone, clean(input.phone)),
+    email: fillIfBlank(existing.email, normalizeEmail(input.email)),
+    utmSource: fillIfBlank(existing.utmSource, clean(input.utmSource)),
+    utmCampaign: fillIfBlank(existing.utmCampaign, clean(input.utmCampaign)),
+    landingPage: fillIfBlank(existing.landingPage, clean(input.landingPage)),
+    referrer: fillIfBlank(existing.referrer, clean(input.referrer)),
+    promoCode: fillIfBlank(existing.promoCode, clean(input.promoCode)),
+    ...partialConsentPatch(input, now),
+  }
+  // A real estimate only ever fills in / increases; never overwrite with null.
+  if (typeof input.estimatedValue === 'number' && input.estimatedValue > 0) {
+    data.estimatedValue = input.estimatedValue
+  }
+  return data
+}
+
+export type CapturePartialResult = { lead: LeadRecord; isNew: boolean } | null
+
+export interface PartialLeadStore {
+  findBySessionId(sessionId: string): Promise<ExistingPartialLead | null>
+  findOpenPartialByEmail(email: string): Promise<ExistingPartialLead | null>
+  create(data: ReturnType<typeof buildPartialLeadCreate>): Promise<LeadRecord>
+  update(id: string, data: ReturnType<typeof buildPartialLeadUpdate>): Promise<LeadRecord>
+}
+
+export type PartialLeadDeps = { store: PartialLeadStore; now: () => Date }
+
+/** THE partial-lead writer. Dedup priority: (1) bookingSessionId, (2) normalized
+ *  email on an OPEN lead. Returns null when there is nothing to key on (no
+ *  session id AND no valid email) — an incomplete email never creates a lead. */
+export async function capturePartialLead(
+  input: PartialLeadInput,
+  deps: PartialLeadDeps = defaultPartialLeadDeps()
+): Promise<CapturePartialResult> {
+  const now = deps.now()
+  const sessionId = clean(input.bookingSessionId)
+  const email = normalizeEmail(input.email)
+  if (!sessionId && !email) return null
+
+  let existing: ExistingPartialLead | null = null
+  if (sessionId) existing = await deps.store.findBySessionId(sessionId)
+  if (!existing && email) existing = await deps.store.findOpenPartialByEmail(email)
+
+  if (existing) {
+    const lead = await deps.store.update(existing.id, buildPartialLeadUpdate(existing, input, now))
+    return { lead, isNew: false }
+  }
+  // Need at least a valid email to CREATE (a bare session id is not a person).
+  if (!email) return null
+  const lead = await deps.store.create(buildPartialLeadCreate(input, now))
+  return { lead, isNew: true }
+}
+
+let _partialDeps: PartialLeadDeps | undefined
+export function defaultPartialLeadDeps(): PartialLeadDeps {
+  if (_partialDeps) return _partialDeps
+  const SELECT = {
+    id: true, status: true, name: true, phone: true, email: true, bookingSessionId: true,
+    lifecycle: true, emailMarketingConsent: true, formStep: true, estimatedValue: true,
+    utmSource: true, utmCampaign: true, landingPage: true, referrer: true, promoCode: true,
+  } as const
+  _partialDeps = {
+    now: () => new Date(),
+    store: {
+      async findBySessionId(sessionId) {
+        return prisma.lead.findFirst({
+          where: { bookingSessionId: sessionId, status: { in: OPEN_STATUSES } },
+          orderBy: { createdAt: 'desc' },
+          select: SELECT,
+        })
+      },
+      async findOpenPartialByEmail(email) {
+        return prisma.lead.findFirst({
+          where: { email, status: { in: OPEN_STATUSES } },
+          orderBy: { createdAt: 'desc' },
+          select: SELECT,
+        })
+      },
+      async create(data) {
+        return prisma.lead.create({ data, select: { id: true, status: true } })
+      },
+      async update(id, data) {
+        return prisma.lead.update({ where: { id }, data, select: { id: true, status: true } })
+      },
+    },
+  }
+  return _partialDeps
+}
+
+/** Route convenience: capture a partial lead and NEVER throw. Silent by design —
+ *  no notification, no promotional automation. Returns the record or null. */
+export async function capturePartialLeadSafe(
+  input: PartialLeadInput,
+  context: string,
+  deps?: PartialLeadDeps
+): Promise<CapturePartialResult> {
+  try {
+    const res = await capturePartialLead(input, deps)
+    if (res) apiLogger.info({ leadId: res.lead.id, isNew: res.isNew, context }, 'partial lead captured')
+    return res
+  } catch (err) {
+    apiLogger.error(
+      { err: err instanceof Error ? err.message : String(err), context },
+      'partial lead capture failed (non-fatal)'
+    )
+    return null
+  }
+}
+
+/** PURE promotional-consent gate (owner spec 2026-07-24). A person is promotable
+ *  ONLY with an explicit positive consent AND no active suppression. Used by the
+ *  audience layer + unit tests. `emailMarketingConsent` is tri-state: null/false
+ *  both fail. Suppression always wins. */
+export function hasPromotionalConsent(subject: {
+  emailMarketingConsent?: boolean | null
+  suppressed?: boolean | { reason?: string } | null
+}): boolean {
+  if (subject.suppressed) return false
+  return subject.emailMarketingConsent === true
+}
+
+/** The tested definition of the partial-lead promotional exclusion. A self-
+ *  captured PARTIAL/IN_PROGRESS/ABANDONED booking lead is blocked from
+ *  promotional audiences UNLESS it explicitly opted in. Ordinary CRM leads
+ *  (lifecycle null) and CONVERTED leads are never blocked by this rule.
+ *  MIRRORS the Prisma `NOT` clause in email-audience.leadWhere() — keep both in
+ *  sync (the SQL cannot call this per-row, so the rule is stated in both). */
+export function partialLeadBlockedFromPromo(lead: {
+  lifecycle?: string | null
+  emailMarketingConsent?: boolean | null
+}): boolean {
+  const partial = lead.lifecycle === 'PARTIAL' || lead.lifecycle === 'IN_PROGRESS' || lead.lifecycle === 'ABANDONED'
+  return partial && lead.emailMarketingConsent !== true
 }

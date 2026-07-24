@@ -451,6 +451,19 @@ enum LeadLostReason {
   OTHER
 }
 
+/// Partial-booking-lead lifecycle (owner spec 2026-07-24). SEPARATE axis from the
+/// CRM sales `LeadStatus` (NEW/CONTACTED/…) so journeys/reminders/reporting are
+/// untouched. A partial lead captured from the booking form's Step-1 email starts
+/// PARTIAL; it becomes CONVERTED when the same session/email completes a booking.
+/// Null on all pre-existing leads (they are ordinary CRM leads).
+enum LeadLifecycle {
+  PARTIAL
+  IN_PROGRESS
+  SUBMITTED
+  CONVERTED
+  ABANDONED
+}
+
 enum CrewPayStatus {
   SCHEDULED
   CHECKED_IN
@@ -745,6 +758,13 @@ model Customer {
   // webhook). Phase-3 follow-ups are suppressed for opted-out customers. The 4
   // transactional booking messages are unaffected (they're not marketing).
   marketingOptOut Boolean @default(false) @map("marketing_opt_out")
+
+  // ── Positive promotional consent (owner spec 2026-07-24) — TRI-STATE, additive.
+  //    Distinct from marketingOptOut (a TCPA SMS opt-out): this is the durable
+  //    record of an explicit email-marketing opt-in, propagated from the booking
+  //    lead's Step-1 checkbox on conversion. null = never expressed a choice. ──
+  emailMarketingConsent Boolean?  @map("email_marketing_consent")
+  marketingConsentAt    DateTime? @map("marketing_consent_at")
 
   // ── Extended contact (admin operations, owner spec 2026-07-12) — all nullable ──
   preferredName         String? @map("preferred_name")
@@ -1863,6 +1883,26 @@ model Lead {
   referrer       String?
   promoCode      String?   @map("promo_code")
   lastActivityAt DateTime? @map("last_activity_at")
+
+  // ── Partial-booking capture + marketing consent (owner spec 2026-07-24) — all
+  //    nullable/additive. Populated by capturePartialLead() from the booking
+  //    form's Step-1 email; ordinary CRM leads leave these null. ──
+  // Booking-session id from the form (localStorage). PRIMARY dedup key so a
+  // refresh / reopen within one active request updates the SAME lead.
+  bookingSessionId String? @map("booking_session_id")
+  // Furthest booking step the visitor reached ("card1".."card5"/"submitted").
+  formStep         String? @map("form_step")
+  // Partial-lead lifecycle (see LeadLifecycle). Null = ordinary CRM lead.
+  lifecycle        LeadLifecycle?
+  // TRI-STATE promotional consent: null = never interacted, true = deliberate
+  // opt-in, false = explicit withdrawal. Entering an email is NOT consent.
+  emailMarketingConsent   Boolean?  @map("email_marketing_consent")
+  marketingConsentAt      DateTime? @map("marketing_consent_at")
+  // Where consent was captured, e.g. "booking_step_1".
+  marketingConsentSource  String?   @map("marketing_consent_source")
+  // Disclosure/consent-text version shown when consent was given.
+  marketingConsentVersion String?   @map("marketing_consent_version")
+
   contactedAt    DateTime? @map("contacted_at")
   quotedAt       DateTime? @map("quoted_at")
   bookedAt       DateTime? @map("booked_at")
@@ -1876,6 +1916,7 @@ model Lead {
   @@index([email])
   @@index([phone])
   @@index([lastActivityAt])
+  @@index([bookingSessionId])
   @@map("leads")
 }
 
