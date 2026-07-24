@@ -7,6 +7,7 @@
 
 import { useState } from 'react'
 import { useRouter } from 'next/navigation'
+import { csrfHeader } from '../../../_client'
 
 type StageType = { type: string; label: string; defaultTemplate: string; isCountdown: boolean }
 
@@ -73,7 +74,7 @@ export default function JourneyConfigEditor({
     try {
       const res = await fetch('/api/admin/email-marketing/journey-config', {
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...csrfHeader() },
         body: JSON.stringify({
           journeyKey,
           config: { enabled, respectQuietHours: quiet, stages, stopRules: rules, caps: { perRecipientPerMonth: Number(cap) || 0 } },
@@ -101,7 +102,7 @@ export default function JourneyConfigEditor({
     try {
       const res = await fetch('/api/admin/email-marketing/journey-config', {
         method: 'DELETE',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...csrfHeader() },
         body: JSON.stringify({ journeyKey }),
       })
       const body = await res.json()

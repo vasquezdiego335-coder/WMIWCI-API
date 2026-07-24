@@ -13,6 +13,7 @@
 
 import { useEffect, useState, useCallback } from 'react'
 import { useRouter, useSearchParams } from 'next/navigation'
+import { csrfHeader } from '../_client'
 import { COLORS } from '../_ui'
 
 type SavedView = {
@@ -107,7 +108,7 @@ export default function SavedViews({ reportType, canShare }: { reportType: strin
     try {
       const res = await fetch(BASE, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...csrfHeader() },
         body: JSON.stringify({ reportType, name: name.trim(), filters: currentFilters(), shared: shareNew }),
       })
       const data = await res.json()
@@ -125,7 +126,7 @@ export default function SavedViews({ reportType, canShare }: { reportType: strin
     setBusy(true)
     try {
       const res = await fetch(`${BASE}/${id}`, {
-        method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+        method: 'PATCH', headers: { 'Content-Type': 'application/json', ...csrfHeader() }, body: JSON.stringify(body),
       })
       const data = await res.json()
       if (!res.ok) { flash('err', data.error ?? 'Could not update that view.'); return }
@@ -140,7 +141,7 @@ export default function SavedViews({ reportType, canShare }: { reportType: strin
     if (!window.confirm(`Delete the saved view "${v.name}"? The report itself is unaffected.`)) return
     setBusy(true)
     try {
-      const res = await fetch(`${BASE}/${v.id}`, { method: 'DELETE' })
+      const res = await fetch(`${BASE}/${v.id}`, { method: 'DELETE', headers: { ...csrfHeader() } })
       const data = await res.json()
       if (!res.ok) { flash('err', data.error ?? 'Could not delete that view.'); return }
       setSelected('')

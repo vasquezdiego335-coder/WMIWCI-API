@@ -6,6 +6,7 @@
 
 import { useState } from 'react'
 import { useRouter } from 'next/navigation'
+import { csrfHeader } from '../../_client'
 
 type Vocabulary = {
   segments: Record<string, string>
@@ -70,7 +71,7 @@ export default function AudienceBuilder({ vocabulary, saved }: { vocabulary: Voc
     try {
       const res = await fetch('/api/admin/email-marketing/audiences', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...csrfHeader() },
         body: JSON.stringify({ action, name: name.trim() || undefined, definition: definition() }),
       })
       const body = await res.json()

@@ -5,6 +5,7 @@
 
 import { useState } from 'react'
 import { useRouter } from 'next/navigation'
+import { csrfHeader } from '../../_client'
 
 export default function SuppressionActions({ email, reason }: { email: string; reason: string }) {
   const router = useRouter()
@@ -22,7 +23,7 @@ export default function SuppressionActions({ email, reason }: { email: string; r
     try {
       const res = await fetch('/api/admin/email-marketing/suppressions', {
         method: 'DELETE',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...csrfHeader() },
         body: JSON.stringify({ email, reason: why.trim() }),
       })
       const body = await res.json().catch(() => ({}))

@@ -2,6 +2,7 @@
 
 import { useState } from 'react'
 import { useRouter } from 'next/navigation'
+import { csrfHeader } from '../../_client'
 
 type Automation = {
   id: string
@@ -62,7 +63,7 @@ export default function AutomationBuilder({ automations, vocabulary, mayEdit }: 
     try {
       const res = await fetch('/api/admin/email-marketing/automations', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...csrfHeader() },
         body: JSON.stringify({ name, definition }),
       })
       const body = await res.json()
@@ -91,7 +92,7 @@ export default function AutomationBuilder({ automations, vocabulary, mayEdit }: 
     try {
       const res = await fetch('/api/admin/email-marketing/automations', {
         method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...csrfHeader() },
         body: JSON.stringify({ id, status }),
       })
       const body = await res.json()

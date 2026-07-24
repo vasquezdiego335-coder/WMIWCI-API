@@ -4,6 +4,7 @@
 // render, so what an owner approves on screen is what leaves the building.
 
 import { useState } from 'react'
+import { csrfHeader } from '../../_client'
 
 type Template = { key: string; name: string; emailClass: string; category: string }
 
@@ -73,7 +74,7 @@ export default function TestSendPanel({ templates, configuredRecipient }: { temp
     try {
       const res = await fetch('/api/admin/email-marketing/test-send', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...csrfHeader() },
         body: JSON.stringify({ template, to: target, overrideRecipient: usingOverride }),
       })
       const body = await res.json()

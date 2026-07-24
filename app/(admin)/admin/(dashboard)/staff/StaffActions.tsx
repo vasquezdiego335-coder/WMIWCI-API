@@ -2,6 +2,7 @@
 
 import { useState } from 'react'
 import { useRouter } from 'next/navigation'
+import { csrfHeader } from '../_client'
 
 export default function StaffActions({ userId, active, role }: { userId: string; active: boolean; role: string }) {
   const router = useRouter()
@@ -12,7 +13,7 @@ export default function StaffActions({ userId, active, role }: { userId: string;
     setLoading(true)
     await fetch(`/api/admin/staff/${userId}`, {
       method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...csrfHeader() },
       body: JSON.stringify({ active: !active }),
     })
     setLoading(false)
@@ -24,7 +25,7 @@ export default function StaffActions({ userId, active, role }: { userId: string;
     setLoading(true)
     await fetch(`/api/admin/staff/${userId}`, {
       method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...csrfHeader() },
       body: JSON.stringify({ role: newRole }),
     })
     setLoading(false)

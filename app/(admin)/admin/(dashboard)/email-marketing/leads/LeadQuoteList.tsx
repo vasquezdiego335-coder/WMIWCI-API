@@ -6,6 +6,7 @@
 
 import { useState } from 'react'
 import { useRouter } from 'next/navigation'
+import { csrfHeader } from '../../_client'
 
 type LeadRow = {
   id: string
@@ -45,7 +46,7 @@ export default function LeadQuoteList({ leads }: { leads: LeadRow[] }) {
     try {
       const res = await fetch(`/api/admin/email-marketing/leads/${lead.id}/quote`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...csrfHeader() },
         body: JSON.stringify(dollars !== null ? { estimatedValueCents: Math.round(dollars * 100) } : {}),
       })
       const body = await res.json()

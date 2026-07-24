@@ -9,6 +9,7 @@
 
 import { useState } from 'react'
 import { useRouter } from 'next/navigation'
+import { csrfHeader } from '../../_client'
 
 type Template = { key: string; name: string }
 type Audience = { id: string; name: string }
@@ -78,7 +79,7 @@ export default function CampaignComposer({
     try {
       const res = await fetch('/api/admin/email-marketing/campaigns', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...csrfHeader() },
         body: JSON.stringify({
           name: form.name, sourceKey: form.sourceKey, template: form.template,
           subject: form.subject || undefined, audienceId: form.audienceId || undefined,
@@ -121,7 +122,7 @@ export default function CampaignComposer({
     try {
       const res = await fetch('/api/admin/email-marketing/campaigns', {
         method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...csrfHeader() },
         body: JSON.stringify({ id, action, status, note, runId }),
       })
       const body = await res.json()

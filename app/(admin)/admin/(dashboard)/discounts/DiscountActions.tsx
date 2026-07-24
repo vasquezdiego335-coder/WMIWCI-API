@@ -2,6 +2,7 @@
 
 import { useState } from 'react'
 import { useRouter } from 'next/navigation'
+import { csrfHeader } from '../_client'
 
 export default function DiscountActions({ bookingId }: { bookingId: string }) {
   const router = useRouter()
@@ -22,7 +23,7 @@ export default function DiscountActions({ bookingId }: { bookingId: string }) {
       // so we call a dedicated admin endpoint
       const res = await fetch(`/api/admin/discounts/${bookingId}`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...csrfHeader() },
         body: JSON.stringify({ approve }),
       })
 
