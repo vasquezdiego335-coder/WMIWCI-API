@@ -70,7 +70,7 @@ export async function performSync(now = new Date()): Promise<SyncResult> {
       take: 200,
     }),
     prisma.lead.findMany({
-      select: { id: true, name: true, status: true, lostReason: true, createdAt: true, quotedAt: true, updatedAt: true },
+      select: { id: true, name: true, status: true, lostReason: true, createdAt: true, quotedAt: true, updatedAt: true, lifecycle: true },
       orderBy: { createdAt: 'desc' },
       take: 500,
     }),

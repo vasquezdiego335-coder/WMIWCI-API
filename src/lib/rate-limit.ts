@@ -59,6 +59,11 @@ export const LIMITS = {
   // Low-risk public inquiry forms — fail open so a limiter blip never eats a lead.
   contact: { name: 'contact', limit: 5, windowSec: 10 * 60, failMode: 'open' } as RateLimitConfig,
   lead: { name: 'lead', limit: 8, windowSec: 10 * 60, failMode: 'open' } as RateLimitConfig,
+  // Partial booking-lead capture fires several times per visitor (debounce +
+  // blur + step change), and NAT means many visitors share one IP. Generous +
+  // fail-open — this is a best-effort side channel that must never eat a lead
+  // or, being independent, ever affect the booking flow.
+  partialLead: { name: 'partial-lead', limit: 40, windowSec: 5 * 60, failMode: 'open' } as RateLimitConfig,
   coupon: { name: 'coupon', limit: 6, windowSec: 10 * 60, failMode: 'open' } as RateLimitConfig,
   // Server-to-server (already token-gated) — a generous ceiling against runaway loops.
   notifyLead: { name: 'notify-lead', limit: 60, windowSec: 60, failMode: 'open' } as RateLimitConfig,

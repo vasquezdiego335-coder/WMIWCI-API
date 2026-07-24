@@ -201,6 +201,18 @@ function leadWhere(f: Record<string, unknown>): Record<string, unknown> {
   if (f.originZip) where.zip = f.originZip
   if (f.marketingSource) where.utmSource = f.marketingSource
   if (f.campaignSourceKey) where.utmCampaign = f.campaignSourceKey
+  // ── PROMOTIONAL CONSENT GATE (owner spec 2026-07-24) ──────────────────────
+  // A self-captured partial-booking lead (PARTIAL / IN_PROGRESS / ABANDONED) is
+  // NOT promotable unless it explicitly opted in. Entering an email to request a
+  // move is not consent to marketing. Excludes those rows unless
+  // emailMarketingConsent === true. Ordinary CRM leads (lifecycle null) and
+  // CONVERTED leads are UNAFFECTED — so no existing audience changes. Prisma's
+  // `not: true` on a nullable boolean matches both false and null.
+  // Mirrors leads.partialLeadBlockedFromPromo() (the unit-tested definition).
+  where.NOT = {
+    lifecycle: { in: ['PARTIAL', 'IN_PROGRESS', 'ABANDONED'] },
+    emailMarketingConsent: { not: true },
+  }
   return where
 }
 
