@@ -1,6 +1,7 @@
 import { test, before } from 'node:test'
 import assert from 'node:assert/strict'
-import { signReferralCode, verifyReferralCode, isWellFormedReferralCode } from '../referral-code'
+import { signReferralCode, verifyReferralCode, isWellFormedReferralCode, referralRedeemUrl } from '../referral-code'
+import { unsafeUrlReason } from '../../emails/validation'
 
 before(() => {
   process.env.REFERRAL_SECRET = 'test_secret_do_not_use_in_prod'
@@ -46,4 +47,33 @@ test('verify never throws when the secret is missing', () => {
   assert.doesNotThrow(() => verifyReferralCode('MIC-AAAAAA', 'cust_A'))
   assert.equal(verifyReferralCode('MIC-AAAAAA', 'cust_A'), false)
   process.env.REFERRAL_SECRET = saved
+})
+
+// ── REDEMPTION URL (owner request 2026-07-24) ────────────────────────────────
+// `referral-reward` requires `redeemUrl`; nothing produced one, so the template
+// fell back to '#' and every send was refused ("unparseable URL"). These pin the
+// generator AND the property that actually matters: the URL it builds must pass
+// the same link validator the email guard runs.
+test('referralRedeemUrl builds an absolute https booking link carrying the code', () => {
+  const url = referralRedeemUrl('MIC-7F3A2X')
+  assert.ok(url.startsWith('https://'), 'must be absolute https')
+  assert.ok(url.includes('/booking-form.html'), 'must land on the booking form')
+  const q = new URL(url).searchParams
+  assert.equal(q.get('code'), 'MIC-7F3A2X')
+  assert.equal(q.get('src'), 'referral_reward', 'attribution must survive')
+})
+
+test('referralRedeemUrl uppercases/trims the code and omits it when absent', () => {
+  assert.equal(new URL(referralRedeemUrl('  mic-abc123 ')).searchParams.get('code'), 'MIC-ABC123')
+  const none = new URL(referralRedeemUrl())
+  assert.equal(none.searchParams.get('code'), null)
+  assert.equal(none.searchParams.get('src'), 'referral_reward')
+})
+
+test('referralRedeemUrl passes the EMAIL LINK VALIDATOR (the original failure)', () => {
+  // This is the assertion that would have caught the production defect.
+  assert.equal(unsafeUrlReason(referralRedeemUrl('MIC-7F3A2X')), null)
+  assert.equal(unsafeUrlReason(referralRedeemUrl()), null)
+  // ...and the old broken value is still correctly refused.
+  assert.ok(unsafeUrlReason('#') !== null)
 })

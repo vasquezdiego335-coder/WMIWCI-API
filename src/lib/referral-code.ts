@@ -66,3 +66,44 @@ export function verifyReferralCode(code: string | undefined | null, customerId: 
   if (a.length !== b.length) return false
   return timingSafeEqual(a, b)
 }
+
+// ════════════════════════════════════════════════════════════════════════
+//  REDEMPTION URL (owner request 2026-07-24)
+//  ---------------------------------------------------------------------
+//  `referral-reward` declares `redeemUrl` as a REQUIRED link, but nothing ever
+//  produced one — so the template defaulted to '#', assertEmailPayload refused
+//  it ("unparseable URL"), and the email could never be sent. This builds the
+//  real link.
+//
+//  It points at the BOOKING FORM on the marketing site (not APP_URL, which is
+//  the API backend): redeeming a reward means booking the next move. The base
+//  comes from MARKETING_SITE_URL — the same env var followups.ts already uses
+//  for its book link — so nothing is hard-coded to one host.
+//
+//  The reward code travels as `?code=`, which the booking form reads to prefill
+//  its coupon field. `src=referral_reward` preserves attribution through the
+//  existing ?src= pipeline. Codes are uppercased to match the form's input.
+//
+//  NOTE ON ENFORCEMENT (unchanged, and deliberately so): as the header above
+//  states, a code is tamper-EVIDENT, not self-enforcing. The team still
+//  verifies it at booking review before any card is charged — which is exactly
+//  what the coupon note on the form promises the customer.
+// ════════════════════════════════════════════════════════════════════════
+
+/** Marketing-site base, trailing slash stripped. Mirrors followups.ts BOOK_URL. */
+function marketingBase(): string {
+  return (process.env.MARKETING_SITE_URL?.trim() || 'https://www.moveitclearit.com').replace(/\/+$/, '')
+}
+
+/**
+ * The CTA link for a referral reward email: the booking form, carrying the
+ * reward code and referral attribution. Always an absolute https URL, so it
+ * satisfies the email link validator.
+ */
+export function referralRedeemUrl(rewardCode?: string | null): string {
+  const base = marketingBase()
+  const params = new URLSearchParams({ src: 'referral_reward' })
+  const code = (rewardCode ?? '').trim().toUpperCase()
+  if (code) params.set('code', code)
+  return `${base}/booking-form.html?${params.toString()}`
+}
