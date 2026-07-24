@@ -130,15 +130,29 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     )
   }
 
-  const result = await sendTestEmail({
-    template,
-    to: recipient.email,
-    subject: built.subject,
-    html: built.html,
-    text: built.text,
-    payload: built.payload,
-    isOverride: recipient.isOverride,
-  })
+  // guardedSend THROWS on a provider rejection (by design — that makes BullMQ
+  // retry it in the worker context). Here we call it inline in the request, so
+  // an uncaught throw becomes an empty 500 the browser reports as "Unexpected
+  // end of JSON input". Catch it and return the ACTUAL reason as JSON.
+  let result: Awaited<ReturnType<typeof sendTestEmail>>
+  try {
+    result = await sendTestEmail({
+      template,
+      to: recipient.email,
+      subject: built.subject,
+      html: built.html,
+      text: built.text,
+      payload: built.payload,
+      isOverride: recipient.isOverride,
+    })
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    log.error({ err: message, template, recipient: recipient.email }, 'test send failed (provider rejection or transport error)')
+    return NextResponse.json(
+      { sent: false, error: message || 'The email provider rejected the send.' },
+      { status: 502 }
+    )
+  }
 
   // Show the owner the LEDGER ROW, not just the provider answer. "It said sent"
   // and "the system recorded it as delivered" are different claims, and the

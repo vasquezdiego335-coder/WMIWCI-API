@@ -24,7 +24,7 @@ const GATED = /\/api\/(admin|crew)\//
 
 // Login posts to /api/auth/login, which is NOT in the middleware matcher, so it
 // is intentionally exempt from the CSRF requirement.
-const EXEMPT_FILES = new Set(['login/page.tsx'])
+const EXEMPT_FILES = ['login/page.tsx']
 
 function walk(dir: string): string[] {
   const out: string[] = []
@@ -41,7 +41,7 @@ test('every mutating admin client component sends the CSRF token', () => {
 
   for (const file of walk(ADMIN_ROOT)) {
     const rel = file.slice(ADMIN_ROOT.length + 1).replace(/\\/g, '/')
-    if ([...EXEMPT_FILES].some((e) => rel.endsWith(e))) continue
+    if (EXEMPT_FILES.some((e) => rel.endsWith(e))) continue
 
     const src = readFileSync(file, 'utf8')
 
