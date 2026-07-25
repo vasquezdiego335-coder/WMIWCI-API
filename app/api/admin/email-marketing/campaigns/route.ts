@@ -158,6 +158,10 @@ const PatchSchema = z.object({
   runId: z.string().trim().optional(),
   /** For action:'transition'. */
   status: z.string().trim().optional(),
+  /** For action:'transition' to SCHEDULED — the send time. Optional here because
+   *  it may already have been set via action:'update'; one of the two must
+   *  supply it (see the SCHEDULED guard below). */
+  scheduledAt: z.string().trim().optional(),
   /** For action:'update'. */
   patch: z
     .object({
@@ -344,8 +348,42 @@ export async function PATCH(req: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ error: 'The campaign has not been approved by an owner.' }, { status: 409 })
   }
 
+  // ── SCHEDULED REQUIRES A SEND TIME (staging rehearsal 2026-07-25) ─────────
+  // This transition previously set status=SCHEDULED without ever checking
+  // `scheduledAt`. The dispatch sweep selects on
+  //   status: 'SCHEDULED' AND emailConfig.scheduledAt <= now
+  // so a null send time can NEVER match — the campaign sat in SCHEDULED,
+  // reported success to the operator, and silently never sent. A real campaign
+  // could miss its window with no error anywhere.
+  //
+  // Now the transition is refused unless a send time exists (supplied here or
+  // previously via action:'update'), and any time supplied is written in the
+  // SAME transaction as the status change, so the two can never disagree.
+  let scheduledAtToSet: Date | null = null
+  if (target === 'SCHEDULED') {
+    const supplied = parsed.data.scheduledAt
+    if (supplied) {
+      const d = new Date(supplied)
+      if (Number.isNaN(d.getTime())) {
+        return NextResponse.json({ error: 'scheduledAt is not a valid date.' }, { status: 400 })
+      }
+      scheduledAtToSet = d
+    }
+    const effective = scheduledAtToSet ?? config.scheduledAt
+    if (!effective) {
+      return NextResponse.json(
+        {
+          error:
+            'A send time is required before a campaign can be scheduled. Set scheduledAt (use the current time to send on the next sweep), then schedule again.',
+        },
+        { status: 400 }
+      )
+    }
+  }
+
   await prisma.$transaction([
     prisma.marketingCampaign.update({ where: { id }, data: { status: target, updatedById: session?.userId ?? null } }),
+    ...(scheduledAtToSet ? [prisma.emailCampaignConfig.update({ where: { campaignId: id }, data: { scheduledAt: scheduledAtToSet } })] : []),
     ...(note ? [prisma.emailCampaignConfig.update({ where: { campaignId: id }, data: { statusNote: note } })] : []),
     prisma.auditLog.create({
       data: {
