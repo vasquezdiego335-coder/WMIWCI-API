@@ -25,6 +25,7 @@
 // ════════════════════════════════════════════════════════════════════════
 
 import { guardedSend, type SendOutcome } from './email-guard'
+import { referralRedeemUrl } from './referral-code'
 import { templateByKey } from './email-registry'
 import { REQUIRED_FIELDS } from '../emails/validation'
 import { buildMarketingContext, applyMarketingContext } from './marketing-context'
@@ -104,6 +105,9 @@ export function syntheticPayload(template: string, appUrl: string): Record<strin
     portalUrl: `${appUrl}/my-booking/TEST-TOKEN`,
     reviewUrl: process.env.GOOGLE_REVIEW_URL?.trim() || `${appUrl}/review`,
     referralUrl: `${appUrl}/referral/TEST-CODE`,
+    // Real generated redemption link — `referral-reward` requires it, and a
+    // "SAMPLE redeemUrl" string is not a URL, so the send was refused.
+    redeemUrl: referralRedeemUrl('MIC-TEST01'),
     checkoutUrl: `${appUrl}/book`,
     invoiceUrl: `${appUrl}/my-booking/TEST-TOKEN`,
     supportEmail: process.env.EMAIL_REPLY_TO ?? 'support@moveitclearit.com',
@@ -114,9 +118,17 @@ export function syntheticPayload(template: string, appUrl: string): Record<strin
 
   // Guarantee every declared required field has SOMETHING, so a test failure is
   // a real template problem rather than a gap in this fixture.
+  //
+  // URL-AWARE FALLBACK (production incident 2026-07-24): the generic filler used
+  // to assign the literal string `SAMPLE redeemUrl` to EVERY missing field. For a
+  // field the template renders as a LINK that is not a URL, so assertEmailPayload
+  // refused the send ("unparseable URL") and the test could never pass — which is
+  // exactly how `referral-reward` presented. A missing *Url field now gets a real
+  // absolute URL, so a test failure again means a genuine template problem.
   const required = (REQUIRED_FIELDS as Record<string, readonly string[]>)[template] ?? []
   for (const field of required) {
-    if (base[field] === undefined) base[field] = `SAMPLE ${field}`
+    if (base[field] !== undefined) continue
+    base[field] = /url$/i.test(field) ? `${appUrl}/sample/${field}` : `SAMPLE ${field}`
   }
   return base
 }
