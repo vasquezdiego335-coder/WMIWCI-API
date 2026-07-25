@@ -101,7 +101,7 @@ async function processScheduledJob(job: Job<ScheduledJobData>): Promise<void> {
           customerName: booking.customer.name,
           displayId: booking.displayId,
           requestedDate: booking.requestedDate?.toISOString(),
-          checkoutUrl: `${appUrl}/api/stripe/checkout?resume=${bookingId}`,
+          checkoutUrl: `${appUrl}/api/stripe/checkout/resume?booking=${booking.id}`,
           portalUrl: `${appUrl}/my-booking/${booking.customerToken}`,
           heroGifUrl: process.env.EMAIL_HERO_GIF_URL || 'https://moveitclearit.com/email/truck-hero.gif',
           locale: booking.customer.locale,

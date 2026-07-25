@@ -137,7 +137,11 @@ test('abandoned checkout builds the real continuation link', async () => {
   const result = await buildRecipientContext('abandoned-checkout', bookingCandidate, deps())
   assert.ok(result.ok, JSON.stringify(result))
   if (result.ok) {
-    assert.equal(result.payload.checkoutUrl, 'https://moveitclearit.com/api/stripe/checkout?resume=bk1')
+    // ROUTE CORRECTED (link audit 2026-07-25): this previously asserted
+    // `/api/stripe/checkout?resume=bk1` — a route that DID NOT EXIST, so the
+    // test was faithfully pinning a 404. The real handler is
+    // app/api/stripe/checkout/resume/route.ts.
+    assert.equal(result.payload.checkoutUrl, 'https://moveitclearit.com/api/stripe/checkout/resume?booking=bk1')
     assert.equal(result.payload.displayId, 'MIC-1042')
   }
 })

@@ -175,7 +175,7 @@ function abandonedCheckoutBuilder(stage: 1 | 2 | 3) {
         customerName: booking.customer.name,
         displayId: booking.displayId,
         requestedDate: booking.requestedDate?.toISOString(),
-        checkoutUrl: `${base}/api/stripe/checkout?resume=${booking.id}`,
+        checkoutUrl: `${base}/api/stripe/checkout/resume?booking=${booking.id}`,
         portalUrl: `${base}/my-booking/${booking.customerToken}`,
         locale: booking.customer.locale,
         journey: 'abandoned',
