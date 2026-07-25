@@ -268,7 +268,14 @@ const CAMPAIGN_TEMPLATES: CampaignTemplateEntry[] = [
       // A referral ask requires the PROOF — a positive review. Same rule as
       // followups.ts, not a looser one for bulk sending.
       if (!booking.review?.isPositive) return fail('context_ineligible:no_positive_review')
-      const referralUrl = deps.env('REFERRAL_URL')?.trim() || `${marketingSiteUrl(deps)}/referral`
+      // FALLBACK FIXED (link audit 2026-07-25): this used to default to
+      // `${marketingSiteUrl}/referral`, a page that does not exist on the static
+      // marketing site — so with REFERRAL_URL unset the referral ask carried a
+      // 404 link (confirmed against production). It now falls back to the
+      // BOOKING FORM via the shared helper, which resolves and carries campaign
+      // attribution. followups.ts already fell back to a live page; the two
+      // paths now agree instead of one silently 404-ing.
+      const referralUrl = deps.env('REFERRAL_URL')?.trim() || bookingFormUrl(deps, 'referral')
       const referralCode = deps.env('REFERRAL_CODE')?.trim() || 'MOVE15'
       return {
         ok: true,
