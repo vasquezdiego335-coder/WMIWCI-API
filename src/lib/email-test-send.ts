@@ -104,11 +104,17 @@ export function syntheticPayload(template: string, appUrl: string): Record<strin
     bookingUrl: `${appUrl}/my-booking/TEST-TOKEN`,
     portalUrl: `${appUrl}/my-booking/TEST-TOKEN`,
     reviewUrl: process.env.GOOGLE_REVIEW_URL?.trim() || `${appUrl}/review`,
-    referralUrl: `${appUrl}/referral/TEST-CODE`,
+    // Fixture URLs must RESOLVE. These previously pointed at routes that do
+    // not exist (`/referral/TEST-CODE`, `/book`), so an owner clicking a test
+    // email got a 404 and reasonably concluded the TEMPLATE was broken — it
+    // was not. A test send is only useful if its buttons can be clicked.
+    referralUrl: referralRedeemUrl(),
     // Real generated redemption link — `referral-reward` requires it, and a
     // "SAMPLE redeemUrl" string is not a URL, so the send was refused.
     redeemUrl: referralRedeemUrl('MIC-TEST01'),
-    checkoutUrl: `${appUrl}/book`,
+    // Real resume route: a non-existent sample id redirects to the fallback
+    // rather than 404-ing, so the button behaves like the production one.
+    checkoutUrl: `${appUrl}/api/stripe/checkout/resume?booking=TEST-BOOKING-ID`,
     invoiceUrl: `${appUrl}/my-booking/TEST-TOKEN`,
     supportEmail: process.env.EMAIL_REPLY_TO ?? 'support@moveitclearit.com',
     reason: 'SAMPLE reason text for a test render.',
