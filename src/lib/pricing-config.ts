@@ -122,10 +122,17 @@ export type MovePackage = {
   requiresReview: boolean
 }
 
+/** PUBLIC NAMES vs INTERNAL KEYS (owner decision 2026-07-25)
+ *  The three studio tiers are marketed as Small / Standard / Large. The KEYS
+ *  stay `little-studio` / `half-studio` / `full-studio` on purpose: they are
+ *  persisted on every historic Booking row and referenced by the booking
+ *  form's radio values, so renaming them would orphan existing data. Change
+ *  `label` / `label_es` to change what customers read; never the key.
+ */
 export const PACKAGES: Record<PackageKey, MovePackage> = {
-  'little-studio': { key: 'little-studio', label: 'Little Studio', label_es: 'Estudio Pequeño', rooms: 1, requiresReview: false, price: c({ kind: 'fixed', amount: 379, label: 'Little Studio' }) },
-  'half-studio':   { key: 'half-studio',   label: 'Half Studio',   label_es: 'Medio Estudio',    rooms: 1, requiresReview: false, price: c({ kind: 'fixed', amount: 439, label: 'Half Studio' }) },
-  'full-studio':   { key: 'full-studio',   label: 'Full Studio',   label_es: 'Estudio Completo', rooms: 1, requiresReview: false, price: c({ kind: 'fixed', amount: 549, label: 'Full Studio' }) },
+  'little-studio': { key: 'little-studio', label: 'Small Studio',    label_es: 'Estudio Pequeño',  rooms: 1, requiresReview: false, price: c({ kind: 'fixed', amount: 379, label: 'Small Studio' }) },
+  'half-studio':   { key: 'half-studio',   label: 'Standard Studio', label_es: 'Estudio Estándar', rooms: 1, requiresReview: false, price: c({ kind: 'fixed', amount: 439, label: 'Standard Studio' }) },
+  'full-studio':   { key: 'full-studio',   label: 'Large Studio',    label_es: 'Estudio Grande',   rooms: 1, requiresReview: false, price: c({ kind: 'fixed', amount: 549, label: 'Large Studio' }) },
   '1br':           { key: '1br',           label: '1 Bedroom',     label_es: '1 Recámara',       rooms: 2, requiresReview: false, price: c({ kind: 'fixed', amount: 649, label: '1 Bedroom' }) },
   '2br':           { key: '2br',           label: '2 Bedrooms',    label_es: '2 Recámaras',      rooms: 3, requiresReview: false, price: c({ kind: 'fixed', amount: 779, label: '2 Bedrooms' }) },
 
