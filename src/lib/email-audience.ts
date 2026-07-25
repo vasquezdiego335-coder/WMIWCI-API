@@ -341,6 +341,45 @@ function dedupe(rows: BookingRow[], f: Record<string, unknown>): Candidate[] {
 
 // ── Preview (with every exclusion named) ────────────────────────────────
 
+/**
+ * THE PROMOTIONAL CONSENT GATE (near-miss 2026-07-25).
+ *
+ * The consent requirement was previously enforced only inside `leadWhere()`, so
+ * it covered LEAD-based segments and nothing else. `bookingWhere()` filters on
+ * `isInternalTest` alone — so every BOOKING-based segment (abandoned_booking,
+ * completed_customers, repeat/first_time, review_eligible, referral_eligible,
+ * reengagement_eligible) resolved real customers who had NEVER opted in.
+ *
+ * Caught while rehearsing a 1-recipient campaign: `abandoned_booking` returned
+ * SIX people, five with `emailMarketingConsent = null`, two of them real
+ * customers with June/July bookings.
+ *
+ * Enforcing here — at the shared, email-keyed choke point both `previewAudience`
+ * and `resolveAudienceDetailed` run — makes the rule true for EVERY segment at
+ * once, present and future, rather than relying on each resolver to remember.
+ *
+ * Consent may live on either record (a person can be a Lead, a Customer, or
+ * both), so an explicit `true` on EITHER grants it. Anything else — false, null,
+ * or no record at all — is NOT consent. Entering an email is not opting in.
+ */
+async function consentingEmails(emails: string[]): Promise<Set<string>> {
+  if (emails.length === 0) return new Set()
+  const [customers, leads] = await Promise.all([
+    prisma.customer.findMany({
+      where: { email: { in: emails }, emailMarketingConsent: true },
+      select: { email: true },
+    }),
+    prisma.lead.findMany({
+      where: { email: { in: emails }, emailMarketingConsent: true },
+      select: { email: true },
+    }),
+  ])
+  const set = new Set<string>()
+  for (const r of customers) set.add(normalizeEmail(r.email))
+  for (const r of leads) if (r.email) set.add(normalizeEmail(r.email))
+  return set
+}
+
 export type AudiencePreview = {
   segment: SegmentKey
   segmentLabel: string
@@ -353,6 +392,8 @@ export type AudiencePreview = {
     complaint: number
     otherSuppression: number
     marketingOptOut: number
+    /** No explicit promotional opt-in (fails closed — absence is not consent). */
+    noConsent: number
     duplicate: number
   }
   /** Who would actually be mailed. */
@@ -375,7 +416,7 @@ export async function previewAudience(def: AudienceDefinition): Promise<Audience
     segment: def.segment,
     segmentLabel: SEGMENTS[def.segment],
     totalCandidates: 0,
-    excluded: { invalidAddress: 0, unsubscribed: 0, hardBounce: 0, complaint: 0, otherSuppression: 0, marketingOptOut: 0, duplicate: 0 },
+    excluded: { invalidAddress: 0, unsubscribed: 0, hardBounce: 0, complaint: 0, otherSuppression: 0, marketingOptOut: 0, noConsent: 0, duplicate: 0 },
     eligible: 0,
     truncated: false,
     sample: [],
@@ -404,9 +445,10 @@ export async function previewAudience(def: AudienceDefinition): Promise<Audience
     }
 
     const emails = unique.map((c) => c.email)
-    const [suppressions, optedOut] = await Promise.all([
+    const [suppressions, optedOut, consenting] = await Promise.all([
       prisma.emailSuppression.findMany({ where: { email: { in: emails } }, select: { email: true, reason: true } }),
       prisma.customer.findMany({ where: { email: { in: emails }, marketingOptOut: true }, select: { email: true } }),
+      consentingEmails(emails),
     ])
 
     const byEmail = new Map(suppressions.map((s) => [s.email, s.reason as string]))
@@ -435,6 +477,12 @@ export async function previewAudience(def: AudienceDefinition): Promise<Audience
       // list and must be honoured for promotional mail too.
       if (optOut.has(c.email)) {
         base.excluded.marketingOptOut++
+        continue
+      }
+      // PROMOTIONAL CONSENT — required for every segment. Absence of an explicit
+      // opt-in is NOT permission, so this fails closed.
+      if (!consenting.has(c.email)) {
+        base.excluded.noConsent++
         continue
       }
       eligible.push(c)
@@ -489,9 +537,10 @@ export async function resolveAudienceDetailed(def: AudienceDefinition): Promise<
   }
 
   const emails = unique.map((c) => c.email)
-  const [suppressions, optedOut] = await Promise.all([
+  const [suppressions, optedOut, consenting] = await Promise.all([
     prisma.emailSuppression.findMany({ where: { email: { in: emails } }, select: { email: true, reason: true } }),
     prisma.customer.findMany({ where: { email: { in: emails }, marketingOptOut: true }, select: { email: true } }),
+    consentingEmails(emails),
   ])
   const suppressionByEmail = new Map(suppressions.map((s) => [s.email, s.reason as string]))
   const optOut = new Set(optedOut.map((c) => normalizeEmail(c.email)))
@@ -509,6 +558,11 @@ export async function resolveAudienceDetailed(def: AudienceDefinition): Promise<
     }
     if (optOut.has(c.email)) {
       excluded.push({ candidate: c, reason: 'marketing_opt_out' })
+      continue
+    }
+    // PROMOTIONAL CONSENT — required for every segment; fails closed.
+    if (!consenting.has(c.email)) {
+      excluded.push({ candidate: c, reason: 'no_consent' })
       continue
     }
     eligible.push(c)
