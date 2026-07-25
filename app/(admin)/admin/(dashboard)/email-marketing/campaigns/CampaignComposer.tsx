@@ -103,15 +103,46 @@ export default function CampaignComposer({
     }
   }
 
-  async function act(id: string, action: string, status?: string, runId?: string) {
+  async function act(id: string, action: string, status?: string, runId?: string, existingScheduledAt?: string | null) {
     let note: string | undefined
+    let scheduledAt: string | undefined
     if (status === 'CANCELLED' || status === 'FAILED') {
       const reason = prompt(`Reason for marking this campaign ${status}?`)
       if (!reason?.trim()) return
       note = reason.trim()
     }
+    // ── SEND TIME (staging rehearsal 2026-07-25) ────────────────────────────
+    // Scheduling used to PATCH without a send time. The dispatch sweep selects
+    // on `status = SCHEDULED AND scheduledAt <= now`, so a null could never
+    // match: the campaign showed "Scheduled" and then silently never sent. The
+    // API now refuses that transition, so the UI has to be able to supply one.
+    if (status === 'SCHEDULED' && !existingScheduledAt) {
+      const entered = prompt(
+        'Send time for this campaign.\n\n' +
+          'Leave blank to send on the next sweep (within ~5 minutes).\n' +
+          'Or enter a local date/time, e.g. 2026-07-25 18:30',
+        ''
+      )
+      if (entered === null) return // cancelled
+      const trimmed = entered.trim()
+      if (trimmed) {
+        const parsedDate = new Date(trimmed.replace(' ', 'T'))
+        if (Number.isNaN(parsedDate.getTime())) {
+          setErrors(['That send time could not be read. Use a format like 2026-07-25 18:30, or leave it blank to send now.'])
+          return
+        }
+        scheduledAt = parsedDate.toISOString()
+      } else {
+        scheduledAt = new Date().toISOString() // "send on the next sweep"
+      }
+    }
     if (status === 'SCHEDULED' || status === 'ACTIVE') {
-      if (!confirm(`Move this campaign to ${status}?\n\nOnce ${status}, it may put email in front of real customers.`)) return
+      const when = scheduledAt
+        ? `\n\nSend time: ${new Date(scheduledAt).toLocaleString()}`
+        : existingScheduledAt
+          ? `\n\nSend time: ${new Date(existingScheduledAt).toLocaleString()}`
+          : ''
+      if (!confirm(`Move this campaign to ${status}?\n\nOnce ${status}, it may put email in front of real customers.${when}`)) return
     }
     if (action === 'approve' && !confirm('Approve this campaign for sending?\n\nThis is the owner authorization step and is recorded in the audit log.')) return
     if (action === 'dispatch' && !confirm('Start sending this campaign NOW?\n\nThe audience is resolved from current data, frozen into a run, and real customers receive email. This is recorded in the audit log.')) return
@@ -123,7 +154,7 @@ export default function CampaignComposer({
       const res = await fetch('/api/admin/email-marketing/campaigns', {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json', ...csrfHeader() },
-        body: JSON.stringify({ id, action, status, note, runId }),
+        body: JSON.stringify({ id, action, status, note, runId, scheduledAt }),
       })
       const body = await res.json()
       if (!res.ok) setErrors([body.error ?? `Failed (${res.status})`])
@@ -212,6 +243,19 @@ export default function CampaignComposer({
                     Approved by {c.approvedByName ?? 'an owner'}
                   </div>
                 )}
+                {/* SEND TIME — shown explicitly. A SCHEDULED campaign with no
+                    send time can never be picked up by the dispatch sweep, and
+                    that state used to be invisible: the row said "SCHEDULED"
+                    while the campaign was silently undispatchable. */}
+                {c.scheduledAt ? (
+                  <div style={{ fontSize: '11px', color: C.muted, marginTop: '4px' }}>
+                    Sends {new Date(c.scheduledAt).toLocaleString()}
+                  </div>
+                ) : c.status === 'SCHEDULED' ? (
+                  <div style={{ fontSize: '11px', color: C.red, marginTop: '4px', fontWeight: 600 }}>
+                    No send time set — this campaign will NOT dispatch. Move it back to Ready, then schedule it again.
+                  </div>
+                ) : null}
                 {c.statusNote && <div style={{ fontSize: '11px', color: C.muted, marginTop: '4px' }}>{c.statusNote}</div>}
               </div>
             </div>
@@ -238,7 +282,7 @@ export default function CampaignComposer({
               {c.allowedTransitions.map((t) => (
                 <SmallBtn
                   key={t}
-                  onClick={() => act(c.id, 'transition', t)}
+                  onClick={() => act(c.id, 'transition', t, undefined, c.scheduledAt)}
                   busy={busy === c.id + 'transition' + t}
                   tone={t === 'CANCELLED' || t === 'FAILED' ? C.red : t === 'ACTIVE' || t === 'SCHEDULED' ? C.orange : undefined}
                 >
