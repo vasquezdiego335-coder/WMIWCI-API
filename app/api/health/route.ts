@@ -50,6 +50,34 @@ function linkVarsHealth() {
   }
 }
 
+/**
+ * Email feature flags AS THIS PROCESS SEES THEM.
+ *
+ * Reported because a flag set in the hosting dashboard and a flag visible to the
+ * running process are different facts: the value only enters `process.env` on
+ * restart, and an exact-string comparison ('true') rejects "TRUE", "True", "1"
+ * and any stray whitespace. An operator set EMAIL_PROMOTIONS_ENABLED, saw the
+ * admin still report it off, and had no way to tell which of those it was.
+ *
+ * `raw` is the literal value so a casing/whitespace mistake is visible, and
+ * `effective` is what the code actually decides. These are booleans and short
+ * words — never secrets.
+ */
+function emailFlags() {
+  const flag = (name: string) => {
+    const raw = process.env[name]
+    return { raw: raw === undefined ? null : raw, effective: raw === 'true' }
+  }
+  return {
+    EMAIL_SENDING_ENABLED: flag('EMAIL_SENDING_ENABLED'),
+    EMAIL_PROMOTIONS_ENABLED: flag('EMAIL_PROMOTIONS_ENABLED'),
+    EMAIL_JOURNEYS_ENABLED: flag('EMAIL_JOURNEYS_ENABLED'),
+    MARKETING_FOLLOWUPS_ENABLED: flag('MARKETING_FOLLOWUPS_ENABLED'),
+    REFERRAL_PROGRAM_ENABLED: flag('REFERRAL_PROGRAM_ENABLED'),
+    PARTIAL_BOOKING_EMAIL_CAPTURE_ENABLED: flag('PARTIAL_BOOKING_EMAIL_CAPTURE_ENABLED'),
+  }
+}
+
 // GET /api/health — liveness + readiness probe.
 // Returns 200 when the DB is reachable AND all required env vars are present
 // AND APP_URL is a usable URL; 503 otherwise. Only env-var PRESENCE is
@@ -76,6 +104,7 @@ export async function GET(): Promise<NextResponse> {
       db,
       appUrl,
       linkVars: linkVarsHealth(),
+      emailFlags: emailFlags(),
       env: {
         ok: env.ok,
         missingRequired: env.missingRequired,
