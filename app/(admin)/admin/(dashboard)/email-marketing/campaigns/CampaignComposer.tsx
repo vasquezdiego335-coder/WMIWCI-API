@@ -39,6 +39,7 @@ type CampaignRow = {
   scheduledAt: string | null
   approvedByName: string | null
   approvedAt: string | null
+  needsReapproval: boolean
   statusNote: string | null
   validation: { ok: boolean; errors: string[]; warnings: string[]; checkedAt: string } | null
   runs: RunRow[]
@@ -243,6 +244,13 @@ export default function CampaignComposer({
                     Approved by {c.approvedByName ?? 'an owner'}
                   </div>
                 )}
+                {/* Say WHY re-approval is needed. Without this the Approve button
+                    reappearing on an already-approved campaign looks like a bug. */}
+                {c.approvedAt && c.needsReapproval && (
+                  <div style={{ fontSize: '11px', color: C.amber, marginTop: '4px', fontWeight: 600 }}>
+                    Edited after approval (validating counts as an edit) — dispatch will refuse until it is approved again.
+                  </div>
+                )}
                 {/* SEND TIME — shown explicitly. A SCHEDULED campaign with no
                     send time can never be picked up by the dispatch sweep, and
                     that state used to be invisible: the row said "SCHEDULED"
@@ -276,7 +284,13 @@ export default function CampaignComposer({
 
             <div style={{ display: 'flex', gap: '7px', flexWrap: 'wrap' }}>
               <SmallBtn onClick={() => act(c.id, 'validate')} busy={busy === c.id + 'validate'}>Validate</SmallBtn>
-              {(c.status === 'VALIDATING' || c.status === 'READY') && !c.approvedAt && (
+              {/* Approve is offered whenever the dispatch guard would DEMAND it —
+                  not only before the first approval. Validating writes its result
+                  and bumps updatedAt, which invalidates an existing approval; the
+                  old condition (!c.approvedAt) then hid the button and left the
+                  campaign permanently undispatchable with an error telling the
+                  owner to do the very thing the UI would not let them do. */}
+              {c.needsReapproval && (
                 <SmallBtn onClick={() => act(c.id, 'approve')} busy={busy === c.id + 'approve'} tone={C.green}>Approve</SmallBtn>
               )}
               {c.allowedTransitions.map((t) => (
