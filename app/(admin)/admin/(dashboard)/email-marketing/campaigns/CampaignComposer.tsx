@@ -296,7 +296,13 @@ export default function CampaignComposer({
                   </div>
                 ) : c.status === 'SCHEDULED' ? (
                   <div style={{ fontSize: '11px', color: C.red, marginTop: '4px', fontWeight: 600 }}>
-                    No send time set — this campaign will NOT dispatch. Move it back to Ready, then schedule it again.
+                    {/* The old copy said "move it back to Ready, then schedule it
+                        again". SCHEDULED -> READY is not a legal transition, so
+                        that instruction could not be followed — it sent the
+                        operator into the bug #8 dead end. Approval now repairs
+                        the send time in place. */}
+                    No send time set — this campaign will NOT dispatch. Click Re-approve and enter a send time (or leave it blank to send on the
+                    next sweep).
                   </div>
                 ) : null}
                 {c.statusNote && <div style={{ fontSize: '11px', color: C.muted, marginTop: '4px' }}>{c.statusNote}</div>}

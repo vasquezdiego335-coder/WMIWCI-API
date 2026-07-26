@@ -66,14 +66,22 @@ const n = (c: Record<string, number>, k: string) => c[k] ?? 0
 
 /** Recipient states that never reached the provider and never will on their own. */
 const NEVER_SENT = ['PENDING', 'DEFERRED']
-/** States that are explanations, not failures — a decision was recorded. */
-const EXPLAINED = ['SKIPPED', 'SUPPRESSED', 'UNSUBSCRIBED', 'INELIGIBLE', 'CONTEXT_INVALID', 'CANCELLED']
+/**
+ * States that are explanations, not failures — a decision was recorded.
+ *
+ * CANCELLED is deliberately NOT in this list. A cancelled recipient was never
+ * given a reason to be excluded; it was abandoned, usually by a cancelled run or
+ * by reconciliation. Counting it as "skipped with a recorded reason" overstates
+ * how much of the outcome was decided on purpose.
+ */
+const EXPLAINED = ['SKIPPED', 'SUPPRESSED', 'UNSUBSCRIBED', 'INELIGIBLE', 'CONTEXT_INVALID']
 
 export function diagnoseRun(input: RunDiagnosisInput): RunDiagnosis {
   const c = input.recipientCounts ?? {}
   const sent = n(c, 'SENT')
   const failed = n(c, 'FAILED')
   const explained = EXPLAINED.reduce((t, k) => t + n(c, k), 0)
+  const cancelled = n(c, 'CANCELLED')
   const neverSent = NEVER_SENT.reduce((t, k) => t + n(c, k), 0)
   const inFlight = n(c, 'SENDING')
 
@@ -117,7 +125,14 @@ export function diagnoseRun(input: RunDiagnosisInput): RunDiagnosis {
   } else {
     parts.push(`The run is ${input.status.toLowerCase().replace(/_/g, ' ')}.`)
   }
-  if (explained > 0) parts.push(`${explained} recipient${explained === 1 ? '' : 's'} were skipped with a recorded reason.`)
+  if (explained > 0) {
+    parts.push(`${explained} recipient${explained === 1 ? ' was' : 's were'} skipped with a recorded reason.`)
+  }
+  if (cancelled > 0) {
+    parts.push(
+      `${cancelled} ${cancelled === 1 ? 'was' : 'were'} cancelled — abandoned by this run rather than excluded for a reason.`
+    )
+  }
   if (neverSent > 0 && !terminal) parts.push(`${neverSent} still waiting.`)
   if (unknownOutcome > 0) {
     parts.push(
