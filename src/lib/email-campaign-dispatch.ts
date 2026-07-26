@@ -34,6 +34,7 @@
 // ════════════════════════════════════════════════════════════════════════
 
 import { prisma } from './db'
+import { needsReapproval } from './email-campaign-approval'
 import { queueLogger } from './logger'
 import { scheduledQueue } from './queues'
 import { guardedSend } from './email-guard'
@@ -112,7 +113,7 @@ export function preflightCampaign(campaign: CampaignWithConfig, now: Date = new 
   // Approval must still describe THIS config. Any material edit after the
   // approval invalidates it — a dispatch on a stale approval sends a campaign
   // nobody approved.
-  if (editedAfterApproval({ approvedAt: config.approvedAt, updatedAt: config.updatedAt })) {
+  if (needsReapproval(config)) {
     return { ok: false, error: 'The campaign was edited after it was approved. Re-validate and re-approve it.' }
   }
 

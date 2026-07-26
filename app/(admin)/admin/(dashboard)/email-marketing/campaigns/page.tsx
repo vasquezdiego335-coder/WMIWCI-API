@@ -16,7 +16,7 @@ import { parseRange } from '@/lib/email-admin'
 import { prisma } from '@/lib/db'
 import { templateRegistry } from '@/lib/email-registry'
 import { allowedTransitions, type CampaignState } from '@/lib/email-campaign'
-import { editedAfterApproval } from '@/lib/email-campaign-run'
+import { needsReapproval } from '@/lib/email-campaign-approval'
 import CampaignComposer from './CampaignComposer'
 import { PageHeader, Card, COLORS, Empty, tableStyles as T, SoftBadge } from '../../_ui'
 import { EmailTabs, RangePicker, money } from '../_shared'
@@ -92,7 +92,7 @@ export default async function EmailCampaignsPage({ searchParams }: { searchParam
       // (validating writes the result, which bumps updatedAt). Surface that so
       // the UI can offer the re-approval the error message asks for — without
       // this the campaign is undispatchable and there is no button to fix it.
-      needsReapproval: c.emailConfig ? editedAfterApproval({ approvedAt: c.emailConfig.approvedAt, updatedAt: c.emailConfig.updatedAt }) : true,
+      needsReapproval: c.emailConfig ? needsReapproval(c.emailConfig) : true,
       statusNote: c.emailConfig?.statusNote ?? null,
       validation: (c.emailConfig?.validation ?? null) as never,
       runs: c.emailRuns.map((r) => ({

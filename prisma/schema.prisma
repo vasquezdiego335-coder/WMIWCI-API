@@ -2739,6 +2739,18 @@ model EmailCampaignConfig {
   /// Result of the last validation run: { ok, errors[], warnings[], checkedAt }.
   validation Json?
   /// Why a campaign is CANCELLED or FAILED, in words.
+  /// Hash of the SEND-AFFECTING configuration at the moment of approval
+  /// (owner spec 2026-07-26). Approval was previously invalidated by comparing
+  /// `updatedAt > approvedAt` — but ANY write to this row bumps updatedAt,
+  /// including persisting a validation RESULT. So validating (which the dispatch
+  /// error explicitly instructs the operator to do) destroyed the approval, and
+  /// the only workaround was "do not click Validate after Approve".
+  /// Hashing the fields that decide WHO receives WHAT means validation output,
+  /// status notes, dispatch metadata and audit writes no longer invalidate an
+  /// approval, while a real content / audience / schedule change still does.
+  /// NULL on rows approved before this column existed — those fall back to the
+  /// old timestamp rule, which is conservative (it asks for re-approval).
+  approvedConfigHash String? @map("approved_config_hash")
   statusNote String? @map("status_note")
 
   dispatchedAt DateTime? @map("dispatched_at")

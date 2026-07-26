@@ -14,6 +14,7 @@
 // state machine checks.
 
 import { NextRequest, NextResponse } from 'next/server'
+import { sendConfigHash } from '@/lib/email-campaign-approval'
 import { getSession } from '@/lib/auth'
 import { prisma } from '@/lib/db'
 import { apiLogger } from '@/lib/logger'
@@ -320,7 +321,17 @@ export async function PATCH(req: NextRequest): Promise<NextResponse> {
     await prisma.$transaction([
       prisma.emailCampaignConfig.update({
         where: { campaignId: id },
-        data: { approvedAt: new Date(), approvedById: session?.userId ?? null, approvedByName: session?.name ?? null },
+        data: {
+          approvedAt: new Date(),
+          approvedById: session?.userId ?? null,
+          approvedByName: session?.name ?? null,
+          // RECORD WHAT WAS APPROVED. The dispatch guard compares this hash
+          // instead of `updatedAt > approvedAt`, so persisting a validation
+          // result — or any other non-send-affecting write to this row — no
+          // longer destroys the approval. Only a real change to who receives
+          // what does. Same function the guard and the UI use.
+          approvedConfigHash: sendConfigHash(config),
+        },
       }),
       prisma.marketingCampaign.update({ where: { id }, data: { status: 'READY' } }),
       prisma.auditLog.create({
