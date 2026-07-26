@@ -317,10 +317,11 @@ export async function listScheduled(limit = 200): Promise<{ rows: ScheduledSend[
     const rows: ScheduledSend[] = jobs.map((job) => {
       const data = (job.data ?? {}) as Record<string, unknown>
       const type = String(data.type ?? job.name ?? 'unknown')
-      // Journey is encoded in the stable jobId: `journey:<journey>:<stage>:<id>`
-      // or `followup:<type>:<bookingId>`.
+      // Journey is encoded in the stable jobId: `journey__<journey>__<stage>__<id>`
+      // or `followup__<type>__<bookingId>`. The separator is "__" and NOT ":" —
+      // BullMQ rejects a custom id containing a colon.
       const id = String(job.id ?? '')
-      const journey = id.startsWith('journey:') ? id.split(':')[1] : id.startsWith('followup:') ? 'post-job' : null
+      const journey = id.startsWith('journey__') ? id.split('__')[1] : id.startsWith('followup__') ? 'post-job' : null
       const template = templateForStage(type)
       return {
         jobId: id,

@@ -90,7 +90,7 @@ export const QUOTE_STAGES: JourneyStage[] = [
 
 /** Stable job id — the anti-duplication guarantee at the queue level. */
 export function jobIdFor(journey: string, stage: string, subjectId: string): string {
-  return `journey:${journey}:${stage}:${subjectId}`
+  return `journey__${journey}__${stage}__${subjectId}`
 }
 
 /** Enqueue one stage. Guarded so a Redis stall can never hang the caller. */
@@ -246,9 +246,12 @@ export async function onBookingCancelled(bookingId: string): Promise<void> {
   const ids = [
     ...ABANDONED_STAGES.map((s) => jobIdFor('abandoned', s.type, bookingId)),
     ...REMINDER_OFFSETS.map((r) => jobIdFor('pre-move', r.type, bookingId)),
-    // Post-job follow-ups use followups.ts's own jobId scheme.
+    // Post-job follow-ups use followups.ts's own jobId scheme. The separator
+    // MUST stay in step with addFollowup() there — a mismatch means cancel()
+    // looks up an id that was never created and the follow-up still fires for a
+    // cancelled booking. Covered by queue-jobid-safety.test.ts.
     ...['review-request', 'review-reminder', 'repeat-reminder', 'referral-ask'].map(
-      (t) => `followup:${t}:${bookingId}`
+      (t) => `followup__${t}__${bookingId}`
     ),
   ]
   await Promise.all(ids.map(cancel))

@@ -143,7 +143,7 @@ async function enqueueFollowup(bookingId: string, type: FollowupType, fireAt: Da
   const allowed = shiftIntoAllowedHours(fireAt)
   const delay = allowed.getTime() - Date.now()
   // Stable jobId => a second completion trigger can't create a duplicate job.
-  await addScheduled(type, bookingId, delay, `followup:${type}:${bookingId}`).catch((err) =>
+  await addScheduled(type, bookingId, delay, `followup__${type}__${bookingId}`).catch((err) =>
     log.warn({ err: err instanceof Error ? err.message : String(err), bookingId, type }, 'enqueue follow-up failed (non-fatal)')
   )
 }
@@ -392,7 +392,7 @@ export async function runFollowup(bookingId: string, type: FollowupType): Promis
   // Quiet hours — defer into the allowed window rather than sending now.
   const wait = msUntilAllowed()
   if (wait > 0) {
-    await addScheduled(type, bookingId, wait, `followup:${type}:${bookingId}:retry`).catch(() => {})
+    await addScheduled(type, bookingId, wait, `followup__${type}__${bookingId}__retry`).catch(() => {})
     return 'deferred-quiet-hours'
   }
 
