@@ -26,6 +26,16 @@ type RunRow = {
   startedAt: string
   completedAt: string | null
   error: string | null
+  errorExplained?: string | null
+  diagnosis?: {
+    stage: string
+    deadNoDelivery: boolean
+    unknownOutcome: number
+    providerAttempted: boolean
+    safeToRetry: number
+    nextAction: string
+    summary: string
+  } | null
 }
 
 type CampaignRow = {
@@ -46,6 +56,12 @@ type CampaignRow = {
 }
 
 const C = { navy: '#0A1628', orange: '#FF5A1F', green: '#10B981', red: '#EF4444', amber: '#F59E0B', muted: '#6B7280', faint: '#9CA3AF', line: '#F1F1F1' }
+
+const STAGE_LABEL: Record<string, string> = {
+  audience_resolution: 'resolving the audience',
+  preparation: 'preparing recipients (nothing sent)',
+  sending: 'sending',
+}
 
 const STATE_COLOR: Record<string, string> = {
   DRAFT: C.faint, VALIDATING: C.amber, READY: C.green, SCHEDULED: '#3B82F6',
@@ -360,6 +376,7 @@ function RunCard({ run, busy, onAct, campaignId }: { run: RunRow; busy: string |
   const pending = (rc.PENDING ?? 0) + (rc.SENDING ?? 0) + (rc.DEFERRED ?? 0)
   const sendable = run.status === 'QUEUED' || run.status === 'SENDING'
   const isBusy = (a: string) => busy === campaignId + a + run.id
+  const d = run.diagnosis
   return (
     <div style={{ marginTop: '10px', padding: '12px 14px', borderRadius: '10px', border: `1px solid ${C.line}`, backgroundColor: '#FAFAFA' }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
@@ -382,14 +399,45 @@ function RunCard({ run, busy, onAct, campaignId }: { run: RunRow; busy: string |
         {(rc.SKIPPED ?? 0) > 0 && <span style={{ color: C.muted }}>{rc.SKIPPED} skipped</span>}
         {(rc.CANCELLED ?? 0) > 0 && <span style={{ color: C.muted }}>{rc.CANCELLED} cancelled</span>}
       </div>
-      {run.error && <p style={{ fontSize: '12px', color: C.red, margin: '0 0 8px' }}>✗ {run.error}</p>}
+      {(run.errorExplained ?? run.error) && (
+        <p style={{ fontSize: '12px', color: C.red, margin: '0 0 8px' }}>✗ {run.errorExplained ?? run.error}</p>
+      )}
+
+      {/* WHAT HAPPENED AND WHAT TO DO (Phase 1 req. 5). A provider error string
+          on its own does not say whether anyone was emailed or whether retrying
+          is safe — and the tempting guess is the one that double-sends. */}
+      {d && d.stage !== 'none' && (
+        <div style={{ margin: '0 0 10px', padding: '10px 12px', borderRadius: '8px', backgroundColor: '#FFFFFF', border: `1px solid ${d.unknownOutcome > 0 ? `${C.amber}66` : C.line}` }}>
+          <div style={{ display: 'flex', gap: '8px', alignItems: 'baseline', flexWrap: 'wrap', marginBottom: '5px' }}>
+            <span style={{ fontSize: '10px', fontWeight: 700, color: C.muted, textTransform: 'uppercase', letterSpacing: '0.04em' }}>
+              Failed at: {STAGE_LABEL[d.stage] ?? d.stage}
+            </span>
+            <span style={{ fontSize: '10px', color: C.faint }}>run {run.id}</span>
+          </div>
+          <p style={{ fontSize: '12px', color: '#374151', margin: '0 0 6px', lineHeight: 1.5 }}>{d.summary}</p>
+          <div style={{ display: 'flex', gap: '12px', flexWrap: 'wrap', fontSize: '11px', color: C.muted, marginBottom: '6px' }}>
+            <span>Provider attempted: <strong style={{ color: d.providerAttempted ? C.navy : C.muted }}>{d.providerAttempted ? 'yes' : 'no'}</strong></span>
+            <span>Safe to retry: <strong style={{ color: d.safeToRetry > 0 ? C.green : C.muted }}>{d.safeToRetry}</strong></span>
+            {d.unknownOutcome > 0 && (
+              <span style={{ color: C.amber, fontWeight: 700 }}>⚠ {d.unknownOutcome} unknown provider outcome</span>
+            )}
+          </div>
+          <p style={{ fontSize: '12px', fontWeight: 600, color: d.unknownOutcome > 0 ? C.amber : C.navy, margin: 0, lineHeight: 1.5 }}>
+            → {d.nextAction}
+          </p>
+        </div>
+      )}
+
       <div style={{ display: 'flex', gap: '7px', flexWrap: 'wrap' }}>
         {sendable && <SmallBtn onClick={() => onAct('pause_run')} busy={isBusy('pause_run')} tone={C.amber}>Pause</SmallBtn>}
         {run.status === 'PAUSED' && <SmallBtn onClick={() => onAct('resume_run')} busy={isBusy('resume_run')} tone={C.green}>Resume</SmallBtn>}
         {(sendable || run.status === 'PAUSED') && (
           <SmallBtn onClick={() => onAct('cancel_run')} busy={isBusy('cancel_run')} tone={C.red}>Cancel remaining</SmallBtn>
         )}
-        {((rc.FAILED ?? 0) > 0 || run.status === 'COMPLETED_WITH_ERRORS') && (
+        {/* Retry is offered only when it CANNOT duplicate a delivery. With an
+            unknown provider outcome the button would be the wrong thing to
+            click, so it is not shown at all — the diagnosis says why. */}
+        {((rc.FAILED ?? 0) > 0 || run.status === 'COMPLETED_WITH_ERRORS') && (d ? d.unknownOutcome === 0 : true) && (
           <SmallBtn onClick={() => onAct('retry_failed')} busy={isBusy('retry_failed')} tone={C.orange}>Retry failed</SmallBtn>
         )}
       </div>

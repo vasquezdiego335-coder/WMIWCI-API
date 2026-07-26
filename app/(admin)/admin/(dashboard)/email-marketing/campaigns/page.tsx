@@ -16,6 +16,7 @@ import { parseRange } from '@/lib/email-admin'
 import { prisma } from '@/lib/db'
 import { templateRegistry } from '@/lib/email-registry'
 import { allowedTransitions, type CampaignState } from '@/lib/email-campaign'
+import { diagnoseRun, explainRunError } from '@/lib/email-run-diagnosis'
 import { needsReapproval } from '@/lib/email-campaign-approval'
 import CampaignComposer from './CampaignComposer'
 import { PageHeader, Card, COLORS, Empty, tableStyles as T, SoftBadge } from '../../_ui'
@@ -71,6 +72,18 @@ export default async function EmailCampaignsPage({ searchParams }: { searchParam
     const recipientGroups = runIds.length
       ? await prisma.emailCampaignRecipient.groupBy({ by: ['runId', 'status'], where: { runId: { in: runIds } }, _count: { _all: true } })
       : []
+    // Rows the provider was actually handed. This is what decides whether a
+    // retry can duplicate a real delivery, so it is counted from the data rather
+    // than inferred from the run status.
+    const submittedByRun = new Map<string, number>()
+    if (runIds.length) {
+      const submitted = await prisma.emailCampaignRecipient.groupBy({
+        by: ['runId'],
+        where: { runId: { in: runIds }, emailSendId: { not: null } },
+        _count: { _all: true },
+      })
+      for (const g of submitted) submittedByRun.set(g.runId, g._count._all)
+    }
     const countsByRun = new Map<string, Record<string, number>>()
     for (const g of recipientGroups) {
       const entry = countsByRun.get(g.runId) ?? {}
@@ -107,6 +120,20 @@ export default async function EmailCampaignsPage({ searchParams }: { searchParam
         startedAt: r.startedAt.toISOString(),
         completedAt: r.completedAt ? r.completedAt.toISOString() : null,
         error: r.error,
+        // OPERATIONAL DIAGNOSIS (Phase 1 req. 5). A provider error string alone
+        // does not tell the owner whether anyone was emailed or whether a retry
+        // is safe, and the tempting guess is the one that double-sends.
+        diagnosis: diagnoseRun({
+          runId: r.id,
+          status: r.status,
+          totalRecipients: r.totalRecipients,
+          recipientCounts: countsByRun.get(r.id) ?? {},
+          submittedCount: submittedByRun.get(r.id) ?? 0,
+          error: r.error,
+          startedAt: r.startedAt,
+          completedAt: r.completedAt,
+        }),
+        errorExplained: explainRunError(r.error),
       })),
     }))
   } catch (err) {
