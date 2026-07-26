@@ -522,7 +522,7 @@ export async function resumeRun(runId: string, actor: ActorContext): Promise<Con
       // Deterministic per resume-generation? No — the ORIGINAL id may still
       // exist as a completed job; suffix with a nonce derived from time bucket
       // so a resume can re-enqueue while a same-second double-click cannot.
-      { jobId: `${campaignBatchJobId(runId, g.batchIndex)}:resume:${Math.floor(Date.now() / 10_000)}` }
+      { jobId: `${campaignBatchJobId(runId, g.batchIndex)}__resume__${Math.floor(Date.now() / 10_000)}` }
     )
   }
   await audit('EMAIL_CAMPAIGN_RUN_RESUMED', actor, { runId, batches: pending.length })
@@ -567,7 +567,7 @@ export async function retryFailedRecipients(runId: string, actor: ActorContext):
       await scheduledQueue.add(
         'campaign-batch',
         { type: 'campaign-batch', payload: { runId, batchIndex: g.batchIndex } },
-        { jobId: `${campaignBatchJobId(runId, g.batchIndex)}:retry:${Math.floor(Date.now() / 10_000)}` }
+        { jobId: `${campaignBatchJobId(runId, g.batchIndex)}__retry__${Math.floor(Date.now() / 10_000)}` }
       )
     }
   }
@@ -667,7 +667,7 @@ export async function sweepCampaignRuns(): Promise<{ dispatched: number; reopene
         await scheduledQueue.add(
           'campaign-batch',
           { type: 'campaign-batch', payload: { runId: run.id, batchIndex: g.batchIndex } },
-          { jobId: `${campaignBatchJobId(run.id, g.batchIndex)}:sweep:${Math.floor(Date.now() / 60_000)}` }
+          { jobId: `${campaignBatchJobId(run.id, g.batchIndex)}__sweep__${Math.floor(Date.now() / 60_000)}` }
         )
         requeued++
       }

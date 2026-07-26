@@ -541,7 +541,7 @@ export async function executeAutomationStage(enrollmentId: string, stageIndex: n
       .add(
         'automation-stage',
         { type: 'automation-stage', payload: { enrollmentId, stageIndex } },
-        { delay, jobId: `${automationJobId(automation.id, enrollment.version, stage.key, enrollmentId)}:retry:${Math.floor(outcome.retryAt.getTime() / 60_000)}` }
+        { delay, jobId: `${automationJobId(automation.id, enrollment.version, stage.key, enrollmentId)}__retry__${Math.floor(outcome.retryAt.getTime() / 60_000)}` }
       )
       .catch(() => undefined)
     await prisma.emailAutomationEnrollment.update({ where: { id: enrollmentId }, data: { nextRunAt: outcome.retryAt, ...stamp } })

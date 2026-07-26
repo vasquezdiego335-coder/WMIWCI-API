@@ -156,12 +156,12 @@ export function batchCount(totalRecipients: number, batchSize = CAMPAIGN_BATCH_S
 
 /** Deterministic queue job id for one batch of one run. */
 export function campaignBatchJobId(runId: string, batchIndex: number): string {
-  return `campaign-run:${runId}:batch:${batchIndex}`
+  return `campaign-run__${runId}__batch__${batchIndex}`
 }
 
 /** Deterministic queue job id for one deferred-recipient retry. */
 export function campaignRecipientJobId(recipientId: string, attempt: number): string {
-  return `campaign-recipient:${recipientId}:attempt:${attempt}`
+  return `campaign-recipient__${recipientId}__attempt__${attempt}`
 }
 
 /**

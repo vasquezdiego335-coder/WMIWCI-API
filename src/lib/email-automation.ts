@@ -268,7 +268,7 @@ export function canActivate(input: {
  * of silently overwriting one made under different rules.
  */
 export function automationJobId(automationId: string, version: number, stageKey: string, subjectId: string): string {
-  return `automation:${automationId}:v${version}:${stageKey}:${subjectId}`
+  return `automation__${automationId}__v${version}__${stageKey}__${subjectId}`
 }
 
 /** Summary line for the admin list. */
