@@ -184,9 +184,38 @@ export function validateCampaign(spec: CampaignSpec): CampaignValidation {
  * well-formed?"; approval asks "does a human with authority accept sending it?"
  * A campaign that validates is still not one that may send.
  */
+/**
+ * States a campaign may be (re-)approved from.
+ *
+ * SCHEDULED is included deliberately (bug #8, 2026-07-26). The dispatch guard
+ * refuses a campaign whose configuration changed after approval and instructs
+ * the operator to re-approve — but approval was restricted to VALIDATING/READY,
+ * and there is no legal SCHEDULED→READY transition. A SCHEDULED campaign needing
+ * re-approval was therefore permanently undispatchable: the UI offered Approve
+ * (correctly, the guard demanded it) and the server refused it with "Only a
+ * validated campaign can be approved."
+ *
+ * Re-approving does not loosen anything: validation must still pass, must still
+ * be fresh, and approval still records the exact configuration hash. It only
+ * makes the recovery the error message asks for actually reachable.
+ *
+ * ACTIVE is included for the same reason, and was found by the invariant test
+ * rather than by a report: an ACTIVE campaign that is edited also demands
+ * re-approval, and its only exits are PAUSED, COMPLETED and FAILED — none of
+ * which approval accepts. It was the same dead end one state along.
+ *
+ * Terminal and paused states stay excluded — approving a CANCELLED, FAILED,
+ * ARCHIVED or COMPLETED campaign is meaningless, and PAUSED must be resumed
+ * rather than re-approved.
+ */
+export const APPROVABLE_STATES: readonly CampaignState[] = ['VALIDATING', 'READY', 'SCHEDULED', 'ACTIVE']
+
 export function canApprove(state: CampaignState, validation: CampaignValidation | null): TransitionResult {
-  if (state !== 'VALIDATING' && state !== 'READY') {
-    return { ok: false, error: `Only a validated campaign can be approved. This one is ${state}.` }
+  if (!APPROVABLE_STATES.includes(state)) {
+    return {
+      ok: false,
+      error: `A ${state} campaign cannot be approved. Approval applies to a campaign that is validated, ready, scheduled or active.`,
+    }
   }
   if (!validation) return { ok: false, error: 'Run validation before approving.' }
   if (!validation.ok) {

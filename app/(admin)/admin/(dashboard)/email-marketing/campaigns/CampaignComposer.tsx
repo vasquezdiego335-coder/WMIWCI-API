@@ -104,7 +104,14 @@ export default function CampaignComposer({
     }
   }
 
-  async function act(id: string, action: string, status?: string, runId?: string, existingScheduledAt?: string | null) {
+  async function act(
+    id: string,
+    action: string,
+    status?: string,
+    runId?: string,
+    existingScheduledAt?: string | null,
+    campaignState?: string
+  ) {
     let note: string | undefined
     let scheduledAt: string | undefined
     if (status === 'CANCELLED' || status === 'FAILED') {
@@ -117,7 +124,13 @@ export default function CampaignComposer({
     // on `status = SCHEDULED AND scheduledAt <= now`, so a null could never
     // match: the campaign showed "Scheduled" and then silently never sent. The
     // API now refuses that transition, so the UI has to be able to supply one.
-    if (status === 'SCHEDULED' && !existingScheduledAt) {
+    // RE-APPROVING an already-SCHEDULED campaign that has no send time (bug #8):
+    // the API repairs the send time in the same call, because such a campaign
+    // cannot legally return to READY to be scheduled again. Same prompt.
+    const needsSendTime =
+      (status === 'SCHEDULED' && !existingScheduledAt) ||
+      (action === 'approve' && campaignState === 'SCHEDULED' && !existingScheduledAt)
+    if (needsSendTime) {
       const entered = prompt(
         'Send time for this campaign.\n\n' +
           'Leave blank to send on the next sweep (within ~5 minutes).\n' +
@@ -145,7 +158,13 @@ export default function CampaignComposer({
           : ''
       if (!confirm(`Move this campaign to ${status}?\n\nOnce ${status}, it may put email in front of real customers.${when}`)) return
     }
-    if (action === 'approve' && !confirm('Approve this campaign for sending?\n\nThis is the owner authorization step and is recorded in the audit log.')) return
+    if (action === 'approve') {
+      const lead =
+        campaignState === 'SCHEDULED'
+          ? 'Re-approve this SCHEDULED campaign?\n\nIt stays scheduled; this records approval of its current configuration.'
+          : 'Approve this campaign for sending?'
+      if (!confirm(`${lead}\n\nThis is the owner authorization step and is recorded in the audit log.`)) return
+    }
     if (action === 'dispatch' && !confirm('Start sending this campaign NOW?\n\nThe audience is resolved from current data, frozen into a run, and real customers receive email. This is recorded in the audit log.')) return
     if (action === 'cancel_run' && !confirm('Cancel the remaining recipients of this run?\n\nAlready-sent emails are unaffected; everyone still pending is marked cancelled.')) return
 
@@ -291,7 +310,13 @@ export default function CampaignComposer({
                   campaign permanently undispatchable with an error telling the
                   owner to do the very thing the UI would not let them do. */}
               {c.needsReapproval && (
-                <SmallBtn onClick={() => act(c.id, 'approve')} busy={busy === c.id + 'approve'} tone={C.green}>Approve</SmallBtn>
+                <SmallBtn
+                  onClick={() => act(c.id, 'approve', undefined, undefined, c.scheduledAt, c.status)}
+                  busy={busy === c.id + 'approve'}
+                  tone={C.green}
+                >
+                  {c.approvedAt ? 'Re-approve' : 'Approve'}
+                </SmallBtn>
               )}
               {c.allowedTransitions.map((t) => (
                 <SmallBtn

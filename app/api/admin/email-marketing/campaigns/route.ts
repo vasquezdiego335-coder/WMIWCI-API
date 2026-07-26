@@ -318,6 +318,37 @@ export async function PATCH(req: NextRequest): Promise<NextResponse> {
     const verdict = canApprove(state, validation)
     if (!verdict.ok) return NextResponse.json({ error: verdict.error }, { status: 409 })
 
+    // RE-APPROVAL IN PLACE (bug #8). A SCHEDULED campaign whose configuration
+    // changed is told by the dispatch guard to be approved again. It must keep
+    // its state: SCHEDULED -> READY is not a legal transition, and writing READY
+    // here would bypass the state machine and silently unschedule the campaign.
+    // Anything already past approval is re-approved IN PLACE. Only the
+    // pre-approval states move to READY.
+    const keepState = state !== 'VALIDATING' && state !== 'READY'
+
+    // A SCHEDULED campaign with no send time never dispatches (the sweep selects
+    // on `scheduledAt <= now`). Since it also cannot legally return to READY to
+    // be scheduled again, the send time is repairable right here — the same
+    // validation the transition path applies.
+    let repairScheduledAt: Date | null = null
+    if (state === 'SCHEDULED' && parsed.data.scheduledAt) {
+      const d = new Date(parsed.data.scheduledAt)
+      if (Number.isNaN(d.getTime())) {
+        return NextResponse.json({ error: 'scheduledAt is not a valid date.' }, { status: 400 })
+      }
+      repairScheduledAt = d
+    }
+    if (state === 'SCHEDULED' && !repairScheduledAt && !config.scheduledAt) {
+      return NextResponse.json(
+        {
+          error:
+            'This campaign is SCHEDULED with no send time, so it would never dispatch. Supply scheduledAt with this approval (use the current time to send on the next sweep).',
+          needsScheduledAt: true,
+        },
+        { status: 409 }
+      )
+    }
+
     await prisma.$transaction([
       prisma.emailCampaignConfig.update({
         where: { campaignId: id },
@@ -330,16 +361,35 @@ export async function PATCH(req: NextRequest): Promise<NextResponse> {
           // result — or any other non-send-affecting write to this row — no
           // longer destroys the approval. Only a real change to who receives
           // what does. Same function the guard and the UI use.
-          approvedConfigHash: sendConfigHash(config),
+          // The hash must describe what is being approved, so a send time
+          // repaired in this same call is part of it. scheduledAt is a hashed
+          // field: hashing the pre-repair config would leave the campaign
+          // instantly "edited after approval" again.
+          approvedConfigHash: sendConfigHash(repairScheduledAt ? { ...config, scheduledAt: repairScheduledAt } : config),
+          ...(repairScheduledAt ? { scheduledAt: repairScheduledAt } : {}),
         },
       }),
-      prisma.marketingCampaign.update({ where: { id }, data: { status: 'READY' } }),
+      // Re-approval keeps a SCHEDULED campaign scheduled; a first approval moves
+      // VALIDATING/READY to READY.
+      ...(keepState ? [] : [prisma.marketingCampaign.update({ where: { id }, data: { status: 'READY' as const } })]),
       prisma.auditLog.create({
-        data: { action: 'EMAIL_CAMPAIGN_APPROVED', userId: session?.userId ?? null, details: { campaignId: id, name: campaign.name } },
+        data: {
+          // One action, not a new enum value: adding to AuditAction needs a
+          // migration, and `reapproved` in the details carries the same fact.
+          action: 'EMAIL_CAMPAIGN_APPROVED',
+          userId: session?.userId ?? null,
+          details: {
+            campaignId: id,
+            name: campaign.name,
+            state,
+            reapproved: keepState,
+            ...(repairScheduledAt ? { scheduledAtSet: repairScheduledAt.toISOString() } : {}),
+          },
+        },
       }),
     ])
-    log.info({ campaignId: id, by: session?.userId }, 'email campaign APPROVED')
-    return NextResponse.json({ ok: true, status: 'READY' })
+    log.info({ campaignId: id, by: session?.userId, state, reapproved: keepState }, 'email campaign APPROVED')
+    return NextResponse.json({ ok: true, status: keepState ? state : 'READY' })
   }
 
   // ── transition ──
