@@ -163,6 +163,9 @@ const PatchSchema = z.object({
    *  it may already have been set via action:'update'; one of the two must
    *  supply it (see the SCHEDULED guard below). */
   scheduledAt: z.string().trim().optional(),
+  /** For action:'dispatch' — deliberate acceptance that an audience over the
+   *  cap will be cut off (audit E-05). Never defaulted true. */
+  acknowledgeTruncation: z.boolean().optional(),
   /** For action:'update'. */
   patch: z
     .object({
@@ -207,8 +210,13 @@ export async function PATCH(req: NextRequest): Promise<NextResponse> {
   // audience compatibility). Idempotent: a second call while a run is
   // unfinished returns that run.
   if (action === 'dispatch') {
-    const result = await dispatchCampaign(id, actor)
-    if (!result.ok) return NextResponse.json({ error: result.error }, { status: 409 })
+    const result = await dispatchCampaign(id, actor, { acknowledgeTruncation: parsed.data.acknowledgeTruncation === true })
+    if (!result.ok) {
+      // An over-cap audience is refused with a flag the UI turns into an
+      // explicit second confirmation, rather than a dead error (audit E-05).
+      const needsTruncationAck = /larger than \d+ and would be silently cut off/.test(result.error)
+      return NextResponse.json({ error: result.error, ...(needsTruncationAck ? { needsTruncationAck: true } : {}) }, { status: 409 })
+    }
     return NextResponse.json({ ok: true, runId: result.runId, totalRecipients: result.totalRecipients, alreadyRunning: result.alreadyRunning })
   }
 
@@ -220,7 +228,19 @@ export async function PATCH(req: NextRequest): Promise<NextResponse> {
     if (action === 'retry_failed') {
       const result = await retryFailedRecipients(runId, actor)
       if (!result.ok) return NextResponse.json({ error: result.error }, { status: 409 })
-      return NextResponse.json({ ok: true, reopened: result.reopened })
+      // needsReconciliation names the recipients the SERVER refused to retry
+      // because their provider outcome is unknown (audit E-07) — the operator
+      // must see that they were deliberately held, not quietly skipped.
+      return NextResponse.json({
+        ok: true,
+        reopened: result.reopened,
+        needsReconciliation: result.needsReconciliation,
+        ...(result.needsReconciliation > 0
+          ? {
+              notice: `${result.reopened} recipient(s) re-opened. ${result.needsReconciliation} were NOT retried because their provider outcome is unknown — resending could deliver a duplicate. Reconcile those against the Resend dashboard.`,
+            }
+          : {}),
+      })
     }
     const fn = action === 'pause_run' ? pauseRun : action === 'resume_run' ? resumeRun : cancelRun
     const result = await fn(runId, actor)

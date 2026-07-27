@@ -16,6 +16,7 @@ import { startScheduledWorker } from './scheduled.worker'
 import { startMarketingWorker } from './marketing.worker'
 import { startWebhookWorker } from './webhook.worker'
 import { logger } from '../lib/logger'
+import { assertEnv } from '../lib/env'
 
 // ── Startup diagnostics ──────────────────────────────────────────────────
 function printWorkerBanner(): void {
@@ -58,6 +59,19 @@ function printWorkerBanner(): void {
 
 async function main() {
   printWorkerBanner()
+
+  // ── FAIL LOUDLY, BEFORE ANYTHING CLAIMS A JOB (audit E-01) ─────────────
+  // assertEnv() existed and documented itself as "call at worker boot so a
+  // misconfigured deploy fails loudly instead of silently dropping jobs" — and
+  // nothing called it. A deploy missing RESEND_WEBHOOK_SECRET started cleanly,
+  // answered 503 to every provider webhook, and stopped suppressing bounces
+  // and complaints with no alert anywhere.
+  //
+  // This runs BEFORE the workers start, so a bad deploy exits non-zero and the
+  // host reports a failed release instead of a running-but-broken service.
+  assertEnv()
+  logger.info('  ✓ environment validated')
+
   logger.info('Starting BullMQ workers…')
 
   const emailWorker = startEmailWorker()

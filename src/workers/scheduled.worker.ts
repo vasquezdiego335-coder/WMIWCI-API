@@ -11,6 +11,8 @@ import { etDayRange, moveDateInRange, effectiveMoveDate } from '../lib/schedulin
 import { markStaleLeadsAbandoned, purgeAbandonedLeads } from '../lib/leads'
 import { dayOfMoveSms } from '../lib/waiting-time'
 import { processCampaignBatch, processRecipientRetry, sweepCampaignRuns } from '../lib/email-campaign-dispatch'
+import { retryPendingSideEffects } from '../lib/email-events'
+import { runEmailMonitoring } from '../lib/email-monitoring'
 import { executeAutomationStage, sweepAutomationEnrollments } from '../lib/email-automation-runtime'
 import { customerBalance, JOB_MONEY_PAYMENT_SELECT } from '../lib/job-money'
 import type { ScheduledJobData } from '../lib/queues'
@@ -398,6 +400,38 @@ async function processScheduledJob(job: Job<ScheduledJobData>): Promise<void> {
       break
     }
 
+    // ── EMAIL FEEDBACK RECOVERY (audit E-02) ──────────────────────
+    // `retryPendingSideEffects` existed, documented itself as the sweep that
+    // recovers failed suppressions, and was NEVER SCHEDULED. A bounce whose
+    // suppression write failed stayed `side_effect_failed` forever and the
+    // address remained sendable — the system would keep mailing a hard-bounced
+    // or complaining customer with nothing surfacing anywhere.
+    case 'email-side-effect-sweep': {
+      const result = await retryPendingSideEffects(50)
+      // A dead-lettered event means every retry is exhausted and only a human
+      // can suppress that address. It is logged at ERROR so log-based alerting
+      // catches it without extra plumbing.
+      const deadLettered = await prisma.emailEvent.count({ where: { processingStatus: 'dead_letter' } })
+      if (deadLettered > 0) {
+        log.error(
+          { deadLettered },
+          `EMAIL ALERT (critical): ${deadLettered} bounce/complaint event(s) exhausted every suppression retry — those addresses are STILL SENDABLE and must be suppressed by hand.`
+        )
+      }
+      log.info({ ...result, deadLettered }, 'email side-effect sweep complete')
+      break
+    }
+
+    // ── EMAIL MONITORING (audit E-04) ─────────────────────────────
+    // Every safety mechanism fails closed; none of them announced that they
+    // had. This turns the silent ones — complaint spikes, stranded recipients,
+    // stuck runs, missed schedules — into log-level alerts.
+    case 'email-monitoring': {
+      const report = await runEmailMonitoring()
+      log.info({ severity: report.severity, checks: report.checks.length, errors: report.errors.length }, 'email monitoring sweep complete')
+      break
+    }
+
     case 'campaign-sweep': {
       // Cron: dispatch due SCHEDULED campaigns, re-open stale claims,
       // re-enqueue lost batches, finalize settled runs.
@@ -533,6 +567,23 @@ async function registerCronJobs(): Promise<void> {
     'automation-sweep',
     { type: 'automation-sweep' },
     { repeat: { pattern: '*/15 * * * *' }, jobId: 'cron:automation-sweep' }
+  )
+
+  // email-side-effect-sweep: every 10 min — re-drives suppressions that failed
+  // to write. Cheap no-op when nothing is pending (audit E-02).
+  await scheduledQueue.add(
+    'email-side-effect-sweep',
+    { type: 'email-side-effect-sweep' },
+    { repeat: { pattern: '*/10 * * * *' }, jobId: 'cron:email-side-effect-sweep' }
+  )
+
+  // email-monitoring: every 10 min, offset from the sweep above so the two do
+  // not contend. Read-only; it repairs nothing, because a monitor that fixes
+  // things hides the problem it exists to reveal (audit E-04).
+  await scheduledQueue.add(
+    'email-monitoring',
+    { type: 'email-monitoring' },
+    { repeat: { pattern: '5-59/10 * * * *' }, jobId: 'cron:email-monitoring' }
   )
 
   // ── Daily lead hygiene (owner review 2026-07-24) ──

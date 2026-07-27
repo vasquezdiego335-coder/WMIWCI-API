@@ -179,7 +179,12 @@ export default async function EmailCampaignsPage({ searchParams }: { searchParam
                 <tr>
                   <th style={T.th}>Campaign</th>
                   <th style={T.th}>Status</th>
-                  <th style={{ ...T.th, textAlign: 'right' }}>Delivered</th>
+                  {/* "Delivered" overstated reality (audit E-06): this counts EmailSend
+                      rows with status='delivered', which means the PROVIDER ACCEPTED
+                      the API call — including messages that later hard-bounced. The
+                      honest word is Accepted. True delivery now lives in
+                      EmailSend.deliveredAt/bouncedAt/complainedAt. */}
+                  <th style={{ ...T.th, textAlign: 'right' }}>Accepted</th>
                   <th style={{ ...T.th, textAlign: 'right' }}>Clicked</th>
                   <th style={{ ...T.th, textAlign: 'right' }}>Bookings</th>
                   <th style={{ ...T.th, textAlign: 'right' }}>Collected revenue</th>

@@ -171,6 +171,55 @@ const firstRecipient = (to: string[] | string | undefined): string | null => {
 //  A replayed event whose side effect is unfinished is RE-DRIVEN, not skipped.
 // ════════════════════════════════════════════════════════════════════════
 
+// ════════════════════════════════════════════════════════════════════════
+//  DELIVERY-STATE PRECEDENCE (audit E-06)
+//  ---------------------------------------------------------------------
+//  `EmailSend.status = 'delivered'` means the PROVIDER ACCEPTED THE API CALL.
+//  Nothing ever wrote back what happened next, so a hard-bounced message read
+//  as delivered forever and no bounce rate could be computed from the table.
+//
+//  Events arrive OUT OF ORDER and are NOT mutually exclusive — a delivered
+//  message can later produce a complaint, and provider retries can deliver a
+//  `sent` after a `bounced`. So each fact gets its OWN column and each is
+//  written ONCE, first-writer-wins:
+//
+//    • a late `delivered` can never erase a recorded bounce;
+//    • a replayed event cannot move a timestamp that is already set;
+//    • a complaint and a delivery can both be true, because they are.
+//
+//  The conditional `where` makes the rule a database guarantee rather than an
+//  application convention: the update matches nothing if the column is set.
+// ════════════════════════════════════════════════════════════════════════
+
+/** Event type → the EmailSend column it settles. */
+const DELIVERY_COLUMN: Record<string, 'deliveredAt' | 'bouncedAt' | 'complainedAt'> = {
+  delivered: 'deliveredAt',
+  bounced: 'bouncedAt',
+  complained: 'complainedAt',
+}
+
+export async function applyDeliveryState(
+  emailSendId: string,
+  mappedType: string,
+  occurredAt: Date,
+  detail?: string
+): Promise<void> {
+  const column = DELIVERY_COLUMN[mappedType]
+  if (!column) return // opened/clicked/delayed carry no delivery verdict
+  try {
+    await prisma.emailSend.updateMany({
+      // FIRST WRITER WINS: `column: null` means a second or out-of-order event
+      // for the same fact matches zero rows and changes nothing.
+      where: { id: emailSendId, [column]: null } as never,
+      data: { [column]: occurredAt, ...(detail && column !== 'deliveredAt' ? { deliveryDetail: detail.slice(0, 500) } : {}) } as never,
+    })
+  } catch (err) {
+    // Never fail the webhook for a reporting column — the EmailEvent row is the
+    // authoritative record and the suppression side effect is what matters.
+    log.warn({ err: String(err), emailSendId, mappedType }, 'delivery-state write failed (non-fatal)')
+  }
+}
+
 /** Outcome of handling one provider event. `settled: false` ⇒ retry me. */
 export type EventOutcome = {
   result: string
@@ -298,6 +347,10 @@ export async function handleEmailEvent(event: ResendEvent, svixId: string): Prom
       },
       select: { id: true, sideEffectAttempts: true },
     })
+    // TRUE DELIVERY STATE (audit E-06). Written AFTER the event row exists, so
+    // the event is always the record of what the provider said and these
+    // columns are a derived convenience for reporting.
+    if (emailSend) await applyDeliveryState(emailSend.id, mappedType, occurredAt, bounceDetail)
   } catch (err) {
     if ((err as { code?: string })?.code === 'P2002') {
       // DUPLICATE DELIVERY. This is exactly where the old code gave up. Check

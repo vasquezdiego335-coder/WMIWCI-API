@@ -248,6 +248,8 @@ export type ScheduledJobData = {
     | 'campaign-batch' // payload: { runId, batchIndex }
     | 'campaign-recipient-retry' // payload: { recipientId }
     | 'campaign-sweep' // cron: dispatch due campaigns + recover stale runs
+    | 'email-side-effect-sweep' // cron: re-drive suppressions that failed to write
+    | 'email-monitoring' // cron: complaint/bounce rates, stuck runs, stranded recipients
     // ── Automation runtime (owner spec 2026-07-22) ──
     //    Producers: email-automation-runtime.ts.
     | 'automation-stage' // payload: { enrollmentId, stageIndex }

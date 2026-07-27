@@ -159,7 +159,12 @@ export function preflightCampaign(campaign: CampaignWithConfig, now: Date = new 
  * THE campaign executor entry point. Idempotent: a repeat call while a run is
  * unfinished returns that run instead of creating a duplicate.
  */
-export async function dispatchCampaign(campaignId: string, actor: ActorContext): Promise<DispatchResult> {
+export async function dispatchCampaign(
+  campaignId: string,
+  actor: ActorContext,
+  opts: { acknowledgeTruncation?: boolean } = {}
+): Promise<DispatchResult> {
+  const acknowledgedTruncation = opts.acknowledgeTruncation === true
   const campaign = await loadCampaign(campaignId)
   if (!campaign || campaign.channel !== 'EMAIL') return { ok: false, error: 'That email campaign does not exist.' }
   const config = campaign.emailConfig
@@ -206,7 +211,21 @@ export async function dispatchCampaign(campaignId: string, actor: ActorContext):
 
   try {
     // Resolve the audience from CURRENT state — never a cached preview.
-    const detailed = await resolveAudienceDetailed(preflight.audience)
+    // campaignId is passed so prior AMBIGUOUS sends for THIS campaign are held
+    // out (audit E-03) — the one path by which a re-dispatch could duplicate.
+    const detailed = await resolveAudienceDetailed(preflight.audience, { campaignId })
+
+    // TRUNCATION IS NOT SILENT (audit E-05). resolveCandidates stops at
+    // MAX_AUDIENCE, so recipients beyond it are never fetched and get NO row
+    // and NO reason — breaking the rule that every recipient is accounted for.
+    // The owner would see a completed campaign and believe everyone was mailed.
+    if (detailed.truncated && !acknowledgedTruncation) {
+      throw new Error(
+        `This audience is larger than ${MAX_AUDIENCE} and would be silently cut off at ${MAX_AUDIENCE} recipients. ` +
+          `Everyone beyond that would receive nothing and have no record explaining why. ` +
+          `Narrow the audience, or re-send this dispatch with acknowledgeTruncation to accept the cut deliberately.`
+      )
+    }
     const eligible = detailed.eligible.slice(0, MAX_AUDIENCE)
 
     // IDEMPOTENCY LAYER 2: UNIQUE(runId, email) + skipDuplicates.
@@ -242,7 +261,16 @@ export async function dispatchCampaign(campaignId: string, actor: ActorContext):
     const batches = batchCount(eligible.length)
     await prisma.emailCampaignRun.update({
       where: { id: run.id },
-      data: { status: 'QUEUED', totalRecipients: eligible.length, skippedCount: detailed.excluded.length },
+      data: {
+        status: 'QUEUED',
+        totalRecipients: eligible.length,
+        skippedCount: detailed.excluded.length,
+        // Recorded on the RUN so the operator sees it on the run card, not only
+        // in the audit log nobody reads during a send.
+        ...(detailed.truncated
+          ? { error: `TRUNCATED: the audience exceeded ${MAX_AUDIENCE}; recipients beyond that were not included in this run.` }
+          : {}),
+      },
     })
 
     // Enqueue bounded batches with deterministic job ids — a crash between two
@@ -271,6 +299,7 @@ export async function dispatchCampaign(campaignId: string, actor: ActorContext):
       totalRecipients: eligible.length,
       excluded: detailed.excluded.length,
       truncated: detailed.truncated,
+      truncationAcknowledged: detailed.truncated ? acknowledgedTruncation : undefined,
       template: config.template,
     })
 
@@ -543,17 +572,65 @@ export async function cancelRun(runId: string, actor: ActorContext): Promise<Con
   return { ok: true, status: 'CANCELLING' }
 }
 
-/** Deliberately re-open FAILED (and stuck-DEFERRED) recipients for another pass. */
-export async function retryFailedRecipients(runId: string, actor: ActorContext): Promise<{ ok: boolean; reopened: number; error?: string }> {
+/**
+ * Deliberately re-open FAILED (and stuck-DEFERRED) recipients for another pass.
+ *
+ * UNKNOWN OUTCOMES ARE REFUSED HERE, SERVER-SIDE (audit E-07). `ambiguous`
+ * outcomes map to FAILED, so a blanket re-open would sweep in recipients whose
+ * message may ALREADY have been delivered. The guard's terminal-status check
+ * would still block the actual duplicate — but that made the API's safety
+ * depend on a UI that hides the button, and any script or future automation
+ * calling this directly would bypass the operator's protection entirely.
+ *
+ * Such recipients are reported as `needsReconciliation` and left untouched, to
+ * be resolved against the provider dashboard by a human.
+ */
+export async function retryFailedRecipients(
+  runId: string,
+  actor: ActorContext
+): Promise<{ ok: boolean; reopened: number; needsReconciliation: number; error?: string }> {
   const run = await prisma.emailCampaignRun.findUnique({ where: { id: runId }, select: { status: true } })
-  if (!run) return { ok: false, reopened: 0, error: 'That run does not exist.' }
+  if (!run) return { ok: false, reopened: 0, needsReconciliation: 0, error: 'That run does not exist.' }
   if (!RUN_SENDABLE_STATES.has(run.status as RunState) && run.status !== 'COMPLETED_WITH_ERRORS') {
-    return { ok: false, reopened: 0, error: `Recipients of a ${run.status} run cannot be retried.` }
+    return { ok: false, reopened: 0, needsReconciliation: 0, error: `Recipients of a ${run.status} run cannot be retried.` }
   }
-  const { count } = await prisma.emailCampaignRecipient.updateMany({
+
+  // Candidates first, so the ambiguous ones can be excluded BY ID rather than
+  // re-opened and relied upon to fail later.
+  const candidates = await prisma.emailCampaignRecipient.findMany({
     where: { runId, status: { in: Array.from(RECIPIENT_RETRYABLE_STATES) as RecipientState[] } },
-    data: { status: 'PENDING', reason: 'manual_retry' },
+    select: { id: true, emailSendId: true },
   })
+  const withSend = candidates.filter((r) => r.emailSendId !== null)
+  let unknownIds = new Set<string>()
+  if (withSend.length > 0) {
+    // A send row that is terminal but NOT 'delivered' is an outcome we cannot
+    // rule out. 'delivered' means the provider accepted it, so re-opening is
+    // pointless but harmless; every other terminal state is ambiguous enough
+    // that resending could duplicate.
+    const rows = await prisma.emailSend.findMany({
+      where: { id: { in: withSend.map((r) => r.emailSendId as string) }, status: { in: UNRESOLVED_SEND_STATUSES } },
+      select: { id: true },
+    })
+    const unresolved = new Set(rows.map((r) => r.id))
+    unknownIds = new Set(withSend.filter((r) => unresolved.has(r.emailSendId as string)).map((r) => r.id))
+  }
+
+  const retryableIds = candidates.filter((r) => !unknownIds.has(r.id)).map((r) => r.id)
+  if (unknownIds.size > 0) {
+    log.warn({ runId, held: unknownIds.size }, 'retry withheld for recipients with an unknown provider outcome')
+    await prisma.emailCampaignRecipient.updateMany({
+      where: { id: { in: Array.from(unknownIds) } },
+      data: { reason: 'unknown_provider_outcome_not_retried' },
+    })
+  }
+
+  const { count } = retryableIds.length
+    ? await prisma.emailCampaignRecipient.updateMany({
+        where: { id: { in: retryableIds }, status: { in: Array.from(RECIPIENT_RETRYABLE_STATES) as RecipientState[] } },
+        data: { status: 'PENDING', reason: 'manual_retry' },
+      })
+    : { count: 0 }
   if (count > 0) {
     // A finished-with-errors run re-opens for the retry pass.
     if (run.status === 'COMPLETED_WITH_ERRORS') {
@@ -572,9 +649,15 @@ export async function retryFailedRecipients(runId: string, actor: ActorContext):
       )
     }
   }
-  await audit('EMAIL_CAMPAIGN_RETRY_INITIATED', actor, { runId, reopened: count })
-  return { ok: true, reopened: count }
+  await audit('EMAIL_CAMPAIGN_RETRY_INITIATED', actor, { runId, reopened: count, heldUnknownOutcome: unknownIds.size })
+  return { ok: true, reopened: count, needsReconciliation: unknownIds.size }
 }
+
+/**
+ * EmailSend statuses whose real-world outcome cannot be determined from our own
+ * data. A recipient anchored to one of these must never be auto-resent.
+ */
+const UNRESOLVED_SEND_STATUSES: string[] = ['ambiguous', 'sending', 'failed_terminal']
 
 // ── Finalization + recovery ─────────────────────────────────────────────
 
@@ -639,11 +722,30 @@ export async function sweepCampaignRuns(): Promise<{ dispatched: number; reopene
     select: { id: true },
     take: 10,
   })
+  let refused = 0
   for (const c of due) {
     const result = await dispatchCampaign(c.id, SYSTEM_ACTOR)
     if (result.ok && !result.alreadyRunning) dispatched++
-    else if (!result.ok) log.warn({ campaignId: c.id, error: result.error }, 'scheduled dispatch refused')
+    else if (!result.ok) {
+      refused++
+      log.warn({ campaignId: c.id, error: result.error }, 'scheduled dispatch refused')
+      // ── THE REFUSAL MUST BE VISIBLE (audit E-09) ──────────────────────
+      // Previously this was a log line and nothing else. A campaign the owner
+      // believed was scheduled would be refused every 5 minutes FOREVER — 288
+      // times a day — while the UI showed a healthy "Scheduled" badge. That is
+      // the exact silent-non-delivery trap behind bugs #2 and #8. The reason
+      // now lands on the campaign row, where the card already renders it.
+      await prisma.emailCampaignConfig
+        .update({
+          where: { campaignId: c.id },
+          data: {
+            statusNote: `Scheduled dispatch was refused at ${new Date().toISOString()}: ${result.error}`.slice(0, 500),
+          },
+        })
+        .catch((err) => log.warn({ err: String(err), campaignId: c.id }, 'could not persist refusal note'))
+    }
   }
+  if (refused > 0) log.warn({ refused }, 'scheduled campaigns refused dispatch — reasons written to statusNote')
 
   // 2 + 3 + 4 for unfinished runs.
   const active = await prisma.emailCampaignRun.findMany({
