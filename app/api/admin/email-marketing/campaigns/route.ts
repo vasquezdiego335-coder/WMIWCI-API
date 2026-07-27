@@ -381,11 +381,9 @@ export async function PATCH(req: NextRequest): Promise<NextResponse> {
           // result — or any other non-send-affecting write to this row — no
           // longer destroys the approval. Only a real change to who receives
           // what does. Same function the guard and the UI use.
-          // The hash must describe what is being approved, so a send time
-          // repaired in this same call is part of it. scheduledAt is a hashed
-          // field: hashing the pre-repair config would leave the campaign
-          // instantly "edited after approval" again.
-          approvedConfigHash: sendConfigHash(repairScheduledAt ? { ...config, scheduledAt: repairScheduledAt } : config),
+          // scheduledAt is NOT hashed (see sendConfigHash), so a send time
+          // repaired in this call cannot affect the approval identity.
+          approvedConfigHash: sendConfigHash(config),
           ...(repairScheduledAt ? { scheduledAt: repairScheduledAt } : {}),
         },
       }),

@@ -46,12 +46,40 @@ test('3. Changing the AUDIENCE requires re-approval', () => {
   assert.equal(needsReapproval({ ...c, audienceId: null }), true)
 })
 
-test('3b. Template, schedule, tracking and discount changes require re-approval', () => {
+test('3b. Template, tracking and discount changes require re-approval', () => {
   const c = approved()
   assert.equal(needsReapproval({ ...c, template: 'review-request' }), true)
-  assert.equal(needsReapproval({ ...c, scheduledAt: new Date('2026-08-01T00:00:00.000Z') }), true)
   assert.equal(needsReapproval({ ...c, utmCampaign: 'other' }), true)
   assert.equal(needsReapproval({ ...c, discountCode: 'SAVE10' }), true)
+})
+
+test('3c. SETTING THE SEND TIME does not invalidate approval (bug #10)', () => {
+  // This assertion REPLACES an earlier one that required the opposite. The
+  // earlier requirement was wrong, and following it produced a workflow that
+  // could not be completed correctly:
+  //
+  //   the lifecycle is VALIDATING -> READY -> (approve) -> SCHEDULED, so
+  //   scheduling happens AFTER approval by design. With scheduledAt hashed,
+  //   that next legitimate step always produced "edited after approval" — an
+  //   owner following the intended sequence exactly was told they had tampered
+  //   with the campaign, on every single campaign.
+  //
+  // This is not the assertion being weakened to get a green run: WHEN a
+  // campaign sends is still gated, just not by this mechanism. The transition
+  // to SCHEDULED refuses without approvedAt, needs email.manage_campaign, is
+  // confirmed in the UI with the time shown, and is audited — and `update`
+  // refuses any campaign past DRAFT/VALIDATING/FAILED, so no other path can
+  // change it. The hash answers "same campaign, same recipients?", which is
+  // what a stale approval must not be allowed to cover.
+  const c = approved()
+  assert.equal(
+    needsReapproval({ ...c, scheduledAt: new Date('2026-08-01T00:00:00.000Z') }),
+    false,
+    'scheduling an approved campaign must not invalidate its approval'
+  )
+  // Approve-then-schedule, the real sequence, must end dispatchable.
+  const scheduled = { ...approved({ scheduledAt: null }), scheduledAt: new Date('2026-07-27T21:19:09.000Z') }
+  assert.equal(needsReapproval(scheduled), false, 'the canonical approve -> schedule flow must not self-invalidate')
 })
 
 test('4. Metadata-only writes do NOT require re-approval', () => {

@@ -44,6 +44,28 @@ export type SendConfigFields = {
  * A unit separator joins the parts so that ("a","b") and ("ab","") can never
  * collide, and a null is encoded distinctly from an empty string.
  */
+/**
+ * SCHEDULED-AT IS DELIBERATELY NOT HASHED (bug #10, found in use 2026-07-27).
+ *
+ * It was, and that made the CORRECT workflow self-invalidating. The lifecycle
+ * is VALIDATING -> READY -> (approve) -> SCHEDULED: scheduling happens AFTER
+ * approval by design, and that transition writes scheduledAt. With the send
+ * time in the hash, the very next legitimate step always produced "edited after
+ * approval", so an owner who followed the intended sequence exactly was told
+ * they had tampered with the campaign.
+ *
+ * Removing it loses no safety, because WHEN is governed separately and more
+ * strictly than WHAT:
+ *   * the transition to SCHEDULED already refuses without approvedAt;
+ *   * it requires the email.manage_campaign permission;
+ *   * the UI confirms the exact send time before it is applied;
+ *   * it is written to the audit log;
+ *   * `action:'update'` refuses to touch a campaign that is not DRAFT,
+ *     VALIDATING or FAILED — so there is no other path that can change it.
+ *
+ * The hash answers "is this the same campaign that was approved?" — which is
+ * WHAT goes out and TO WHOM. That is what a stale approval must not cover.
+ */
 export function sendConfigHash(config: SendConfigFields): string {
   const SEP = '\u001f'
   const NULL_MARK = '\u0000null'
@@ -53,7 +75,6 @@ export function sendConfigHash(config: SendConfigFields): string {
     enc(config.template),
     enc(config.subject),
     enc(config.audienceId),
-    enc(config.scheduledAt ? config.scheduledAt.toISOString() : null),
     enc(config.utmSource),
     enc(config.utmMedium),
     enc(config.utmCampaign),

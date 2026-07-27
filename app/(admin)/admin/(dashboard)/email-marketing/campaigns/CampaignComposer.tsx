@@ -317,7 +317,12 @@ Everyone beyond the cap will receive NOTHING and will have no record explaining 
                     reappearing on an already-approved campaign looks like a bug. */}
                 {c.approvedAt && c.needsReapproval && (
                   <div style={{ fontSize: '11px', color: C.amber, marginTop: '4px', fontWeight: 600 }}>
-                    Edited after approval (validating counts as an edit) — dispatch will refuse until it is approved again.
+                    {/* The old text blamed validation. That stopped being true when
+                        approval moved from a timestamp comparison to a hash of the
+                        send-affecting fields — validating no longer invalidates
+                        anything, and saying it does sends the owner to the wrong fix. */}
+                    The template, subject, audience, tracking or discount changed after this was approved — dispatch will
+                    refuse until it is approved again.
                   </div>
                 )}
                 {/* SEND TIME — shown explicitly. A SCHEDULED campaign with no

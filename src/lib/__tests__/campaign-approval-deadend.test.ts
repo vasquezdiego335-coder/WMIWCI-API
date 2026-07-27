@@ -113,12 +113,20 @@ test('re-approval keeps the campaign SCHEDULED (it must not be silently unschedu
     /keepState \? \[\] : \[prisma\.marketingCampaign\.update/.test(code),
     'the status->READY write must be skipped when re-approving in place'
   )
-  // scheduledAt is a hashed field: approving without folding a repaired send
-  // time into the hash would leave the row instantly "edited after approval".
+  // scheduledAt is NOT hashed (bug #10): hashing it made the canonical
+  // approve -> schedule flow self-invalidating, because scheduling happens
+  // AFTER approval by design. So a repaired send time cannot affect approval
+  // identity, and the hash call must stay plain.
+  assert.match(code, /approvedConfigHash: sendConfigHash\(config\)/, 'the approved hash is taken over the config as-is')
+  // Checks the CALL, not a window after it: the handler still WRITES a repaired
+  // scheduledAt on the next line, which is correct and must not trip this.
   assert.ok(
-    /sendConfigHash\(repairScheduledAt \? \{ \.\.\.config, scheduledAt: repairScheduledAt \} : config\)/.test(code),
-    'a send time repaired during approval must be part of the approved hash'
+    !/sendConfigHash\(\s*\{/.test(code),
+    'the approval hash must be taken over config as-is, never a spread that injects the send time'
   )
+  // The repair itself must still happen — it is what escapes the no-send-time
+  // dead end; it just no longer participates in approval identity.
+  assert.match(code, /scheduledAt: repairScheduledAt/, 'a repaired send time must still be written')
 })
 
 test('a SCHEDULED campaign with no send time is not approved into a second dead end', () => {
