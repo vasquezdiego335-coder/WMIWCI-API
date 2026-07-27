@@ -367,6 +367,24 @@ export async function runEmailMonitoring(): Promise<HealthReport> {
   }
   for (const e of report.errors) log.error({ check: e.id, err: e.error }, 'email monitoring check FAILED to run')
 
+  // ROUTE CRITICALS SOMEWHERE VISIBLE. A log line is only an alert if someone
+  // is reading the logs; this puts criticals in the ops channel. Dynamic import
+  // so the monitoring module stays usable (and testable) without the Discord
+  // stack loaded, and a failure here can never break the sweep.
+  const criticals = report.checks.filter((c) => c.severity === 'critical')
+  if (criticals.length > 0) {
+    try {
+      const { postEmailAlert } = await import('../bot/discord-rest')
+      const delivered = await postEmailAlert({
+        severity: 'critical',
+        messages: criticals.map((c) => ({ message: c.message, action: c.action })),
+      })
+      log.info({ delivered, criticals: criticals.length }, delivered ? 'critical email alerts posted to Discord' : 'critical email alerts could NOT be delivered to a channel')
+    } catch (err) {
+      log.error({ err: String(err) }, 'alert routing failed — the log lines above are the only record')
+    }
+  }
+
   if (report.severity === 'ok') log.info({ checks: report.checks.length }, 'email monitoring: all checks healthy')
   return report
 }
