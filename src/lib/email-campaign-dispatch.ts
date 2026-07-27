@@ -668,6 +668,29 @@ export async function finalizeRunIfDone(runId: string): Promise<void> {
   const state = run.status as RunState
   if (['CANCELLED', 'COMPLETED', 'COMPLETED_WITH_ERRORS', 'FAILED'].includes(state)) return
 
+  // ── CANCELLING IS SELF-COMPLETING (audit A-1, 2026-07-27) ──────────────
+  // A cancel marks the PENDING/DEFERRED rows at the time it runs, but leaves
+  // SENDING rows alone — correctly, since one may be mid-provider-call. If that
+  // worker then dies, the sweep re-opens the row to PENDING... and a CANCELLING
+  // run is not in RUN_SENDABLE_STATES, so no batch will ever pick it up again.
+  // The run could never settle and the recipient sat PENDING forever:
+  //
+  //   cancel -> CANCELLING -> worker dies -> sweep reopens SENDING to PENDING
+  //          -> not sendable, never processed -> runIsSettled() false -> stuck
+  //
+  // A recipient still open on a CANCELLING run has no future, so it is closed
+  // here with the same reason the cancel would have given it. Idempotent: once
+  // closed there is nothing left to match.
+  if (state === 'CANCELLING') {
+    const reopened = await prisma.emailCampaignRecipient.updateMany({
+      where: { runId, status: { in: ['PENDING', 'DEFERRED'] } },
+      data: { status: 'CANCELLED', reason: 'run_cancelled' },
+    })
+    if (reopened.count > 0) {
+      log.info({ runId, closed: reopened.count }, 'closed recipients re-opened on a cancelling run')
+    }
+  }
+
   const grouped = await prisma.emailCampaignRecipient.groupBy({ by: ['status'], where: { runId }, _count: { _all: true } })
   const counts: Partial<Record<RecipientState, number>> = {}
   for (const g of grouped) counts[g.status as RecipientState] = g._count._all
@@ -746,6 +769,30 @@ export async function sweepCampaignRuns(): Promise<{ dispatched: number; reopene
     }
   }
   if (refused > 0) log.warn({ refused }, 'scheduled campaigns refused dispatch — reasons written to statusNote')
+
+  // 1b. ABANDONED PREPARATION (audit A-5, 2026-07-27).
+  //
+  // dispatchCampaign creates the run as PREPARING, then resolves the audience
+  // and writes recipient rows. A thrown error moves it to FAILED — but a KILLED
+  // process (deploy, OOM, SIGKILL) cannot run that catch, so the run stays
+  // PREPARING forever. PREPARING is in UNFINISHED_RUN_STATES, so every later
+  // dispatch returns `alreadyRunning` for a run that will never progress:
+  // THE CAMPAIGN BECOMES PERMANENTLY UNDISPATCHABLE, with no operator remedy.
+  //
+  // Preparation is seconds of work. A PREPARING run older than the stale
+  // threshold did not survive, so it is failed honestly — which unblocks
+  // dispatch, because FAILED is not an unfinished state.
+  const abandoned = await prisma.emailCampaignRun.updateMany({
+    where: { status: 'PREPARING', startedAt: { lt: new Date(Date.now() - RECIPIENT_STALE_MS) } },
+    data: {
+      status: 'FAILED',
+      completedAt: new Date(),
+      error: 'Preparation never completed — the process was interrupted before the recipient list was finished. No email was sent; dispatch again.',
+    },
+  })
+  if (abandoned.count > 0) {
+    log.warn({ runs: abandoned.count }, 'failed abandoned PREPARING runs — campaigns unblocked for re-dispatch')
+  }
 
   // 2 + 3 + 4 for unfinished runs.
   const active = await prisma.emailCampaignRun.findMany({

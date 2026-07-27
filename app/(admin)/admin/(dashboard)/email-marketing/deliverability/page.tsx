@@ -13,6 +13,7 @@
 import { getSession } from '@/lib/auth'
 import { runDiagnostics } from '@/lib/email-diagnostics'
 import { webhookHealth, dnsChecks } from '@/lib/email-admin'
+import { liveDnsChecks } from '@/lib/email-dns'
 import { PageHeader, Card, COLORS, Callout, tableStyles as T, SoftBadge } from '../../_ui'
 import { EmailTabs, dt } from '../_shared'
 
@@ -30,8 +31,14 @@ export default async function DeliverabilityPage() {
   const session = await getSession()
   const isOwner = session?.role === 'OWNER'
 
-  const [diag, health] = await Promise.all([runDiagnostics(), webhookHealth()])
-  const dns = dnsChecks()
+  // LIVE DNS (audit pass D). The page used to report SPF/DKIM/DMARC as
+  // "unverified, always" because the records live at the registrar. But this
+  // process CAN resolve DNS, and the permanent-unknown made a real problem
+  // invisible: DMARC was published as p=none with no rua=, so the policy whose
+  // only purpose is reporting was reporting to nobody.
+  const [diag, health, live] = await Promise.all([runDiagnostics(), webhookHealth(), liveDnsChecks()])
+  // The env-var attestations remain as an operator override/audit trail.
+  const attested = dnsChecks()
 
   return (
     <div>
@@ -117,14 +124,48 @@ export default async function DeliverabilityPage() {
       </div>
 
       <Card title="DNS authentication" icon="🌐" wide>
-        <ChecksTable checks={dns.map((d) => ({ name: d.name, status: d.status, detail: d.detail }))} />
+        <p style={{ fontSize: '12px', color: COLORS.muted, margin: '0 0 12px', lineHeight: 1.6 }}>
+          Resolved live from DNS just now for <strong>{live.domain ?? 'an unknown domain'}</strong> — the From-header
+          domain, which is the one DMARC alignment is judged against.
+        </p>
+        <ChecksTable checks={live.checks.map((d) => ({ name: d.name, status: d.status, detail: d.detail }))} />
+
+        {live.checks.some((c) => c.advice.length > 0) && (
+          <div style={{ marginTop: '14px' }}>
+            {live.checks.filter((c) => c.advice.length > 0).map((c) => (
+              <div key={c.name} style={{ marginBottom: '10px' }}>
+                <p style={{ fontSize: '12px', fontWeight: 700, color: COLORS.navy, margin: '0 0 4px' }}>{c.name}</p>
+                {c.advice.map((a) => (
+                  <p key={a} style={{ fontSize: '12px', color: COLORS.muted, margin: '0 0 4px', lineHeight: 1.6 }}>• {a}</p>
+                ))}
+                {c.record && (
+                  <code style={{ fontSize: '11px', color: COLORS.muted, wordBreak: 'break-all', display: 'block', marginTop: '4px' }}>
+                    {c.record}
+                  </code>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+
         <p style={{ fontSize: '12px', color: COLORS.muted, margin: '14px 0 0', lineHeight: 1.6 }}>
-          These are reported as <strong>unverified</strong> on purpose. SPF, DKIM and DMARC are DNS records at the
-          registrar; this application cannot read them, and inferring &ldquo;configured&rdquo; from an environment
-          variable would produce a green light that means nothing. Verify them in the Resend dashboard or with a DNS
-          lookup, and record the date you checked.
+          A published record proves the record <strong>exists</strong>. It does not prove that a given message passes
+          authentication — only the receiving mail server can tell you that, which is what the DMARC{' '}
+          <code>rua=</code> reports are for.
         </p>
       </Card>
+
+      {attested.some((d) => d.status !== 'UNVERIFIED') && (
+        <div style={{ marginTop: '18px' }}>
+          <Card title="Recorded attestations" icon="📝" wide>
+            <ChecksTable checks={attested.map((d) => ({ name: d.name, status: d.status, detail: d.detail }))} />
+            <p style={{ fontSize: '12px', color: COLORS.muted, margin: '14px 0 0', lineHeight: 1.6 }}>
+              Manually recorded via <code>EMAIL_DNS_*</code>. The live lookup above is authoritative; these are kept as
+              an audit trail of what an operator previously asserted.
+            </p>
+          </Card>
+        </div>
+      )}
 
       <div style={{ marginTop: '18px' }}>
         <Card title="Journey flags in this environment" icon="🚩" wide>
