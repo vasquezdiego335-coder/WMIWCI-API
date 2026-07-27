@@ -29,6 +29,7 @@
 
 import { prisma } from './db'
 import { queueLogger } from './logger'
+import { postOpsAlert } from './ops-alert'
 
 const log = queueLogger.child({ mod: 'email-monitoring' })
 
@@ -368,21 +369,17 @@ export async function runEmailMonitoring(): Promise<HealthReport> {
   for (const e of report.errors) log.error({ check: e.id, err: e.error }, 'email monitoring check FAILED to run')
 
   // ROUTE CRITICALS SOMEWHERE VISIBLE. A log line is only an alert if someone
-  // is reading the logs; this puts criticals in the ops channel. Dynamic import
-  // so the monitoring module stays usable (and testable) without the Discord
-  // stack loaded, and a failure here can never break the sweep.
+  // is reading the logs. postOpsAlert is a bare HTTPS POST with no SDK — an
+  // earlier version imported the Discord client here and dragged discord.js
+  // into the Next.js bundle for the health route, which broke the build.
   const criticals = report.checks.filter((c) => c.severity === 'critical')
   if (criticals.length > 0) {
-    try {
-      const { postEmailAlert } = await import('../bot/discord-rest')
-      const delivered = await postEmailAlert({
-        severity: 'critical',
-        messages: criticals.map((c) => ({ message: c.message, action: c.action })),
-      })
-      log.info({ delivered, criticals: criticals.length }, delivered ? 'critical email alerts posted to Discord' : 'critical email alerts could NOT be delivered to a channel')
-    } catch (err) {
-      log.error({ err: String(err) }, 'alert routing failed — the log lines above are the only record')
-    }
+    const result = await postOpsAlert(
+      'EMAIL SYSTEM - CRITICAL',
+      criticals.map((c) => ({ message: c.message, action: c.action }))
+    )
+    if (result.delivered) log.info({ criticals: criticals.length }, 'critical email alerts delivered to the ops channel')
+    else log.error({ criticals: criticals.length, reason: result.reason }, 'CRITICAL EMAIL ALERTS COULD NOT BE DELIVERED — the log lines above are the only record')
   }
 
   if (report.severity === 'ok') log.info({ checks: report.checks.length }, 'email monitoring: all checks healthy')

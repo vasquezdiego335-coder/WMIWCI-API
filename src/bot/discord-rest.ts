@@ -86,41 +86,6 @@ async function restSendToChannel(envKey: string, body: MessageBody): Promise<{ i
   }
 }
 
-/**
- * Post an email-system alert to the ops channel (audit E-04 follow-up).
- *
- * The monitoring sweep already logs alerts, but a log line is only an alert if
- * somebody is reading the logs. This puts CRITICAL email conditions — complaint
- * spikes, stranded recipients, missed schedules, dead-lettered suppressions —
- * into a channel the owner actually watches.
- *
- * WARN is deliberately NOT sent. An ops channel that pages for routine noise
- * gets muted, and a muted channel is worse than no channel at all.
- *
- * Never throws: alerting must not be able to break the sweep that produced it.
- * Returns whether a channel actually accepted the message, so the caller can
- * log the difference between "alerted" and "could not reach anyone".
- */
-export async function postEmailAlert(input: {
-  severity: string
-  messages: { message: string; action?: string }[]
-}): Promise<boolean> {
-  if (input.severity !== 'critical' || input.messages.length === 0) return false
-  try {
-    const lines = input.messages
-      .slice(0, 5)
-      .map((m) => (m.action ? `• ${m.message}\n  → ${m.action}` : `• ${m.message}`))
-      .join('\n')
-    const sent = await restSendFirst(['DISCORD_CHANNEL_ALERTS', 'DISCORD_CHANNEL_OPERATIONS'], {
-      content: `🚨 **EMAIL SYSTEM — CRITICAL**\n${lines}`,
-    })
-    return sent !== null
-  } catch (err) {
-    botLogger.error({ err: String(err) }, 'email alert could not be posted to Discord')
-    return false
-  }
-}
-
 // Try a list of channel env keys in order; send to the first configured one.
 async function restSendFirst(envKeys: string[], body: MessageBody): Promise<{ id: string } | null> {
   for (const key of envKeys) {
