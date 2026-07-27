@@ -49,6 +49,7 @@ import { startOutboxWorker } from './outbox/workers/emailWorker'
 import { getDiscordClient } from './bot/discord-actions'
 import { processStripeWebhook } from './lib/stripe-events'
 import { logger } from './lib/logger'
+import { checkEnv } from './lib/env'
 
 // ── Liveness state surfaced by the health endpoints ─────────────────────
 const state = {
@@ -57,6 +58,8 @@ const state = {
   bullWorkers: 0,
   outbox: false,
   discordBot: false,
+  /// Names of required env vars that are missing. Non-empty ⇒ NO worker starts.
+  envMissing: [] as string[],
 }
 
 // ── Never let a stray rejection/exception kill the whole host ───────────
@@ -86,7 +89,7 @@ function startHttpServer(): void {
   // ── Health endpoints ──────────────────────────────────────────────
   // status is "ok" only when Redis is connected AND the workers registered.
   const health = (_req: Request, res: Response): void => {
-    const ok = state.redis && state.bullWorkers > 0
+    const ok = state.redis && state.bullWorkers > 0 && state.envMissing.length === 0
     res.status(ok ? 200 : 503).json({
       status: ok ? 'ok' : 'degraded',
       service: 'worker-host',
@@ -179,6 +182,32 @@ function startHttpServer(): void {
 async function main(): Promise<void> {
   // 1) HTTP first — Railway sees a live port immediately.
   startHttpServer()
+
+  // 1b) ENVIRONMENT VALIDATION (audit E-01).
+  //
+  // THIS IS THE ENTRYPOINT PRODUCTION ACTUALLY RUNS (`host:start` →
+  // worker-host.ts). src/workers/index.ts is the local-dev entrypoint; putting
+  // the check only there would have left production exactly as unprotected as
+  // before, which is the failure mode this whole release is about.
+  //
+  // It does NOT throw, deliberately. This file already established that a hard
+  // crash on missing config is the wrong shape for Railway — a crash-loop hides
+  // the reason and the operator sees only a restarting service. So the failure
+  // is made loud a better way: the banner goes to logs, /health turns 503 and
+  // NAMES the missing variables, and NO WORKER STARTS — nothing is processed
+  // with a broken configuration.
+  const env = checkEnv()
+  if (!env.ok) {
+    state.envMissing = env.missingRequired
+    logger.error(
+      { missing: env.missingRequired },
+      `STARTUP HALTED — missing required environment variables: ${env.missingRequired.join(', ')}. ` +
+        'No queue worker has been started, so nothing will be processed with this configuration. ' +
+        'Set these in Railway and redeploy; /health lists them and returns 503 until they are present.'
+    )
+    return
+  }
+  logger.info('  ✓ environment validated')
 
   // 2) Redis is required for the BullMQ queues. If it's missing we DON'T crash:
   //    the HTTP server stays up (health reports "degraded") so you can see the

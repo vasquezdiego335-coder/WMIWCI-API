@@ -45,6 +45,28 @@ test('E-01 assertEnv is CALLED at worker boot, not merely exported', () => {
   assert.ok(callAt > 0 && callAt < firstWorker, 'assertEnv() must run before the workers start')
 })
 
+test('E-01 the env gate is in the entrypoint PRODUCTION runs, not only the dev one', () => {
+  // THE MISTAKE THIS PINS (found during deploy, 2026-07-27): the gate was added
+  // to src/workers/index.ts, but Railway runs `host:start` → src/worker-host.ts.
+  // The check was therefore live in local development and ABSENT in production —
+  // the exact "written, documented, never called" pattern this release exists to
+  // remove, reproduced while removing it.
+  const pkg = JSON.parse(src('package.json'))
+  const entry = pkg.scripts['host:start'] as string
+  assert.match(entry, /worker-host\.ts/, 'host:start must point at worker-host.ts (update this test if it moves)')
+
+  const host = code(src('src/worker-host.ts'))
+  assert.match(host, /checkEnv\(\)/, 'the production entrypoint must validate the environment')
+  assert.match(host, /state\.envMissing = env\.missingRequired/, 'and record what is missing for /health')
+  // Workers must NOT start on a bad environment.
+  const gateAt = host.indexOf('const env = checkEnv()')
+  const firstWorker = host.indexOf('startEmailWorker()')
+  assert.ok(gateAt > 0 && gateAt < firstWorker, 'validation must run BEFORE any worker starts')
+  assert.match(host, /if \(!env\.ok\)[\s\S]{0,600}return/, 'a bad environment must return before starting workers')
+  // /health must reflect it, since this entrypoint deliberately does not crash.
+  assert.match(host, /state\.envMissing\.length === 0/, '/health must report degraded while vars are missing')
+})
+
 test('E-01 the email vars that fail SILENTLY are required when email is on', () => {
   const env = src('src/lib/env.ts')
   for (const key of ['RESEND_API_KEY', 'RESEND_WEBHOOK_SECRET', 'BUSINESS_POSTAL_ADDRESS', 'EMAIL_FROM', 'MARKETING_SITE_URL']) {
