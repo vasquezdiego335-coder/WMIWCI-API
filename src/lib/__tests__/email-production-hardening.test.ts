@@ -271,3 +271,27 @@ test('E-04 the monitoring cron is registered', () => {
   assert.match(worker, /jobId: 'cron:email-monitoring'/)
   assert.match(worker, /runEmailMonitoring\(\)/)
 })
+
+// ── Admin links must point at routes that exist ─────────────────────────
+
+test('the Queues page does not link to a route that does not exist', () => {
+  // FOUND 2026-07-27 while checking third-party advice: the "Open Bull Board"
+  // button pointed at /api/admin/queues/bull-board, which has no route file.
+  // src/workers/bull-board.ts is an Express app bound to 127.0.0.1 that nothing
+  // imports — it can never serve that URL. A dead control in an incident tool
+  // is worse than no control: it is consulted precisely when something is wrong.
+  const page = src('app/(admin)/admin/(dashboard)/queues/page.tsx')
+  assert.ok(!/queues\/bull-board/.test(page), 'must not link to the non-existent bull-board route')
+  assert.match(page, /\/api\/admin\/queues\/failed/, 'must link to the inspector that exists')
+})
+
+test('the failed-job inspector is authenticated and read-only', () => {
+  const route = src('app/api/admin/queues/failed/route.ts')
+  assert.match(route, /denyReason/, 'must be admin-authenticated server-side')
+  assert.match(route, /INSPECTABLE\.includes\(requested\)/, 'queue name must come from a closed list, never raw input')
+  // Read-only: no retry/remove/promote. Inspecting an incident must not change it.
+  // Plain substring checks — no regex escaping to get wrong.
+  for (const mutation of ['.retry(', '.remove(', '.promote(', '.drain(', '.clean(', '.obliterate(']) {
+    assert.ok(!route.includes(mutation), `the inspector must not call ${mutation}`)
+  }
+})

@@ -40,7 +40,7 @@ export default async function AdminQueues() {
         </div>
         <div style={{ display: 'flex', gap: '8px' }}>
           <a
-            href="/api/admin/queues/bull-board"
+            href="/api/admin/queues/failed?queue=scheduled"
             target="_blank"
             rel="noreferrer"
             style={{ padding: '8px 16px', backgroundColor: '#0A1628', color: '#FFFFFF', borderRadius: '8px', fontSize: '13px', fontWeight: '600', textDecoration: 'none' }}
@@ -60,8 +60,8 @@ export default async function AdminQueues() {
       {totalFailed > 0 && (
         <div style={alert}>
           ⚠️ {totalFailed} failed job{totalFailed > 1 ? 's' : ''} require attention.{' '}
-          <a href="/api/admin/queues/bull-board" target="_blank" rel="noreferrer" style={{ color: '#FF5A1F' }}>
-            Open Bull Board to retry →
+          <a href="/api/admin/queues/failed?queue=scheduled" target="_blank" rel="noreferrer" style={{ color: '#FF5A1F' }}>
+            See why they failed →
           </a>
         </div>
       )}
