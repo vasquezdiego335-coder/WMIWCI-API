@@ -30,9 +30,12 @@ export function EmailTabs({ active, isOwner }: { active: string; isOwner: boolea
       {EMAIL_TABS.filter((t) => isOwner || !t.ownerOnly).map((t) => {
         const on = t.href === active
         return (
+          // Which tab is current was communicated by colour, weight and an
+          // underline — all purely visual. aria-current states it outright.
           <Link
             key={t.href}
             href={t.href}
+            aria-current={on ? 'page' : undefined}
             style={{
               padding: '8px 13px',
               fontSize: '13px',

@@ -7,7 +7,7 @@
 // here can move a campaign straight from draft to sending — validate, approve
 // and schedule are three separate calls, each independently checked.
 
-import { useState } from 'react'
+import { useState, useId } from 'react'
 import { useRouter } from 'next/navigation'
 import { csrfHeader } from '../../_client'
 
@@ -55,7 +55,22 @@ type CampaignRow = {
   runs: RunRow[]
 }
 
-const C = { navy: '#0A1628', orange: '#FF5A1F', green: '#10B981', red: '#EF4444', amber: '#F59E0B', muted: '#6B7280', faint: '#9CA3AF', line: '#F1F1F1' }
+// CONTRAST (audit F-10). The brand palette is tuned for large surfaces; used
+// as 10-12px text, or as a badge background under white text, several values
+// failed WCAG AA badly — amber was 2.1:1 and green 2.2:1 against white, where
+// 4.5:1 is required at these sizes. These are the darkened equivalents used
+// for TEXT AND BADGES only; the brand orange is unchanged wherever it is a
+// large or decorative element.
+const C = {
+  navy: '#0A1628',
+  orange: '#C2410C', // 4.9:1 on white (brand #FF5A1F is 3.3:1 — too low for 12px text)
+  green: '#047857', // 4.8:1  (was #10B981, 2.2:1)
+  red: '#B91C1C', // 6.2:1  (was #EF4444, 3.7:1)
+  amber: '#B45309', // 4.9:1  (was #F59E0B, 2.1:1 — the worst offender)
+  muted: '#6B7280', // 5.0:1
+  faint: '#6B7280', // was #9CA3AF at 2.6:1; italic "empty" text still needs to be readable
+  line: '#E5E7EB',
+}
 
 const STAGE_LABEL: Record<string, string> = {
   audience_resolution: 'resolving the audience',
@@ -64,8 +79,8 @@ const STAGE_LABEL: Record<string, string> = {
 }
 
 const STATE_COLOR: Record<string, string> = {
-  DRAFT: C.faint, VALIDATING: C.amber, READY: C.green, SCHEDULED: '#3B82F6',
-  ACTIVE: C.green, PAUSED: C.amber, COMPLETED: C.navy, CANCELLED: C.faint, FAILED: C.red, ARCHIVED: C.faint,
+  DRAFT: C.muted, VALIDATING: C.amber, READY: C.green, SCHEDULED: '#1D4ED8', // 6.3:1 (was #3B82F6, 3.7:1)
+  ACTIVE: C.green, PAUSED: C.amber, COMPLETED: C.navy, CANCELLED: C.muted, FAILED: C.red, ARCHIVED: C.muted,
 }
 
 export default function CampaignComposer({
@@ -181,7 +196,20 @@ export default function CampaignComposer({
           : 'Approve this campaign for sending?'
       if (!confirm(`${lead}\n\nThis is the owner authorization step and is recorded in the audit log.`)) return
     }
-    if (action === 'dispatch' && !confirm('Start sending this campaign NOW?\n\nThe audience is resolved from current data, frozen into a run, and real customers receive email. This is recorded in the audit log.')) return
+    // IRREVERSIBILITY IS STATED, not implied. "Cancel remaining" exists and
+    // reads like an undo, so the confirmation has to be explicit that it only
+    // stops recipients who have NOT been sent yet — anything the provider has
+    // already accepted is gone.
+    if (
+      action === 'dispatch' &&
+      !confirm(
+        'Start sending this campaign NOW?\n\n' +
+          'The audience is resolved from current data, frozen into a run, and real customers receive email. ' +
+          'This is recorded in the audit log.\n\n' +
+          'THIS CANNOT BE UNDONE. Messages already accepted by the provider cannot be recalled — cancelling only stops recipients who have not been sent yet.'
+      )
+    )
+      return
     if (action === 'cancel_run' && !confirm('Cancel the remaining recipients of this run?\n\nAlready-sent emails are unaffected; everyone still pending is marked cancelled.')) return
 
     setBusy(id + action + (status ?? '') + (runId ?? ''))
@@ -239,9 +267,9 @@ Everyone beyond the cap will receive NOTHING and will have no record explaining 
   return (
     <div>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '14px', gap: '12px', flexWrap: 'wrap' }}>
-        <h3 style={{ fontSize: '13px', fontWeight: 700, color: '#374151', textTransform: 'uppercase', letterSpacing: '0.05em', margin: 0 }}>
+        <h2 style={{ fontSize: '13px', fontWeight: 700, color: '#374151', textTransform: 'uppercase', letterSpacing: '0.05em', margin: 0 }}>
           Campaigns
-        </h3>
+        </h2>
         <button onClick={() => setOpen(!open)} style={{ ...btn(false, C.navy), flex: 'none', padding: '8px 16px' }}>
           {open ? 'Cancel' : '+ New campaign draft'}
         </button>
@@ -286,11 +314,21 @@ Everyone beyond the cap will receive NOTHING and will have no record explaining 
         </div>
       )}
 
-      {errors.length > 0 && (
-        <ul style={{ margin: '0 0 14px', paddingLeft: '17px', fontSize: '12px', color: C.red, lineHeight: 1.6 }}>
-          {errors.map((e) => <li key={e}>{e}</li>)}
-        </ul>
-      )}
+      {/* ANNOUNCED, not just shown (audit F-5). Every server refusal in this
+          page lands here — approval refused, dispatch blocked, recipients
+          withheld from a retry. Rendering it silently means a screen-reader
+          user clicks a button and is told nothing at all about why it did not
+          work. role="alert" is assertive because these are always the direct
+          result of an action the operator just took. The container is always
+          mounted so the live region exists BEFORE the text arrives; announcing
+          from a node that appears at the same moment is unreliable. */}
+      <div role="alert" aria-live="assertive" aria-atomic="true">
+        {errors.length > 0 && (
+          <ul style={{ margin: '0 0 14px', paddingLeft: '17px', fontSize: '12px', color: C.red, lineHeight: 1.6 }}>
+            {errors.map((e) => <li key={e}>{e}</li>)}
+          </ul>
+        )}
+      </div>
 
       {campaigns.length === 0 ? (
         <p style={{ fontSize: '13px', color: C.faint, fontStyle: 'italic' }}>No email campaigns yet.</p>
@@ -496,7 +534,8 @@ function SmallBtn({ onClick, children, busy, tone }: { onClick: () => void; chil
       onClick={onClick}
       disabled={busy}
       style={{
-        fontSize: '11px', fontWeight: 600, padding: '5px 11px', borderRadius: '6px',
+        fontSize: '12px', fontWeight: 600, padding: '8px 14px', borderRadius: '6px',
+        minHeight: '36px', minWidth: '44px',
         border: `1px solid ${tone ? `${tone}55` : '#D1D5DB'}`, cursor: busy ? 'default' : 'pointer',
         backgroundColor: busy ? '#F3F4F6' : tone ? `${tone}12` : '#FFFFFF', color: tone ?? '#374151',
       }}
@@ -506,20 +545,40 @@ function SmallBtn({ onClick, children, busy, tone }: { onClick: () => void; chil
   )
 }
 
-function Field({ label, value, onChange, type = 'text', placeholder }: { label: string; value: string; onChange: (v: string) => void; type?: string; placeholder?: string }) {
+// ── ACCESSIBLE FIELDS (audit F-1, 2026-07-27) ──────────────────────────
+// The label was a <p>. A paragraph next to an input is not a label: screen
+// readers announced every field in this form as unnamed ("edit text, blank"),
+// and clicking the text did not focus the control. A real <label htmlFor> tied
+// to an id fixes both, and costs nothing visually.
+// useId(), not a module counter: a counter yields different ids on the server
+// and the client, which React reports as a hydration mismatch and which can
+// leave the rendered `for` pointing at nothing.
+function Field({ label, value, onChange, type = 'text', placeholder, hint }: { label: string; value: string; onChange: (v: string) => void; type?: string; placeholder?: string; hint?: string }) {
+  const id = useId()
+  const hintId = hint ? `${id}-hint` : undefined
   return (
     <div>
-      <p style={fieldLabel}>{label}</p>
-      <input type={type} value={value} placeholder={placeholder} onChange={(e) => onChange(e.target.value)} style={input} />
+      <label htmlFor={id} style={fieldLabel}>{label}</label>
+      <input
+        id={id}
+        type={type}
+        value={value}
+        placeholder={placeholder}
+        aria-describedby={hintId}
+        onChange={(e) => onChange(e.target.value)}
+        style={input}
+      />
+      {hint && <p id={hintId} style={fieldHint}>{hint}</p>}
     </div>
   )
 }
 
 function SelectField({ label, value, onChange, options }: { label: string; value: string; onChange: (v: string) => void; options: Array<{ value: string; label: string }> }) {
+  const id = useId()
   return (
     <div>
-      <p style={fieldLabel}>{label}</p>
-      <select value={value} onChange={(e) => onChange(e.target.value)} style={input}>
+      <label htmlFor={id} style={fieldLabel}>{label}</label>
+      <select id={id} value={value} onChange={(e) => onChange(e.target.value)} style={input}>
         <option value="">Choose…</option>
         {options.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
       </select>
@@ -533,4 +592,5 @@ const btn = (disabled: boolean, bg: string): React.CSSProperties => ({
 })
 const card: React.CSSProperties = { backgroundColor: '#FFFFFF', borderRadius: '14px', padding: '18px 20px', boxShadow: '0 1px 3px rgba(0,0,0,0.06)', border: `1px solid ${C.line}` }
 const input: React.CSSProperties = { width: '100%', padding: '8px 10px', fontSize: '13px', borderRadius: '8px', border: '1px solid #D1D5DB', fontFamily: 'inherit' }
-const fieldLabel: React.CSSProperties = { fontSize: '11px', color: C.muted, margin: '0 0 4px', fontWeight: 600 }
+const fieldLabel: React.CSSProperties = { display: 'block', fontSize: '11px', color: C.muted, margin: '0 0 4px', fontWeight: 600 }
+const fieldHint: React.CSSProperties = { fontSize: '11px', color: C.muted, margin: '4px 0 0', lineHeight: 1.4 }

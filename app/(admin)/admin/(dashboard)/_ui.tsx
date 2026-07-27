@@ -138,8 +138,29 @@ export function MoneyRow({ label, value, strong, negative, positive }: { label: 
 
 export const tableStyles = {
   wrap: { backgroundColor: COLORS.card, borderRadius: '12px', overflow: 'hidden', boxShadow: '0 1px 4px rgba(0,0,0,0.06)', border: '1px solid #EFEFEF' } as React.CSSProperties,
-  scroll: { overflowX: 'auto' } as React.CSSProperties,
-  table: { width: '100%', borderCollapse: 'collapse' } as React.CSSProperties,
+  // A scrollable region must be KEYBOARD reachable (WCAG 2.1.1): without a
+  // tabindex a keyboard-only user can never scroll it, so the right-hand
+  // columns of a wide table are unreachable for them. `tableScrollProps` below
+  // carries the tabIndex + accessible name; use it on the scroll wrapper.
+  scroll: { overflowX: 'auto', WebkitOverflowScrolling: 'touch' } as React.CSSProperties,
+  // minWidth is what makes the container actually SCROLL. Without it a nine
+  // column table at 320px crushes every column to a few unreadable characters
+  // instead — technically no overflow, practically unusable.
+  table: { width: '100%', minWidth: '760px', borderCollapse: 'collapse' } as React.CSSProperties,
   th: { padding: '11px 14px', textAlign: 'left', fontSize: '11px', fontWeight: 600, color: COLORS.muted, letterSpacing: '0.05em', textTransform: 'uppercase', backgroundColor: '#F9FAFB', borderBottom: '1px solid #E5E7EB', whiteSpace: 'nowrap' } as React.CSSProperties,
   td: { padding: '11px 14px', fontSize: '13px', color: COLORS.ink, borderBottom: '1px solid #F3F4F6', verticalAlign: 'middle' } as React.CSSProperties,
 }
+
+/**
+ * Spread onto the element carrying `tableStyles.scroll`.
+ *
+ * `tabIndex={0}` makes the horizontally scrollable region focusable so it can
+ * be scrolled with the arrow keys; `role="region"` plus a name means a screen
+ * reader announces what the user has just entered rather than an anonymous
+ * focusable box.
+ */
+export const tableScrollProps = (label: string) => ({
+  tabIndex: 0,
+  role: 'region' as const,
+  'aria-label': `${label} (scrolls horizontally)`,
+})

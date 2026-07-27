@@ -19,7 +19,7 @@ import { allowedTransitions, type CampaignState } from '@/lib/email-campaign'
 import { diagnoseRun, explainRunError } from '@/lib/email-run-diagnosis'
 import { needsReapproval } from '@/lib/email-campaign-approval'
 import CampaignComposer from './CampaignComposer'
-import { PageHeader, Card, COLORS, Empty, tableStyles as T, SoftBadge } from '../../_ui'
+import { PageHeader, Card, COLORS, Empty, tableStyles as T, SoftBadge, tableScrollProps } from '../../_ui'
 import { EmailTabs, RangePicker, money } from '../_shared'
 
 export const dynamic = 'force-dynamic'
@@ -173,7 +173,7 @@ export default async function EmailCampaignsPage({ searchParams }: { searchParam
           </Empty>
         )}
         {rows.length > 0 && (
-          <div style={T.scroll}>
+          <div style={T.scroll} {...tableScrollProps('Campaign performance table')}>
             <table style={T.table}>
               <thead>
                 <tr>

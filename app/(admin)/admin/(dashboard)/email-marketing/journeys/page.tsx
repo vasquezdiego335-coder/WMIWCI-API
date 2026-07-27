@@ -43,11 +43,11 @@ export default async function JourneysPage({ searchParams }: { searchParams: SP 
             <Card wide>
               <div style={{ display: 'flex', justifyContent: 'space-between', gap: '16px', flexWrap: 'wrap', marginBottom: '14px' }}>
                 <div style={{ minWidth: 0 }}>
-                  <h3 style={{ fontSize: '17px', fontWeight: 700, color: COLORS.navy, margin: '0 0 6px', display: 'flex', alignItems: 'center', gap: '9px', flexWrap: 'wrap' }}>
+                  <h2 style={{ fontSize: '17px', fontWeight: 700, color: COLORS.navy, margin: '0 0 6px', display: 'flex', alignItems: 'center', gap: '9px', flexWrap: 'wrap' }}>
                     {j.name}
                     <ClassBadge emailClass={j.emailClass} />
                     <SoftBadge color={j.enabled ? COLORS.green : COLORS.faint}>{j.enabled ? 'Active' : 'Off'}</SoftBadge>
-                  </h3>
+                  </h2>
                   <p style={{ fontSize: '13px', color: COLORS.muted, margin: 0 }}>{j.audience}</p>
                 </div>
                 {j.flag && (

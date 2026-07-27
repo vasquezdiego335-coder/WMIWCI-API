@@ -149,7 +149,7 @@ export default function AudienceBuilder({ vocabulary, saved }: { vocabulary: Voc
 
       <div>
         <div style={card}>
-          <h3 style={h3}>Who this reaches</h3>
+          <h2 style={h3}>Who this reaches</h2>
           {!preview && <p style={muted}>Choose a segment and preview it.</p>}
           {preview && (
             <>
@@ -190,7 +190,7 @@ export default function AudienceBuilder({ vocabulary, saved }: { vocabulary: Voc
         </div>
 
         <div style={{ ...card, marginTop: '18px' }}>
-          <h3 style={h3}>Saved audiences</h3>
+          <h2 style={h3}>Saved audiences</h2>
           {saved.length === 0 ? (
             <p style={muted}>None saved yet.</p>
           ) : (

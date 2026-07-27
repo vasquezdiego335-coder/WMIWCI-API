@@ -122,9 +122,9 @@ export default async function AutomationsPage() {
       {/* ── EXECUTION — what is actually enrolled and running ─────────── */}
       {rows.length > 0 && (
         <Card>
-          <h3 style={{ fontSize: '13px', fontWeight: 700, color: '#374151', textTransform: 'uppercase', letterSpacing: '0.05em', margin: '0 0 12px' }}>
+          <h2 style={{ fontSize: '13px', fontWeight: 700, color: '#374151', textTransform: 'uppercase', letterSpacing: '0.05em', margin: '0 0 12px' }}>
             Execution
-          </h3>
+          </h2>
           {rows.map((a) => {
             const counts = enrollmentsByAutomation.get(a.id) ?? {}
             const next = upcoming.filter((u) => u.automationId === a.id).slice(0, 3)
