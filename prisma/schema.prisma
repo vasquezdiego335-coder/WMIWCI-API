@@ -2581,6 +2581,23 @@ model EmailSend {
   providerId     String?   @map("provider_id")
   error          String?
   sentAt         DateTime? @map("sent_at")
+
+  /// ── TRUE DELIVERY STATE (audit E-06, 2026-07-26) ──
+  /// `status = 'delivered'` means the PROVIDER ACCEPTED THE API CALL. It has
+  /// never meant the message reached an inbox, and webhooks did not update it,
+  /// so a hard-bounced send still read as "delivered" forever and no bounce
+  /// rate could be computed from this table at all.
+  ///
+  /// These three columns carry what the provider told us AFTERWARDS. They are
+  /// independent, not a status field, because the events are not mutually
+  /// exclusive and arrive OUT OF ORDER: a message can be delivered and then
+  /// generate a complaint, and a late `delivered` webhook must never erase a
+  /// recorded bounce. Precedence lives in `applyDeliveryState()`.
+  deliveredAt   DateTime? @map("delivered_at")
+  bouncedAt     DateTime? @map("bounced_at")
+  complainedAt  DateTime? @map("complained_at")
+  /// Bounce sub-type / complaint feedback type, for triage.
+  deliveryDetail String?  @map("delivery_detail")
   createdAt      DateTime  @default(now()) @map("created_at")
   updatedAt      DateTime  @updatedAt @map("updated_at")
 
@@ -2622,6 +2639,9 @@ model EmailSend {
   /// email + emailClass + status + sentAt. A composite index keeps that a range
   /// scan rather than a scan of every send to the address.
   @@index([email, emailClass, status, sentAt])
+  /// Bounce/complaint RATE queries scan by outcome time.
+  @@index([bouncedAt])
+  @@index([complainedAt])
   @@map("email_sends")
 }
 
@@ -2936,7 +2956,11 @@ model EmailCampaignRecipient {
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
 
-  run EmailCampaignRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+  /// onDelete: Restrict (audit E-08). Cascade meant deleting a run silently
+  /// DESTROYED the record that real people were emailed — the one row that
+  /// answers "did we contact this customer?". A run with recipients can no
+  /// longer be deleted; reconcile and keep it instead.
+  run EmailCampaignRun @relation(fields: [runId], references: [id], onDelete: Restrict)
 
   @@unique([runId, email])
   @@index([runId, status])

@@ -192,9 +192,43 @@ export default function CampaignComposer({
         headers: { 'Content-Type': 'application/json', ...csrfHeader() },
         body: JSON.stringify({ id, action, status, note, runId, scheduledAt }),
       })
-      const body = await res.json()
+      let body = await res.json()
+
+      // ── OVER-CAP AUDIENCE (audit E-05) ────────────────────────────────
+      // The server refuses rather than silently cutting the audience off.
+      // Acknowledging is a SECOND deliberate act, and the confirm text states
+      // plainly that the remainder get nothing — it is never pre-accepted.
+      if (!res.ok && body.needsTruncationAck) {
+        if (
+          confirm(
+            `${body.error}
+
+Send anyway to the capped number only?
+
+Everyone beyond the cap will receive NOTHING and will have no record explaining why.`
+          )
+        ) {
+          const retry = await fetch('/api/admin/email-marketing/campaigns', {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json', ...csrfHeader() },
+            body: JSON.stringify({ id, action, status, note, runId, scheduledAt, acknowledgeTruncation: true }),
+          })
+          body = await retry.json()
+          if (!retry.ok) { setErrors([body.error ?? `Failed (${retry.status})`]); return }
+          router.refresh()
+          return
+        }
+        setErrors([body.error])
+        return
+      }
+
       if (!res.ok) setErrors([body.error ?? `Failed (${res.status})`])
-      else router.refresh()
+      else {
+        // A server-side refusal to retry unknown outcomes is NOT a silent skip
+        // — the operator is told exactly what was held back and why (E-07).
+        if (body.notice) setErrors([body.notice])
+        router.refresh()
+      }
     } catch (err) {
       setErrors([err instanceof Error ? err.message : 'Failed'])
     } finally {

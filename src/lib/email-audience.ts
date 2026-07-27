@@ -500,6 +500,46 @@ export async function previewAudience(def: AudienceDefinition): Promise<Audience
 /** One candidate excluded at dispatch, with the machine-readable why. */
 export type ExcludedCandidate = { candidate: Candidate; reason: string }
 
+/**
+ * How far back an unresolved ambiguous send blocks a re-send of the same
+ * campaign. Long enough to cover a realistic reconciliation window; not
+ * unbounded, because an address must not be permanently unreachable because of
+ * one provider timeout a year ago.
+ */
+export const AMBIGUOUS_WINDOW_DAYS = Number(process.env.EMAIL_AMBIGUOUS_WINDOW_DAYS) || 30
+
+/**
+ * Addresses with an UNRESOLVED send for this campaign — the provider request
+ * left us and we never learned the outcome.
+ *
+ * Only 'ambiguous' qualifies. A 'delivered' send does NOT exclude anyone: a
+ * customer may legitimately receive a campaign twice if an owner deliberately
+ * re-dispatches. The danger is exclusively the send we cannot rule out.
+ *
+ * Fails CLOSED on a database error: if we cannot prove the outcome is known,
+ * we do not send. An empty set here would silently reopen the duplicate path
+ * this function exists to close.
+ */
+export async function priorAmbiguousEmails(
+  emails: string[],
+  campaignId: string | null,
+  windowDays: number = AMBIGUOUS_WINDOW_DAYS
+): Promise<Set<string>> {
+  if (!campaignId || emails.length === 0) return new Set()
+  const since = new Date(Date.now() - windowDays * 24 * 60 * 60 * 1000)
+  try {
+    const rows = await prisma.emailSend.findMany({
+      where: { campaignId, email: { in: emails }, status: 'ambiguous', createdAt: { gte: since } },
+      select: { email: true },
+    })
+    return new Set(rows.map((r) => normalizeEmail(r.email)))
+  } catch (err) {
+    // Fail closed: treat every candidate as possibly ambiguous rather than
+    // risk a duplicate to a real customer.
+    throw new Error(`ambiguous-outcome check failed, refusing to send: ${err instanceof Error ? err.message : String(err)}`)
+  }
+}
+
 export type DetailedAudience = {
   /** Deduped, valid, unsuppressed — the people a dispatch may mail. */
   eligible: Candidate[]
@@ -515,7 +555,10 @@ export type DetailedAudience = {
  * didn't X get this?" has an answer. Suppression is re-checked here AND again
  * inside the send guard for every individual message.
  */
-export async function resolveAudienceDetailed(def: AudienceDefinition): Promise<DetailedAudience> {
+export async function resolveAudienceDetailed(
+  def: AudienceDefinition,
+  opts: { campaignId?: string | null; ambiguousWindowDays?: number } = {}
+): Promise<DetailedAudience> {
   const candidates = await resolveCandidates(def)
   const truncated = candidates.length >= MAX_AUDIENCE
 
@@ -537,10 +580,11 @@ export async function resolveAudienceDetailed(def: AudienceDefinition): Promise<
   }
 
   const emails = unique.map((c) => c.email)
-  const [suppressions, optedOut, consenting] = await Promise.all([
+  const [suppressions, optedOut, consenting, priorAmbiguous] = await Promise.all([
     prisma.emailSuppression.findMany({ where: { email: { in: emails } }, select: { email: true, reason: true } }),
     prisma.customer.findMany({ where: { email: { in: emails }, marketingOptOut: true }, select: { email: true } }),
     consentingEmails(emails),
+    priorAmbiguousEmails(emails, opts.campaignId ?? null, opts.ambiguousWindowDays ?? AMBIGUOUS_WINDOW_DAYS),
   ])
   const suppressionByEmail = new Map(suppressions.map((s) => [s.email, s.reason as string]))
   const optOut = new Set(optedOut.map((c) => normalizeEmail(c.email)))
@@ -563,6 +607,16 @@ export async function resolveAudienceDetailed(def: AudienceDefinition): Promise<
     // PROMOTIONAL CONSENT — required for every segment; fails closed.
     if (!consenting.has(c.email)) {
       excluded.push({ candidate: c, reason: 'no_consent' })
+      continue
+    }
+    // CROSS-RUN AMBIGUOUS OUTCOME (audit E-03). Within one run the idempotency
+    // key makes a resend impossible, but the key is scoped PER RUN — a second
+    // dispatch of the same campaign mints a new key, so someone whose previous
+    // outcome was unknown (the provider may already have delivered it) would
+    // receive a DUPLICATE. That is the exact harm the ambiguous state exists to
+    // prevent, so they are held out for human reconciliation instead.
+    if (priorAmbiguous.has(c.email)) {
+      excluded.push({ candidate: c, reason: 'prior_ambiguous_outcome' })
       continue
     }
     eligible.push(c)
