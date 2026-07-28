@@ -531,6 +531,9 @@ export type PartialLeadInput = {
   pickupZip?: string | null
   destinationZip?: string | null
   serviceInterest?: string | null
+  /** Home size the visitor picked on the quick quote form ("2br"). NOT a job
+   *  type: it goes in its own column so `jobType` keeps a single vocabulary. */
+  moveSize?: string | null
 }
 
 /** Order used to only ever ADVANCE lifecycle, never regress it. */
@@ -588,6 +591,7 @@ export function buildPartialLeadCreate(input: PartialLeadInput, now: Date) {
     moveDate: input.moveDate ?? undefined,
     originZip: clean(input.pickupZip) ?? undefined,
     destinationZip: clean(input.destinationZip) ?? undefined,
+    moveSize: clean(input.moveSize) ?? undefined,
     utmSource: clean(input.utmSource),
     utmMedium: clean(input.utmMedium),
     utmCampaign: clean(input.utmCampaign),

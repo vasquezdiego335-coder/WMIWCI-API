@@ -1914,6 +1914,18 @@ model Lead {
   jobType            String?         @map("job_type")
   moveDate           DateTime?       @map("move_date")
   zip                String?
+  // ── Quote-form move details (2026-07-28) ─────────────────────────────
+  // `zip` holds one value and a move has two ends, so origin/destination get
+  // their own columns. `moveSize` is the home size the visitor picked
+  // ("2br"); it is NOT a job type and must not share that column -- mixing
+  // "full-move", "loading-only" and "2br" in one field makes it impossible to
+  // group by either. The write path was already producing originZip and
+  // destinationZip against a model that had neither, which Prisma rejected at
+  // runtime; the route is fail-soft, so those leads were answered 200 and
+  // silently dropped.
+  originZip          String?         @map("origin_zip")
+  destinationZip     String?         @map("destination_zip")
+  moveSize           String?         @map("move_size")
   notes              String?
   assignedTo         String?         @map("assigned_to")
   convertedBookingId String?         @map("converted_booking_id") // plain reference

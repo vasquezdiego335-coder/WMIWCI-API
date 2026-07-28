@@ -101,6 +101,9 @@ const PartialSchema = z.object({
   pickupZip: str(12),
   destinationZip: str(12),
   serviceInterest: str(60),
+  /* Home size from the quick quote form ("2br"). Its own field so it never
+     shares a column with real job types like "full-move". */
+  moveSize: str(30),
   // ── Which SURFACE captured the consent. Validated against the controlled
   //    vocabulary; an unrecognised value is dropped rather than stored raw,
   //    which is what filled the lead table with `OTHER` in the first place.
@@ -170,6 +173,7 @@ async function handle(req: NextRequest): Promise<NextResponse> {
       pickupZip: d.pickupZip,
       destinationZip: d.destinationZip,
       serviceInterest: d.serviceInterest,
+      moveSize: d.moveSize,
     },
     'partial-lead',
   )

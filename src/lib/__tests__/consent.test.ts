@@ -11,7 +11,8 @@ import {
   type ExistingConsent,
   type IncomingConsent,
 } from '../consent'
-import { mapLeadSource } from '../leads'
+import { Prisma } from '@prisma/client'
+import { buildPartialLeadCreate, buildPartialLeadUpdate, mapLeadSource } from '../leads'
 import { CANONICAL_SITE_URL, isRetiredDomain, marketingSiteUrl } from '../site-urls'
 
 // ════════════════════════════════════════════════════════════════════════
@@ -346,4 +347,64 @@ test('the agent now checks that link domains resolve', () => {
   assert.ok(/infrastructure\.link_domain_retired/.test(src))
   assert.ok(/MARKETING_SITE_URL/.test(src) && /APP_URL/.test(src), 'both link-building variables must be checked')
   assert.ok(/localhost/.test(src), 'a developer machine must not be reported as a fault')
+})
+
+// ════════════════════════════════════════════════════════════════════════
+//  EVERY KEY WRITTEN MUST EXIST ON THE MODEL
+//
+//  A real production defect, found by reading the diff rather than by any
+//  test: buildPartialLeadCreate emitted `originZip` and `destinationZip`,
+//  which are Booking columns. Lead has only a single `zip`.
+//
+//  TypeScript cannot catch this. Excess-property checking applies to object
+//  LITERALS, and the row is built in one function and passed to
+//  prisma.lead.create as a VARIABLE, so the extra keys sail through. Prisma
+//  then rejects the call at runtime -- and because the capture route is
+//  deliberately fail-soft, the visitor got a 200 and the lead vanished.
+//
+//  Checking against the generated DMMF is the only thing that closes it.
+// ════════════════════════════════════════════════════════════════════════
+
+test('every key the partial-lead builders write is a real Lead column', () => {
+  const fields = new Set(
+    Prisma.dmmf.datamodel.models.find((m) => m.name === 'Lead')!.fields.map((f) => f.name)
+  )
+  // A fully populated input, so no key can hide behind an undefined value.
+  const input = {
+    email: 'someone@example.com', phone: '8620000000', formStep: 'quote',
+    source: 'QUICK_QUOTE_FORM', consentSource: 'QUICK_QUOTE_FORM',
+    marketingConsent: true, consentVersion: CONSENT_VERSION,
+    pickupZip: '07001', destinationZip: '07002', serviceInterest: 'full-move',
+    moveSize: '2br', moveDate: new Date(), estimatedValue: 12345,
+    utmSource: 'x', utmMedium: 'y', utmCampaign: 'z', landingPage: '/quote.html',
+    referrer: 'https://example.com', bookingSessionId: 'sess_1',
+  } as never
+
+  for (const [name, row] of [
+    ['create', buildPartialLeadCreate(input, new Date())],
+    ['update', buildPartialLeadUpdate(input, new Date(), {} as never)],
+  ] as const) {
+    const unknown = Object.keys(row as object).filter((k) => !fields.has(k))
+    assert.deepEqual(unknown, [], `${name}: writes column(s) that do not exist on Lead: ${unknown.join(', ')}`)
+  }
+})
+
+test('a move size never lands in the job-type column', () => {
+  // PREVENTS: "full-move", "loading-only" and "2br" sharing one column, which
+  // makes it impossible to group by either.
+  const row = buildPartialLeadCreate(
+    { formStep: 'quote', source: 'QUICK_QUOTE_FORM', serviceInterest: 'full-move', moveSize: '2br' } as never,
+    new Date()
+  ) as Record<string, unknown>
+  assert.equal(row.moveSize, '2br')
+  assert.equal(row.jobType, 'full-move')
+})
+
+test('both ends of a move are stored, not just one zip', () => {
+  const row = buildPartialLeadCreate(
+    { formStep: 'quote', source: 'QUICK_QUOTE_FORM', pickupZip: '07001', destinationZip: '07002' } as never,
+    new Date()
+  ) as Record<string, unknown>
+  assert.equal(row.originZip, '07001')
+  assert.equal(row.destinationZip, '07002')
 })
