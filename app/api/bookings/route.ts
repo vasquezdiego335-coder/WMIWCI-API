@@ -16,6 +16,11 @@ import { nextBookingReference } from '@/lib/booking-reference'
 import { rateLimit, tooManyRequests, LIMITS, clientIp } from '@/lib/rate-limit'
 import { ingestLeadSafe, markLeadConverted } from '@/lib/leads'
 import { TRUCK_PICKUP_RETURN, DISCOUNT_POLICY } from '@/lib/pricing-config'
+// Next.js App Router route files may export ONLY route handlers, so the Zod
+// schema and the review-reason builder live in lib/ — where they are also
+// unit testable without importing a Next route.
+import { BookingSchema } from '@/lib/booking-schema'
+import { buildReviewReasons } from '@/lib/booking-review'
 
 /** The truck pickup & return ADD-ON. Distinct from BOOKING_FEE_CENTS — the two
  *  are both $49 and must never be merged or deduplicated by amount. */
@@ -63,204 +68,18 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   return res
 }
 
-function sanitizeText(value: string): string {
-  return value.replace(/[\u0000-\u001F\u007F]/g, ' ').replace(/\s+/g, ' ').trim()
-}
-
-function sanitizeNotes(value: string): string {
-  return value
-    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, ' ')
-    .replace(/[ \t]+/g, ' ')
-    .trim()
-}
-
-function normalizeTruckOption(value?: string): string | undefined {
-  const clean = value ? sanitizeText(value) : undefined
-  if (!clean) return undefined
-  if (clean === 'full-148' || clean === 'reserve-99') return 'truck-pickup-return'
-  return clean
-}
-
-const cleanString = (min: number, max: number) =>
-  z.string().transform(sanitizeText).pipe(z.string().min(min).max(max))
-
-const BookingSchema = z.object({
-  fullName: cleanString(2, 100),
-  phone: cleanString(7, 25),
-  email: z.string().transform((v) => sanitizeText(v).toLowerCase()).pipe(z.string().email()),
-  serviceType: cleanString(1, 60),
-  date: z.string().transform(sanitizeText).optional(),
-  time: z.string().transform(sanitizeText).optional(),
-  truckOption: z.string().transform(normalizeTruckOption).optional(),
-  jobDetails: z.string().transform(sanitizeNotes).pipe(z.string().max(2000)).optional(),
-  discountCode: z.string().transform(sanitizeText).pipe(z.string().max(50)).optional(),
-
-  // ── Addresses & access (collected on the booking form) ──
-  addressFrom: z.string().transform(sanitizeText).pipe(z.string().max(200)).optional(),
-  addressTo: z.string().transform(sanitizeText).pipe(z.string().max(200)).optional(),
-
-  // ── Structured service-area addresses (new booking form) ──
-  // Optional; when present, drive the server-side travel-fee/zone decision. The
-  // single-line addressFrom/addressTo above stay for back-compat.
-  pickupAddresses: z
-    .array(
-      z.object({
-        street: z.string().transform(sanitizeText).pipe(z.string().max(200)).optional(),
-        city: z.string().transform(sanitizeText).pipe(z.string().max(120)).optional(),
-        state: z.string().transform(sanitizeText).pipe(z.string().max(40)).optional(),
-        zip: z.string().transform(sanitizeText).pipe(z.string().max(12)).optional(),
-      }),
-    )
-    .max(10)
-    .optional(),
-  destinationAddress: z
-    .object({
-      street: z.string().transform(sanitizeText).pipe(z.string().max(200)).optional(),
-      city: z.string().transform(sanitizeText).pipe(z.string().max(120)).optional(),
-      state: z.string().transform(sanitizeText).pipe(z.string().max(40)).optional(),
-      zip: z.string().transform(sanitizeText).pipe(z.string().max(12)).optional(),
-    })
-    .optional(),
-  // ── LEGACY access booleans. Kept so a browser tab opened before the
-  //    2026-07-21 cutover still submits successfully; they map to the LOWEST
-  //    tier server-side and never guess a heavy-item weight. ──
-  stairs: z.coerce.boolean().optional(),
-  longWalk: z.coerce.boolean().optional(),
-  heavyItems: z.coerce.boolean().optional(),
-
-  // ── TIERED access details (2026-07-21). Stairs and carry distance are
-  //    priced PER ADDRESS, so each end is captured separately. ──
-  pickupStairFlights: z.coerce.number().int().min(0).max(60).optional(),
-  dropoffStairFlights: z.coerce.number().int().min(0).max(60).optional(),
-  pickupCarryFeet: z.coerce.number().int().min(0).max(5000).optional(),
-  dropoffCarryFeet: z.coerce.number().int().min(0).max(5000).optional(),
-
-  /** Heavy items WITH weights. Weight is what makes the $50/$100/review tiers
-   *  computable; a piano or safe is always a custom quote regardless. */
-  heavyItemsDetail: z
-    .array(
-      z.object({
-        label: z.string().transform(sanitizeText).pipe(z.string().max(80)).optional(),
-        pounds: z.coerce.number().int().min(0).max(5000).optional(),
-        isPianoOrSafe: z.coerce.boolean().optional(),
-      })
-    )
-    .max(20)
-    .optional(),
-
-  /** Stops beyond the included one pickup + one drop-off. */
-  additionalStops: z
-    .array(
-      z.object({
-        label: z.string().transform(sanitizeText).pipe(z.string().max(120)).optional(),
-        miles: z.coerce.number().min(0).max(500).optional(),
-      })
-    )
-    .max(10)
-    .optional(),
-
-  // ── Structured access details (booking form selects). Unknown values are
-  //    dropped rather than rejected so an old cached form can never 422.
-  //    NOTE: as of 2026-07-21 these are STORED FOR THE CREW ONLY and price
-  //    nothing. The building-age surcharge was removed as undisclosed. ──
-  elevatorAccess: z
-    .string()
-    .transform((v) => (ELEVATOR_LABELS[sanitizeText(v)] ? sanitizeText(v) : undefined))
-    .optional(),
-  parkingDistance: z
-    .string()
-    .transform((v) => (PARKING_LABELS[sanitizeText(v)] ? sanitizeText(v) : undefined))
-    .optional(),
-  buildingYear: z
-    .string()
-    .transform((v) => (BUILDING_LABELS[sanitizeText(v)] ? sanitizeText(v) : undefined))
-    .optional(),
-
-  // ── Structured access details (owner spec 2026-07-12) — all optional so an
-  //    older cached form never 422s. Pickup=origin, drop-off=dest stay separate.
-  //    Access CODES are persisted to their own columns and NEVER folded into
-  //    itemsDescription (which reaches public emails + the customer summary). ──
-  originUnit: z.string().transform(sanitizeText).pipe(z.string().max(40)).optional(),
-  destUnit: z.string().transform(sanitizeText).pipe(z.string().max(40)).optional(),
-  originFloor: z.coerce.number().int().min(-5).max(200).optional(),
-  destFloor: z.coerce.number().int().min(-5).max(200).optional(),
-  originHasElevator: z.coerce.boolean().optional(),
-  destHasElevator: z.coerce.boolean().optional(),
-  originStairCount: z.coerce.number().int().min(0).max(200).optional(),
-  destStairCount: z.coerce.number().int().min(0).max(200).optional(),
-  originAccessNotes: z.string().transform(sanitizeNotes).pipe(z.string().max(500)).optional(),
-  destAccessNotes: z.string().transform(sanitizeNotes).pipe(z.string().max(500)).optional(),
-  originAccessCode: z.string().transform(sanitizeText).pipe(z.string().max(60)).optional(),
-  destAccessCode: z.string().transform(sanitizeText).pipe(z.string().max(60)).optional(),
-  truckProvider: z.string().transform(sanitizeText).pipe(z.string().max(80)).optional(),
-  truckSize: z.string().transform(sanitizeText).pipe(z.string().max(40)).optional(),
-  truckReservationStatus: z.string().transform(sanitizeText).pipe(z.string().max(40)).optional(),
-  truckPickupLocation: z.string().transform(sanitizeText).pipe(z.string().max(200)).optional(),
-  truckReturnResponsibility: z.string().transform(sanitizeText).pipe(z.string().max(120)).optional(),
-  equipmentNeeds: z.string().transform(sanitizeNotes).pipe(z.string().max(500)).optional(),
-  crewInstructions: z.string().transform(sanitizeNotes).pipe(z.string().max(1000)).optional(),
-
-  // ── Phase 2 address verification handshake. addressFormVersion >= 2 means the
-  //    form ran the autocomplete widget and enforced suggestion selection, so the
-  //    server may hard-reject undeliverable strings. manualEntryReason is the
-  //    controlled fallback (verification genuinely failed) — it always routes the
-  //    booking to owner manual review instead of rejecting. ──
-  addressFormVersion: z.coerce.number().int().min(1).max(10).optional(),
-  manualEntryReason: z.string().transform(sanitizeNotes).pipe(z.string().max(300)).optional(),
-
-  // ── Client-side estimate snapshot (display only — NEVER drives pricing).
-  //    Shown to the owner so the approval card matches what the customer saw. ──
-  estimateTotal: z.coerce.number().min(0).max(100000).optional(),
-  estimateAddons: z.coerce.number().min(0).max(100000).optional(),
-
-  // ── Marketing attribution (?src= from the QR / landing URL) ──
-  source: z.string().transform(sanitizeText).pipe(z.string().max(60)).optional(),
-  // "Where did you find us?" self-report from the booking-form dropdown.
-  foundUs: z.string().transform(sanitizeText).pipe(z.string().max(40)).optional(),
-
-  // ── Partial-lead linkage + promotional consent (owner spec 2026-07-24) — all
-  //    optional/additive. bookingSessionId lets markLeadConverted find + convert
-  //    the exact partial lead captured in Step 1; marketingConsent (tri-state:
-  //    present only when the visitor toggled the box) is propagated to the
-  //    Customer. Absent on any tab opened before this cutover — safely ignored. ──
-  bookingSessionId: z.string().transform(sanitizeText).pipe(z.string().max(80)).optional(),
-  marketingConsent: z.boolean().optional(),
-
-  // ── Moving Service Agreement (hard-required) ──
-  // Must be literally true — booking + Stripe session are refused otherwise.
-  agreementAccepted: z.literal(true, {
-    errorMap: () => ({ message: 'You must accept the Moving Service Agreement to book.' }),
-  }),
-  agreementName: cleanString(2, 100),
-  // Frontend sends the version it displayed; we store the server's canonical version.
-  agreementVersion: z.string().transform(sanitizeText).pipe(z.string().max(40)).optional(),
-  agreementSignature: z.string().transform(sanitizeText).pipe(z.string().max(120)).optional(),
-
-  // Preferred language from the site's EN/ES toggle — drives bilingual email/SMS.
-  locale: z.string().transform(sanitizeText).pipe(z.string().max(8)).optional(),
-
-  // ── Job photos (uploaded client-side to Cloudinary before submit) ──
-  // Each entry is the {url, publicId} Cloudinary returns. Optional + capped so a
-  // malformed/oversized payload can't bloat the booking. Persisted as File rows.
-  photos: z
-    .array(
-      z.object({
-        url: z.string().url().max(500),
-        publicId: z.string().transform(sanitizeText).pipe(z.string().min(1).max(300)),
-      })
-    )
-    .max(20)
-    .optional(),
-})
-
 // Move-size flat prices live in the canonical estimate module (the ONE table
 // the form mirrors + the estimate tests pin). Aliased so existing references
 // keep working without a second copy that could drift.
 const SERVICE_MAP = MOVE_SIZES
 
+// Labels are INTERPOLATED from the canonical price book — never hardcoded.
+// A hardcoded "$50" here disagreed with TRUCK_PICKUP_RETURN.amount ($49) and
+// with every price shown on the marketing site, and this string is written
+// into itemsDescription, which reaches customer emails verbatim.
 const TRUCK_LABELS: Record<string, string> = {
   'own-truck': 'Customer provides truck ($0)',
-  'truck-pickup-return': 'Truck Pickup & Return (+$50 due on move day)',
+  'truck-pickup-return': `Truck Pickup & Return (+$${TRUCK_PICKUP_RETURN.amount} due on move day)`,
 }
 
 function buildRequestedDate(date?: string, time?: string): Date {
@@ -294,7 +113,7 @@ function buildDescription(
   lines.push(`Service: ${svc ? svc.label : serviceType}`)
   if (truckOption) lines.push(`Truck: ${TRUCK_LABELS[truckOption] ?? truckOption}`)
   if (truckOption === 'truck-pickup-return') {
-    lines.push('Truck add-on due on move day: $50 (not charged in Stripe)')
+    lines.push(`Truck add-on due on move day: $${TRUCK_PICKUP_RETURN.amount} (not charged in Stripe)`)
   }
   // Access conditions — always human-readable (these lines reach the Discord
   // cards, admin portal, and customer emails verbatim).
@@ -512,6 +331,21 @@ async function handleBooking(req: NextRequest): Promise<NextResponse> {
   })
   const totalEstimateValue = svc ? est.estimatedTotal : est.estimatedTotal > 0 ? est.estimatedTotal : null
 
+  // ── Manual review: ONE verdict, with reasons the owner can read. ──
+  //    est.requiresReview was computed and thrown away before this; the access
+  //    flags never reached the server at all.
+  const reviewReasons = buildReviewReasons({
+    estimate: est,
+    serviceArea: sa,
+    addressNeedsReview,
+    manualEntryReason: data.manualEntryReason,
+    difficultElevatorPickup: data.difficultElevatorPickup,
+    difficultElevatorDropoff: data.difficultElevatorDropoff,
+    difficultBuildingPickup: data.difficultBuildingPickup,
+    difficultBuildingDropoff: data.difficultBuildingDropoff,
+  })
+  const needsManualReview = reviewReasons.length > 0
+
   const itemsDescription = buildDescription(
     data.serviceType,
     data.truckOption,
@@ -528,7 +362,7 @@ async function handleBooking(req: NextRequest): Promise<NextResponse> {
   )
     + (data.source ? `\nSource: ${data.source}` : '')
     + (data.photos?.length ? `\n📷 ${data.photos.length} job photo(s) attached — view in admin/portal` : '')
-    + (sa?.zone === 'extended_nj' ? '\nExtended service-area fee: $50 (due on move day)' : '')
+    + (sa?.zone === 'extended_nj' ? `\nExtended service-area fee: $${travelFeeUsd} (due on move day)` : '')
     + (sa?.zone === 'primary' ? '\nService area: Primary — no travel fee' : '')
     + (sa?.manualReviewRequired ? '\n⚠ Service area: Owner review required — travel price pending; do not confirm a final travel price' : '')
     + ((data.pickupAddresses ?? []).slice(1).map(formatAddr).filter(Boolean).length
@@ -577,6 +411,14 @@ async function handleBooking(req: NextRequest): Promise<NextResponse> {
       truckReturnResponsibility: data.truckReturnResponsibility,
       equipmentNeeds: data.equipmentNeeds,
       crewInstructions: data.crewInstructions,
+      // ── Access difficulty + inventory attestation (owner fix 2026-07-28) ──
+      //    Stored so the crew and the owner can see what the customer declared.
+      //    These drive reviewReasons above; they price nothing.
+      difficultElevatorPickup: data.difficultElevatorPickup,
+      difficultElevatorDropoff: data.difficultElevatorDropoff,
+      difficultBuildingPickup: data.difficultBuildingPickup,
+      difficultBuildingDropoff: data.difficultBuildingDropoff,
+      inventoryAccuracyConfirmed: data.inventoryAccuracyConfirmed,
       // ── Verified structured address (server verification results ONLY) ──
       ...verifiedAddressColumns('origin', originV, data.manualEntryReason),
       ...verifiedAddressColumns('dest', destV, data.manualEntryReason),
@@ -595,7 +437,11 @@ async function handleBooking(req: NextRequest): Promise<NextResponse> {
       serviceAreaZone: (sa?.zone ?? null) as any,
       travelFee: travelFeeCents,
       travelFeeDueOnMoveDay: travelFeeCents > 0,
-      manualReviewRequired: (sa?.manualReviewRequired ?? false) || addressNeedsReview,
+      // Derived from buildReviewReasons() so the flag and the reasons can never
+      // disagree. Previously this read only the service-area/address verdicts,
+      // so an unpriced piano booked as if it were a settled job.
+      manualReviewRequired: needsManualReview,
+      reviewReasons,
       serviceAreaMessage: sa?.message ?? null,
       addressEvaluation: sa ? (sa.evaluatedAddresses as any) : undefined,
       discountCode: data.discountCode,

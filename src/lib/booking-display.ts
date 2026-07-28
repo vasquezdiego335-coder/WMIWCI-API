@@ -576,6 +576,17 @@ export type ApprovalCardData = {
   serviceAreaZone?: string | null
   manualReviewRequired?: boolean
   serviceAreaMessage?: string | null
+  /** Readable reasons this booking needs the owner's eyes — piano, difficult
+   *  elevator, unverified address, unpriced package. Built server-side by
+   *  buildReviewReasons() in app/api/bookings/route.ts. Shown verbatim. */
+  reviewReasons?: string[] | null
+  // Access difficulty the customer declared (review triggers, never auto-priced)
+  difficultElevatorPickup?: boolean | null
+  difficultElevatorDropoff?: boolean | null
+  difficultBuildingPickup?: boolean | null
+  difficultBuildingDropoff?: boolean | null
+  /** Customer attested the inventory/access details are accurate. */
+  inventoryAccuracyConfirmed?: boolean | null
   // Stripe
   paymentStatusLabel?: string | null
   stripePaymentIntentId?: string | null
@@ -687,6 +698,35 @@ export function buildBookingApprovalCard(data: ApprovalCardData): {
   if (data.stripeCheckoutId) stripeLines.push(`Checkout Session: \`${shortRef(data.stripeCheckoutId)}\``)
   if (data.stripeChargeId) stripeLines.push(`Charge: \`${shortRef(data.stripeChargeId)}\``)
   fields.push(field('💳 Stripe', stripeLines.join('\n'), true))
+
+  // 8-bis) WHY this needs review. Full width and directly above the buttons the
+  //        owner is about to press — a bare "⚠️ Owner review required" told them
+  //        THAT a job needed review but never WHY, so they re-derived it by hand
+  //        from the notes. Reasons are pre-worded server-side; shown verbatim.
+  const reviewReasons = (data.reviewReasons ?? []).filter((r) => !!r && r.trim())
+  if (reviewReasons.length) {
+    fields.push(
+      field(
+        '⚠️ Owner Review Required',
+        reviewReasons.map((r) => `• ${r}`).join('\n'),
+        false // full width — these are sentences, not a two-column stat
+      )
+    )
+  }
+
+  // 8-ter) Access difficulty + the inventory attestation. Separate from the
+  //        reasons above because the crew needs these even when the owner has
+  //        already cleared the review.
+  const accessFlags: string[] = []
+  if (data.difficultElevatorPickup) accessFlags.push('⚠️ Difficult elevator — pickup')
+  if (data.difficultElevatorDropoff) accessFlags.push('⚠️ Difficult elevator — destination')
+  if (data.difficultBuildingPickup) accessFlags.push('⚠️ Difficult building access — pickup')
+  if (data.difficultBuildingDropoff) accessFlags.push('⚠️ Difficult building access — destination')
+  if (data.inventoryAccuracyConfirmed === true) accessFlags.push('✅ Customer confirmed inventory is accurate')
+  else if (data.inventoryAccuracyConfirmed === false) accessFlags.push('❔ Inventory accuracy NOT confirmed')
+  if (accessFlags.length) {
+    fields.push(field('🚪 Access Difficulty', accessFlags.join('\n'), false))
+  }
 
   // 9) Service area (only when it needs the owner's eyes)
   if (data.serviceAreaZone || data.manualReviewRequired) {
@@ -826,6 +866,12 @@ export type ApprovalBookingInput = {
   serviceAreaZone?: string | null
   manualReviewRequired?: boolean | null
   serviceAreaMessage?: string | null
+  reviewReasons?: string[] | null
+  difficultElevatorPickup?: boolean | null
+  difficultElevatorDropoff?: boolean | null
+  difficultBuildingPickup?: boolean | null
+  difficultBuildingDropoff?: boolean | null
+  inventoryAccuracyConfirmed?: boolean | null
   stripePaymentIntentId?: string | null
   stripeCheckoutId?: string | null
   agreementAccepted?: boolean | null
@@ -884,6 +930,15 @@ export function approvalCardDataFromBooking(
     serviceAreaZone: b.serviceAreaZone ?? null,
     manualReviewRequired: b.manualReviewRequired ?? false,
     serviceAreaMessage: b.serviceAreaMessage ?? null,
+    // Why the owner is being asked to look, and what the customer declared
+    // about access. Both are read straight from the booking row — the route
+    // is the only thing that words them.
+    reviewReasons: b.reviewReasons ?? [],
+    difficultElevatorPickup: b.difficultElevatorPickup ?? null,
+    difficultElevatorDropoff: b.difficultElevatorDropoff ?? null,
+    difficultBuildingPickup: b.difficultBuildingPickup ?? null,
+    difficultBuildingDropoff: b.difficultBuildingDropoff ?? null,
+    inventoryAccuracyConfirmed: b.inventoryAccuracyConfirmed ?? null,
     paymentStatusLabel: b.depositPaid
       ? `✅ $${deposit.toFixed(0)} captured`
       : `🔒 $${deposit.toFixed(0)} hold authorized (captured on approval)`,
