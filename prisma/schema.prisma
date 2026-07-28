@@ -3709,3 +3709,51 @@ model EmailAgentModelCall {
   @@index([incidentId])
   @@map("email_agent_model_calls")
 }
+
+// ════════════════════════════════════════════════════════════════════════
+//  LINK CLICK — traffic attribution for the cloaked short links
+//  (owner spec 2026-07-28)
+//  ---------------------------------------------------------------------
+//  The owner pastes moveitclearit.com/m into Messenger all day, plus /fb,
+//  /ig, /tt and /qr elsewhere. Those pages stamp a source/medium/campaign
+//  into the visitor's sessionStorage and land them on a clean URL. This
+//  table records the ARRIVAL, so "which channel actually sends people" is
+//  answerable without opening Google Analytics.
+//
+//  ONE ROW PER SESSION PER SOURCE. The browser guards this with a
+//  sessionStorage flag, so a visitor reading five pages is one row — the
+//  numbers here mean "visits", not "page views".
+//
+//  DELIBERATELY NOT PERSONAL DATA. No IP, no cookie, no fingerprint, no
+//  join key back to a person. A row says "someone arrived from Messenger
+//  at 14:12" and nothing more, which is all the owner asked for and the
+//  least that answers it. The funnel view pairs these counts with Lead
+//  rows by campaign — an aggregate-to-aggregate comparison, never a
+//  click-to-person link.
+// ════════════════════════════════════════════════════════════════════════
+model LinkClick {
+  id String @id @default(cuid())
+
+  /// utm_source — "facebook", "instagram", "tiktok", "print".
+  source String
+  /// utm_medium — "messenger", "post", "bio", "doorhanger".
+  medium String?
+  /// utm_campaign — the joinable key: "fb-messenger", "ig-bio", …
+  /// Matches Lead.utmCampaign, which is what makes the funnel view possible.
+  campaign String?
+
+  /// Where they landed ("/" for a short link, or a deep page).
+  landingPath String? @map("landing_path")
+  /// Truncated referrer. Useful for spotting traffic the tags didn't cover.
+  referrer String?
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  /// Date-range scans for the admin page and the daily digest.
+  @@index([createdAt])
+  /// "Group by source over the last N days" — the main query.
+  @@index([source, createdAt])
+  /// Funnel join against Lead.utmCampaign.
+  @@index([campaign, createdAt])
+  @@map("link_clicks")
+}

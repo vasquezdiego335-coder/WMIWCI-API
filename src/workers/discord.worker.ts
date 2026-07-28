@@ -9,6 +9,7 @@ import {
   createJobChannels,
   postDailySchedule,
   postContactMessage,
+  postTrafficDigest,
 } from '../bot/discord-rest'
 
 async function processDiscordJob(job: Job<DiscordJobData>): Promise<void> {
@@ -41,6 +42,9 @@ async function processDiscordJob(job: Job<DiscordJobData>): Promise<void> {
       break
     case 'contact-message':
       await postContactMessage(payload)
+      break
+    case 'traffic-digest':
+      await postTrafficDigest(payload)
       break
     case 'reschedule-offer':
       // Re-post a fresh approval card after a customer picks a new date.

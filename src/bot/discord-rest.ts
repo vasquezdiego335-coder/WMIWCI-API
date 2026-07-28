@@ -311,3 +311,55 @@ export async function postContactMessage(payload: Record<string, unknown>): Prom
     embeds: [embed.toJSON()],
   })
 }
+
+// ══════════════════════════════════════════════════════════════════════════
+//  8. Weekly traffic digest (owner spec 2026-07-28)
+//     "Which link is actually working?" — answered once a week, in the place
+//     the owner already looks. Clicks AND leads together, because either
+//     number alone lies: 200 clicks with 0 leads is a channel that looks busy
+//     and earns nothing.
+// ══════════════════════════════════════════════════════════════════════════
+export async function postTrafficDigest(payload: Record<string, unknown>): Promise<void> {
+  botLogger.info({ title: payload.title }, '▶ postTrafficDigest (REST)')
+  type ChannelRow = { label: string; link: string; clicks: number; leads: number }
+  const rows = (payload.rows as ChannelRow[]) ?? []
+  const totalClicks = rows.reduce((n, r) => n + r.clicks, 0)
+  const totalLeads = rows.reduce((n, r) => n + r.leads, 0)
+
+  const embed = new EmbedBuilder()
+    .setTitle((payload.title as string) || '📊 Where your traffic came from')
+    .setColor(0xff5a1f)
+    .setTimestamp()
+
+  if (rows.length === 0) {
+    // Say what to DO about it, not just that the number is zero.
+    embed.setDescription(
+      [
+        'No link clicks recorded this week.',
+        '',
+        'Paste these instead of the plain website address:',
+        '`moveitclearit.com/m` — Messenger · `/fb` — Facebook · `/ig` — Instagram',
+        '`/tt` — TikTok · `/qr` — door hangers',
+      ].join('\n')
+    )
+  } else {
+    for (const r of rows) {
+      const rate = r.clicks > 0 ? Math.round((r.leads / r.clicks) * 100) : 0
+      // A channel sending real traffic and producing nothing is the single most
+      // useful thing this message can point at.
+      const flag = r.clicks >= 10 && r.leads === 0 ? '  ⚠️ no leads' : ''
+      embed.addFields({
+        name: r.label,
+        value: `**${r.clicks}** click${r.clicks === 1 ? '' : 's'} → **${r.leads}** lead${r.leads === 1 ? '' : 's'} (${rate}%)${flag}\n\`moveitclearit.com${r.link}\``,
+        inline: false,
+      })
+    }
+    embed.setFooter({
+      text: `${totalClicks} click${totalClicks === 1 ? '' : 's'} → ${totalLeads} lead${totalLeads === 1 ? '' : 's'} over the last 7 days`,
+    })
+  }
+
+  await restSendFirst(['DISCORD_CHANNEL_OPERATIONS', 'DISCORD_CHANNEL_ALERTS', 'DISCORD_CHANNEL_SCHEDULING'], {
+    embeds: [embed.toJSON()],
+  })
+}

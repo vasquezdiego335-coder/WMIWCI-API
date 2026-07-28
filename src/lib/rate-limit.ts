@@ -67,6 +67,12 @@ export const LIMITS = {
   coupon: { name: 'coupon', limit: 6, windowSec: 10 * 60, failMode: 'open' } as RateLimitConfig,
   // Server-to-server (already token-gated) — a generous ceiling against runaway loops.
   notifyLead: { name: 'notify-lead', limit: 60, windowSec: 60, failMode: 'open' } as RateLimitConfig,
+  // Link-click analytics. The browser fires this once per SESSION, so a real
+  // visitor is 1 hit — but a household, an office or a carrier NAT all share
+  // one IP, so the ceiling is generous. Fail OPEN: dropping rows to protect a
+  // table that holds no personal data would only make the owner's marketing
+  // numbers wrong, which is the one thing the feature exists to prevent.
+  trackClick: { name: 'track-click', limit: 60, windowSec: 5 * 60, failMode: 'open' } as RateLimitConfig,
 } as const
 
 // ── Pure in-memory bucket (fixed window). Exported for offline tests. ─────────

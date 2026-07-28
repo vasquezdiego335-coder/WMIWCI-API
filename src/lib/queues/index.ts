@@ -206,6 +206,7 @@ export type DiscordJobData = {
     | 'daily-schedule'
     | 'contact-message'    // a new contact-form submission (alerts the team)
     | 'reschedule-offer'   // re-post an approval card after a customer picks a new date
+    | 'traffic-digest'     // weekly clicks-and-leads-by-channel summary
   bookingId?: string
   payload: Record<string, unknown>
 }
@@ -251,6 +252,8 @@ export type ScheduledJobData = {
     | 'email-side-effect-sweep' // cron: re-drive suppressions that failed to write
     | 'email-monitoring' // cron: complaint/bounce rates, stuck runs, stranded recipients
     | 'email-agent-cycle' // cron: operations agent — health engine, incidents, investigation, alerts
+    // ── Marketing attribution (owner spec 2026-07-28) ──
+    | 'traffic-digest-weekly' // cron: post clicks+leads by channel to Discord
     // ── Automation runtime (owner spec 2026-07-22) ──
     //    Producers: email-automation-runtime.ts.
     | 'automation-stage' // payload: { enrollmentId, stageIndex }

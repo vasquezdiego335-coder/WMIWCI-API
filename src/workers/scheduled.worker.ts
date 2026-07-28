@@ -272,6 +272,78 @@ async function processScheduledJob(job: Job<ScheduledJobData>): Promise<void> {
       break
     }
 
+    // ── Monday 8 AM: which link is actually working ───────────────
+    //  Pairs LinkClick counts with Lead counts by campaign tag. Both numbers
+    //  are needed: a channel with 200 clicks and 0 leads looks like the best
+    //  one until you see the second column.
+    //
+    //  WEEKLY, not daily, on purpose. At this volume a daily message would
+    //  mostly read "0 clicks, 0 leads" and become noise the owner learns to
+    //  ignore — which would cost him the one message that matters.
+    case 'traffic-digest-weekly': {
+      const since = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000)
+
+      const [clicks, leads] = await Promise.all([
+        prisma.linkClick.groupBy({
+          by: ['campaign'],
+          where: { createdAt: { gte: since } },
+          _count: { _all: true },
+        }),
+        prisma.lead.groupBy({
+          by: ['utmCampaign'],
+          where: { createdAt: { gte: since }, utmCampaign: { not: null } },
+          _count: { _all: true },
+        }),
+      ])
+
+      if (clicks.length === 0) {
+        // Still post: "nobody clicked anything" is a real finding, and the
+        // empty-state message names the links he should be pasting.
+        await discordQueue.add('traffic-digest', { type: 'traffic-digest', payload: { rows: [] } })
+        log.info('traffic digest posted (no clicks)')
+        break
+      }
+
+      const leadsByCampaign = new Map<string, number>()
+      for (const l of leads) {
+        if (l.utmCampaign) leadsByCampaign.set(l.utmCampaign.toLowerCase(), l._count._all)
+      }
+
+      const LABELS: Record<string, { label: string; link: string }> = {
+        'fb-messenger': { label: '📘 Messenger DMs', link: '/m' },
+        'fb-post': { label: '📘 Facebook post', link: '/fb' },
+        'ig-bio': { label: '📸 Instagram', link: '/ig' },
+        'tiktok-bio': { label: '🎵 TikTok', link: '/tt' },
+        'print-doorhanger': { label: '🚪 Door hangers / QR', link: '/qr' },
+      }
+
+      const rows = clicks
+        .map((c) => {
+          const key = (c.campaign ?? '(untagged)').toLowerCase()
+          const meta = LABELS[key] ?? { label: key, link: '' }
+          return {
+            label: meta.label,
+            link: meta.link,
+            clicks: c._count._all,
+            leads: leadsByCampaign.get(key) ?? 0,
+          }
+        })
+        .sort((a, b) => b.clicks - a.clicks)
+
+      const today = new Date().toLocaleDateString('en-US', {
+        month: 'long',
+        day: 'numeric',
+        timeZone: 'America/New_York',
+      })
+
+      await discordQueue.add('traffic-digest', {
+        type: 'traffic-digest',
+        payload: { title: `📊 Where your traffic came from — week to ${today}`, rows },
+      })
+      log.info({ channels: rows.length }, 'traffic digest posted')
+      break
+    }
+
     // ── 7 AM: Today's confirmed jobs ──────────────────────────────
     case 'daily-schedule-morning': {
       // Day boundaries pinned to America/New_York (not the server's local zone),
@@ -643,6 +715,16 @@ async function registerCronJobs(): Promise<void> {
     'lead-maintenance',
     { type: 'lead-maintenance' },
     { repeat: { pattern: '20 3 * * *', tz: 'America/New_York' }, jobId: 'cron:lead-maintenance' }
+  )
+
+  // ── Weekly traffic digest (owner spec 2026-07-28) ──
+  // Monday 8 AM ET: clicks and leads per channel for the past 7 days, to
+  // Discord. Weekly rather than daily because at this volume a daily message
+  // would usually read "0 clicks" and train the owner to ignore it.
+  await scheduledQueue.add(
+    'traffic-digest-weekly',
+    { type: 'traffic-digest-weekly' },
+    { repeat: { pattern: '0 8 * * 1', tz: 'America/New_York' }, jobId: 'cron:traffic-digest-weekly' }
   )
 
   // The agent cron previously ran every 5 minutes under the SAME jobId. BullMQ

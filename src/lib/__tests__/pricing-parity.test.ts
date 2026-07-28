@@ -60,8 +60,13 @@ test('parity: the booking form loads the mirror and defines no prices itself', {
   assert.ok(existsSync(FORM), `missing ${FORM}`)
   const html = readFileSync(FORM, 'utf8')
 
+  /* An optional ?v= cache-buster is ALLOWED, and is in fact wanted (the site
+     added one on 2026-07-28). This mirror is the one file where a stale browser
+     cache means a customer is quoted last month's prices — precisely the
+     mis-billing this suite exists to prevent. The assertion is "the form loads
+     the mirror", not "the src carries no query string". */
   assert.ok(
-    /<script[^>]+src=["']\/?js\/pricing-config\.js["']/.test(html),
+    /<script[^>]+src=["']\/?js\/pricing-config\.js(\?[^"']*)?["']/.test(html),
     'booking-form.html must load js/pricing-config.js'
   )
 
