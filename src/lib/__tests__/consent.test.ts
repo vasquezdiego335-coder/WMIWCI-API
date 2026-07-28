@@ -11,6 +11,7 @@ import {
   type ExistingConsent,
   type IncomingConsent,
 } from '../consent'
+import { mapLeadSource } from '../leads'
 
 // ════════════════════════════════════════════════════════════════════════
 //  MARKETING CONSENT RULES (owner spec 2026-07-28)
@@ -245,4 +246,48 @@ test('the shared isMarketable gate agrees with the audience query', () => {
   assert.equal(isMarketable({ email: 'a@b.com', consent: false }).marketable, false)
   assert.equal(isMarketable({ email: 'a@b.com', consent: true }).marketable, true)
   assert.equal(isMarketable({ email: 'a@b.com', consent: true, suppressed: true }).marketable, false)
+})
+
+// ════════════════════════════════════════════════════════════════════════
+//  SOURCE ATTRIBUTION (Phase 4)
+//
+//  MEASURED FAILURE: an end-to-end run of the new quote-form payload stored
+//  `source: OTHER` despite sending `QUICK_QUOTE_FORM`, because mapLeadSource
+//  only knew the legacy free-form channel words. That is exactly the
+//  unanswerable-attribution problem this phase exists to fix.
+// ════════════════════════════════════════════════════════════════════════
+
+test('a controlled capture surface is stored, not flattened to OTHER', () => {
+  for (const v of ['QUICK_QUOTE_FORM', 'HOMEPAGE_ESTIMATE', 'BOOKING_FORM', 'SERVICES_PAGE', 'MOVING_CHECKLIST']) {
+    assert.equal(mapLeadSource(v), v, `${v} must survive`)
+  }
+})
+
+test('capture surfaces are matched case- and separator-insensitively', () => {
+  assert.equal(mapLeadSource('quick_quote_form'), 'QUICK_QUOTE_FORM')
+  assert.equal(mapLeadSource('services-page'), 'SERVICES_PAGE')
+  assert.equal(mapLeadSource('homepage estimate'), 'HOMEPAGE_ESTIMATE')
+})
+
+test('a legacy word keeps its ORIGINAL meaning even when a same-named enum value exists', () => {
+  // `contact-form` has always meant WEBSITE. CONTACT_FORM now exists as an
+  // enum value, and an enum-first lookup would silently re-point every
+  // existing /api/contact submission — a live behaviour change disguised as a
+  // vocabulary addition. Callers wanting the new value send it explicitly.
+  assert.equal(mapLeadSource('contact-form'), 'WEBSITE')
+  assert.equal(mapLeadSource('CONTACT_FORM'), 'CONTACT_FORM')
+})
+
+test('legacy channel words still map as they always did', () => {
+  // PREVENTS: the new branch swallowing the existing vocabulary.
+  assert.equal(mapLeadSource('google'), 'GOOGLE')
+  assert.equal(mapLeadSource('door-hanger'), 'DOOR_HANGER')
+  assert.equal(mapLeadSource('fb'), 'FACEBOOK')
+  assert.equal(mapLeadSource('website'), 'WEBSITE')
+})
+
+test('a genuinely unknown source still falls back to OTHER', () => {
+  assert.equal(mapLeadSource('some-affiliate-nobody-configured'), 'OTHER')
+  assert.equal(mapLeadSource(''), 'OTHER')
+  assert.equal(mapLeadSource(null), 'OTHER')
 })

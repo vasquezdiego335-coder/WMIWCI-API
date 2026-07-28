@@ -94,8 +94,28 @@ const SOURCE_MAP: Record<string, LeadSource> = {
 }
 
 export function mapLeadSource(source?: string | null): LeadSource {
-  const key = (source ?? '').trim().toLowerCase()
-  return SOURCE_MAP[key] ?? LeadSource.OTHER
+  const raw = (source ?? '').trim()
+  if (!raw) return LeadSource.OTHER
+
+  // ── LEGACY CHANNEL WORDS FIRST, and the order is deliberate. ────────────
+  // `contact-form` has always meant WEBSITE. Now that CONTACT_FORM exists as
+  // an enum value, an enum-first lookup would silently re-point every existing
+  // /api/contact submission at a different source — a live behaviour change
+  // disguised as a vocabulary addition. Existing callers keep their meaning.
+  const legacy = SOURCE_MAP[raw.toLowerCase()]
+  if (legacy) return legacy
+
+  // ── Then CONTROLLED CAPTURE SURFACES (owner spec 2026-07-28). ───────────
+  // A caller sending `QUICK_QUOTE_FORM` means exactly that. Before this every
+  // such submission fell through to `OTHER`, which is why the lead table could
+  // not answer "which form is actually working". Matched against the live
+  // enum, so adding a value to the schema is all it takes to support it.
+  const upper = raw.toUpperCase().replace(/[\s-]+/g, '_')
+  if (Object.prototype.hasOwnProperty.call(LeadSource, upper)) {
+    return LeadSource[upper as keyof typeof LeadSource]
+  }
+
+  return LeadSource.OTHER
 }
 
 const clean = (v?: string | null): string | null => {
