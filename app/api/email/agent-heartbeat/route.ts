@@ -46,9 +46,19 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
   // FAIL CLOSED. With no token configured the endpoint is unavailable rather
   // than public — an unauthenticated status endpoint is a free reconnaissance
   // signal about when nobody is watching.
-  if (!expected || expected.length < 16) {
+  // A PLACEHOLDER IS NOT A SECRET. `PUT_A_RANDOM_32_PLUS_CHARACTER_SECRET_HERE`
+  // is long enough to pass a length check and is public knowledge, so it is
+  // rejected explicitly — a guessable token on a status endpoint is worse than
+  // no endpoint, because it looks protected.
+  const placeholder = /^(REPLACE|PASTE|PUT|ADD|SET|INSERT|YOUR|CHANGE|EXAMPLE|SAMPLE|TODO|XXX)([_-]|$)/i.test(expected ?? '')
+  if (!expected || expected.length < 16 || placeholder) {
     return NextResponse.json(
-      { state: 'unconfigured', message: 'EMAIL_AGENT_HEARTBEAT_TOKEN is not set (minimum 16 characters). The heartbeat endpoint is disabled.' },
+      {
+        state: 'unconfigured',
+        message: placeholder
+          ? 'EMAIL_AGENT_HEARTBEAT_TOKEN is still the placeholder value. Generate a real random secret; the endpoint stays disabled until then.'
+          : 'EMAIL_AGENT_HEARTBEAT_TOKEN is not set (minimum 16 characters). The heartbeat endpoint is disabled.',
+      },
       { status: 503 }
     )
   }

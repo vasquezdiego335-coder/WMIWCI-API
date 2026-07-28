@@ -834,6 +834,11 @@ model Booking {
   travelFee                   Int              @default(0) @map("travel_fee") // cents; 0 = none
   travelFeeDueOnMoveDay       Boolean          @default(false) @map("travel_fee_due_on_move_day")
   manualReviewRequired        Boolean          @default(false) @map("manual_review_required")
+  /// Human-readable reasons the booking needs owner review. Populated from
+  /// computeEstimate().reviewReasons plus the access-difficulty flags and the
+  /// service-area/address verdicts. A bare boolean told the owner THAT a job
+  /// needed review but never WHY, so the owner had to re-derive it by hand.
+  reviewReasons               String[]         @map("review_reasons")
   serviceAreaMessage          String?          @map("service_area_message")
   distanceFromWestOrangeMiles Float?           @map("distance_from_west_orange_miles")
   estimatedDriveTimeMinutes   Int?             @map("estimated_drive_time_minutes")
@@ -892,6 +897,24 @@ model Booking {
 
   equipmentNeeds   String? @map("equipment_needs") // dollies/straps/piano board (informational)
   crewInstructions String? @map("crew_instructions") // customer's move-day instructions for the crew
+
+  // ── ACCESS DIFFICULTY (customer-declared). REVIEW TRIGGERS, NEVER AUTO-PRICED. ──
+  //    The booking form has always SENT these five, but they were absent from the
+  //    Zod schema, and z.object() strips unknown keys silently — so the answers
+  //    evaporated on every submission. The form promises the customer that a
+  //    freight-restricted elevator or a loading-dock restriction is "Reviewed
+  //    before any charge applies"; without these columns no review ever fired.
+  //
+  //    Nullable because a browser tab opened before this cutover does not send
+  //    them; null means "not asked", which is NOT the same as "no".
+  difficultElevatorPickup  Boolean? @map("difficult_elevator_pickup")
+  difficultElevatorDropoff Boolean? @map("difficult_elevator_dropoff")
+  difficultBuildingPickup  Boolean? @map("difficult_building_pickup")
+  difficultBuildingDropoff Boolean? @map("difficult_building_dropoff")
+  /// The customer attested their inventory/access details are accurate. Required
+  /// on new submissions; defaults false so legacy rows read honestly as "never
+  /// attested" rather than silently claiming an attestation never made.
+  inventoryAccuracyConfirmed Boolean @default(false) @map("inventory_accuracy_confirmed")
 
   // ── Verified structured address (Phase 2, owner spec 2026-07-12). Written by
   //    SERVER-side Google Address Validation only — client-claimed components are

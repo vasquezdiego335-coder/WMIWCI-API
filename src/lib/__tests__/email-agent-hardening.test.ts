@@ -996,3 +996,57 @@ test('the investigator refuses to send a prompt containing an unmasked address',
   const callAt = src.indexOf('await attemptCall(')
   assert.ok(leakAt > 0 && leakAt < callAt, 'the leak gate must precede the provider call')
 })
+
+// ════════════════════════════════════════════════════════════════════════
+//  PLACEHOLDER CONFIGURATION (owner rollout, 2026-07-28)
+//
+//  Two real near-misses: DISCORD_CHANNEL_ALERTS was the literal string
+//  `PASTE_ALERTS_CHANNEL_ID`, which the old guard accepted and Discord
+//  answered 400 to; and the documented heartbeat token placeholder
+//  `PUT_A_RANDOM_32_PLUS_CHARACTER_SECRET_HERE` is long enough to pass a
+//  length check while being public knowledge.
+// ════════════════════════════════════════════════════════════════════════
+
+test('common placeholder values are not accepted as configuration', () => {
+  const placeholders = [
+    'PASTE_ALERTS_CHANNEL_ID',
+    'PUT_A_RANDOM_32_PLUS_CHARACTER_SECRET_HERE',
+    'REPLACE_ME',
+    'YOUR_API_KEY',
+    'CHANGE_ME',
+    'TODO_SET_THIS',
+    'EXAMPLE_VALUE',
+  ]
+  for (const p of placeholders) {
+    const status = effectiveStatus(
+      { ...settings, alertsEnabled: true },
+      { EMAIL_AGENT_ENABLED: 'true', DISCORD_BOT_TOKEN: 'a-real-looking-token-value', DISCORD_CHANNEL_ALERTS: p } as never
+    )
+    assert.equal(status.alertsConfigured, false, `${p} must read as unconfigured`)
+  }
+})
+
+test('a genuine-looking value IS accepted', () => {
+  // The guard must not be so broad that real configuration is rejected.
+  const status = effectiveStatus(
+    { ...settings, alertsEnabled: true },
+    { EMAIL_AGENT_ENABLED: 'true', DISCORD_BOT_TOKEN: 'MTIzNDU2Nzg5MDEyMzQ1Njc4.abcdef.ghijkl', DISCORD_CHANNEL_ALERTS: '1234567890123456789' } as never
+  )
+  assert.equal(status.alertsConfigured, true, 'a real channel id must be accepted')
+})
+
+test('the heartbeat endpoint rejects the documented placeholder token', () => {
+  const src = readFileSync(resolve(__dirname, '../../../app/api/email/agent-heartbeat/route.ts'), 'utf8')
+  assert.ok(/const placeholder = /.test(src), 'the route must detect a placeholder token')
+  assert.ok(/\|\| placeholder/.test(src), 'and refuse to enable the endpoint with one')
+  assert.ok(/PUT\|/.test(src) || /PUT/.test(src), 'PUT_ prefixed placeholders must be covered')
+})
+
+test('the fallback provider needs its PROVIDER name, not just a model', () => {
+  // A rollout that sets EMAIL_AGENT_FALLBACK_MODEL but omits
+  // EMAIL_AGENT_FALLBACK_PROVIDER gets NO fallback at all, silently.
+  const src = lib('email-agent/investigator.ts')
+  const fn = src.slice(src.indexOf('export function resolveFallbackProvider'))
+  assert.ok(/EMAIL_AGENT_FALLBACK_PROVIDER/.test(fn), 'the provider name is what enables the fallback')
+  assert.ok(/if \(!name\) return null/.test(fn), 'and its absence disables the fallback entirely')
+})

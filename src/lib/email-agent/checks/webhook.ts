@@ -43,7 +43,7 @@ import {
 const configured = (v?: string): boolean => {
   const t = v?.trim()
   if (!t) return false
-  return !/^(REPLACE|PASTE|YOUR|CHANGE_?ME|TODO|XXX)/i.test(t) && !t.includes('REPLACE')
+  return !/^(REPLACE|PASTE|PUT|ADD|SET|INSERT|YOUR|CHANGE|EXAMPLE|SAMPLE|TODO|XXX)([_-]|$)/i.test(t) && !t.includes('REPLACE')
 }
 
 // ── 1. The endpoint cannot verify anything ──────────────────────────────
