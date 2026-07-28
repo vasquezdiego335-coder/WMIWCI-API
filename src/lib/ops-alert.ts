@@ -29,7 +29,19 @@ const log = queueLogger.child({ mod: 'ops-alert' })
 
 const REQUEST_TIMEOUT_MS = 5000
 
-const configured = (v?: string): boolean => !!v && v.trim() !== '' && !v.includes('REPLACE')
+/**
+ * Is this value REALLY configured?
+ *
+ * Placeholder-aware. A literal `PASTE_ALERTS_CHANNEL_ID` was previously treated
+ * as a real channel id, so the alert path reported itself configured and
+ * Discord answered `400 Invalid Form Body`. Unconfigured must LOOK
+ * unconfigured, not broken.
+ */
+const configured = (v?: string): boolean => {
+  const t = v?.trim()
+  if (!t) return false
+  return !/^(REPLACE|PASTE|YOUR|CHANGE_?ME|TODO|XXX)/i.test(t) && !t.includes('REPLACE')
+}
 
 export type AlertLine = { message: string; action?: string }
 

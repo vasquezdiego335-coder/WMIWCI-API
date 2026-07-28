@@ -46,6 +46,10 @@ import { buildMarketingContext, applyMarketingContext } from './marketing-contex
 import { validateCampaign, canDispatch, canTransition, type CampaignState, type CampaignValidation } from './email-campaign'
 import { validateAudienceDefinition, resolveAudienceDetailed, MAX_AUDIENCE, type AudienceDefinition, type Candidate } from './email-audience'
 import { buildRecipientContext, templateAllowsSegment } from './email-recipient-context'
+// The operations agent's kill switch. Imported from `settings` rather than the
+// agent barrel so this hot path never pulls the checks, providers or runner
+// into a Next.js route bundle.
+import { isMarketingDispatchPaused, pauseRefusalMessage } from './email-agent/settings'
 import {
   CAMPAIGN_BATCH_SIZE,
   RUN_SENDABLE_STATES,
@@ -165,6 +169,20 @@ export async function dispatchCampaign(
   opts: { acknowledgeTruncation?: boolean } = {}
 ): Promise<DispatchResult> {
   const acknowledgedTruncation = opts.acknowledgeTruncation === true
+
+  // ── THE GLOBAL KILL SWITCH (owner spec 2026-07-27) ─────────────────────
+  // Checked HERE, at the top of the one function every dispatch goes through —
+  // manual, scheduled sweep and retry alike — because a switch that only hides
+  // an admin button is not a kill switch. The read fails open by design (see
+  // isMarketingDispatchPaused): a monitoring table being unreachable must not
+  // become an outage of the business's email, and the degraded read is itself
+  // reported by the agent's `infrastructure.agent_settings_unreadable` check.
+  const pause = await isMarketingDispatchPaused()
+  if (pause.paused) {
+    log.warn({ campaignId, pausedBy: pause.by }, 'dispatch refused — marketing dispatch is paused')
+    return { ok: false, error: pauseRefusalMessage(pause) }
+  }
+
   const campaign = await loadCampaign(campaignId)
   if (!campaign || campaign.channel !== 'EMAIL') return { ok: false, error: 'That email campaign does not exist.' }
   const config = campaign.emailConfig
@@ -430,6 +448,18 @@ export async function processCampaignBatch(runId: string, batchIndex: number): P
     select: { id: true, campaignId: true, status: true, snapshot: true },
   })
   if (!run) return { processed: 0, halted: true }
+
+  // THE KILL SWITCH ALSO STOPS WORK ALREADY IN FLIGHT. Pausing dispatch has to
+  // halt the batches of a run that is mid-send, not merely prevent the next
+  // campaign from starting — otherwise switching it on during an incident
+  // still lets the current send finish reaching customers. Recipients stay
+  // PENDING and resume when the pause is lifted; nothing is lost.
+  const pause = await isMarketingDispatchPaused()
+  if (pause.paused) {
+    log.warn({ runId, batchIndex, pausedBy: pause.by }, 'batch halted — marketing dispatch is paused')
+    return { processed: 0, halted: true }
+  }
+
   if (!RUN_SENDABLE_STATES.has(run.status as RunState)) {
     // PAUSED / CANCELLING / terminal: recipients stay PENDING. Resume
     // re-enqueues the batches; cancel marks them CANCELLED.

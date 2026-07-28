@@ -440,6 +440,35 @@ async function processScheduledJob(job: Job<ScheduledJobData>): Promise<void> {
       break
     }
 
+    // ── EMAIL OPERATIONS AGENT (owner spec 2026-07-27) ────────────
+    // The supervised watcher. It runs the deterministic health engine, groups
+    // what it finds into incidents, remembers, investigates, and alerts. It
+    // executes nothing unless the mode is safe_auto AND the policy engine
+    // classifies the action automatic.
+    //
+    // The cycle takes its own Postgres advisory lock, so a duplicate job, a
+    // second container or a manual run from the admin cannot produce two
+    // concurrent cycles. It never throws: a failed cycle records itself as
+    // failed and the worker carries on.
+    case 'email-agent-cycle': {
+      const { runAgentCycle } = await import('../lib/email-agent/runner')
+      const result = await runAgentCycle({ trigger: 'scheduled' })
+      if (!result.ran) {
+        log.info({ reason: result.skippedReason }, 'email agent cycle did not run')
+      } else {
+        log.info(
+          {
+            status: result.overallStatus, findings: result.findings, criticals: result.criticals,
+            opened: result.incidentsOpened, resolved: result.incidentsResolved,
+            actions: result.actionsExecuted, approvals: result.approvalsCreated,
+            alerts: result.alertsSent, ai: result.aiInvoked, durationMs: result.durationMs,
+          },
+          'email agent cycle complete'
+        )
+      }
+      break
+    }
+
     // ── AUTOMATION RUNTIME (owner spec 2026-07-22) ────────────────
     case 'automation-stage': {
       const enrollmentId = typeof payload?.enrollmentId === 'string' ? payload.enrollmentId : null
@@ -586,6 +615,25 @@ async function registerCronJobs(): Promise<void> {
     { repeat: { pattern: '5-59/10 * * * *' }, jobId: 'cron:email-monitoring' }
   )
 
+  // ── Email operations agent (owner spec 2026-07-27) ──
+  // Every 5 minutes by default (EMAIL_AGENT_INTERVAL_MINUTES documents the
+  // intent; the cron pattern is the schedule BullMQ actually honours, and the
+  // agent's own `scheduler.agent_gap` check reports whenever the two disagree
+  // in practice). Registered unconditionally: the cycle reads its own settings
+  // and returns immediately when the mode is `off`, so enabling the agent never
+  // requires a worker restart, and disabling it never leaves a cron orphaned.
+  await scheduledQueue.add(
+    'email-agent-cycle',
+    { type: 'email-agent-cycle' },
+    // EVERY 15 MINUTES (owner spec 2026-07-28). The deterministic half costs
+    // nothing to run, but a 5-minute cadence produced 288 cycles a day and,
+    // before the deduplication layer existed, 288 model calls per open
+    // incident. 15 minutes is still four checks an hour on a system whose
+    // fastest meaningful failure — a missed schedule — has a 15-minute grace
+    // period anyway, so nothing is detected later than it was before.
+    { repeat: { pattern: '*/15 * * * *' }, jobId: 'cron:email-agent-cycle' }
+  )
+
   // ── Daily lead hygiene (owner review 2026-07-24) ──
   // 3:20 AM ET, off-peak: ages inactive partial captures to ABANDONED (the
   // lifecycle nothing previously set) and applies the retention purge. Both
@@ -597,7 +645,23 @@ async function registerCronJobs(): Promise<void> {
     { repeat: { pattern: '20 3 * * *', tz: 'America/New_York' }, jobId: 'cron:lead-maintenance' }
   )
 
-  queueLogger.info('Cron jobs registered (daily digests + campaign/automation sweeps + lead maintenance)')
+  // The agent cron previously ran every 5 minutes under the SAME jobId. BullMQ
+  // keys a repeatable job on (name, pattern, jobId), so changing the pattern
+  // leaves the old schedule in place and the agent would run on BOTH. Remove
+  // any repeatable whose pattern is not the current one.
+  try {
+    const repeatables = await scheduledQueue.getRepeatableJobs()
+    for (const r of repeatables) {
+      if (r.name === 'email-agent-cycle' && r.pattern !== '*/15 * * * *') {
+        await scheduledQueue.removeRepeatableByKey(r.key)
+        queueLogger.warn({ pattern: r.pattern }, 'removed a stale email-agent-cycle schedule')
+      }
+    }
+  } catch (err) {
+    queueLogger.warn({ err: err instanceof Error ? err.message : String(err) }, 'could not prune stale repeatable jobs')
+  }
+
+  queueLogger.info('Cron jobs registered (daily digests + campaign/automation sweeps + agent cycle + lead maintenance)')
 }
 
 export function startScheduledWorker() {

@@ -3026,3 +3026,617 @@ model EmailAutomationEnrollment {
   @@index([leadId])
   @@map("email_automation_enrollments")
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  EMAIL OPERATIONS AGENT (owner spec 2026-07-27)
+//  -------------------------------------------------------------------------
+//  A supervised operations manager for the email-marketing system. It watches
+//  continuously, groups what it finds into incidents, remembers what happened
+//  last time, and asks before doing anything that touches a customer.
+//
+//  THREE RULES SHAPE EVERY TABLE HERE.
+//
+//  1. DETERMINISTIC CODE OWNS TRUTH. Findings are produced by SQL and pure
+//     comparisons, never by a model. EmailAgentModelCall records what the AI
+//     said and what it cost; it is evidence about the AI, not evidence about
+//     the email system.
+//
+//  2. HISTORY IS EVIDENCE AND MUST SURVIVE ITS SUBJECT. Nothing here holds a
+//     foreign key to MarketingCampaign, EmailCampaignRun, EmailSend, EmailEvent
+//     or User. Those are RETAINED IDENTIFIERS — plain strings. A campaign that
+//     is deleted must not be able to erase the record that the agent paused
+//     dispatch because of it, and no ON DELETE rule can be trusted to still be
+//     reviewed years later. The relations that DO exist are agent-internal and
+//     are Restrict/SetNull, so an incident cannot take its own timeline with it.
+//
+//  3. AN ACTION RECORD IS WRITTEN BEFORE THE ACTION AND CLOSED AFTER IT.
+//     EmailAgentAction carries beforeState, afterState and an outcome, so a
+//     crash mid-action leaves a row saying "started, never finished" rather
+//     than no row at all. An action is never reported successful until its
+//     transaction has committed.
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Singleton (id = "singleton"). The agent's operating configuration and the
+/// KILL SWITCHES. marketingDispatchPaused is read by dispatchCampaign itself,
+/// so pausing here stops sending at the server, not in the browser.
+model EmailAgentSettings {
+  id String @id @default("singleton")
+
+  /// off | read_only | safe_auto. The first production deployment defaults to
+  /// read_only: the agent observes and reports, and executes nothing.
+  mode String @default("read_only")
+
+  // ── Kill switches, separate on purpose. Turning off the AI must not turn
+  //    off the deterministic checks, and pausing dispatch must not require
+  //    disabling the agent that noticed the problem.
+  /// false = deterministic checks still run; no model is ever called.
+  aiEnabled Boolean @default(true) @map("ai_enabled")
+  /// false = even in safe_auto, no corrective tool executes.
+  autoActionsEnabled Boolean @default(true) @map("auto_actions_enabled")
+  /// false = no Discord alerts at all (deterministic checks still record).
+  alertsEnabled Boolean @default(true) @map("alerts_enabled")
+  /// false = warnings alert individually instead of being digested.
+  digestWarnings Boolean @default(true) @map("digest_warnings")
+
+  /// THE GLOBAL EMAIL KILL SWITCH. Enforced inside the dispatch service.
+  marketingDispatchPaused Boolean   @default(false) @map("marketing_dispatch_paused")
+  pausedReason            String?   @map("paused_reason")
+  pausedAt                DateTime? @map("paused_at")
+  pausedBy                String?   @map("paused_by")
+
+  /// Hard ceiling on corrective actions in ONE cycle. A bug that produces a
+  /// thousand findings must not produce a thousand mutations.
+  maxAutoActionsPerRun Int @default(3) @map("max_auto_actions_per_run")
+  /// Stage 2 recipient ceiling the checks compare against. The agent may never
+  /// raise this itself — the tool that would is classified forbidden.
+  stageRecipientLimit Int @default(50) @map("stage_recipient_limit")
+  intervalMinutes     Int @default(5) @map("interval_minutes")
+  memoryRetentionDays Int @default(365) @map("memory_retention_days")
+
+  // -- AI BUDGET (owner spec 2026-07-28) --------------------------------
+  // Hard ceilings, enforced atomically against EmailAgentModelCall so two
+  // Railway containers cannot each spend the same remaining dollar. The AI
+  // may never raise these: no tool writes this block at all.
+  maxModelCallsPerCycle Int   @default(2)  @map("max_model_calls_per_cycle")
+  maxModelCallsPerDay   Int   @default(25) @map("max_model_calls_per_day")
+  maxTokensPerDay       Int   @default(150000) @map("max_tokens_per_day")
+  maxTokensPerMonth     Int   @default(3000000) @map("max_tokens_per_month")
+  maxAiCostUsdPerDay    Float @default(0.20) @map("max_ai_cost_usd_per_day")
+  maxAiCostUsdPerMonth  Float @default(3.00) @map("max_ai_cost_usd_per_month")
+  /// Hours before an UNCHANGED incident may be re-investigated at all.
+  aiReinvestigateHours  Int   @default(12) @map("ai_reinvestigate_hours")
+
+  // -- Provider selection -----------------------------------------------
+  fallbackProvider      String? @map("fallback_provider")
+  fallbackModel         String? @map("fallback_model")
+  allowProviderFallback Boolean @default(true) @map("allow_provider_fallback")
+
+  // -- SAFE-AUTO BLAST RADIUS (owner spec 2026-07-28) -------------------
+  // Present and enforced even though safe_auto is off, because the time to
+  // build a blast-radius limit is before somebody enables what it limits.
+  maxAutoActionsPerDay      Int @default(10) @map("max_auto_actions_per_day")
+  maxAutoActionsPerToolDay  Int @default(4)  @map("max_auto_actions_per_tool_day")
+  maxAutoActionsPerIncident Int @default(3)  @map("max_auto_actions_per_incident")
+  /// Minutes before the same tool may touch the same resource again.
+  resourceActionCooldownMinutes Int @default(60) @map("resource_action_cooldown_minutes")
+  /// Consecutive automatic-action failures before safe_auto downgrades itself.
+  autoFailureDowngradeThreshold Int @default(3) @map("auto_failure_downgrade_threshold")
+
+  /// Why the agent last left safe_auto by itself, and when. Never cleared
+  /// automatically -- a human re-enabling safe_auto should see what happened.
+  autoDowngradeReason String?   @map("auto_downgrade_reason")
+  autoDowngradedAt    DateTime? @map("auto_downgraded_at")
+
+  /// Billing-period alert bookkeeping, so 50/80/100% each alert ONCE.
+  budgetAlertPeriod String? @map("budget_alert_period")
+  budgetAlertLevel  Int     @default(0) @map("budget_alert_level")
+
+  /// Null = follow EMAIL_AGENT_PROVIDER / EMAIL_AGENT_MODEL from the
+  /// environment. Set = an operator override recorded in the database.
+  provider String?
+  model    String?
+
+  updatedById   String?  @map("updated_by_id")
+  updatedByName String?  @map("updated_by_name")
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @updatedAt @map("updated_at")
+
+  @@map("email_agent_settings")
+}
+
+/// One health cycle. Written even when the cycle fails, because "the agent did
+/// not run" is exactly the condition that must not be silent.
+model EmailAgentRun {
+  id String @id @default(cuid())
+
+  /// scheduled | manual | dry_run
+  trigger String @default("scheduled")
+  /// running | completed | failed | skipped
+  status String @default("running")
+  /// The agent mode in force for THIS cycle, so a later mode change never
+  /// rewrites what the cycle was allowed to do.
+  mode String
+
+  /// Aggregate verdict: healthy | warning | critical.
+  overallStatus String? @map("overall_status")
+
+  checksRun         Int @default(0) @map("checks_run")
+  checksFailed      Int @default(0) @map("checks_failed")
+  findingsTotal     Int @default(0) @map("findings_total")
+  findingsInfo      Int @default(0) @map("findings_info")
+  findingsWarning   Int @default(0) @map("findings_warning")
+  findingsCritical  Int @default(0) @map("findings_critical")
+  incidentsOpened   Int @default(0) @map("incidents_opened")
+  incidentsUpdated  Int @default(0) @map("incidents_updated")
+  incidentsResolved Int @default(0) @map("incidents_resolved")
+  actionsExecuted   Int @default(0) @map("actions_executed")
+  approvalsCreated  Int @default(0) @map("approvals_created")
+  alertsSent        Int @default(0) @map("alerts_sent")
+
+  /// Whether the AI leg ran, and why it did not when it did not.
+  aiInvoked       Boolean @default(false) @map("ai_invoked")
+  aiSkippedReason String? @map("ai_skipped_reason")
+  /// The owner-facing paragraph for this cycle.
+  summary String?
+  /// Check ids that could not run, with their error text (never secrets).
+  checkErrors Json? @map("check_errors")
+  /// Redacted, bounded snapshot of the deterministic report for the admin.
+  report Json?
+  error  String?
+
+  durationMs  Int?      @map("duration_ms")
+  startedAt   DateTime  @default(now()) @map("started_at")
+  completedAt DateTime? @map("completed_at")
+
+  /// Correlates every finding, action, alert and model call of this cycle.
+  correlationId String @unique @map("correlation_id")
+
+  // -- PROVENANCE (owner spec 2026-07-28) -------------------------------
+  // A record must say where it came from. A finding produced on a laptop
+  // pointed at the production database describes the laptop, and without
+  // these columns it is indistinguishable from a real production finding.
+  /// production | staging | development | test
+  environment String @default("unknown")
+  /// worker | web | cli | test
+  service String @default("unknown")
+  /// scheduled | manual | dry_run | test | api
+  source       String  @default("scheduled")
+  deploymentId String? @map("deployment_id")
+
+  /// When the deterministic engine finished, separate from the whole cycle --
+  /// the heartbeat cares that CHECKS ran, not that the AI answered.
+  checksCompletedAt DateTime? @map("checks_completed_at")
+  /// Investigations deliberately skipped, so "the AI did nothing" is explainable.
+  aiSkippedCount Int @default(0) @map("ai_skipped_count")
+  /// Estimated USD spent by this cycle's model calls.
+  aiCostUsd Float @default(0) @map("ai_cost_usd")
+
+  findings   EmailAgentFinding[]
+  actions    EmailAgentAction[]
+  modelCalls EmailAgentModelCall[]
+
+  @@index([startedAt])
+  @@index([status])
+  @@index([trigger])
+  /// Drives the heartbeat query: latest successful production worker cycle.
+  @@index([environment, service, startedAt])
+  @@map("email_agent_runs")
+}
+
+/// One normalized observation from one deterministic check in one cycle.
+/// Findings are APPEND-ONLY: the same problem seen in ten cycles is ten
+/// findings sharing one fingerprint and one incident, so the record of how long
+/// something persisted is never overwritten.
+model EmailAgentFinding {
+  id    String @id @default(cuid())
+  runId String @map("run_id")
+
+  /// Stable identifier of the CHECK, e.g. "run.counters_mismatch".
+  checkId String @map("check_id")
+  /// Stable identity of THIS INSTANCE of the problem (check + subject).
+  /// Deduplication and incident grouping both key on it.
+  fingerprint String
+  /// info | warning | critical
+  severity String
+  /// campaign | run | send | consent | suppression | webhook | provider |
+  /// scheduler | infrastructure
+  category String
+
+  title       String
+  description String
+
+  /// Structured, REDACTED evidence. Never an environment-variable value,
+  /// never a raw provider payload, never a customer list.
+  evidence Json
+
+  // ── Retained identifiers. Deliberately NOT foreign keys (rule 2). ──
+  campaignId     String? @map("campaign_id")
+  runRefId       String? @map("run_ref_id")
+  sendId         String? @map("send_id")
+  webhookEventId String? @map("webhook_event_id")
+
+  /// Tools the deterministic check considers relevant. Advisory input to the
+  /// policy engine, never permission.
+  suggestedActions Json? @map("suggested_actions")
+
+  /// When this fingerprint was FIRST seen (carried forward across cycles).
+  firstDetectedAt DateTime @map("first_detected_at")
+  detectedAt      DateTime @default(now()) @map("detected_at")
+  /// Provenance, denormalised from the run so a finding can be filtered
+  /// without a join and can never be silently re-attributed.
+  environment String @default("unknown")
+
+  incidentId String?             @map("incident_id")
+  incident   EmailAgentIncident? @relation(fields: [incidentId], references: [id], onDelete: SetNull)
+  run        EmailAgentRun       @relation(fields: [runId], references: [id], onDelete: Restrict)
+
+  @@index([fingerprint])
+  @@index([checkId])
+  @@index([severity])
+  @@index([campaignId])
+  @@index([runRefId])
+  @@index([sendId])
+  @@index([detectedAt])
+  @@index([incidentId])
+  @@index([runId])
+  @@map("email_agent_findings")
+}
+
+/// A problem, not an observation. Related findings collapse into one incident,
+/// so a provider outage is one alert rather than one alert per recipient.
+model EmailAgentIncident {
+  id String @id @default(cuid())
+  /// Human-quotable reference, e.g. INC-2026-00014.
+  reference String @unique
+
+  /// open | investigating | awaiting_approval | mitigated | resolved | ignored
+  status String @default("open")
+  /// info | warning | critical
+  severity String
+  category String
+  /// Grouping key. At most one OPEN incident per fingerprint, enforced in code
+  /// by findOpenByFingerprint before create.
+  fingerprint String
+
+  title String
+  /// Plain English, for the owner.
+  summary String
+  /// The technical account, for whoever fixes it.
+  technicalSummary String? @map("technical_summary")
+  probableCause    String? @map("probable_cause")
+  /// 0..1, from the AI investigator. Null when no model has looked at it.
+  confidence Float?
+
+  /// Retained identifiers of everything this incident touches.
+  affectedCampaignIds Json? @map("affected_campaign_ids")
+  affectedRunIds      Json? @map("affected_run_ids")
+  affectedSendIds     Json? @map("affected_send_ids")
+  affectedEventIds    Json? @map("affected_event_ids")
+  /// How many distinct subjects are affected — the escalation signal.
+  affectedCount Int @default(1) @map("affected_count")
+
+  /// The agent's current recommendation, validated and policy-classified.
+  recommendation Json?
+  /// How it ended, in words.
+  resolution     String?
+  resolutionKind String? @map("resolution_kind")
+
+  detectionCount Int @default(1) @map("detection_count")
+
+  // -- AI INVESTIGATION STATE (owner spec 2026-07-28) -------------------
+  // The agent re-investigated every open incident every cycle. At a 5-minute
+  // cadence that is 288 identical model calls a day per incident, for
+  // evidence that did not change. These columns are the whole fix.
+  //
+  /// Hash of the MATERIAL evidence: check ids, severity, affected resources
+  /// and the evidence payloads. Detection count and timestamps are excluded
+  /// on purpose -- "seen again" is not "changed".
+  evidenceHash String? @map("evidence_hash")
+  /// The evidence hash at the moment the AI last looked. Differing from
+  /// `evidenceHash` means something materially changed since.
+  investigatedEvidenceHash String?   @map("investigated_evidence_hash")
+  lastInvestigatedAt       DateTime? @map("last_investigated_at")
+  /// Set by an operator asking for a fresh look; cleared once honoured.
+  reinvestigateRequestedAt DateTime? @map("reinvestigate_requested_at")
+  /// How many times a model has been spent on this incident.
+  investigationCount Int @default(0) @map("investigation_count")
+
+  /// Provenance of the cycle that opened it.
+  environment String @default("unknown")
+
+  // ── Alert deduplication state ──
+  lastAlertAt       DateTime? @map("last_alert_at")
+  lastAlertSeverity String?   @map("last_alert_severity")
+  lastAlertScope    Int?      @map("last_alert_scope")
+  alertCount        Int       @default(0) @map("alert_count")
+
+  firstDetectedAt DateTime  @default(now()) @map("first_detected_at")
+  lastDetectedAt  DateTime  @default(now()) @map("last_detected_at")
+  resolvedAt      DateTime? @map("resolved_at")
+  createdAt       DateTime  @default(now()) @map("created_at")
+  updatedAt       DateTime  @updatedAt @map("updated_at")
+
+  findings  EmailAgentFinding[]
+  events    EmailAgentIncidentEvent[]
+  actions   EmailAgentAction[]
+  approvals EmailAgentApproval[]
+
+  @@index([status])
+  @@index([fingerprint])
+  @@index([severity])
+  @@index([category])
+  @@index([lastDetectedAt])
+  @@index([createdAt])
+  @@index([status, severity])
+  @@index([evidenceHash])
+  @@index([lastInvestigatedAt])
+  @@index([environment])
+  @@map("email_agent_incidents")
+}
+
+/// The incident timeline. Append-only; this is how "what did we already try" is
+/// answered without trusting a model's memory.
+model EmailAgentIncidentEvent {
+  id         String @id @default(cuid())
+  incidentId String @map("incident_id")
+
+  /// detected | escalated | investigated | action_attempted | action_succeeded |
+  /// action_failed | approval_requested | approved | rejected | alerted |
+  /// mitigated | resolved | reopened | note
+  kind    String
+  message String
+  detail  Json?
+
+  /// agent | owner:<userId> | system
+  actor     String   @default("agent")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  incident EmailAgentIncident @relation(fields: [incidentId], references: [id], onDelete: Restrict)
+
+  @@index([incidentId, createdAt])
+  @@index([kind])
+  @@map("email_agent_incident_events")
+}
+
+/// Every attempt to CHANGE something, automatic or human-approved. Written
+/// before the change and closed after it — a row with status "started" and no
+/// afterState is a crash, and says so.
+model EmailAgentAction {
+  id String @id @default(cuid())
+
+  /// Allowlisted tool name. Anything not in the registry never reaches here.
+  toolName String @map("tool_name")
+  /// Validated arguments, redacted.
+  arguments Json
+
+  /// automatic | approval_required | forbidden — the POLICY verdict, recorded
+  /// even for refusals so a blocked attempt is auditable.
+  policyClassification String @map("policy_classification")
+  policyReason         String @map("policy_reason")
+
+  /// started | succeeded | failed | refused | skipped_idempotent
+  status String @default("started")
+
+  /// Snapshot of the affected rows BEFORE and AFTER. The pair is the proof that
+  /// the change was what it claimed to be.
+  beforeState Json?   @map("before_state")
+  afterState  Json?   @map("after_state")
+  result      Json?
+  error       String?
+
+  /// agent | owner:<userId>
+  actor     String  @default("agent")
+  actorName String? @map("actor_name")
+  /// Which provider recommended it, when one did.
+  aiProvider String? @map("ai_provider")
+  aiModel    String? @map("ai_model")
+
+  /// Repeat suppression: the same tool against the same subject inside a window
+  /// is a no-op rather than a second mutation.
+  idempotencyKey String? @unique @map("idempotency_key")
+
+  correlationId String  @map("correlation_id")
+  runId         String? @map("run_id")
+  incidentId    String? @map("incident_id")
+  approvalId    String? @map("approval_id")
+
+  // Retained identifiers of the affected rows.
+  campaignId String? @map("campaign_id")
+  runRefId   String? @map("run_ref_id")
+  sendId     String? @map("send_id")
+
+  startedAt   DateTime  @default(now()) @map("started_at")
+  completedAt DateTime? @map("completed_at")
+
+  run      EmailAgentRun?      @relation(fields: [runId], references: [id], onDelete: SetNull)
+  incident EmailAgentIncident? @relation(fields: [incidentId], references: [id], onDelete: SetNull)
+  approval EmailAgentApproval? @relation(fields: [approvalId], references: [id], onDelete: SetNull)
+
+  /// Provenance, so an action taken from a laptop is distinguishable from one
+  /// taken by the production worker.
+  environment String @default("unknown")
+  service     String @default("unknown")
+
+  /// Hash of (tool + arguments + the evidence that justified it). Repeating an
+  /// action against unchanged evidence is refused rather than performed twice.
+  argumentsHash String? @map("arguments_hash")
+
+  @@index([toolName])
+  @@index([status])
+  @@index([startedAt])
+  @@index([incidentId])
+  @@index([correlationId])
+  @@index([campaignId])
+  @@index([runRefId])
+  /// Drives the blast-radius aggregates (per day, per tool, per incident).
+  @@index([environment, startedAt])
+  @@index([toolName, startedAt])
+  @@index([argumentsHash])
+  @@map("email_agent_actions")
+}
+
+/// A request for a human decision. An approval authorizes ONE action against
+/// ONE state: resourceChecksum is the state the human actually reviewed, and a
+/// mismatch at execution time invalidates it. Approving a campaign send and
+/// then editing the campaign must not leave the send authorized.
+model EmailAgentApproval {
+  id         String  @id @default(cuid())
+  reference  String  @unique
+  incidentId String? @map("incident_id")
+
+  toolName  String @map("tool_name")
+  arguments Json
+
+  /// What is being asked, in the owner's language.
+  question String
+  reason   String
+  /// What will happen if approved.
+  expectedEffect String @map("expected_effect")
+  /// What could go wrong.
+  risk String
+
+  /// Retained identifiers of the resources the decision covers.
+  campaignId String? @map("campaign_id")
+  runRefId   String? @map("run_ref_id")
+  sendId     String? @map("send_id")
+
+  /// Hash of the reviewed state. Recomputed at execution; different = expired.
+  resourceChecksum String @map("resource_checksum")
+
+  /// pending | approved | rejected | expired | invalidated | executed
+  status String @default("pending")
+
+  decidedById   String?   @map("decided_by_id")
+  decidedByName String?   @map("decided_by_name")
+  decidedAt     DateTime? @map("decided_at")
+  decisionNote  String?   @map("decision_note")
+  /// Why an approval became unusable, when it did.
+  invalidationReason String? @map("invalidation_reason")
+
+  expiresAt DateTime @map("expires_at")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  incident EmailAgentIncident? @relation(fields: [incidentId], references: [id], onDelete: SetNull)
+  actions  EmailAgentAction[]
+
+  /// Provenance of the cycle that raised the question.
+  environment String @default("unknown")
+
+  /// Set once the approved tool has actually run. THE exactly-once guarantee:
+  /// a double-click or a concurrent request finds this already set and stops.
+  executedAt   DateTime? @map("executed_at")
+  executedById String?   @map("executed_by_id")
+
+  @@index([status])
+  @@index([expiresAt])
+  @@index([incidentId])
+  @@index([createdAt])
+  @@map("email_agent_approvals")
+}
+
+/// What the agent learned. patternKey is the memory address: the same class of
+/// problem recurring updates ONE lesson rather than accumulating duplicates.
+/// A lesson is a description of past experience — it is never a rule, and it can
+/// never widen what the policy engine allows.
+model EmailAgentLesson {
+  id         String @id @default(cuid())
+  patternKey String @unique @map("pattern_key")
+
+  title String
+  /// Observable symptoms, as an array of short strings.
+  symptoms      Json
+  probableCause String @map("probable_cause")
+  /// What actually fixed it, when something did.
+  successfulResolution String? @map("successful_resolution")
+  /// Things that were tried and did not work — the expensive knowledge.
+  failedApproaches Json @map("failed_approaches")
+
+  /// 0..1. Rises with each confirmation, falls when the lesson misleads.
+  confidence Float @default(0.5)
+  /// How many incidents matched this pattern.
+  occurrences Int @default(1)
+  /// Incidents that turned out to be false positives under this pattern.
+  falsePositives Int @default(0) @map("false_positives")
+
+  /// Check ids this pattern has been observed under, for retrieval.
+  relatedCheckIds Json? @map("related_check_ids")
+
+  firstObservedAt DateTime @default(now()) @map("first_observed_at")
+  lastObservedAt  DateTime @default(now()) @map("last_observed_at")
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  @@index([lastObservedAt])
+  @@index([confidence])
+  @@map("email_agent_lessons")
+}
+
+/// One call to a model provider. Recorded whether it succeeded or not, because
+/// "the AI was unavailable" must be visible rather than inferred from silence.
+/// No prompt text and no secret is stored — only shape, cost and outcome.
+model EmailAgentModelCall {
+  id    String  @id @default(cuid())
+  runId String? @map("run_id")
+
+  provider String
+  model    String
+  /// Provider request id, when the API returns one.
+  requestId String? @map("request_id")
+
+  /// investigate | summarize | lesson
+  purpose String @default("investigate")
+
+  /// ok | invalid_output | error | timeout | disabled
+  outcome String
+  /// Short, redacted failure text.
+  error String?
+
+  promptTokens     Int? @map("prompt_tokens")
+  completionTokens Int? @map("completion_tokens")
+  totalTokens      Int? @map("total_tokens")
+  latencyMs        Int? @map("latency_ms")
+  /// Tokens served from the provider's prompt cache. Billed far cheaper, and
+  /// counted separately so the cost estimate is not silently wrong.
+  cachedInputTokens Int? @map("cached_input_tokens")
+  /// Reasoning tokens, where the provider reports them. They are billed as
+  /// OUTPUT, and on a reasoning model they can exceed the visible answer.
+  reasoningTokens Int? @map("reasoning_tokens")
+
+  /// Estimated cost in USD from the pricing table in code. An ESTIMATE -- the
+  /// provider invoice is authoritative -- recorded so spend is visible without
+  /// waiting for a bill.
+  estimatedCostUsd Float @default(0) @map("estimated_cost_usd")
+  /// Which pricing row produced that number, so an old call is never
+  /// retroactively re-priced by a later table edit.
+  pricingVersion String? @map("pricing_version")
+
+  /// True when this call happened because the PRIMARY provider failed.
+  isFallback Boolean @default(false) @map("is_fallback")
+  /// Why the fallback was used, in words.
+  fallbackReason String? @map("fallback_reason")
+
+  /// Provenance.
+  environment String @default("unknown")
+  /// The incident this spend was for, so per-incident cost is answerable.
+  incidentId String? @map("incident_id")
+
+  /// How many findings the model was shown, and what it recommended. Not the
+  /// prompt itself.
+  inputFindingCount Int?    @map("input_finding_count")
+  recommendedTool   String? @map("recommended_tool")
+
+  correlationId String   @map("correlation_id")
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  run EmailAgentRun? @relation(fields: [runId], references: [id], onDelete: SetNull)
+
+  @@index([createdAt])
+  @@index([provider])
+  @@index([outcome])
+  @@index([correlationId])
+  /// Drives the daily/monthly budget aggregates.
+  @@index([environment, createdAt])
+  @@index([incidentId])
+  @@map("email_agent_model_calls")
+}
