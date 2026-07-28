@@ -207,3 +207,42 @@ test('consent rules exist in exactly one module', () => {
   const leads = readFileSync(resolve(__dirname, '../leads.ts'), 'utf8')
   assert.ok(/from '\.\/consent'/.test(leads), 'leads.ts must import the shared rules')
 })
+
+// ════════════════════════════════════════════════════════════════════════
+//  MARKETABLE-AUDIENCE ELIGIBILITY (Phase 10)
+//
+//  Every campaign, audience and journey path must use ONE eligibility gate.
+//  Individual routes implementing their own is how a suppressed contact
+//  eventually receives mail.
+// ════════════════════════════════════════════════════════════════════════
+
+test('audience resolution requires EXPLICIT consent, never null', () => {
+  const src = readFileSync(resolve(__dirname, '../email-audience.ts'), 'utf8')
+  const fn = src.slice(src.indexOf('async function consentingEmails'), src.indexOf('export type AudiencePreview'))
+  // `emailMarketingConsent: true` — not `{ not: false }`, which would let
+  // null through and mail people who were never asked.
+  assert.ok(/emailMarketingConsent: true/.test(fn), 'must require an explicit true')
+  assert.ok(!/emailMarketingConsent: \{ not:/.test(fn), 'must not use a negation that admits null')
+  assert.equal((fn.match(/emailMarketingConsent: true/g) ?? []).length, 2, 'both Customer and Lead must be gated')
+})
+
+test('consent is checked on BOTH preview and real dispatch, not just preview', () => {
+  // PREVENTS: a preview that looks compliant while the real send is not.
+  const src = readFileSync(resolve(__dirname, '../email-audience.ts'), 'utf8')
+  assert.ok((src.match(/consentingEmails\(emails\)/g) ?? []).length >= 2, 'preview and dispatch must both gate on consent')
+})
+
+test('suppression is resolved alongside consent on every audience path', () => {
+  const src = readFileSync(resolve(__dirname, '../email-audience.ts'), 'utf8')
+  assert.ok(/emailSuppression/.test(src), 'the suppression list must be consulted')
+  assert.ok(/noConsent/.test(src), 'and a no-consent exclusion reason must be recorded')
+})
+
+test('the shared isMarketable gate agrees with the audience query', () => {
+  // Both must exclude the same people. This is the contract between the
+  // pure rule and the SQL that implements it.
+  assert.equal(isMarketable({ email: 'a@b.com', consent: null }).marketable, false)
+  assert.equal(isMarketable({ email: 'a@b.com', consent: false }).marketable, false)
+  assert.equal(isMarketable({ email: 'a@b.com', consent: true }).marketable, true)
+  assert.equal(isMarketable({ email: 'a@b.com', consent: true, suppressed: true }).marketable, false)
+})
