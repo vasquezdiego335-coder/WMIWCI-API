@@ -20,6 +20,7 @@ import { readdirSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { prisma } from '../../db'
 import { emailRequired } from '../../env'
+import { CANONICAL_SITE_URL, isRetiredDomain } from '../../site-urls'
 import { safeErrorMessage } from '../redact'
 import type { AgentFinding } from '../types'
 import { makeFinding, plural, type CheckContext, type CheckDefinition } from './shared'
@@ -294,6 +295,106 @@ const operationalPosture: CheckDefinition = {
   },
 }
 
+/**
+ * LINK DOMAINS MUST RESOLVE (owner report 2026-07-28).
+ *
+ * THE GAP THIS CLOSES, found the hard way: the customer portal was rendering
+ * links to `wemoveitweclearit.com` — the retired brand domain, which has no DNS
+ * at all — because NEXT_PUBLIC_MARKETING_SITE_URL was unset and the code fell
+ * back to it. Nothing looked broken. The page rendered, the link was blue, and
+ * it went nowhere.
+ *
+ * The agent already checked the SENDING domain's authentication. It never
+ * checked that the domains it puts in front of customers actually exist, which
+ * is why this hid. An email full of dead links is worse than an unsent one:
+ * the customer sees an intact message and concludes the business is broken.
+ */
+const linkDomainsResolve: CheckDefinition = {
+  id: 'infrastructure.link_domain_unresolvable',
+  category: 'infrastructure',
+  intent: 'A domain used to build customer-facing links does not resolve, so every link built from it is dead.',
+  emits: ['infrastructure.link_domain_unresolvable', 'infrastructure.link_domain_retired'],
+  run: async (ctx) => {
+    const dns = await import('node:dns/promises')
+    const findings: AgentFinding[] = []
+
+    // Only the variables that BUILD LINKS. A misconfigured one here reaches a
+    // customer; the sending domain is covered by provider.dns_authentication.
+    const configured: Array<{ key: string; url: string }> = []
+    for (const key of ['MARKETING_SITE_URL', 'NEXT_PUBLIC_MARKETING_SITE_URL', 'APP_URL']) {
+      const raw = process.env[key]?.trim()
+      if (raw) configured.push({ key, url: raw })
+    }
+    if (configured.length === 0) return []
+
+    for (const { key, url } of configured) {
+      let host: string
+      try {
+        host = new URL(url).hostname
+      } catch {
+        findings.push(
+          makeFinding(ctx, {
+            checkId: 'infrastructure.link_domain_unresolvable',
+            severity: 'critical',
+            category: 'infrastructure',
+            fingerprintParts: ['link_domain_unparseable', key],
+            title: `${key} is not a valid URL`,
+            description: `${key} cannot be parsed as a URL, so every customer-facing link built from it is malformed.`,
+            evidence: { variable: key, parseable: false },
+            suggestedActions: ['sendDiscordIncidentAlert'],
+          })
+        )
+        continue
+      }
+
+      if (isRetiredDomain(url)) {
+        findings.push(
+          makeFinding(ctx, {
+            checkId: 'infrastructure.link_domain_retired',
+            severity: 'critical',
+            category: 'infrastructure',
+            fingerprintParts: ['link_domain_retired', key, host],
+            title: `${key} points at the retired ${host}`,
+            description:
+              `${key} is set to a domain the business no longer uses. Every link built from it — in emails and in the customer portal — ` +
+              `goes to a domain that is not ours. Set it to ${CANONICAL_SITE_URL}.`,
+            evidence: { variable: key, host, canonical: CANONICAL_SITE_URL },
+            suggestedActions: ['sendDiscordIncidentAlert'],
+          })
+        )
+        continue
+      }
+
+      // Localhost is a developer machine, not a fault.
+      if (/^(localhost|127\.0\.0\.1|::1)$/.test(host)) continue
+
+      try {
+        await dns.resolve4(host)
+      } catch {
+        try {
+          await dns.resolveCname(host)
+        } catch (err) {
+          findings.push(
+            makeFinding(ctx, {
+              checkId: 'infrastructure.link_domain_unresolvable',
+              severity: 'critical',
+              category: 'infrastructure',
+              fingerprintParts: ['link_domain_unresolvable', host],
+              title: `${host} does not resolve, and customer links point at it`,
+              description:
+                `${key} is set to ${host}, which has no DNS record. Every link built from it is dead — the page renders, the link looks ` +
+                `normal, and it goes nowhere. A customer seeing that concludes the business is broken, not that a variable is wrong.`,
+              evidence: { variable: key, host, resolves: false, error: safeErrorMessage(err, 120) },
+              suggestedActions: ['sendDiscordIncidentAlert'],
+            })
+          )
+        }
+      }
+    }
+    return findings
+  },
+}
+
 export const infrastructureChecks: CheckDefinition[] = [
   requiredEnv,
   pendingMigrations,
@@ -301,4 +402,5 @@ export const infrastructureChecks: CheckDefinition[] = [
   aiProviderConfig,
   settingsDegraded,
   operationalPosture,
+  linkDomainsResolve,
 ]

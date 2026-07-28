@@ -12,6 +12,7 @@ import {
   type IncomingConsent,
 } from '../consent'
 import { mapLeadSource } from '../leads'
+import { CANONICAL_SITE_URL, isRetiredDomain, marketingSiteUrl } from '../site-urls'
 
 // ════════════════════════════════════════════════════════════════════════
 //  MARKETING CONSENT RULES (owner spec 2026-07-28)
@@ -290,4 +291,59 @@ test('a genuinely unknown source still falls back to OTHER', () => {
   assert.equal(mapLeadSource('some-affiliate-nobody-configured'), 'OTHER')
   assert.equal(mapLeadSource(''), 'OTHER')
   assert.equal(mapLeadSource(null), 'OTHER')
+})
+
+// ════════════════════════════════════════════════════════════════════════
+//  CANONICAL SITE URL (owner report 2026-07-28)
+//
+//  The customer portal rendered links to the retired wemoveitweclearit.com —
+//  a domain with no DNS at all — because NEXT_PUBLIC_MARKETING_SITE_URL was
+//  unset and the code fell back to it. Nothing looked broken.
+// ════════════════════════════════════════════════════════════════════════
+
+test('the fallback is the LIVE domain, never the retired one', () => {
+  // A fallback pointing somewhere WRONG is worse than none: a missing URL is
+  // an obvious bug, a plausible-looking dead one survives review.
+  assert.equal(marketingSiteUrl({} as never), CANONICAL_SITE_URL)
+  assert.ok(!CANONICAL_SITE_URL.includes('wemoveitweclearit'))
+})
+
+test('a configured value pointing at a RETIRED domain is refused', () => {
+  // An env var copied forward from an old deployment is how this comes back.
+  const env = { NEXT_PUBLIC_MARKETING_SITE_URL: 'https://www.wemoveitweclearit.com' } as never
+  assert.equal(marketingSiteUrl(env), CANONICAL_SITE_URL)
+})
+
+test('a legitimate configured value is honoured', () => {
+  assert.equal(marketingSiteUrl({ NEXT_PUBLIC_MARKETING_SITE_URL: 'https://staging.example.com' } as never), 'https://staging.example.com')
+  // Trailing slashes are stripped so links never double up.
+  assert.equal(marketingSiteUrl({ NEXT_PUBLIC_MARKETING_SITE_URL: 'https://example.com/' } as never), 'https://example.com')
+})
+
+test('MARKETING_SITE_URL is used when the NEXT_PUBLIC one is absent', () => {
+  assert.equal(marketingSiteUrl({ MARKETING_SITE_URL: 'https://example.com' } as never), 'https://example.com')
+})
+
+test('retired domains are recognised with and without www', () => {
+  assert.equal(isRetiredDomain('https://wemoveitweclearit.com/x'), true)
+  assert.equal(isRetiredDomain('https://www.wemoveitweclearit.com'), true)
+  assert.equal(isRetiredDomain('https://www.moveitclearit.com'), false)
+  assert.equal(isRetiredDomain('not a url'), false)
+})
+
+test('the retired domain is gone from the portal fallback', () => {
+  const src = readFileSync(resolve(__dirname, '../../../app/my-booking/page.tsx'), 'utf8')
+  const code = src.split('\n').filter((l) => !l.trim().startsWith('//')).join('\n')
+  assert.ok(!/wemoveitweclearit/.test(code), 'the portal must not hardcode the retired domain')
+  assert.ok(/marketingSiteUrl\(\)/.test(code), 'it must use the shared resolver')
+})
+
+test('the agent now checks that link domains resolve', () => {
+  // The gap that let this hide: the agent checked the SENDING domain's
+  // authentication but never that customer-facing link domains exist.
+  const src = readFileSync(resolve(__dirname, '../email-agent/checks/infrastructure.ts'), 'utf8')
+  assert.ok(/infrastructure\.link_domain_unresolvable/.test(src))
+  assert.ok(/infrastructure\.link_domain_retired/.test(src))
+  assert.ok(/MARKETING_SITE_URL/.test(src) && /APP_URL/.test(src), 'both link-building variables must be checked')
+  assert.ok(/localhost/.test(src), 'a developer machine must not be reported as a fault')
 })

@@ -430,8 +430,12 @@ test('pricing package cards preselect their package', skipSite, () => {
 })
 
 test('general estimate CTAs route through the short quote flow', skipSite, () => {
+  // The href may carry attribution (`quote.html?src=SERVICES_PAGE`) — that is
+  // the point of source tagging. An earlier version of this test demanded the
+  // BARE href and failed the moment attribution was added, which tested the
+  // string rather than the behaviour it stands for.
   for (const f of ['index.html', 'pricing.html', 'services.html']) {
-    assert.ok(/href="quote\.html"/.test(site(f)), `${f} has no CTA pointing at the quote page`)
+    assert.ok(/href="quote\.html(\?[^"]*)?"/.test(site(f)), `${f} has no CTA pointing at the quote page`)
   }
 })
 

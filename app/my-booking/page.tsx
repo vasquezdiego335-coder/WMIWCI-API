@@ -1,5 +1,6 @@
 'use client'
 
+import { marketingSiteUrl } from '@/lib/site-urls'
 import { useState, FormEvent } from 'react'
 import { useRouter } from 'next/navigation'
 
@@ -42,7 +43,12 @@ export default function MyBookingLookup() {
     }
   }
 
-  const marketingSiteUrl = process.env.NEXT_PUBLIC_MARKETING_SITE_URL ?? 'https://www.wemoveitweclearit.com'
+  // Canonical, from ONE place. This previously fell back to the retired
+  // wemoveitweclearit.com — a domain that no longer resolves — whenever
+  // NEXT_PUBLIC_MARKETING_SITE_URL was unset, which it was in production. The
+  // helper also refuses a configured value pointing at a retired domain, since
+  // an env var copied forward from an old deployment is how this comes back.
+  const siteUrl = marketingSiteUrl()
 
   return (
     <div style={page}>
@@ -86,7 +92,7 @@ export default function MyBookingLookup() {
           <div style={helpSection}>
             <p style={helpTitle}>Need to book a move?</p>
             <a
-              href={`${marketingSiteUrl}/booking-form.html`}
+              href={`${siteUrl}/booking-form.html`}
               style={bookLink}
             >
               Book your move here &rarr;
