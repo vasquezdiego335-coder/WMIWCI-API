@@ -123,6 +123,27 @@ export default async function AdminBookings({
                     <span style={{ ...badge, backgroundColor: STATUS_COLORS[b.status] ?? '#9CA3AF' }}>
                       {b.status.replace('_', ' ')}
                     </span>
+                    {/* WHY this booking needs the owner, spelled out. A bare
+                        "needs review" flag made the owner re-derive the reason
+                        from the notes on every job. Reasons are worded once,
+                        server-side, in buildReviewReasons(). */}
+                    {b.manualReviewRequired && (
+                      <div style={{ marginTop: '6px' }}>
+                        <span style={{ ...badge, backgroundColor: '#B45309' }}>NEEDS REVIEW</span>
+                        {b.reviewReasons.length > 0 && (
+                          <ul style={reviewList}>
+                            {b.reviewReasons.map((reason, i) => (
+                              <li key={i} style={reviewItem}>{reason}</li>
+                            ))}
+                          </ul>
+                        )}
+                      </div>
+                    )}
+                    {b.inventoryAccuracyConfirmed === false && (
+                      <div style={{ ...reviewItem, marginTop: '6px', color: '#B45309' }}>
+                        Inventory accuracy not confirmed
+                      </div>
+                    )}
                   </td>
                   <td style={td}>
                     <Link href={`/admin/jobs/${b.id}`} style={{ color: '#FF5A1F', fontSize: '13px', fontWeight: '500' }}>
@@ -176,3 +197,7 @@ const tr: React.CSSProperties = { borderBottom: '1px solid #F3F4F6' }
 const td: React.CSSProperties = { padding: '12px 16px', fontSize: '13px', color: '#374151' }
 const badge: React.CSSProperties = { color: '#FFFFFF', fontSize: '10px', fontWeight: '700', padding: '3px 8px', borderRadius: '100px', letterSpacing: '0.04em', whiteSpace: 'nowrap' }
 const empty: React.CSSProperties = { padding: '48px 24px', textAlign: 'center', color: '#9CA3AF', fontSize: '14px', fontStyle: 'italic', margin: '0' }
+// Review reasons sit under the status badge — readable at a glance, wrapping
+// rather than truncating, because a half-shown reason is worse than none.
+const reviewList: React.CSSProperties = { margin: '5px 0 0', padding: '0 0 0 14px', listStyle: 'disc', maxWidth: '260px' }
+const reviewItem: React.CSSProperties = { fontSize: '11px', lineHeight: '1.45', color: '#6B7280' }
