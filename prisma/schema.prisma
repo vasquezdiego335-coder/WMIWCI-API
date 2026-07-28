@@ -3154,6 +3154,13 @@ model EmailAgentSettings {
   budgetAlertPeriod String? @map("budget_alert_period")
   budgetAlertLevel  Int     @default(0) @map("budget_alert_level")
 
+  /// Deduplication state for the LEGACY monitoring cron's Discord alerts.
+  /// Lives here rather than in a new table because it is two columns, and it
+  /// must be shared across containers -- an in-process flag deduplicates
+  /// per-process, which is to say not at all.
+  opsAlertSignature String?   @map("ops_alert_signature")
+  opsAlertSentAt    DateTime? @map("ops_alert_sent_at")
+
   /// Null = follow EMAIL_AGENT_PROVIDER / EMAIL_AGENT_MODEL from the
   /// environment. Set = an operator override recorded in the database.
   provider String?

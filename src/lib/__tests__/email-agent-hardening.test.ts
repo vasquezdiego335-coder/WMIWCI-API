@@ -20,6 +20,7 @@ import { buildRequestBody, DEFAULT_MAX_OUTPUT_TOKENS, PROVIDER_DEFAULT_MODELS, r
 import { envDefaults } from '../email-agent/settings'
 import { redact, redactString, maskEmail } from '../email-agent/redact'
 import { findUnmaskedEmails } from '../email-agent/memory'
+import { alertSignature, decideOpsAlert } from '../ops-alert-dedupe'
 import type { AgentFinding, FindingSeverity } from '../email-agent/types'
 
 // ════════════════════════════════════════════════════════════════════════
@@ -1049,4 +1050,80 @@ test('the fallback provider needs its PROVIDER name, not just a model', () => {
   const fn = src.slice(src.indexOf('export function resolveFallbackProvider'))
   assert.ok(/EMAIL_AGENT_FALLBACK_PROVIDER/.test(fn), 'the provider name is what enables the fallback')
   assert.ok(/if \(!name\) return null/.test(fn), 'and its absence disables the fallback entirely')
+})
+
+// ════════════════════════════════════════════════════════════════════════
+//  OPS ALERT DEDUPLICATION (owner report 2026-07-28)
+//
+//  MEASURED FAILURE: fifty identical CRITICAL Discord messages in eight hours
+//  from one stuck test campaign. The monitoring cron runs every ten minutes
+//  and had no dedupe at all.
+// ════════════════════════════════════════════════════════════════════════
+
+test('an identical alert inside the cooldown is SUPPRESSED', () => {
+  const now = new Date('2026-07-28T12:00:00Z')
+  const g = decideOpsAlert({
+    signature: 'sig-a',
+    lastSignature: 'sig-a',
+    lastSentAt: new Date('2026-07-28T11:50:00Z'),
+    now,
+  })
+  assert.equal(g.send, false, 'ten minutes later, unchanged — must not resend')
+})
+
+test('a CHANGED alert goes out immediately, cooldown or not', () => {
+  const g = decideOpsAlert({
+    signature: 'sig-b',
+    lastSignature: 'sig-a',
+    lastSentAt: new Date('2026-07-28T11:59:00Z'),
+    now: new Date('2026-07-28T12:00:00Z'),
+  })
+  assert.equal(g.send, true, 'new information must never be suppressed')
+})
+
+test('the first ever alert is always sent', () => {
+  const g = decideOpsAlert({ signature: 'sig-a', lastSignature: null, lastSentAt: null, now: new Date() })
+  assert.equal(g.send, true)
+})
+
+test('an unchanged alert repeats after the cooldown', () => {
+  const g = decideOpsAlert({
+    signature: 'sig-a',
+    lastSignature: 'sig-a',
+    lastSentAt: new Date('2026-07-28T00:00:00Z'),
+    now: new Date('2026-07-28T12:00:00Z'),
+    cooldownMs: 6 * 3600_000,
+  })
+  assert.equal(g.send, true, 'a still-broken system must not go quiet forever')
+})
+
+test('embedded timestamps do not make an unchanged alert look new', () => {
+  // THE BUG THAT MADE IT SPAM: the refusal note carries the time it was
+  // refused, so every ten-minute run produced different text for one problem.
+  const a = alertSignature('EMAIL SYSTEM - CRITICAL', [
+    { message: 'Scheduled dispatch was refused at 2026-07-28T08:35:01.351Z: edited after approval.' },
+  ])
+  const b = alertSignature('EMAIL SYSTEM - CRITICAL', [
+    { message: 'Scheduled dispatch was refused at 2026-07-28T09:45:01.703Z: edited after approval.' },
+  ])
+  assert.equal(a, b, 'only the timestamp differs — this is the same alert')
+})
+
+test('a genuinely different message produces a different signature', () => {
+  const a = alertSignature('EMAIL SYSTEM - CRITICAL', [{ message: '1 campaign missed its send time.' }])
+  const b = alertSignature('EMAIL SYSTEM - CRITICAL', [{ message: '4 campaigns missed their send time.' }])
+  assert.notEqual(a, b, 'a changed count is new information')
+})
+
+test('alert dedupe FAILS OPEN — never silent when its own state is broken', () => {
+  const src = lib('ops-alert-dedupe.ts')
+  const fn = src.slice(src.indexOf('export async function shouldSendOpsAlert'))
+  assert.ok(/catch \(err\)/.test(fn), 'a dedupe failure must be caught')
+  assert.ok(/send: true/.test(fn.slice(fn.indexOf('catch (err)'))), 'and must SEND, not suppress')
+})
+
+test('dedupe state is shared across containers, not in memory', () => {
+  const src = lib('ops-alert-dedupe.ts')
+  assert.ok(/prisma\.emailAgentSettings/.test(src), 'state must live in the database')
+  assert.ok(!/^let (lastSent|lastSignature)/m.test(src), 'a module-level flag deduplicates per process, i.e. not at all')
 })

@@ -30,6 +30,7 @@
 import { prisma } from './db'
 import { queueLogger } from './logger'
 import { postOpsAlert } from './ops-alert'
+import { shouldSendOpsAlert } from './ops-alert-dedupe'
 
 const log = queueLogger.child({ mod: 'email-monitoring' })
 
@@ -374,12 +375,23 @@ export async function runEmailMonitoring(): Promise<HealthReport> {
   // into the Next.js bundle for the health route, which broke the build.
   const criticals = report.checks.filter((c) => c.severity === 'critical')
   if (criticals.length > 0) {
-    const result = await postOpsAlert(
-      'EMAIL SYSTEM - CRITICAL',
-      criticals.map((c) => ({ message: c.message, action: c.action }))
-    )
-    if (result.delivered) log.info({ criticals: criticals.length }, 'critical email alerts delivered to the ops channel')
-    else log.error({ criticals: criticals.length, reason: result.reason }, 'CRITICAL EMAIL ALERTS COULD NOT BE DELIVERED — the log lines above are the only record')
+    const title = 'EMAIL SYSTEM - CRITICAL'
+    const lines = criticals.map((c) => ({ message: c.message, action: c.action }))
+
+    // DEDUPLICATED (owner report 2026-07-28). This cron runs every ten minutes
+    // and used to post EVERY critical EVERY run: one stuck test campaign
+    // produced fifty identical Discord messages in eight hours. An owner who
+    // mutes the channel because of that never sees the alert that matters.
+    // Unchanged criticals now repeat at most once per cooldown; a CHANGED one
+    // still goes out immediately.
+    const gate = await shouldSendOpsAlert('email-monitoring', title, lines)
+    if (!gate.send) {
+      log.info({ criticals: criticals.length, reason: gate.reason }, 'critical email alerts suppressed as duplicates')
+    } else {
+      const result = await postOpsAlert(title, lines)
+      if (result.delivered) log.info({ criticals: criticals.length, reason: gate.reason }, 'critical email alerts delivered to the ops channel')
+      else log.error({ criticals: criticals.length, reason: result.reason }, 'CRITICAL EMAIL ALERTS COULD NOT BE DELIVERED — the log lines above are the only record')
+    }
   }
 
   if (report.severity === 'ok') log.info({ checks: report.checks.length }, 'email monitoring: all checks healthy')
