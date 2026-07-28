@@ -20,6 +20,7 @@ import { TRUCK_PICKUP_RETURN, DISCOUNT_POLICY } from '@/lib/pricing-config'
 // schema and the review-reason builder live in lib/ — where they are also
 // unit testable without importing a Next route.
 import { BookingSchema } from '@/lib/booking-schema'
+import { CONSENT_VERSION } from '@/lib/consent'
 import { buildReviewReasons } from '@/lib/booking-review'
 
 /** The truck pickup & return ADD-ON. Distinct from BOOKING_FEE_CENTS — the two
@@ -576,7 +577,11 @@ async function handleBooking(req: NextRequest): Promise<NextResponse> {
       // email) and propagate the visitor's promotional consent onto the Customer.
       bookingSessionId: data.bookingSessionId,
       marketingConsent: data.marketingConsent,
-      consentSource: 'booking_step_1',
+      // Controlled vocabulary + the disclosure version the visitor actually
+      // saw. `booking_step_1` was an ad-hoc string, and the version was never
+      // recorded at all — so a consent record could not say WHAT was agreed to.
+      consentSource: 'BOOKING_FORM',
+      consentVersion: CONSENT_VERSION,
     })
     if (convertedLeadId) await onLeadClosed(convertedLeadId)
   } catch (err) {

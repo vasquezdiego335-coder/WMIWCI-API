@@ -25,6 +25,7 @@
 import { LeadSource, LeadStatus, LeadLifecycle } from '@prisma/client'
 import { prisma } from './db'
 import { apiLogger } from './logger'
+import { CONSENT_VERSION, decideConsent, normaliseConsentSource } from './consent'
 
 const OPEN_STATUSES: LeadStatus[] = [LeadStatus.NEW, LeadStatus.CONTACTED, LeadStatus.QUOTE_SENT, LeadStatus.FOLLOW_UP]
 
@@ -355,14 +356,14 @@ export async function markLeadConverted(
         ? await prisma.lead.findFirst({
             where: { bookingSessionId: sessionId, status: { in: OPEN_STATUSES } },
             orderBy: { createdAt: 'desc' },
-            select: { id: true, email: true, emailMarketingConsent: true },
+            select: { id: true, email: true, emailMarketingConsent: true, marketingConsentSource: true, marketingConsentVersion: true },
           })
         : null
     if (!lead && normalized) {
       lead = await prisma.lead.findFirst({
         where: { email: normalized, status: { in: OPEN_STATUSES } },
         orderBy: { createdAt: 'desc' },
-        select: { id: true, email: true, emailMarketingConsent: true },
+        select: { id: true, email: true, emailMarketingConsent: true, marketingConsentSource: true, marketingConsentVersion: true },
       })
     }
 
@@ -372,6 +373,13 @@ export async function markLeadConverted(
     const explicit = typeof opts.marketingConsent === 'boolean' ? opts.marketingConsent : undefined
     const effectiveConsent = explicit ?? (lead ? lead.emailMarketingConsent ?? undefined : undefined)
 
+    // A SUPPRESSED address is never marketable, whatever this form claims.
+    // Checked here so neither the Lead nor the Customer write below can
+    // resurrect somebody who unsubscribed or complained.
+    const suppressed = normalized
+      ? (await prisma.emailSuppression.findUnique({ where: { email: normalized }, select: { id: true } }).catch(() => null)) !== null
+      : false
+
     if (lead) {
       const data: Record<string, unknown> = {
         status: LeadStatus.BOOKED,
@@ -380,12 +388,25 @@ export async function markLeadConverted(
         lastActivityAt: now,
         lifecycle: LeadLifecycle.CONVERTED,
       }
-      if (explicit !== undefined) {
-        data.emailMarketingConsent = explicit
-        data.marketingConsentAt = now
-        if (clean(opts.consentSource)) data.marketingConsentSource = clean(opts.consentSource)
-        if (clean(opts.consentVersion)) data.marketingConsentVersion = clean(opts.consentVersion)
-      }
+      // Consent rules live in ONE place (src/lib/consent.ts) so this route and
+      // the lead endpoint cannot drift. It decides whether anything changes at
+      // all: silence changes nothing, an unchecked box never revokes an earlier
+      // opt-in, and suppression overrides everything.
+      const decision = decideConsent(
+        {
+          consent: lead.emailMarketingConsent,
+          consentSource: lead.marketingConsentSource,
+          consentVersion: lead.marketingConsentVersion,
+        },
+        {
+          consent: explicit,
+          source: opts.consentSource,
+          version: opts.consentVersion ?? CONSENT_VERSION,
+          isSuppressed: suppressed,
+        },
+        now
+      )
+      Object.assign(data, decision.changes)
       await prisma.lead.update({ where: { id: lead.id }, data })
       apiLogger.info({ leadId: lead.id, bookingId }, 'lead converted (booking created)')
     }
@@ -393,15 +414,40 @@ export async function markLeadConverted(
     // Propagate positive/negative consent to the durable Customer record so
     // promotional audiences can honor it after the lead is closed. Only writes a
     // known boolean; never creates or clears an EmailSuppression row.
-    if (effectiveConsent !== undefined && normalized) {
-      await prisma.customer
-        .updateMany({
+    if (effectiveConsent !== undefined && normalized && !suppressed) {
+      const existingCustomer = await prisma.customer
+        .findFirst({
           where: { email: normalized },
-          data: { emailMarketingConsent: effectiveConsent, marketingConsentAt: now },
+          select: { emailMarketingConsent: true, marketingConsentSource: true, marketingConsentVersion: true },
         })
-        .catch((err) =>
-          apiLogger.warn({ err: String(err), bookingId }, 'customer consent propagation failed (non-fatal)')
-        )
+        .catch(() => null)
+
+      const customerDecision = decideConsent(
+        {
+          consent: existingCustomer?.emailMarketingConsent,
+          consentSource: existingCustomer?.marketingConsentSource,
+          consentVersion: existingCustomer?.marketingConsentVersion,
+        },
+        {
+          consent: effectiveConsent,
+          source: opts.consentSource,
+          version: opts.consentVersion ?? CONSENT_VERSION,
+          isSuppressed: suppressed,
+        },
+        now
+      )
+
+      // The FULL evidence travels with the boolean. Source and version were
+      // previously written only to the Lead, so a customer who consented with
+      // no prior lead carried a bare `true` and nothing that could show where
+      // it came from or what wording they saw.
+      if (Object.keys(customerDecision.changes).length > 0) {
+        await prisma.customer
+          .updateMany({ where: { email: normalized }, data: customerDecision.changes })
+          .catch((err) =>
+            apiLogger.warn({ err: String(err), bookingId }, 'customer consent propagation failed (non-fatal)')
+          )
+      }
     }
 
     return lead ? lead.id : null

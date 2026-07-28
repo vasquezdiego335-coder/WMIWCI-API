@@ -419,6 +419,7 @@ enum ApprovalStatus {
 }
 
 enum LeadSource {
+  // ── Marketing CHANNELS: where the person came from. ──
   GOOGLE
   FACEBOOK
   INSTAGRAM
@@ -430,6 +431,25 @@ enum LeadSource {
   RETURNING_CUSTOMER
   WEBSITE
   OTHER
+  // ── Capture SURFACES (owner spec 2026-07-28): which form they used. ──
+  // ADDED, never replacing the channel values above: a person can arrive from
+  // a door hanger AND submit the quick quote form, and collapsing those two
+  // facts into one column is what produced a table full of `OTHER`. Historical
+  // rows keep their existing value; nothing is rewritten.
+  HOMEPAGE_ESTIMATE
+  QUICK_QUOTE_FORM
+  BOOKING_FORM
+  SERVICES_PAGE
+  CONTACT_FORM
+  MOVING_CHECKLIST
+  GOOGLE_BUSINESS
+  FACEBOOK_MARKETPLACE
+  DOOR_HANGER_QR
+  YARD_SIGN_QR
+  CUSTOMER_REFERRAL
+  MANUAL_ENTRY
+  EXISTING_CUSTOMER_OPT_IN
+  UNKNOWN
 }
 
 enum LeadStatus {
@@ -765,6 +785,13 @@ model Customer {
   //    lead's Step-1 checkbox on conversion. null = never expressed a choice. ──
   emailMarketingConsent Boolean?  @map("email_marketing_consent")
   marketingConsentAt    DateTime? @map("marketing_consent_at")
+  // ── CONSENT EVIDENCE (owner spec 2026-07-28) ──
+  // Storing `true` is not enough to defend a send. WHERE they agreed and WHAT
+  // they were shown are what make the record provable, and the Lead table has
+  // carried both since 2026-07-24 while Customer did not — so a customer who
+  // consented without a prior lead had a bare boolean and nothing behind it.
+  marketingConsentSource  String? @map("marketing_consent_source")
+  marketingConsentVersion String? @map("marketing_consent_version")
 
   // ── Extended contact (admin operations, owner spec 2026-07-12) — all nullable ──
   preferredName         String? @map("preferred_name")
