@@ -503,6 +503,14 @@ export type PartialLeadInput = {
   referrer?: string | null
   promoCode?: string | null
   estimatedValue?: number | null // cents
+  // ── Move details (owner spec 2026-07-28) ──────────────────────────────
+  // A quick-quote or homepage estimate carries real intent. Without these a
+  // captured lead is a bare address, and the follow-up email cannot say
+  // anything specific enough to be worth sending.
+  moveDate?: Date | null
+  pickupZip?: string | null
+  destinationZip?: string | null
+  serviceInterest?: string | null
 }
 
 /** Order used to only ever ADVANCE lifecycle, never regress it. */
@@ -537,7 +545,7 @@ function partialConsentPatch(input: PartialLeadInput, now: Date): Record<string,
   return {
     emailMarketingConsent: input.marketingConsent,
     marketingConsentAt: now,
-    marketingConsentSource: clean(input.consentSource) ?? 'booking_step_1',
+    marketingConsentSource: normaliseConsentSource(input.consentSource) ?? 'BOOKING_FORM',
     marketingConsentVersion: clean(input.consentVersion),
   }
 }
@@ -556,7 +564,10 @@ export function buildPartialLeadCreate(input: PartialLeadInput, now: Date) {
     lifecycle: lifecycleForStep(input.formStep),
     bookingSessionId: clean(input.bookingSessionId),
     formStep: clean(input.formStep),
-    jobType: 'booking-form',
+    jobType: clean(input.serviceInterest) ?? 'booking-form',
+    moveDate: input.moveDate ?? undefined,
+    originZip: clean(input.pickupZip) ?? undefined,
+    destinationZip: clean(input.destinationZip) ?? undefined,
     utmSource: clean(input.utmSource),
     utmMedium: clean(input.utmMedium),
     utmCampaign: clean(input.utmCampaign),
@@ -569,7 +580,7 @@ export function buildPartialLeadCreate(input: PartialLeadInput, now: Date) {
     lastActivityAt: now,
     emailMarketingConsent: consented ? (input.marketingConsent as boolean) : null,
     marketingConsentAt: consented ? now : null,
-    marketingConsentSource: consented ? (clean(input.consentSource) ?? 'booking_step_1') : null,
+    marketingConsentSource: consented ? (normaliseConsentSource(input.consentSource) ?? 'BOOKING_FORM') : null,
     marketingConsentVersion: consented ? clean(input.consentVersion) : null,
   }
 }

@@ -58,7 +58,27 @@ test('buildPartialLeadCreate: TRI-STATE consent — true sets true+at+source; un
   const optedIn = buildPartialLeadCreate({ email: 'a@b.com', bookingSessionId: 's', marketingConsent: true }, NOW)
   assert.equal(optedIn.emailMarketingConsent, true)
   assert.equal(optedIn.marketingConsentAt, NOW)
-  assert.equal(optedIn.marketingConsentSource, 'booking_step_1')
+  // Was the ad-hoc `booking_step_1`. Now the controlled-vocabulary value
+  // (owner spec 2026-07-28) so consent source is queryable and cannot drift
+  // into a free-form string per caller. The MEANING is unchanged: a partial
+  // capture with no explicit surface still came from the booking form.
+  assert.equal(optedIn.marketingConsentSource, 'BOOKING_FORM')
+
+  // An explicitly supplied surface is honoured.
+  const fromQuote = buildPartialLeadCreate(
+    { email: 'a@b.com', bookingSessionId: 's', marketingConsent: true, consentSource: 'QUICK_QUOTE_FORM' },
+    NOW
+  )
+  assert.equal(fromQuote.marketingConsentSource, 'QUICK_QUOTE_FORM')
+
+  // An unrecognised string falls back to the safe default rather than being
+  // stored raw — storing whatever a caller sends is what filled the lead
+  // table with `OTHER` and made attribution unanswerable.
+  const junk = buildPartialLeadCreate(
+    { email: 'a@b.com', bookingSessionId: 's', marketingConsent: true, consentSource: 'whatever-i-felt-like' },
+    NOW
+  )
+  assert.equal(junk.marketingConsentSource, 'BOOKING_FORM')
 
   const untouched = buildPartialLeadCreate({ email: 'a@b.com', bookingSessionId: 's' }, NOW)
   assert.equal(untouched.emailMarketingConsent, null)

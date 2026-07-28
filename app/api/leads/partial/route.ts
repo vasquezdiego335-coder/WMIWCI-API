@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { z } from 'zod'
+import { normaliseConsentSource } from '@/lib/consent'
 import { apiLogger } from '@/lib/logger'
 import { rateLimit, tooManyRequests, LIMITS, clientIp } from '@/lib/rate-limit'
 import { capturePartialLeadSafe } from '@/lib/leads'
@@ -48,6 +49,23 @@ export async function OPTIONS(req: NextRequest): Promise<NextResponse> {
 
 const flagOn = () => process.env.PARTIAL_BOOKING_EMAIL_CAPTURE_ENABLED === 'true'
 
+/**
+ * Parse a move date without ever rejecting the submission.
+ *
+ * A visitor typing a half-finished or nonsense date must still have their lead
+ * captured — losing the whole contact over an unparseable optional field would
+ * be the worst possible trade.
+ */
+function parseMoveDate(raw?: string | null): Date | null {
+  if (!raw) return null
+  const d = new Date(raw)
+  if (Number.isNaN(d.getTime())) return null
+  // Bounded: a typo like year 0202 or 9999 is not a move date.
+  const year = d.getUTCFullYear()
+  if (year < 2020 || year > 2100) return null
+  return d
+}
+
 // ── Sanitizer: strip ASCII control chars, collapse whitespace. ──
 function sanitizeText(value: string): string {
   return value.replace(/[\x00-\x1f\x7f]/g, ' ').replace(/\s+/g, ' ').trim()
@@ -78,6 +96,15 @@ const PartialSchema = z.object({
   referrer: str(500),
   // Live estimate in DOLLARS; converted to cents for the Lead. Bounded.
   estimateTotal: z.number().nonnegative().max(1_000_000).optional(),
+  // ── Move details (owner spec 2026-07-28) ──
+  moveDate: z.string().max(40).optional(),
+  pickupZip: str(12),
+  destinationZip: str(12),
+  serviceInterest: str(60),
+  // ── Which SURFACE captured the consent. Validated against the controlled
+  //    vocabulary; an unrecognised value is dropped rather than stored raw,
+  //    which is what filled the lead table with `OTHER` in the first place.
+  consentSource: str(40),
   // Honeypot — bots fill hidden fields; humans leave them empty.
   company: z.string().max(0).optional(),
 })
@@ -124,7 +151,9 @@ async function handle(req: NextRequest): Promise<NextResponse> {
       bookingSessionId: d.bookingSessionId,
       formStep: d.formStep,
       marketingConsent: d.marketingConsent,
-      consentSource: 'booking_step_1',
+      // The capture surface, from the request. Falls back to BOOKING_FORM
+      // because that is the only caller that historically omitted it.
+      consentSource: normaliseConsentSource(d.consentSource) ?? 'BOOKING_FORM',
       consentVersion: d.consentVersion,
       source: d.source,
       foundUs: d.foundUs,
@@ -137,6 +166,10 @@ async function handle(req: NextRequest): Promise<NextResponse> {
       referrer: d.referrer,
       promoCode: d.utmCampaign, // door-hanger/QR campaign code doubles as the promo code slot
       estimatedValue: typeof d.estimateTotal === 'number' ? Math.round(d.estimateTotal * 100) : null,
+      moveDate: parseMoveDate(d.moveDate),
+      pickupZip: d.pickupZip,
+      destinationZip: d.destinationZip,
+      serviceInterest: d.serviceInterest,
     },
     'partial-lead',
   )
