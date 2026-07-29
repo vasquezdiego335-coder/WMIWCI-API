@@ -254,6 +254,37 @@ export function defaultLeadDeps(): LeadDeps {
   return _deps
 }
 
+/**
+ * Post a new lead to Discord, fire-and-forget.
+ *
+ * NOT awaited by callers: a Discord outage or a slow request must never delay
+ * the form response or cost the capture. Dynamically imported so this module
+ * keeps its light import graph for the offline tests.
+ *
+ * Re-reads the row rather than trusting the caller's input, so the card shows
+ * what was actually STORED -- if a field was dropped on the way in, the owner
+ * sees the gap instead of a value that only ever existed in memory.
+ */
+function notifyOwnerOfNewLead(leadId: string, context: string): void {
+  void (async () => {
+    try {
+      const lead = await prisma.lead.findUnique({
+        where: { id: leadId },
+        select: {
+          id: true, name: true, email: true, phone: true, source: true, moveSize: true,
+          moveDate: true, originZip: true, destinationZip: true, estimatedValue: true,
+          emailMarketingConsent: true, landingPage: true, utmSource: true, utmCampaign: true,
+        },
+      })
+      if (!lead) return
+      const { notifyNewLead } = await import('./lead-alert')
+      await notifyNewLead({ ...lead, source: lead.source ? String(lead.source) : null })
+    } catch (err) {
+      apiLogger.warn({ err: String(err).slice(0, 200), leadId, context }, 'new-lead notice failed (non-fatal)')
+    }
+  })()
+}
+
 /** Convenience wrapper for routes: persist a lead and never throw. Returns the
  *  record on success or null on failure (already logged), so the caller can
  *  still fire its Discord/email alert regardless. */
@@ -269,6 +300,7 @@ export async function ingestLeadSafe(input: LeadInput, context: string): Promise
       import('./email-automation-runtime')
         .then((m) => m.fireLeadTrigger('lead_created', res.lead.id))
         .catch((err) => apiLogger.warn({ err: String(err) }, 'lead_created trigger failed (non-fatal)'))
+      notifyOwnerOfNewLead(res.lead.id, context)
     }
     return res
   } catch (err) {
@@ -767,6 +799,9 @@ export async function capturePartialLeadSafe(
   try {
     const res = await capturePartialLead(input, deps)
     if (res) apiLogger.info({ leadId: res.lead.id, isNew: res.isNew, context }, 'partial lead captured')
+    // Tell the owner. NEW leads only -- a repeat submission merges into the
+    // existing lead and takes the update path, so this cannot double-notify.
+    if (res?.isNew) notifyOwnerOfNewLead(res.lead.id, context)
     return res
   } catch (err) {
     apiLogger.error(

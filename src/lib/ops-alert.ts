@@ -60,20 +60,40 @@ export type AlertResult = {
  * than to silence.
  */
 export async function postOpsAlert(title: string, lines: AlertLine[]): Promise<AlertResult> {
+  return postToChannels(['DISCORD_CHANNEL_ALERTS', 'DISCORD_CHANNEL_OPERATIONS'], title, lines, 'ops alert')
+}
+
+/**
+ * Post to the first configured channel in `channelVars`, in order.
+ *
+ * Extracted so a NON-incident notice (a new lead) can reuse this exact
+ * transport without landing in the alerts channel. Rule 3 in the header is why
+ * that separation matters: a channel that pings for routine traffic gets muted,
+ * and once the alerts channel is muted the critical alerts are gone too.
+ *
+ * Fallback order is the caller's business; degrading to a visible channel beats
+ * degrading to silence.
+ */
+export async function postToChannels(
+  channelVars: string[],
+  title: string,
+  lines: AlertLine[],
+  label = 'notice'
+): Promise<AlertResult> {
   if (lines.length === 0) return { delivered: false, reason: 'nothing to report' }
 
   const token = process.env.DISCORD_BOT_TOKEN?.trim()
   if (!configured(token)) return { delivered: false, reason: 'DISCORD_BOT_TOKEN is not configured' }
 
-  const channelId = [process.env.DISCORD_CHANNEL_ALERTS, process.env.DISCORD_CHANNEL_OPERATIONS]
-    .map((c) => c?.trim())
-    .find((c) => configured(c))
-  if (!channelId) return { delivered: false, reason: 'no alerts or operations channel is configured' }
+  const channelId = channelVars.map((v) => process.env[v]?.trim()).find((c) => configured(c))
+  if (!channelId) {
+    return { delivered: false, reason: `no configured channel among ${channelVars.join(', ')}` }
+  }
 
   // Cap the body: Discord rejects messages over 2000 characters outright, and
   // a rejected alert is a silent alert.
   const body = lines
-    .slice(0, 5)
+    .slice(0, 8)
     .map((l) => (l.action ? `• ${l.message}\n  → ${l.action}` : `• ${l.message}`))
     .join('\n')
   const content = `${title}\n${body}`.slice(0, 1900)
@@ -92,14 +112,14 @@ export async function postOpsAlert(title: string, lines: AlertLine[]): Promise<A
       // Read the reason, but never let a body-parse failure mask the status.
       const detail = await res.text().catch(() => '')
       const reason = `Discord returned ${res.status}${detail ? `: ${detail.slice(0, 160)}` : ''}`
-      log.error({ status: res.status, channelId }, `ops alert REJECTED — ${reason}`)
+      log.error({ status: res.status, channelId }, `${label} REJECTED — ${reason}`)
       return { delivered: false, reason }
     }
-    log.info({ channelId, lines: lines.length }, 'ops alert delivered')
+    log.info({ channelId, lines: lines.length }, `${label} delivered`)
     return { delivered: true }
   } catch (err) {
     const reason = err instanceof Error ? err.message : String(err)
-    log.error({ err: reason, channelId }, 'ops alert could not be delivered')
+    log.error({ err: reason, channelId }, `${label} could not be delivered`)
     return { delivered: false, reason }
   }
 }

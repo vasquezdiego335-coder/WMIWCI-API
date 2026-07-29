@@ -188,6 +188,10 @@ const queueHealthCheck: CheckDefinition = {
     const QUEUE_DEPTH_WARN = 500
     const QUEUE_DEPTH_CRITICAL = 2000
     const FAILED_JOBS_WARN = 10
+    // A failure older than this is history, not a fault. Long enough to catch
+    // an overnight breakage the owner slept through; short enough that a
+    // problem fixed days ago stops shouting.
+    const RECENT_FAILURE_WINDOW_MS = 24 * 60 * 60 * 1000
     const findings: AgentFinding[] = []
     try {
       // Imported lazily so a Redis outage cannot break the database checks, and
@@ -217,19 +221,63 @@ const queueHealthCheck: CheckDefinition = {
             })
           )
         }
+        // AGE MATTERS (owner report 2026-07-28). This counted RETAINED
+        // failures and concluded "a broken code path, not bad luck" -- wrong
+        // for the case that actually happened: on 2026-07-24 the worker
+        // deployed ahead of the email-marketing migrations, 100 sweeps failed
+        // with "table does not exist", the migrations landed, and every sweep
+        // since has succeeded. BullMQ keeps failures, so five days later a
+        // fixed problem still read as a live one.
+        //
+        // An alert that is not true is worse than no alert: it teaches the
+        // owner to ignore the ones that are.
         if (failed >= FAILED_JOBS_WARN) {
-          findings.push(
-            makeFinding(ctx, {
-              checkId: 'scheduler.failed_jobs',
-              severity: 'warning',
-              category: 'scheduler',
-              fingerprintParts: ['failed_jobs', name],
-              title: `The ${name} queue is retaining ${failed} failed jobs`,
-              description: `${failed} jobs on the ${name} queue have failed and been retained. Repeated failures mean a broken code path, not bad luck.`,
-              evidence: { queue: name, failed, warnAt: FAILED_JOBS_WARN },
-              suggestedActions: [],
-            })
-          )
+          // Enough to judge recency; a large backlog need not be read in full
+          // to answer "is this still happening?".
+          const sample = await queue.getFailed(0, 249)
+          const cutoff = Date.now() - RECENT_FAILURE_WINDOW_MS
+          const recent = sample.filter((j) => (j.finishedOn ?? j.timestamp ?? 0) >= cutoff)
+          const newest = sample.length ? Math.max(...sample.map((j) => j.finishedOn ?? j.timestamp ?? 0)) : 0
+          const windowHours = Math.round(RECENT_FAILURE_WINDOW_MS / 3_600_000)
+          countInspected(ctx, `queue_${name}_failed_recent`, recent.length)
+
+          if (recent.length >= FAILED_JOBS_WARN) {
+            // Distinct first lines: forty copies of one bug is one bug.
+            const reasons = Array.from(
+              new Set(
+                recent
+                  .map((j) => String(j.failedReason || '').split('\n').find((l) => l.trim())?.trim() ?? '')
+                  .filter(Boolean)
+              )
+            )
+            findings.push(
+              makeFinding(ctx, {
+                checkId: 'scheduler.failed_jobs',
+                severity: 'warning',
+                category: 'scheduler',
+                fingerprintParts: ['failed_jobs', name],
+                title: `The ${name} queue has ${recent.length} failures in the last ${windowHours} hours`,
+                description:
+                  `${recent.length} jobs on the ${name} queue have failed recently (${failed} retained in total). ` +
+                  'Failures this fresh, repeating, mean a broken code path rather than bad luck.' +
+                  (reasons.length ? ` Distinct causes: ${reasons.slice(0, 3).map((r) => r.slice(0, 120)).join(' | ')}` : ''),
+                evidence: {
+                  queue: name,
+                  recentFailures: recent.length,
+                  retainedTotal: failed,
+                  windowHours,
+                  newestFailureAt: newest ? new Date(newest).toISOString() : null,
+                  distinctReasons: reasons.slice(0, 3).map((r) => r.slice(0, 160)),
+                  warnAt: FAILED_JOBS_WARN,
+                },
+                suggestedActions: [],
+              })
+            )
+          } else {
+            // Historical debris. Counted so it stays visible in the run
+            // report, deliberately NOT a finding -- nothing is wrong now.
+            countInspected(ctx, `queue_${name}_failed_stale`, failed)
+          }
         }
       }
     } catch (err) {

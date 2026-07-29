@@ -288,3 +288,46 @@ test('no check stores an environment variable VALUE', () => {
     assert.ok(!/value:\s*process\.env/.test(src), `${file} must never put an env value in evidence`)
   }
 })
+
+// ════════════════════════════════════════════════════════════════════════
+//  QUEUE FAILURES: AGE MATTERS (owner report 2026-07-28)
+//
+//  The check counted RETAINED failures and concluded "a broken code path, not
+//  bad luck". What actually happened: on 2026-07-24 the worker deployed ahead
+//  of the email-marketing migrations, 100 sweeps failed with "table does not
+//  exist", the migrations landed, and every sweep since succeeded. BullMQ keeps
+//  failures, so five days later a fixed problem still read as a live one.
+//
+//  An alert that is not true is worse than no alert.
+// ════════════════════════════════════════════════════════════════════════
+
+test('stale queue failures do not raise a finding', () => {
+  const src = readFileSync(resolve(__dirname, '../email-agent/checks/scheduler.ts'), 'utf8')
+  const code = src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '')
+
+  assert.match(code, /RECENT_FAILURE_WINDOW_MS/, 'the check must have a recency window')
+  assert.match(code, /recent\.length >= FAILED_JOBS_WARN/,
+    'the warning must be gated on RECENT failures, not the retained total')
+  assert.ok(
+    !/if \(failed >= FAILED_JOBS_WARN\) \{\s*findings\.push/.test(code),
+    'the retained total alone must never raise a finding'
+  )
+})
+
+test('a recent-failure finding names the distinct causes', () => {
+  // Forty copies of one bug is one bug; the owner needs the reason, not a count.
+  const src = readFileSync(resolve(__dirname, '../email-agent/checks/scheduler.ts'), 'utf8')
+  assert.match(src, /distinctReasons/, 'the evidence must carry why they failed')
+  assert.match(src, /new Set\(/, 'identical reasons must collapse')
+  assert.match(src, /newestFailureAt/, 'the evidence must say how fresh the newest failure is')
+})
+
+test('the recency window is long enough to survive a night', () => {
+  const src = readFileSync(resolve(__dirname, '../email-agent/checks/scheduler.ts'), 'utf8')
+  const m = src.match(/RECENT_FAILURE_WINDOW_MS = ([^\n]+)/)
+  assert.ok(m, 'window must be defined')
+  // A breakage at 11pm must still be reported at 8am.
+  const value = Function(`"use strict"; return (${m![1].replace(/\/\/.*$/, '').trim()})`)()
+  assert.ok(value >= 12 * 3600_000, 'a window under 12h could miss an overnight breakage')
+  assert.ok(value <= 72 * 3600_000, 'a window over 3 days re-creates the stale-alert problem')
+})

@@ -382,7 +382,10 @@ test('every key the partial-lead builders write is a real Lead column', () => {
 
   for (const [name, row] of [
     ['create', buildPartialLeadCreate(input, new Date())],
-    ['update', buildPartialLeadUpdate(input, new Date(), {} as never)],
+    // (existing, input, now) -- an earlier version had these transposed. It
+    // still passed, because the assertion only inspects KEYS, which meant the
+    // update builder was never actually exercised with a real input.
+    ['update', buildPartialLeadUpdate({ id: 'lead_1', emailMarketingConsent: null } as never, input, new Date())],
   ] as const) {
     const unknown = Object.keys(row as object).filter((k) => !fields.has(k))
     assert.deepEqual(unknown, [], `${name}: writes column(s) that do not exist on Lead: ${unknown.join(', ')}`)

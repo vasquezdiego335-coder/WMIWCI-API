@@ -60,8 +60,12 @@ test('parity: the booking form loads the mirror and defines no prices itself', {
   assert.ok(existsSync(FORM), `missing ${FORM}`)
   const html = readFileSync(FORM, 'utf8')
 
+  // The src may carry a cache-buster (`?v=4`) -- bumping it is how a price
+  // change reaches returning visitors, so it MUST be allowed. An earlier
+  // version of this pattern demanded a bare path and failed the moment the
+  // version was bumped, testing the string instead of the behaviour.
   assert.ok(
-    /<script[^>]+src=["']\/?js\/pricing-config\.js["']/.test(html),
+    /<script[^>]+src=["']\/?js\/pricing-config\.js(\?[^"']*)?["']/.test(html),
     'booking-form.html must load js/pricing-config.js'
   )
 
