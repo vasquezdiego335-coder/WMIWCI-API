@@ -100,6 +100,16 @@ const QuoteLeadSchema = z.object({
   contactPreference: str(40),
   bestTimeToCall: str(120),
 
+  // ── Site access (quick quote step 4) ────────────────────────────────────
+  // The page asks about stairs and heavy items. Those answers were collected
+  // and then DROPPED: zod strips unknown keys silently, so they never reached
+  // the schema, the database, or the crew who would otherwise have found the
+  // piano and the two flights of stairs on the day. A strict yes/no
+  // vocabulary — anything else is rejected rather than stored as junk.
+  stairsPickup: z.enum(['yes', 'no']).optional(),
+  stairsDestination: z.enum(['yes', 'no']).optional(),
+  heavyItems: z.enum(['yes', 'no']).optional(),
+
   // ── Move details ──
   moveDate: str(20),
   pickupZip: str(12),
@@ -152,6 +162,23 @@ const QuoteLeadSchema = z.object({
    */
   company: z.string().trim().max(200).optional(),
 })
+
+/**
+ * One human-readable access line for the owner's notes, or null when the
+ * customer answered nothing. Deliberately plain English: it gets read on a
+ * phone, in a van, by whoever is loading the truck.
+ */
+function composeAccessDetails(input: {
+  stairsPickup?: 'yes' | 'no'
+  stairsDestination?: 'yes' | 'no'
+  heavyItems?: 'yes' | 'no'
+}): string | null {
+  const parts: string[] = []
+  if (input.stairsPickup) parts.push(`Stairs at pickup: ${input.stairsPickup}`)
+  if (input.stairsDestination) parts.push(`Stairs at destination: ${input.stairsDestination}`)
+  if (input.heavyItems) parts.push(`Large or heavy items: ${input.heavyItems}`)
+  return parts.length ? `From the quick quote — ${parts.join('; ')}.` : null
+}
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
   const res = await handle(req)
@@ -246,6 +273,7 @@ async function handle(req: NextRequest): Promise<NextResponse> {
       consentVersion: d.consentVersion,
       contactPreference: d.contactPreference,
       bestTimeToCall: d.bestTimeToCall,
+      accessDetails: composeAccessDetails(d),
       moveDate: parseMoveDate(d.moveDate),
       pickupZip: d.pickupZip,
       destinationZip: d.destinationZip,
