@@ -44,6 +44,10 @@ interface Props {
   /** Pre-formatted display amount, e.g. "$1,049". ABSENT (not empty string)
    *  when no estimate could be produced — see the header note. */
   estimatedPrice?: string
+  /** The customer asked for a VISIT. There is deliberately no number: the
+   *  whole subject and body change, rather than the estimate paragraph being
+   *  quietly dropped from an email that still says "here is your estimate". */
+  inPerson?: boolean
   /** Echoed back so the customer can see what we based the number on. */
   moveDate?: string
   moveSize?: string
@@ -67,6 +71,7 @@ function hasEstimate(value?: string): value is string {
 export default function QuoteRequestReceivedEmail({
   firstName = 'there',
   estimatedPrice,
+  inPerson = false,
   moveDate,
   moveSize,
   businessPhone = '862-640-0625',
@@ -78,7 +83,7 @@ export default function QuoteRequestReceivedEmail({
   locale = 'en',
 }: Props) {
   const es = (locale ?? 'en').toLowerCase().startsWith('es')
-  const showEstimate = hasEstimate(estimatedPrice)
+  const showEstimate = !inPerson && hasEstimate(estimatedPrice)
 
   const dateStr = moveDate
     ? new Date(moveDate).toLocaleDateString(es ? 'es-US' : 'en-US', {
@@ -91,13 +96,19 @@ export default function QuoteRequestReceivedEmail({
 
   const t = es
     ? {
-        preview: showEstimate
-          ? `Recibimos su solicitud de estimado — aproximadamente ${estimatedPrice}.`
-          : 'Recibimos su solicitud de estimado de mudanza.',
-        pill: 'Solicitud recibida',
-        h1: 'Recibimos su solicitud de estimado de mudanza',
+        preview: inPerson
+          ? 'Recibimos su solicitud de estimado en persona.'
+          : showEstimate
+            ? `Recibimos su solicitud de estimado — aproximadamente ${estimatedPrice}.`
+            : 'Recibimos su solicitud de estimado de mudanza.',
+        pill: inPerson ? 'Visita solicitada' : 'Solicitud recibida',
+        h1: inPerson
+          ? 'Recibimos su solicitud de estimado en persona'
+          : 'Recibimos su solicitud de estimado de mudanza',
         greeting: `Hola ${firstName},`,
-        thanks: 'Gracias por solicitar un estimado a Move It Clear It.',
+        thanks: inPerson
+          ? 'Su solicitud de estimado en persona ha sido recibida. Nuestro equipo local se comunicará con usted para coordinar una hora conveniente.'
+          : 'Gracias por solicitar un estimado a Move It Clear It.',
         estimate: `Según la información que nos dio, su estimado preliminar es de aproximadamente ${estimatedPrice}.`,
         estimateLabel: 'Su estimado preliminar',
         speak: 'Con gusto hablamos con usted para confirmar los detalles de la mudanza y darle su precio final.',
@@ -107,7 +118,9 @@ export default function QuoteRequestReceivedEmail({
         sizeLabel: 'Tamaño',
         signOffName: 'Move It Clear It',
         signOffTag: 'Ayuda local de mudanza',
-        note: 'Tenga en cuenta que el estimado en línea es preliminar y puede cambiar después de que confirmemos el inventario, las escaleras, las ubicaciones, el tamaño del camión y otros detalles de la mudanza.',
+        note: inPerson
+          ? 'Confirmaremos su precio después de ver los artículos y el acceso en ambas direcciones. No hay nada que deba hacer antes de la visita.'
+          : 'Tenga en cuenta que el estimado en línea es preliminar y puede cambiar después de que confirmemos el inventario, las escaleras, las ubicaciones, el tamaño del camión y otros detalles de la mudanza.',
         supportTitle: '¿Hablamos?',
         contactLabels: { phone: 'Llame o escriba', email: 'Correo', website: 'Sitio web' },
         disclaimer:
@@ -115,13 +128,19 @@ export default function QuoteRequestReceivedEmail({
         footerLabels: { rights: 'Todos los derechos reservados.' },
       }
     : {
-        preview: showEstimate
-          ? `We received your estimate request — approximately ${estimatedPrice}.`
-          : 'We received your moving estimate request.',
-        pill: 'Request received',
-        h1: 'We received your moving estimate request',
+        preview: inPerson
+          ? 'We received your in-person estimate request.'
+          : showEstimate
+            ? `We received your estimate request — approximately ${estimatedPrice}.`
+            : 'We received your moving estimate request.',
+        pill: inPerson ? 'Visit requested' : 'Request received',
+        h1: inPerson
+          ? 'We received your in-person estimate request'
+          : 'We received your moving estimate request',
         greeting: `Hi ${firstName},`,
-        thanks: 'Thank you for requesting an estimate from Move It Clear It.',
+        thanks: inPerson
+          ? 'Your in-person estimate request has been received. Our local team will contact you to arrange a convenient time.'
+          : 'Thank you for requesting an estimate from Move It Clear It.',
         estimate: `Based on the information you provided, your preliminary estimate is approximately ${estimatedPrice}.`,
         estimateLabel: 'Your preliminary estimate',
         speak: 'We would be happy to speak with you to confirm the move details and provide your final price.',
@@ -131,7 +150,9 @@ export default function QuoteRequestReceivedEmail({
         sizeLabel: 'Size',
         signOffName: 'Move It Clear It',
         signOffTag: 'Local Moving Help',
-        note: 'Please note that the online estimate is preliminary and may change after we confirm the inventory, stairs, locations, truck size, and other move details.',
+        note: inPerson
+          ? 'We will confirm your price after we see the items and the access at both addresses. There is nothing for you to do before the visit.'
+          : 'Please note that the online estimate is preliminary and may change after we confirm the inventory, stairs, locations, truck size, and other move details.',
         supportTitle: 'Let’s talk',
         contactLabels: { phone: 'Call or text', email: 'Email', website: 'Website' },
         disclaimer:

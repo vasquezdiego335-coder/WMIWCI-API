@@ -40,6 +40,10 @@ import type { QuoteLeadCaptureResponse } from '@/lib/quote-capture'
 
 export const runtime = 'nodejs'
 
+/** ONE string, so the lead notes, the Discord card, the confirmation email and
+ *  the admin list cannot drift into three different names for one thing. */
+const IN_PERSON_LABEL = 'In-Person Estimate Requested'
+
 const ALLOWED_ORIGINS = (
   process.env.CORS_ALLOWED_ORIGINS ??
   'http://localhost:3000,http://127.0.0.1:3000,http://localhost:8000,http://127.0.0.1:8000,https://www.wemoveitweclearit.com,https://wemoveitweclearit.com,https://www.moveitclearit.com,https://moveitclearit.com,https://wmiwci-backend.vercel.app'
@@ -106,9 +110,26 @@ const QuoteLeadSchema = z.object({
   // the schema, the database, or the crew who would otherwise have found the
   // piano and the two flights of stairs on the day. A strict yes/no
   // vocabulary — anything else is rejected rather than stored as junk.
-  stairsPickup: z.enum(['yes', 'no']).optional(),
-  stairsDestination: z.enum(['yes', 'no']).optional(),
-  heavyItems: z.enum(['yes', 'no']).optional(),
+  // "not_sure" is a REAL answer, not a missing one. The form used to tell
+  // people "if you're not sure, choose No", which files a guess as a fact and
+  // sends a crew expecting no stairs. An honest unknown is worth more to the
+  // person planning the job than a confident wrong answer.
+  stairsPickup: z.enum(['yes', 'no', 'not_sure']).optional(),
+  stairsDestination: z.enum(['yes', 'no', 'not_sure']).optional(),
+  heavyItems: z.enum(['yes', 'no', 'not_sure']).optional(),
+
+  // ── In-person estimate ──────────────────────────────────────────────────
+  // Some moves are cheaper to price in person than to guess at. This mode
+  // means the customer asked for a visit, so NO automatic number is produced,
+  // stored, or emailed — see the pricing branch below.
+  quoteMode: z.enum(['instant', 'in_person']).optional(),
+  preferredDay: str(60),
+  preferredTime: str(60),
+  pickupAddress: str(200),
+  visitNotes: str(1000),
+
+  /** The date is a best guess and the customer says they can move it. */
+  dateFlexible: z.boolean().optional(),
 
   // ── Move details ──
   moveDate: str(20),
@@ -168,16 +189,42 @@ const QuoteLeadSchema = z.object({
  * customer answered nothing. Deliberately plain English: it gets read on a
  * phone, in a van, by whoever is loading the truck.
  */
-function composeAccessDetails(input: {
-  stairsPickup?: 'yes' | 'no'
-  stairsDestination?: 'yes' | 'no'
-  heavyItems?: 'yes' | 'no'
+type YesNoUnsure = 'yes' | 'no' | 'not_sure'
+const SAY: Record<YesNoUnsure, string> = { yes: 'yes', no: 'no', not_sure: 'not sure' }
+
+export function composeAccessDetails(input: {
+  stairsPickup?: YesNoUnsure
+  stairsDestination?: YesNoUnsure
+  heavyItems?: YesNoUnsure
+  dateFlexible?: boolean
+  quoteMode?: 'instant' | 'in_person'
+  preferredDay?: string
+  preferredTime?: string
+  pickupAddress?: string
+  visitNotes?: string
 }): string | null {
-  const parts: string[] = []
-  if (input.stairsPickup) parts.push(`Stairs at pickup: ${input.stairsPickup}`)
-  if (input.stairsDestination) parts.push(`Stairs at destination: ${input.stairsDestination}`)
-  if (input.heavyItems) parts.push(`Large or heavy items: ${input.heavyItems}`)
-  return parts.length ? `From the quick quote — ${parts.join('; ')}.` : null
+  const blocks: string[] = []
+
+  // The label leads, so whoever opens the lead sees what kind of request this
+  // is before they read anything else.
+  if (input.quoteMode === 'in_person') blocks.push(IN_PERSON_LABEL)
+
+  const visit: string[] = []
+  if (input.pickupAddress) visit.push(`Address: ${input.pickupAddress}`)
+  if (input.preferredDay) visit.push(`Preferred day: ${input.preferredDay}`)
+  if (input.preferredTime) visit.push(`Preferred time: ${input.preferredTime}`)
+  if (visit.length) blocks.push(visit.join('; ') + '.')
+
+  const access: string[] = []
+  if (input.stairsPickup) access.push(`Stairs at pickup: ${SAY[input.stairsPickup]}`)
+  if (input.stairsDestination) access.push(`Stairs at destination: ${SAY[input.stairsDestination]}`)
+  if (input.heavyItems) access.push(`Large or heavy items: ${SAY[input.heavyItems]}`)
+  if (input.dateFlexible) access.push('Moving date is flexible')
+  if (access.length) blocks.push(`From the quick quote — ${access.join('; ')}.`)
+
+  if (input.visitNotes) blocks.push(`Notes: ${input.visitNotes}`)
+
+  return blocks.length ? blocks.join('\n') : null
 }
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
@@ -239,8 +286,17 @@ async function handle(req: NextRequest): Promise<NextResponse> {
     }
   }
 
+  // ── IN-PERSON: NO AUTOMATIC NUMBER, AT ALL ──────────────────────────────
+  // Not "a number we withhold" — none is produced, none is stored on the lead,
+  // and none reaches the email. The point of asking for a visit is that the
+  // move is easier to price after seeing it; quoting it anyway would answer a
+  // question the customer explicitly declined to ask.
+  const inPerson = d.quoteMode === 'in_person'
+
   // ── SERVER-AUTHORITATIVE PRICING ────────────────────────────────────────
-  const priced = quoteEstimate({ moveSize: d.moveSize })
+  const priced = inPerson
+    ? { ok: false as const, reason: 'manual_plan' as const, packageKey: d.moveSize ?? null }
+    : quoteEstimate({ moveSize: d.moveSize })
   if (!priced.ok && priced.reason === 'unknown_package') {
     // Never silently default to a price for something we do not sell.
     apiLogger.warn({ packageKey: priced.packageKey ?? '(unrecognised)' }, 'POST /api/leads — unknown package key')
@@ -267,7 +323,11 @@ async function handle(req: NextRequest): Promise<NextResponse> {
       lastName: d.lastName,
       phone: d.phone,
       bookingSessionId: d.bookingSessionId,
-      formStep: d.formStep || 'quote',
+      // The MODE, not just the step. The confirmation email and the owner's
+      // card both read this back OFF THE LEAD rather than trusting a flag
+      // passed alongside them — so a resend months later is still labelled
+      // correctly, and admin can filter on it without parsing prose.
+      formStep: inPerson ? 'quote_in_person' : d.formStep || 'quote',
       marketingConsent: d.marketingConsent,
       consentSource: d.consentSource || 'quick_quote_form',
       consentVersion: d.consentVersion,
@@ -326,6 +386,10 @@ async function handle(req: NextRequest): Promise<NextResponse> {
     estimate: priced.ok
       ? { totalDollars: priced.totalDollars, isStarting: priced.isStarting, packageLabel: priced.packageLabel }
       : null,
+    /** True when this move is quoted by a human rather than automatically —
+     *  5+ bedrooms, or the customer asked for an in-person visit. The lead is
+     *  captured either way; it simply carries no number. */
+    manualReview: inPerson || (!priced.ok && priced.reason === 'manual_plan'),
   })
 }
 
