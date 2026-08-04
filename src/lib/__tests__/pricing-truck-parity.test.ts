@@ -244,19 +244,33 @@ test('5BR through quoteEstimate is a manual plan, not a silent price', () => {
 //  7. THE BROWSER MIRROR IS GENERATED FROM THIS SOURCE
 // ══════════════════════════════════════════════════════════════════════
 
-const MIRROR = path.resolve(__dirname, '..', '..', '..', '..', 'WMIWCI-SITE', 'public', 'js', 'pricing-config.js')
-// BLOCKED, not forgotten: the mirror can only be regenerated once the server
-// price book carries the fields the live site reads (legacy, includedTruck,
-// serviceType). Those live in the owner's in-flight two-product work, so
-// regenerating from main today would strip them — un-retiring three studio
-// packages and blanking the booking form's truck copy. See the PR description.
-const MIRROR_REGENERATED = false
+// The sibling checkout by default, but overridable: the site is developed in
+// git worktrees, and a test that can only ever see ONE checkout silently
+// reports on a branch nobody is working in. Point it at the branch under
+// review with WMIWCI_SITE_DIR=/path/to/site-worktree.
+const SITE_DIR = process.env.WMIWCI_SITE_DIR
+  ? path.resolve(process.env.WMIWCI_SITE_DIR)
+  : path.resolve(__dirname, '..', '..', '..', '..', 'WMIWCI-SITE')
+const MIRROR = path.join(SITE_DIR, 'public', 'js', 'pricing-config.js')
+// THESE TEST AGREEMENT, NOT PROVENANCE — which is why they no longer skip.
+//
+// They were gated on `MIRROR_REGENERATED`, on the reasoning that nothing could
+// be asserted until the mirror was rebuilt from this source. That conflated
+// two different things. Full REGENERATION is still blocked: the server price
+// book does not yet carry the fields the live site reads (legacy,
+// includedTruck, serviceType), which live in the owner's in-flight two-product
+// work, so regenerating today would strip them — un-retiring three studio
+// packages and blanking the booking form's truck copy.
+//
+// But AGREEMENT on the numbers can be checked right now, and it is the thing
+// that actually protects a customer: a browser total that differs from the
+// stored one is the bug, whoever authored the file. Skipping until the
+// provenance was perfect meant the drift these tests exist to catch went
+// unchecked for as long as the blocker lasted. Checking agreement found a real
+// one — the mirror had no `10ft` entry, so a 1-bedroom truck fee read
+// `undefined` on any path that trusted it.
 const skipSite = {
-  skip: !existsSync(MIRROR)
-    ? 'WMIWCI-SITE checkout not present'
-    : !MIRROR_REGENERATED
-      ? 'mirror regeneration blocked on the two-product price book (see PR)'
-      : false,
+  skip: !existsSync(MIRROR) ? 'WMIWCI-SITE checkout not present' : false,
 }
 
 function loadMirror(): Record<string, unknown> {
@@ -278,7 +292,12 @@ test('browser and server agree on the truck fees', skipSite, () => {
   const m = loadMirror()
   const t = m.TRUCK_SIZE_UPGRADE as { amountByTruck: Record<string, number> } | undefined
   assert.ok(t, 'the mirror must carry TRUCK_SIZE_UPGRADE, generated from the server')
-  assert.deepEqual(t!.amountByTruck, { ...TRUCK_SIZE_UPGRADE.amountByTruck })
+  // Spread BOTH sides. The mirror is executed with runInNewContext, so its
+  // objects carry that realm's Object.prototype and a strict deep-equal fails
+  // on prototype identity even when every key and value matches — "same
+  // structure but not reference-equal". This never surfaced because the test
+  // was skipped; it failed the moment it was allowed to run.
+  assert.deepEqual({ ...t!.amountByTruck }, { ...TRUCK_SIZE_UPGRADE.amountByTruck })
   assert.equal((t!.amountByTruck as Record<string, number>)['20ft'], undefined,
     'the retired size must not reach the browser')
 })
