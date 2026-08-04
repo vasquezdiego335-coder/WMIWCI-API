@@ -69,6 +69,15 @@ const PartialSchema = z.object({
   consentVersion: str(40),
   source: str(60),
   foundUs: str(60),
+  // ── Added 2026-08-03. z.object() STRIPS unknown keys rather than rejecting
+  //    them, so the booking form was free to send these and have them silently
+  //    evaporate — the exact failure mode that lost the access answers in the
+  //    2026-07-28 review. If the form sends it, the schema must name it.
+  contactPreference: str(40),
+  bestTimeToCall: str(120),
+  /** Ad click ids. Presence alone proves the paying channel. */
+  gclid: str(200),
+  fbclid: str(200),
   utmSource: str(80),
   utmMedium: str(80),
   utmCampaign: str(120),
@@ -76,10 +85,18 @@ const PartialSchema = z.object({
   utmTerm: str(120),
   landingPage: str(500),
   referrer: str(500),
-  // Live estimate in DOLLARS; converted to cents for the Lead. Bounded.
+  // Live estimate in DOLLARS; converted to cents for the Lead.
+  //
+  // NOTE: this endpoint deliberately still trusts the caller's figure. It is
+  // the shared handler behind the DEPLOYED /api/leads alias, whose six capture
+  // surfaces send an estimate WITHOUT a package key — re-pricing here would
+  // blank their stored value. Server-authoritative pricing lives on the new
+  // /api/leads/quote-capture endpoint, which receives a package key it can
+  // actually price. Tightening this route is a separate, coordinated change.
   estimateTotal: z.number().nonnegative().max(1_000_000).optional(),
-  // Honeypot — bots fill hidden fields; humans leave them empty.
-  company: z.string().max(0).optional(),
+  // HONEYPOT. Bounded but PERMISSIVE: `.max(0)` made the discard branch below
+  // unreachable (zod 422'd first) AND named the trap field back to the bot.
+  company: z.string().trim().max(200).optional(),
 })
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
@@ -128,6 +145,10 @@ async function handle(req: NextRequest): Promise<NextResponse> {
       consentVersion: d.consentVersion,
       source: d.source,
       foundUs: d.foundUs,
+      contactPreference: d.contactPreference,
+      bestTimeToCall: d.bestTimeToCall,
+      gclid: d.gclid,
+      fbclid: d.fbclid,
       utmSource: d.utmSource,
       utmMedium: d.utmMedium,
       utmCampaign: d.utmCampaign,

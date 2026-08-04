@@ -34,6 +34,7 @@ import OperationalAlertEmail from '../emails/operational-alert'
 import FinalInvoiceEmail from '../emails/final-invoice'
 import ReferralRewardEmail from '../emails/referral-reward'
 import QuoteFollowupEmail from '../emails/quote-followup'
+import QuoteRequestReceivedEmail from '../emails/quote-request-received'
 
 type Renderer = (payload: Record<string, unknown>) => React.ReactElement
 
@@ -62,6 +63,7 @@ export const RENDERERS: Record<string, Renderer> = {
   'quote-followup-1': (p) => QuoteFollowupEmail({ ...p, stage: 1 } as never),
   'quote-followup-2': (p) => QuoteFollowupEmail({ ...p, stage: 2 } as never),
   'quote-followup-final': (p) => QuoteFollowupEmail({ ...p, stage: 3 } as never),
+  'quote-request-received': (p) => QuoteRequestReceivedEmail(p as never),
   // followups.ts renders these two from the review-request component.
   'review-reminder': (p) => ReviewRequestEmail({ ...p, reminder: true } as never),
   'repeat-reminder': (p) => ReviewRequestEmail({ ...p, repeat: true } as never),

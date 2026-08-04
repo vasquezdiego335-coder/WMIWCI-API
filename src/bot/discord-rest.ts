@@ -16,6 +16,8 @@ import {
   serviceLabelFromDescription,
   truckLabelFromDescription,
   TRUCK_OPTION_LABELS,
+  buildLeadCard,
+  type LeadCardData,
 } from '../lib/booking-display'
 import { completenessLines } from '../lib/booking-completeness'
 
@@ -64,7 +66,7 @@ function getRest(): REST | null {
   return _rest
 }
 
-type MessageBody = { embeds?: unknown[]; components?: unknown[]; content?: string }
+type MessageBody = { embeds?: unknown[]; components?: unknown[]; content?: string; allowed_mentions?: unknown }
 
 // Resolve a channel id from an env key and POST a message via REST.
 // Returns the created message ({ id }) or null (never throws → worker-safe).
@@ -310,4 +312,31 @@ export async function postContactMessage(payload: Record<string, unknown>): Prom
   await restSendFirst(['DISCORD_CHANNEL_OPERATIONS', 'DISCORD_CHANNEL_ALERTS', 'DISCORD_CHANNEL_SCHEDULING'], {
     embeds: [embed.toJSON()],
   })
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+//  8. New quick-quote lead (informational, owner spec 2026-08-03)
+//  ---------------------------------------------------------------------
+//  Posted the moment someone completes the contact step of the quick quote —
+//  the FIRST Discord card that has ever existed before a deposit is paid.
+//  The card is built by the shared, prisma-free builder in lib/booking-display
+//  so the REST path and the gateway path cannot drift.
+//
+//  Channel order matters: a dedicated #leads channel if configured, otherwise
+//  operations. Never silently nothing — restSendFirst logs a DROPPED message
+//  when no channel is configured.
+// ══════════════════════════════════════════════════════════════════════════
+export async function postLeadCard(payload: Record<string, unknown>): Promise<boolean> {
+  botLogger.info({ leadId: payload.leadId }, '▶ postLeadCard (REST)')
+  const { embeds, components } = buildLeadCard(payload as unknown as LeadCardData)
+  // allowed_mentions:{parse:[]} — belt and braces beside discordSafe()'s
+  // zero-width neutralisation. A lead name is customer-controlled text, and
+  // NOTHING a customer types may ping the owner's server.
+  const msg = await restSendFirst(
+    ['DISCORD_CHANNEL_LEADS', 'DISCORD_CHANNEL_OPERATIONS', 'DISCORD_CHANNEL_ALERTS', 'DISCORD_CHANNEL_SCHEDULING'],
+    { embeds, components, allowed_mentions: { parse: [] } }
+  )
+  // restSendFirst returns null for "no channel configured" AND for a failed
+  // POST — both mean the owner was not told, so both are a delivery failure.
+  return msg !== null
 }

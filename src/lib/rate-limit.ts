@@ -64,6 +64,11 @@ export const LIMITS = {
   // fail-open — this is a best-effort side channel that must never eat a lead
   // or, being independent, ever affect the booking flow.
   partialLead: { name: 'partial-lead', limit: 40, windowSec: 5 * 60, failMode: 'open' } as RateLimitConfig,
+  // Quick-quote submissions (owner spec 2026-08-03). Far tighter than
+  // partialLead: that one fires on every keystroke-debounce, this one fires
+  // on a deliberate submit. failMode 'open' because a rate-limiter outage
+  // must never stop a customer seeing their estimate.
+  quoteLead: { name: 'quote-lead', limit: 15, windowSec: 10 * 60, failMode: 'open' } as RateLimitConfig,
   coupon: { name: 'coupon', limit: 6, windowSec: 10 * 60, failMode: 'open' } as RateLimitConfig,
   // Server-to-server (already token-gated) — a generous ceiling against runaway loops.
   notifyLead: { name: 'notify-lead', limit: 60, windowSec: 60, failMode: 'open' } as RateLimitConfig,

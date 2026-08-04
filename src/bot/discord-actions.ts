@@ -21,6 +21,8 @@ import {
   serviceLabelFromDescription,
   truckLabelFromDescription,
   TRUCK_OPTION_LABELS,
+  buildLeadCard,
+  type LeadCardData,
 } from '../lib/booking-display'
 
 // ════════════════════════════════════════════════════════════════════════
@@ -54,6 +56,7 @@ const ENV_GROUPS: Record<string, string[]> = {
     'DISCORD_CHANNEL_JOBS',
     'DISCORD_CHANNEL_ALERTS',
     'DISCORD_CHANNEL_OPERATIONS',
+    'DISCORD_CHANNEL_LEADS',
     'DISCORD_CHANNEL_PAYMENTS',
     'DISCORD_CHANNEL_RECEIPTS',
     'DISCORD_CHANNEL_PAPERWORK',
@@ -613,3 +616,44 @@ export async function postContactMessage(payload: Record<string, unknown>): Prom
 // The discord worker imports the post* functions above; importing this module
 // boots the gateway client so the bot is online to receive slash commands.
 getDiscordClient()
+
+// ══════════════════════════════════════════════════════════════════════════
+//  8. New quick-quote lead (informational, owner spec 2026-08-03)
+//  ---------------------------------------------------------------------
+//  Posted the moment someone completes the contact step of the quick quote —
+//  the FIRST Discord card that has ever existed before a deposit is paid.
+//  The card is built by the shared, prisma-free builder in lib/booking-display
+//  so the REST path and the gateway path cannot drift.
+//
+//  Channel order matters: a dedicated #leads channel if configured, otherwise
+//  operations. Never silently nothing — restSendFirst logs a DROPPED message
+//  when no channel is configured.
+// ══════════════════════════════════════════════════════════════════════════
+export async function postLeadCard(payload: Record<string, unknown>): Promise<boolean> {
+  botLogger.info({ leadId: payload.leadId }, '▶ postLeadCard (REST)')
+  const { embeds, components } = buildLeadCard(payload as unknown as LeadCardData)
+
+  const channel =
+    (await getChannel('DISCORD_CHANNEL_LEADS')) ??
+    (await getChannel('DISCORD_CHANNEL_OPERATIONS')) ??
+    (await getChannel('DISCORD_CHANNEL_ALERTS')) ??
+    (await getChannel('DISCORD_CHANNEL_SCHEDULING'))
+
+  if (!channel) {
+    botLogger.error({ leadId: payload.leadId }, 'No Discord channel configured - lead card DROPPED')
+    return false
+  }
+
+  try {
+    // allowed_mentions:{parse:[]} — customer-typed text can never ping.
+    await channel.send({
+      embeds: embeds as never,
+      components: components as never,
+      allowedMentions: { parse: [] },
+    })
+    return true
+  } catch (err) {
+    botLogger.error({ leadId: payload.leadId, err: errMsg(err) }, 'lead card send failed')
+    return false
+  }
+}

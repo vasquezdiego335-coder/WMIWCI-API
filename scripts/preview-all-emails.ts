@@ -23,6 +23,7 @@ import OperationalAlert from '../src/emails/operational-alert'
 import FinalInvoice from '../src/emails/final-invoice'
 import ReferralReward from '../src/emails/referral-reward'
 import QuoteFollowup from '../src/emails/quote-followup'
+import QuoteRequestReceived from '../src/emails/quote-request-received'
 
 const OUT = resolve('email-previews')
 mkdirSync(OUT, { recursive: true })
@@ -54,6 +55,14 @@ const templates: Array<[string, React.ReactElement]> = [
   ['quote-followup-1', React.createElement(QuoteFollowup, { ...common, stage: 1, jobType: '2-bedroom apartment, 3rd floor walk-up', moveDate: '2026-08-15T15:00:00Z', bookingUrl: 'https://www.moveitclearit.com/booking-form.html' })],
   ['quote-followup-2', React.createElement(QuoteFollowup, { ...common, stage: 2, bookingUrl: 'https://www.moveitclearit.com/booking-form.html' })],
   ['quote-followup-final', React.createElement(QuoteFollowup, { ...common, stage: 3, moveDate: '2026-08-15T15:00:00Z', bookingUrl: 'https://www.moveitclearit.com/booking-form.html' })],
+  // ── Quick-quote confirmation (2026-08-03). THREE variants on purpose: the
+  //    interesting behaviour is the CONDITIONAL estimate paragraph. The owner's
+  //    rule is "if no estimate exists yet, omit the paragraph instead of
+  //    displaying an empty value" — so a reviewer has to be able to see the
+  //    no-estimate render, not just trust that it works.
+  ['quote-request-received', React.createElement(QuoteRequestReceived, { firstName: 'Zalak', estimatedPrice: '$1,049', moveDate: '2026-08-11T12:00:00Z', moveSize: '2 Bedrooms', businessPhone: '862-640-0625', locale: 'en' })],
+  ['quote-request-received-no-estimate', React.createElement(QuoteRequestReceived, { firstName: 'Zalak', businessPhone: '862-640-0625', locale: 'en' })],
+  ['quote-request-received-es', React.createElement(QuoteRequestReceived, { firstName: 'Zalak', estimatedPrice: '$1,049', moveDate: '2026-08-11T12:00:00Z', moveSize: '2 Recámaras', businessPhone: '862-640-0625', locale: 'es' })],
 ]
 
 async function main() {

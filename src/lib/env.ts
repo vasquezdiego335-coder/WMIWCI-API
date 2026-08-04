@@ -33,6 +33,10 @@ const REQUIRED_DISCORD: EnvVar[] = [
   { key: 'DISCORD_GUILD_ID', required: false, note: 'owner actions are scoped to this server' },
   { key: 'DISCORD_CHANNEL_SCHEDULING', required: false, note: 'approval cards land here' },
   { key: 'DISCORD_CHANNEL_ALERTS', required: false },
+  // Quick-quote lead cards (owner spec 2026-08-03). Optional: postLeadCard
+  // falls back to OPERATIONS -> ALERTS -> SCHEDULING, so an unset value
+  // degrades to 'lands in operations', never to silence.
+  { key: 'DISCORD_CHANNEL_LEADS', required: false, note: 'new quote-request cards land here' },
   { key: 'DISCORD_OWNER_USER_IDS', required: false, note: 'comma-list of owner user IDs (or use the role below / legacy staff IDs)' },
   { key: 'DISCORD_OWNER_ROLE_ID', required: false, note: 'role that grants owner powers' },
 ]

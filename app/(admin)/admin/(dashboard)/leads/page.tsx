@@ -2,6 +2,8 @@ import { prisma } from '@/lib/db'
 import { getSession } from '@/lib/auth'
 import Link from 'next/link'
 import type { Prisma } from '@prisma/client'
+import { leadSourceLabel } from '@/lib/lead-attribution'
+import { ResendConfirmationProvider, ResendConfirmationButton } from './ResendConfirmation'
 
 export const revalidate = 30
 
@@ -67,6 +69,13 @@ export default async function AdminLeads({
         id: true, name: true, email: true, phone: true, source: true, status: true, lifecycle: true,
         formStep: true, utmCampaign: true, referrer: true, estimatedValue: true, convertedBookingId: true,
         emailMarketingConsent: true, lastActivityAt: true, createdAt: true,
+        // ── Quote-request capture (owner spec 2026-08-03). How they asked to be
+        //    contacted, and whether the confirmation email actually went out.
+        contactPreference: true, bestTimeToCall: true, landingPage: true,
+        quoteConfirmationQueuedAt: true,
+        quoteConfirmationStatus: true,
+        quoteConfirmationDeliveredAt: true,
+        quoteConfirmationLastError: true,
       },
     }),
     prisma.lead.count({ where }),
@@ -112,20 +121,23 @@ export default async function AdminLeads({
         </form>
       </div>
 
+      <ResendConfirmationProvider>
       <div style={tableWrap}>
         <table style={table}>
           <thead>
             <tr>
-              {['Lead', 'Phone', 'Step', 'Source', 'Campaign', 'Status', 'Marketing', 'Est. value', 'Last activity'].map((h) => (
+              {['Lead', 'Phone', 'Contact pref', 'Step', 'Source', 'Campaign', 'Status', 'Marketing', 'Confirmation', 'Est. value', 'Last activity'].map((h) => (
                 <th key={h} style={th}>{h}</th>
               ))}
             </tr>
           </thead>
           <tbody>
             {leads.length === 0 ? (
-              <tr><td colSpan={9} style={{ ...td, textAlign: 'center', color: '#9CA3AF', fontStyle: 'italic', padding: '40px' }}>No leads found.</td></tr>
+              <tr><td colSpan={11} style={{ ...td, textAlign: 'center', color: '#9CA3AF', fontStyle: 'italic', padding: '40px' }}>No leads found.</td></tr>
             ) : leads.map((l) => {
               const supp = l.email ? suppByEmail.get(l.email) : undefined
+              const ref = referrerHost(l.referrer)
+              const landing = landingPath(l.landingPage)
               return (
                 <tr key={l.id} style={tr}>
                   <td style={td}>
@@ -133,11 +145,26 @@ export default async function AdminLeads({
                     <div style={{ fontSize: '11px', color: '#9CA3AF' }}>{l.email ?? '—'}</div>
                   </td>
                   <td style={td}>{l.phone ?? '—'}</td>
+                  <td style={td}>
+                    <div>{contactPrefLabel(l.contactPreference) ?? '—'}</div>
+                    {l.bestTimeToCall && <div style={{ fontSize: '11px', color: '#9CA3AF' }}>{truncate(l.bestTimeToCall, 40)}</div>}
+                  </td>
                   <td style={td}>{l.formStep ? l.formStep.replace(/^card/, 'Step ') : '—'}</td>
-                  <td style={td}>{(l.source ?? 'OTHER').replace(/_/g, ' ').toLowerCase()}</td>
+                  {/* Source: the CLASSIFIED channel, with the RAW evidence under it.
+                      Shown even when the channel is Unknown/Direct — that raw pair is
+                      exactly what tells a mapping bug from a genuinely untagged visit. */}
+                  <td style={td}>
+                    <div>{leadSourceLabel(l.source)}</div>
+                    {ref && <div style={rawEvidence} title={l.referrer ?? undefined}>from {ref}</div>}
+                    {landing && <div style={rawEvidence} title={l.landingPage ?? undefined}>on {landing}</div>}
+                  </td>
                   <td style={td}>{l.utmCampaign ?? '—'}</td>
                   <td style={td}>{statusBadge(l.lifecycle, l.status, l.convertedBookingId)}</td>
                   <td style={td}>{marketingBadge(l.emailMarketingConsent, supp)}</td>
+                  <td style={{ ...td, whiteSpace: 'nowrap' }}>
+                    {confirmationBadge(l)}
+                    {l.email && <ResendConfirmationButton leadId={l.id} name={l.name} sent={!!l.quoteConfirmationQueuedAt} />}
+                  </td>
                   <td style={{ ...td, whiteSpace: 'nowrap' }}>{typeof l.estimatedValue === 'number' ? `$${Math.round(l.estimatedValue / 100).toLocaleString()}` : '—'}</td>
                   <td style={{ ...td, whiteSpace: 'nowrap', fontSize: '12px' }}>
                     {(l.lastActivityAt ?? l.createdAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'America/New_York' })}
@@ -148,6 +175,7 @@ export default async function AdminLeads({
           </tbody>
         </table>
       </div>
+      </ResendConfirmationProvider>
 
       {pages > 1 && (
         <div style={{ display: 'flex', gap: '8px', justifyContent: 'center', marginTop: '24px', flexWrap: 'wrap' }}>
@@ -183,6 +211,95 @@ function statusBadge(lifecycle: string | null, status: string, convertedBookingI
   return <span style={{ ...badge, background: '#EFF2F6', color: '#475569' }}>{status.replace(/_/g, ' ').toLowerCase()}</span>
 }
 
+// ── Quote-request capture display (owner spec 2026-08-03) ─────────────────
+// How the customer asked to be reached. Stored as a free-form String (a new
+// form option must not 500 the public capture route), so an unmapped value is
+// shown humanized rather than hidden — it is real data the owner should act on.
+const CONTACT_PREF_LABELS: Record<string, string> = {
+  call_asap: 'Call ASAP',
+  text: 'Text',
+  email: 'Email',
+  customer_will_contact: "They'll call us",
+}
+
+function contactPrefLabel(pref: string | null): string | null {
+  const key = (pref ?? '').trim().toLowerCase()
+  if (!key) return null
+  return CONTACT_PREF_LABELS[key] ?? key.replace(/_/g, ' ')
+}
+
+function truncate(v: string, max: number): string {
+  return v.length > max ? v.slice(0, max - 1) + '…' : v
+}
+
+/** Referrer → just the host. A stored value may be a full URL or a bare host;
+ *  either way the column shows a short, readable name and the full string
+ *  stays available in the cell's title attribute. */
+function referrerHost(referrer: string | null): string | null {
+  const raw = (referrer ?? '').trim()
+  if (!raw) return null
+  for (const candidate of [raw, `https://${raw}`]) {
+    try {
+      return truncate(new URL(candidate).hostname.replace(/^www\./, ''), 28)
+    } catch {
+      /* not a URL in this form — try the next */
+    }
+  }
+  return truncate(raw, 28)
+}
+
+/** Landing page → the PATH only. The host is always ours, and a full URL with
+ *  utm tags attached would blow the column out. */
+function landingPath(landingPage: string | null): string | null {
+  const raw = (landingPage ?? '').trim()
+  if (!raw) return null
+  try {
+    const u = new URL(raw.startsWith('/') ? `https://x${raw}` : raw)
+    return truncate((u.pathname === '/' ? '/' : u.pathname.replace(/\/$/, '')) + (u.search ? u.search : ''), 34)
+  } catch {
+    return truncate(raw, 34)
+  }
+}
+
+/**
+ * Confirmation state, told HONESTLY.
+ *
+ * This used to read "Sent" for any row with a timestamp — but that timestamp
+ * was written BEFORE the job reached the queue, so a Redis outage displayed as
+ * a delivered email. Queued, delivered and failed are now distinct, and only
+ * the worker ever writes 'delivered'.
+ */
+function confirmationBadge(l: {
+  quoteConfirmationQueuedAt: Date | null
+  quoteConfirmationStatus: string | null
+  quoteConfirmationDeliveredAt: Date | null
+  quoteConfirmationLastError: string | null
+}) {
+  const day = (d: Date) => d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'America/New_York' })
+  if (l.quoteConfirmationStatus === 'delivered') {
+    return (
+      <div style={{ fontSize: '12px', color: '#166534' }}>
+        Delivered{l.quoteConfirmationDeliveredAt ? ` · ${day(l.quoteConfirmationDeliveredAt)}` : ''}
+      </div>
+    )
+  }
+  if (l.quoteConfirmationStatus === 'failed') {
+    return (
+      <div style={{ fontSize: '12px', color: '#991B1B' }} title={l.quoteConfirmationLastError ?? undefined}>
+        Failed — resend
+      </div>
+    )
+  }
+  if (l.quoteConfirmationQueuedAt) {
+    return (
+      <div style={{ fontSize: '12px', color: '#92400E' }}>
+        Queued · {day(l.quoteConfirmationQueuedAt)}
+      </div>
+    )
+  }
+  return <div style={{ fontSize: '12px', color: '#9CA3AF' }}>—</div>
+}
+
 function marketingBadge(consent: boolean | null, supp?: { reason: string; scope: string }) {
   if (supp) {
     const label = supp.reason === 'UNSUBSCRIBED' ? 'Unsubscribed' : 'Suppressed'
@@ -207,3 +324,6 @@ const th: React.CSSProperties = { padding: '12px 16px', textAlign: 'left', fontS
 const tr: React.CSSProperties = { borderBottom: '1px solid #F3F4F6' }
 const td: React.CSSProperties = { padding: '12px 16px', fontSize: '13px', color: '#374151' }
 const badge: React.CSSProperties = { fontSize: '11px', padding: '3px 8px', borderRadius: '100px', fontWeight: 600, whiteSpace: 'nowrap' }
+// Raw referrer / landing page under the classified Source. Hard-capped width so
+// a long tagged URL can never widen the column.
+const rawEvidence: React.CSSProperties = { fontSize: '11px', color: '#9CA3AF', maxWidth: '190px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }

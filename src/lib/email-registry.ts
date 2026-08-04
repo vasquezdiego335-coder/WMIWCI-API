@@ -348,6 +348,26 @@ const SEEDS: Seed[] = [
     subject: 'Did your moving plans change?',
   },
   {
+    key: 'quote-request-received',
+    name: 'Quote request received',
+    file: 'emails/quote-request-received.tsx',
+    category: 'lead',
+    trigger:
+      'Immediately when someone completes the contact step of the quick quote (POST /api/leads). Sent ONCE per lead; guarded by Lead.quoteRequestConfirmationSentAt plus the guard idempotency key.',
+    // Not part of a delayed sequence — it is the immediate reply to a request,
+    // so there is no journey to stop and no feature flag standing in front of
+    // it. Gating it behind EMAIL_JOURNEYS_ENABLED would mean a customer who
+    // asked for a price silently got nothing.
+    journey: null,
+    flag: null,
+    wiring: 'wired',
+    stopRules: [
+      'Already sent for this lead (quoteRequestConfirmationSentAt) — only an owner resend repeats it',
+      'Hard suppression (bounce / complaint / admin block)',
+    ],
+    subject: 'We received your moving estimate request',
+  },
+  {
     key: 'quote-followup-1',
     name: 'Quote follow-up — stage 1',
     file: 'emails/quote-followup.tsx',

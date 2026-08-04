@@ -137,6 +137,12 @@ export const REQUIRED_FIELDS = {
   'abandoned-checkout': ['checkoutUrl'],
   'abandoned-checkout-2': ['checkoutUrl'],
   'abandoned-checkout-3': ['checkoutUrl'],
+  // The quick-quote reply has no CTA button by design (the owner's copy asks
+  // the customer to REPLY), so there is no URL to require. firstName is
+  // required because the greeting is the owner's wording: the quick quote now
+  // collects a first name before it will show a price, and every sender
+  // (auto + owner resend) falls back to a real value rather than an empty one.
+  'quote-request-received': ['firstName'],
   'quote-followup-1': ['bookingUrl'],
   'quote-followup-2': ['bookingUrl'],
   'quote-followup-final': ['bookingUrl'],

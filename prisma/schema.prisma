@@ -217,6 +217,10 @@ enum AuditAction {
   ATTRIBUTION_CORRECTED
   LEAD_CREATED
   LEAD_STATUS_CHANGED
+  /// An owner manually re-sent the "we received your estimate request"
+  /// confirmation (owner spec 2026-08-03). Recorded because a resend puts a
+  /// second email in a customer's inbox and must be explainable later.
+  LEAD_QUOTE_CONFIRMATION_RESENT
   PRICE_CHANGED
   BUSINESS_CONFIG_UPDATED
   // ── Action Center + Ideas & Roadmap (increment 2, owner spec 2026-07-13) ──
@@ -430,8 +434,32 @@ enum LeadSource {
   RETURNING_CUSTOMER
   WEBSITE
   OTHER
-}
 
+  // ── Channel split (owner spec 2026-08-03) ────────────────────────────────
+  //    Until now every unrecognised OR missing channel collapsed into OTHER,
+  //    so "typed the URL", "referred by a site we don't classify" and "our
+  //    mapping is broken" were the same value in the admin. These are the
+  //    distinctions the owner actually reports on. Classification lives in
+  //    src/lib/lead-attribution.ts; OTHER is retained for historical rows and
+  //    is no longer written by the classifier.
+  /// No tags, no click id, no external referrer — typed, bookmarked, or an
+  /// app that sends no referrer. A real category, not a failure to attribute.
+  DIRECT
+  /// A search engine actually referred the visit. NEVER inferred from the
+  /// absence of evidence — that is what made ad spend look free.
+  ORGANIC_SEARCH
+  /// Proven paid search: a gclid, or a paid utm_medium.
+  GOOGLE_ADS
+  TIKTOK
+  /// Facebook Marketplace / Nextdoor and similar listing surfaces.
+  MARKETPLACE
+  /// A QR scan with no more specific print channel attached (a door-hanger
+  /// QR resolves to DOOR_HANGER, which is the channel that costs money).
+  QR_CODE
+  /// Referred by a host we cannot classify. Distinct from DIRECT: we know
+  /// someone sent them, we just cannot say who.
+  UNKNOWN
+}
 enum LeadStatus {
   NEW
   CONTACTED
@@ -1925,6 +1953,66 @@ model Lead {
   marketingConsentSource  String?   @map("marketing_consent_source")
   // Disclosure/consent-text version shown when consent was given.
   marketingConsentVersion String?   @map("marketing_consent_version")
+  // ══════════════════════════════════════════════════════════════════════════
+  //  QUOTE-REQUEST CAPTURE (owner spec 2026-08-03). The quick quote now asks
+  //  for contact details BEFORE it reveals a price, so these columns describe
+  //  a person who asked for an estimate — not someone who booked. Every one is
+  //  nullable: a lead captured before this cutover simply never answered.
+  // ══════════════════════════════════════════════════════════════════════════
+  /// How the customer asked to be contacted: 'call_asap' | 'text' | 'email' |
+  /// 'customer_will_contact'. Free-form String (not an enum) so a new option on
+  /// the form cannot 500 the public capture route before a migration ships.
+  contactPreference String? @map("contact_preference")
+  /// Free-text window the customer gave, e.g. "weekday mornings".
+  bestTimeToCall    String? @map("best_time_to_call")
+  /// Pickup / destination ZIPs from the quick quote. `zip` above predates this
+  /// and stays the PICKUP zip for back-compat; these two are unambiguous.
+  pickupZip         String? @map("pickup_zip")
+  destinationZip    String? @map("destination_zip")
+  /// The RAW source string exactly as the browser sent it (e.g.
+  /// 'QUICK_QUOTE_FORM', 'print', 'tiktok'). `source` above is the CLASSIFIED
+  /// channel; keeping the raw value means a future mapping fix can be applied
+  /// retroactively instead of guessing what OTHER used to mean.
+  sourceDetail      String? @map("source_detail")
+
+  // ── QUEUE STATE vs DELIVERY STATE ────────────────────────────────────────
+  //  These are NOT the same thing and the schema must not blur them. Putting a
+  //  job in Redis proves nothing about Resend accepting it, and the previous
+  //  single column was literally named "...SentAt" while being written BEFORE
+  //  the enqueue — so the admin could read "Sent" for an email that never left.
+  //
+  //  The Prisma FIELD is renamed; the underlying column is unchanged (@map), so
+  //  this costs no migration and no data movement.
+  //
+  //  TRUE DELIVERY STATE ALREADY EXISTS in the EmailSend table (status,
+  //  attempts, idempotencyKey, provider ids) and is NOT duplicated here. These
+  //  columns exist so the LEAD row can answer "did this customer get their
+  //  confirmation?" without a join, which is what the admin list needs.
+  /// When the confirmation email was QUEUED. Never means delivered.
+  quoteConfirmationQueuedAt     DateTime? @map("quote_request_confirmation_sent_at")
+  /// 'queued' | 'delivered' | 'failed'. Null = never requested.
+  /// Written by the API (queued) and by the email worker (delivered/failed).
+  quoteConfirmationStatus       String?   @map("quote_confirmation_status")
+  quoteConfirmationDeliveredAt  DateTime? @map("quote_confirmation_delivered_at")
+  quoteConfirmationFailedAt     DateTime? @map("quote_confirmation_failed_at")
+  /// A SHORT, sanitized failure category — never a stack trace, never a
+  /// provider payload, never anything containing customer data.
+  quoteConfirmationLastError    String?   @map("quote_confirmation_last_error")
+  /// How many times it has been sent (1 = automatic, >1 = owner resends). Also
+  /// the `version` fed to the idempotency key so a deliberate resend is a NEW
+  /// send rather than a refused duplicate.
+  quoteConfirmationCount Int       @default(0) @map("quote_request_confirmation_count")
+
+  /// Fingerprint of the lead facts that justify re-alerting the owner (move
+  /// date, estimate, contact preference). An unchanged fingerprint means the
+  /// customer edited something cosmetic and Discord stays quiet.
+  alertFingerprint String?   @map("alert_fingerprint")
+  /// When the owner card was QUEUED. Same rule as the email above: queueing is
+  /// not delivery, and the two are recorded separately.
+  lastAlertedAt    DateTime? @map("last_alerted_at")
+  /// 'queued' | 'delivered' | 'failed'. Null = never alerted.
+  alertStatus      String?   @map("alert_status")
+  alertDeliveredAt DateTime? @map("alert_delivered_at")
 
   contactedAt    DateTime? @map("contacted_at")
   quotedAt       DateTime? @map("quoted_at")

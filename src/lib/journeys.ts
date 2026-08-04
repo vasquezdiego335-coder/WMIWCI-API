@@ -384,7 +384,33 @@ export function quoteFollowupBlockReason(lead: LeadState | null, now: Date = new
  *
  * FAILS CLOSED: a read error blocks the send.
  */
-export async function leadEligibility(leadId: string): Promise<string | null> {
+/**
+ * Stop rules that apply to ANY lead-scoped email, regardless of journey.
+ *
+ * WHY THIS EXISTS (owner spec 2026-08-03). `leadId` on an email job used to
+ * have exactly one consumer — the quote-followup journey — so leadEligibility
+ * hard-coded that journey's matrix, which begins "a lead with no quotedAt gets
+ * nothing". The quick-quote confirmation is the SECOND consumer, and it is an
+ * immediate REPLY to something the customer just did: it asserts nothing about
+ * a recorded quote, and a quick-quote lead never has quotedAt (that column is
+ * stamped only by the admin CRM action). Inheriting the journey matrix refused
+ * 100% of confirmations — silently, because 'no_quote' classifies as retryable
+ * and the worker returns without throwing.
+ *
+ * Stamping quotedAt on the quick-quote lead would be the WRONG fix: it would
+ * make an estimator visit look like a recorded quote and could arm the
+ * quote-followup drip for someone who only wanted a number.
+ */
+export function transactionalLeadBlockReason(lead: LeadState | null): string | null {
+  if (!lead) return 'lead_deleted'
+  if (!lead.email) return 'no_email'
+  return null
+}
+
+/** Lead-scoped templates that are an immediate REPLY, not a journey stage. */
+const TRANSACTIONAL_LEAD_TEMPLATES: ReadonlySet<string> = new Set(['quote-request-received'])
+
+export async function leadEligibility(leadId: string, template?: string): Promise<string | null> {
   try {
     const lead = await prisma.lead.findUnique({
       where: { id: leadId },
@@ -398,8 +424,14 @@ export async function leadEligibility(leadId: string): Promise<string | null> {
         convertedBookingId: true,
       },
     })
-    const reason = quoteFollowupBlockReason(lead)
-    if (reason) log.info({ leadId, reason }, 'lead eligibility BLOCKED the send')
+    // Journey stages keep the full quote-followup matrix; an immediate
+    // transactional reply gets only the rules that are true of every lead.
+    // `template` is optional so existing callers keep today's behaviour.
+    const reason =
+      template && TRANSACTIONAL_LEAD_TEMPLATES.has(template)
+        ? transactionalLeadBlockReason(lead)
+        : quoteFollowupBlockReason(lead)
+    if (reason) log.info({ leadId, template, reason }, 'lead eligibility BLOCKED the send')
     return reason
   } catch (err) {
     log.error(

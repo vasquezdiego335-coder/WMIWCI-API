@@ -9,6 +9,7 @@ import {
   createJobChannels,
   postDailySchedule,
   postContactMessage,
+  postLeadCard,
 } from '../bot/discord-rest'
 
 async function processDiscordJob(job: Job<DiscordJobData>): Promise<void> {
@@ -42,6 +43,19 @@ async function processDiscordJob(job: Job<DiscordJobData>): Promise<void> {
     case 'contact-message':
       await postContactMessage(payload)
       break
+    case 'lead-created': {
+      // postLeadCard returns FALSE when no channel was configured or the REST
+      // post failed. restSendToChannel never throws, so without observing the
+      // return value a dropped card looked exactly like a delivered one.
+      const delivered = await postLeadCard(payload)
+      const leadId = typeof payload.leadId === 'string' ? payload.leadId : null
+      if (leadId) {
+        const { recordLeadAlertOutcome } = await import('../lib/quote-capture')
+        await recordLeadAlertOutcome(leadId, delivered)
+      }
+      if (!delivered) log.warn({ leadId }, 'lead card was not delivered')
+      break
+    }
     case 'reschedule-offer':
       // Re-post a fresh approval card after a customer picks a new date.
       await postBookingApprovalCard(bookingId!, payload)

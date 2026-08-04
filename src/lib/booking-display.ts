@@ -43,9 +43,12 @@ export const TRUCK_OPTION_LABELS: Record<string, string> = {
 }
 
 // ── Human labels for the server-computed service-area zone ────────────────
+// The amount is NOT baked into these labels: travel is banded by driving miles
+// ($25 / $50 / reviewed), so the real figure is rendered from travelFee beside
+// them. A hardcoded "$50" here was wrong the moment bands landed.
 export const SERVICE_AREA_ZONE_LABELS: Record<string, string> = {
-  primary: 'Primary area — no travel fee',
-  extended_nj: 'Extended NJ — $50 travel fee (move day)',
+  primary: 'Included travel area — no adjustment',
+  extended_nj: 'Extended NJ — travel adjustment (move day)',
   new_york: 'New York — owner review',
   manual_review: 'Owner review required',
   unsupported: 'Out of area — owner review',
@@ -560,6 +563,30 @@ export type ApprovalCardData = {
   access?: AccessInfo
   rawDescription?: string | null // itemsDescription — source for access bullets + notes
   customerNotes?: string | null // explicit column, preferred over parsed notes when set
+  // ── TWO-PRODUCT MODEL (owner spec 2026-07-31) ──────────────────────────
+  //    'full_service' | 'labor_only'. Null on a pre-cutover booking, which
+  //    renders exactly as it always did.
+  serviceTypeKey?: string | null
+  // Full-service truck
+  includedTruckSize?: string | null
+  confirmedTruckSize?: string | null
+  truckSizeUpgradeApplied?: boolean | null
+  truckSizeUpgradeAmountCents?: number | null
+  // Full-service transportation ($3 per routed mile, fuel included)
+  routedMiles?: number | null
+  billableMiles?: number | null
+  mileageRateDollars?: number | null
+  transportationDollars?: number | null
+  routeManualReview?: boolean | null
+  // Labor-only
+  laborServiceLabel?: string | null
+  laborEstimatedHours?: number | null
+  laborBillableHours?: number | null
+  laborHourlyRate?: number | null
+  laborWorkers?: number | null
+  laborSubtotalDollars?: number | null
+  customerTruckStatus?: string | null
+
   // Pricing (dollars unless the field name says cents)
   baseRate?: number | null
   travelFeeDollars?: number | null
@@ -667,12 +694,56 @@ export function buildBookingApprovalCard(data: ApprovalCardData): {
       : accessBulletsFromDescription(data.rawDescription)
   if (bullets.length) fields.push(field('🔑 Access', bullets.map((b) => `• ${b}`).join('\n')))
 
-  // 7) Pricing — the full owner breakdown.
+  // 7) Pricing — the full owner breakdown, BY PRODUCT.
+  //    Full-service and labor-only are billed in different units, so they get
+  //    different breakdowns. Rendering an hourly job with a "Base labor" flat
+  //    line (or a labor-only job with a mileage line) is exactly the confusion
+  //    this split exists to prevent.
   const priceLines: string[] = []
-  if (typeof data.baseRate === 'number' && data.baseRate > 0) priceLines.push(`Base labor: ${money(data.baseRate)}`)
-  if (data.manualReviewRequired) priceLines.push('Travel fee: Pending owner review')
-  else if (typeof data.travelFeeDollars === 'number' && data.travelFeeDollars > 0)
-    priceLines.push(`Travel fee: ${money(data.travelFeeDollars)} — collected on move day`)
+  const isLaborOnly = data.serviceTypeKey === 'labor_only'
+
+  if (isLaborOnly) {
+    priceLines.push('Service: Labor-Only Moving Help')
+    if (data.laborServiceLabel) priceLines.push(`Labor service: ${data.laborServiceLabel}`)
+    const workers = data.laborWorkers ?? 2
+    const rate = data.laborHourlyRate ?? 150
+    priceLines.push(`Rate: ${money(rate)}/hour (${workers} workers included)`)
+    if (typeof data.laborEstimatedHours === 'number' && data.laborEstimatedHours > 0)
+      priceLines.push(`Estimated time: ${data.laborEstimatedHours} h`)
+    // The BILLABLE hours are the invoice; the estimate is only what was quoted.
+    if (typeof data.laborBillableHours === 'number' && data.laborBillableHours > 0)
+      priceLines.push(`Final billable time: ${data.laborBillableHours} h ✅`)
+    if (typeof data.laborSubtotalDollars === 'number' && data.laborSubtotalDollars > 0)
+      priceLines.push(`Labor subtotal: ${money(data.laborSubtotalDollars)}`)
+    priceLines.push('Truck: customer provided — no mileage charge')
+  } else {
+    if (typeof data.baseRate === 'number' && data.baseRate > 0) priceLines.push(`Base package: ${money(data.baseRate)}`)
+    // Truck: what the package includes, and what review confirmed.
+    if (data.includedTruckSize) {
+      const confirmed = data.confirmedTruckSize
+      priceLines.push(
+        confirmed && confirmed !== data.includedTruckSize
+          ? `Truck: ${data.includedTruckSize} included → ${confirmed} confirmed`
+          : `Truck: ${data.includedTruckSize} included`
+      )
+    }
+    if (data.truckSizeUpgradeApplied)
+      priceLines.push(`Larger truck upgrade: ${money((data.truckSizeUpgradeAmountCents ?? 10000) / 100)}`)
+    // Transportation: $3 per routed mile, fuel included. An unmeasured route is
+    // reported as pending, never as $0.
+    if (data.routeManualReview) {
+      priceLines.push('Transportation: route not calculated — confirm before approval ⚠️')
+    } else if (typeof data.billableMiles === 'number' && data.billableMiles > 0) {
+      const rate = data.mileageRateDollars ?? 3
+      priceLines.push(
+        `Transportation: ${data.billableMiles} mi × ${money(rate)} = ${money(data.transportationDollars ?? data.billableMiles * rate)} — collected on move day (fuel included)`
+      )
+    } else if (typeof data.travelFeeDollars === 'number' && data.travelFeeDollars > 0) {
+      // A historical booking with a retired distance-band travel fee. Labelled
+      // as travel, not mileage, because that is what the customer approved.
+      priceLines.push(`Travel fee: ${money(data.travelFeeDollars)} — collected on move day`)
+    }
+  }
   if (data.truckAddonDueOnMoveDay)
     priceLines.push(`Truck add-on: ${money((data.truckAddonAmountCents ?? 5000) / 100)} — collected on move day`)
   if (data.discountCode || data.discountType) {
@@ -880,7 +951,45 @@ export type ApprovalBookingInput = {
   agreementAcceptedAt?: Date | string | null
   source?: string | null
   foundUs?: string | null
+  // ── TWO-PRODUCT MODEL (2026-07-31). All nullable: a pre-cutover booking
+  //    leaves every one null and renders exactly as it did before. ──
+  serviceTypeKey?: string | null
+  packageLabelSnapshot?: string | null
+  includedTruckSize?: string | null
+  confirmedTruckSize?: string | null
+  truckSizeUpgradeApplied?: boolean | null
+  truckSizeUpgradeAmount?: number | null // cents
+  routedMiles?: number | null
+  billableMiles?: number | null
+  mileageRateCents?: number | null
+  transportationCharge?: number | null // cents
+  routeManualReview?: boolean | null
+  laborServiceType?: string | null
+  laborEstimatedHours?: number | null
+  laborBillableHours?: number | null
+  laborHourlyRateCents?: number | null
+  laborWorkers?: number | null
+  laborSubtotal?: number | null // cents
+  customerTruckStatus?: string | null
   customer?: { name?: string | null; email?: string | null; phone?: string | null } | null
+}
+
+/** Customer-facing labels for the labor services. Mirrors LABOR_SERVICES so
+ *  this module stays import-light, and is pinned to it by a parity test. */
+export const LABOR_SERVICE_LABELS: Record<string, string> = {
+  loading_only: 'Loading only',
+  unloading_only: 'Unloading only',
+  loading_and_unloading: 'Loading and unloading',
+  in_home_furniture: 'In-home furniture moving',
+  storage_unit_help: 'Storage-unit help',
+  moving_container_help: 'Moving-container help',
+}
+
+/** '10ft' → '10-foot truck', for anything a human reads. */
+export function truckSizeLabel(size?: string | null): string | null {
+  if (!size) return null
+  const m = /^(\d+)ft$/.exec(size)
+  return m ? `${m[1]}-foot truck` : size
 }
 
 export function approvalCardDataFromBooking(
@@ -920,6 +1029,26 @@ export function approvalCardDataFromBooking(
     travelFeeDollars: dollars(b.travelFee),
     truckAddonDueOnMoveDay: b.truckAddonDueOnMoveDay ?? false,
     truckAddonAmountCents: b.truckAddonAmount ?? null,
+    // ── TWO-PRODUCT MODEL. Every value is READ FROM THE BOOKING, never
+    //    re-derived from the live price book — that is what keeps a historical
+    //    booking showing the price it was actually quoted. ──
+    serviceTypeKey: b.serviceTypeKey ?? null,
+    includedTruckSize: truckSizeLabel(b.includedTruckSize),
+    confirmedTruckSize: truckSizeLabel(b.confirmedTruckSize),
+    truckSizeUpgradeApplied: b.truckSizeUpgradeApplied ?? false,
+    truckSizeUpgradeAmountCents: b.truckSizeUpgradeAmount ?? null,
+    routedMiles: b.routedMiles ?? null,
+    billableMiles: b.billableMiles ?? null,
+    mileageRateDollars: dollars(b.mileageRateCents),
+    transportationDollars: dollars(b.transportationCharge),
+    routeManualReview: b.routeManualReview ?? false,
+    laborServiceLabel: b.laborServiceType ? (LABOR_SERVICE_LABELS[b.laborServiceType] ?? b.laborServiceType) : null,
+    laborEstimatedHours: b.laborEstimatedHours ?? null,
+    laborBillableHours: b.laborBillableHours ?? null,
+    laborHourlyRate: dollars(b.laborHourlyRateCents),
+    laborWorkers: b.laborWorkers ?? null,
+    laborSubtotalDollars: dollars(b.laborSubtotal),
+    customerTruckStatus: b.customerTruckStatus ?? null,
     discountType: b.discountType ?? null,
     discountCode: b.discountCode ?? null,
     discountPercent: b.discountPercent ?? null,
@@ -958,4 +1087,184 @@ export function approvalCardDataFromBooking(
     includeActionButtons: opts?.includeActionButtons ?? true,
     warnings: opts?.warnings ?? [],
   }
+}
+
+// ════════════════════════════════════════════════════════════════════════
+//  THE NEW-LEAD CARD (owner spec 2026-08-03)
+//  ---------------------------------------------------------------------
+//  Until now the first Discord card for a customer appeared only AFTER they
+//  paid the deposit (src/lib/fulfillment.ts). Someone who asked what a move
+//  costs and left produced nothing an owner could act on — the whole reason
+//  a $1,049 quote request could sit unanswered.
+//
+//  This card is INFORMATIONAL: link buttons only, no custom_id actions, so it
+//  needs no entry in OWNER_ACTIONS and a click can never dead-end on a
+//  generic ack. "Call" and "Email" are tel:/mailto: links the owner taps from
+//  the phone; "Open in admin" is the dashboard.
+//
+//  Like every other builder here this file stays free of prisma and
+//  discord.js so the card is unit-testable offline.
+// ════════════════════════════════════════════════════════════════════════
+
+export type LeadCardData = {
+  leadId: string
+  firstName?: string | null
+  lastName?: string | null
+  /** Full name when first/last were not captured separately. */
+  name?: string | null
+  phone?: string | null
+  email?: string | null
+  /** DOLLARS. Null when no estimate could be produced — never rendered as $0. */
+  estimateDollars?: number | null
+  moveDate?: Date | string | null
+  moveSize?: string | null
+  pickup?: string | null
+  destination?: string | null
+  /** Raw contact-preference key; humanized here. */
+  contactPreference?: string | null
+  bestTimeToCall?: string | null
+  formStep?: string | null
+  /** Classified channel (LeadSource) + the raw string it came from. */
+  source?: string | null
+  sourceDetail?: string | null
+  referrer?: string | null
+  landingPage?: string | null
+  utmSource?: string | null
+  utmCampaign?: string | null
+  adminUrl?: string | null
+  /** True when this is a re-alert after a meaningful change, not a new lead. */
+  isUpdate?: boolean
+}
+
+const CONTACT_PREFERENCE_LABELS: Record<string, string> = {
+  call_asap: '📞 Call me as soon as possible',
+  text: '💬 Text me',
+  email: '✉️ Email me',
+  customer_will_contact: '🙋 They will contact us',
+}
+
+export function contactPreferenceLabel(value?: string | null): string | null {
+  const v = (value ?? '').trim().toLowerCase()
+  return v ? CONTACT_PREFERENCE_LABELS[v] ?? v.replace(/_/g, ' ') : null
+}
+
+/** Digits-only phone for a tel: link. Returns null when there is nothing
+ *  dialable, so we never render a button that opens an empty dialer. */
+export function telHref(phone?: string | null): string | null {
+  const digits = (phone ?? '').replace(/\D/g, '')
+  if (digits.length < 10) return null
+  return `tel:+${digits.length === 10 ? '1' + digits : digits}`
+}
+
+export function buildLeadCard(data: LeadCardData): { embeds: EmbedJson[]; components: ActionRowJson[] } {
+  const fullName =
+    [data.firstName, data.lastName].filter(Boolean).join(' ').trim() ||
+    (data.name ?? '').trim() ||
+    'Name not given'
+
+  // ── Money. An absent estimate is stated, never shown as $0 — quoting zero
+  //    is quoting a free move. Mirrors the site's travelPending rule.
+  const estimate =
+    typeof data.estimateDollars === 'number' && data.estimateDollars > 0
+      ? `**$${Math.round(data.estimateDollars).toLocaleString('en-US')}**`
+      : '_no estimate yet_'
+
+  const dateLabel = data.moveDate
+    ? new Date(data.moveDate).toLocaleDateString('en-US', {
+        weekday: 'short',
+        month: 'short',
+        day: 'numeric',
+        year: 'numeric',
+        timeZone: 'America/New_York',
+      })
+    : 'Not given'
+
+  const fields: EmbedField[] = []
+
+  // Phone first and on its own line: it is the thing the owner acts on.
+  fields.push(
+    field(
+      '👤 Lead',
+      [`**${fullName}**`, data.phone ? `📞 ${data.phone}` : null, data.email ? `✉️ ${data.email}` : null]
+        .filter(Boolean)
+        .join('\n'),
+      true
+    )
+  )
+
+  fields.push(
+    field(
+      '💵 Estimate',
+      [estimate, data.moveSize ? `Size: ${data.moveSize}` : null].filter(Boolean).join('\n'),
+      true
+    )
+  )
+
+  fields.push(field('📅 Move date', dateLabel, true))
+
+  fields.push(
+    field(
+      '📍 Route',
+      [`From: ${data.pickup || 'Not given'}`, `To: ${data.destination || 'Not given'}`].join('\n'),
+      true
+    )
+  )
+
+  const pref = contactPreferenceLabel(data.contactPreference)
+  fields.push(
+    field(
+      '🗣 How to reach them',
+      [pref ?? 'No preference given', data.bestTimeToCall ? `Best time: ${data.bestTimeToCall}` : null]
+        .filter(Boolean)
+        .join('\n'),
+      true
+    )
+  )
+
+  fields.push(field('🧭 Step', data.formStep || 'quote', true))
+
+  // ── Attribution. The raw referrer and landing page are shown even when the
+  //    channel is UNKNOWN — that is the whole point of the 2026-08-03 change:
+  //    an unattributed lead should still tell the owner where it came from.
+  const attribution = [
+    `Channel: ${data.source || 'UNKNOWN'}`,
+    data.sourceDetail ? `Tag: ${data.sourceDetail}` : null,
+    data.utmSource ? `utm_source: ${data.utmSource}` : null,
+    data.utmCampaign ? `utm_campaign: ${data.utmCampaign}` : null,
+    `Referrer: ${data.referrer || 'none (direct)'}`,
+    data.landingPage ? `Landed on: ${data.landingPage}` : null,
+  ]
+    .filter(Boolean)
+    .join('\n')
+  fields.push(field('📈 Where they came from', attribution))
+
+  const title = data.isUpdate ? '🔄 Lead updated — details changed' : '🆕 New quote request'
+  const embed: EmbedJson = {
+    title,
+    // Orange for a new lead (brand action colour), navy for an update so a
+    // re-alert cannot be mistaken for a second person.
+    color: data.isUpdate ? 0x0a1628 : 0xff5a1f,
+    description: data.isUpdate
+      ? 'This lead changed something that affects how you should call them.'
+      : 'They asked for a price and left their number. Call while it is warm.',
+    fields,
+    footer: { text: `Lead ID: ${data.leadId}` },
+    timestamp: new Date().toISOString(),
+  }
+
+  // ── Buttons: LINK style only (style 5 + url, never custom_id). Max 5.
+  //
+  //  ONLY http(s) URLS ARE SAFE HERE. Discord validates every link button and
+  //  rejects the WHOLE message on an unsupported scheme — so a `tel:` or
+  //  `mailto:` button does not degrade to an un-clickable button, it deletes
+  //  the entire alert. Since the alert exists precisely so a lead gets called,
+  //  losing it to make the phone tappable is the worst possible trade.
+  //
+  //  The phone and email are therefore in the FIRST embed field as plain text,
+  //  where the Discord mobile client (the one the owner actually acts on)
+  //  linkifies a phone number and an address by itself.
+  const row: ButtonJson[] = []
+  if (data.adminUrl) row.push({ type: 2, style: BTN.link, label: '🔎 Open lead in admin', url: data.adminUrl })
+
+  return { embeds: [embed], components: row.length ? [{ type: 1, components: row.slice(0, 5) }] : [] }
 }

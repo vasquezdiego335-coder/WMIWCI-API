@@ -155,6 +155,7 @@ const EMAIL_SUBJECTS: Record<string, { en: string; es: string }> = {
   'operational-alert':   { en: 'An update about your move',                 es: 'Una actualización sobre tu mudanza' },
   'final-invoice':       { en: 'Your final invoice',                        es: 'Tu factura final' },
   'referral-reward':     { en: 'Your referral reward is here',              es: 'Tu recompensa por recomendarnos ya está aquí' },
+  'quote-request-received': { en: 'We received your moving estimate request', es: 'Recibimos su solicitud de estimado de mudanza' },
 }
 
 export function emailSubject(template: string, locale?: string): string {

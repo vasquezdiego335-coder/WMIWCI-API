@@ -25,6 +25,13 @@
 import { LeadSource, LeadStatus, LeadLifecycle } from '@prisma/client'
 import { prisma } from './db'
 import { apiLogger } from './logger'
+import { classifyLeadSource, mapLeadSource, type AttributionEvidence } from './lead-attribution'
+
+// THE source→enum primitive lives in lead-attribution.ts alongside the
+// evidence classifier that consumes it. Re-exported here because leads.ts has
+// been its import site since 2026-07-15 and every caller (plus leads.test.ts)
+// still expects to find it on this module.
+export { mapLeadSource }
 
 const OPEN_STATUSES: LeadStatus[] = [LeadStatus.NEW, LeadStatus.CONTACTED, LeadStatus.QUOTE_SENT, LeadStatus.FOLLOW_UP]
 
@@ -48,6 +55,10 @@ export type LeadInput = {
   utmTerm?: string | null
   landingPage?: string | null
   referrer?: string | null
+  /** Ad click ids. Presence alone is proof of the paying channel, which is why
+   *  they are attribution inputs and not merely stored. */
+  gclid?: string | null
+  fbclid?: string | null
   promoCode?: string | null
   estimatedValue?: number | null // cents
 }
@@ -68,33 +79,28 @@ export function normalizePhone(phone?: string | null): string | null {
   return d.length >= 7 ? d : null
 }
 
-const SOURCE_MAP: Record<string, LeadSource> = {
-  google: LeadSource.GOOGLE,
-  'google-business': LeadSource.GOOGLE,
-  gbp: LeadSource.GOOGLE,
-  facebook: LeadSource.FACEBOOK,
-  fb: LeadSource.FACEBOOK,
-  instagram: LeadSource.INSTAGRAM,
-  ig: LeadSource.INSTAGRAM,
-  door_hanger: LeadSource.DOOR_HANGER,
-  'door-hanger': LeadSource.DOOR_HANGER,
-  doorhanger: LeadSource.DOOR_HANGER,
-  yard_sign: LeadSource.YARD_SIGN,
-  'yard-sign': LeadSource.YARD_SIGN,
-  referral: LeadSource.REFERRAL,
-  craigslist: LeadSource.CRAIGSLIST,
-  offerup: LeadSource.OFFERUP,
-  returning: LeadSource.RETURNING_CUSTOMER,
-  returning_customer: LeadSource.RETURNING_CUSTOMER,
-  website: LeadSource.WEBSITE,
-  contact: LeadSource.WEBSITE,
-  'contact-form': LeadSource.WEBSITE,
-  web: LeadSource.WEBSITE,
+/** The attribution evidence carried by every ingestion shape. Pulled out so
+ *  the CRM path and the partial-capture path classify through ONE function —
+ *  two ladders would inevitably disagree about what counts as organic. */
+function evidenceOf(input: LeadInput | PartialLeadInput): AttributionEvidence {
+  return {
+    source: input.source,
+    utmSource: input.utmSource,
+    utmMedium: input.utmMedium,
+    utmCampaign: input.utmCampaign,
+    gclid: (input as PartialLeadInput).gclid,
+    fbclid: (input as PartialLeadInput).fbclid,
+    referrer: input.referrer,
+    landingPage: input.landingPage,
+  }
 }
 
-export function mapLeadSource(source?: string | null): LeadSource {
-  const key = (source ?? '').trim().toLowerCase()
-  return SOURCE_MAP[key] ?? LeadSource.OTHER
+/** The RAW source string worth keeping beside the classified channel. An
+ *  internal page marker ('QUICK_QUOTE_FORM') is exactly what we want here —
+ *  it says which widget produced the lead — it just must not become the
+ *  channel. Falls back to utm_source so the column is rarely empty. */
+function sourceDetailOf(input: LeadInput | PartialLeadInput): string | null {
+  return clean(input.source) ?? clean(input.utmSource)
 }
 
 const clean = (v?: string | null): string | null => {
@@ -114,7 +120,13 @@ export function buildLeadCreate(input: LeadInput, now: Date) {
     name: clean(input.name) ?? 'Website lead',
     phone: clean(input.phone),
     email: normalizeEmail(input.email),
-    source: mapLeadSource(input.source),
+    // EVIDENCE-BASED (2026-08-03): was mapLeadSource(input.source), which
+    // answered OTHER for everything it did not literally recognise. The
+    // classifier still honours an explicit recognised string first, then falls
+    // back to UTM / click-id / referrer evidence, and finally to DIRECT or
+    // UNKNOWN — never to a guessed "organic".
+    source: classifyLeadSource(evidenceOf(input)),
+    sourceDetail: sourceDetailOf(input),
     status: LeadStatus.NEW,
     message: clean(input.message),
     notes: composeNotes(input),
@@ -455,8 +467,35 @@ export type PartialLeadInput = {
   utmTerm?: string | null
   landingPage?: string | null
   referrer?: string | null
+  gclid?: string | null
+  fbclid?: string | null
   promoCode?: string | null
   estimatedValue?: number | null // cents
+
+  // ── Quote-request capture (owner spec 2026-08-03) ──────────────────────
+  /** 'call_asap' | 'text' | 'email' | 'customer_will_contact'. */
+  contactPreference?: string | null
+  /** Free text, e.g. "weekday mornings". */
+  bestTimeToCall?: string | null
+  moveDate?: Date | null
+  pickupZip?: string | null
+  destinationZip?: string | null
+  originCity?: string | null
+  destCity?: string | null
+  /** The package/size the customer picked, stored as the lead's job type. */
+  moveSize?: string | null
+}
+
+/** Contact-preference vocabulary. Kept as a validated STRING rather than a
+ *  Prisma enum so a new option on the form is a copy change, not a migration —
+ *  but an unrecognised value is dropped rather than stored, so the admin
+ *  column can never fill with junk from a crafted request. */
+export const CONTACT_PREFERENCES = ['call_asap', 'text', 'email', 'customer_will_contact'] as const
+export type ContactPreference = (typeof CONTACT_PREFERENCES)[number]
+
+export function normalizeContactPreference(value?: string | null): ContactPreference | null {
+  const v = (value ?? '').trim().toLowerCase().replace(/[\s-]+/g, '_')
+  return (CONTACT_PREFERENCES as readonly string[]).includes(v) ? (v as ContactPreference) : null
 }
 
 /** Order used to only ever ADVANCE lifecycle, never regress it. */
@@ -505,12 +544,25 @@ export function buildPartialLeadCreate(input: PartialLeadInput, now: Date) {
     name: composePartialName(input) ?? 'Booking lead',
     phone: clean(input.phone),
     email: normalizeEmail(input.email),
-    source: mapLeadSource(input.source),
+    // See buildLeadCreate: evidence-based since 2026-08-03.
+    source: classifyLeadSource(evidenceOf(input)),
+    sourceDetail: sourceDetailOf(input),
     status: LeadStatus.NEW,
     lifecycle: lifecycleForStep(input.formStep),
     bookingSessionId: clean(input.bookingSessionId),
     formStep: clean(input.formStep),
-    jobType: 'booking-form',
+    // The quick quote asks for a HOME SIZE ('2br'); the booking form does not
+    // send one. Keeping the size here rather than inventing a column matches
+    // how the CRM path already uses jobType.
+    jobType: clean(input.moveSize) ?? 'booking-form',
+    moveDate: input.moveDate ?? null,
+    zip: clean(input.pickupZip),
+    pickupZip: clean(input.pickupZip),
+    destinationZip: clean(input.destinationZip),
+    originCity: clean(input.originCity),
+    destCity: clean(input.destCity),
+    contactPreference: normalizeContactPreference(input.contactPreference),
+    bestTimeToCall: clean(input.bestTimeToCall),
     utmSource: clean(input.utmSource),
     utmMedium: clean(input.utmMedium),
     utmCampaign: clean(input.utmCampaign),
@@ -551,8 +603,36 @@ export type ExistingPartialLead = {
  *  CONVERTED), always tracks the latest step, fills blank attribution, and
  *  applies TRI-STATE consent (a fresh unchecked load — marketingConsent
  *  undefined — leaves any stored consent untouched). */
-export function buildPartialLeadUpdate(existing: ExistingPartialLead, input: PartialLeadInput, now: Date) {
+/**
+ * HOW A REPEAT SUBMISSION IS MERGED — the policy, stated once.
+ *
+ *   'session'  matched on bookingSessionId. This is the SAME PERSON in the
+ *              SAME sitting, so their latest answer WINS: someone who fixes a
+ *              typo in their email, name or phone is correcting us, and
+ *              freezing the first value would leave the crew calling a wrong
+ *              number. Blank input never erases a stored value.
+ *
+ *   'email'    matched only on a shared email address against an older open
+ *              lead. Far weaker evidence — a shared household or work address
+ *              can put two different people on one row — so identity fields
+ *              are FILL-BLANK-ONLY here and an existing value is never
+ *              overwritten.
+ *
+ * Attribution is first-touch under BOTH policies: the channel that earned the
+ * lead does not change because the person came back.
+ */
+export type LeadMatchBasis = 'session' | 'email'
+
+export function buildPartialLeadUpdate(
+  existing: ExistingPartialLead,
+  input: PartialLeadInput,
+  now: Date,
+  matchedBy: LeadMatchBasis = 'email'
+) {
   const fillIfBlank = <T>(cur: T | null, next: T | null | undefined): T | null => (cur == null ? (next ?? null) : cur)
+  /** Same-session: latest non-empty wins. Email-match: fill blanks only. */
+  const correctable = <T>(cur: T | null, next: T | null | undefined): T | null =>
+    matchedBy === 'session' && next != null ? next : fillIfBlank(cur, next)
 
   // Lifecycle: never downgrade. CONVERTED/SUBMITTED are sticky terminal-ish.
   const candidate = lifecycleForStep(input.formStep)
@@ -566,11 +646,16 @@ export function buildPartialLeadUpdate(existing: ExistingPartialLead, input: Par
     formStep: clean(input.formStep) ?? existing.formStep,
     bookingSessionId: existing.bookingSessionId ?? clean(input.bookingSessionId),
     // Name/phone/attribution: fill blanks only — never clobber curated data.
-    name: existing.name && existing.name !== 'Booking lead' && existing.name !== 'Website lead'
-      ? existing.name
-      : (composePartialName(input) ?? existing.name),
-    phone: fillIfBlank(existing.phone, clean(input.phone)),
-    email: fillIfBlank(existing.email, normalizeEmail(input.email)),
+    // Identity: correctable in-session (see LeadMatchBasis), never clobbered on
+    // a loose email match. A placeholder name is always replaceable.
+    name:
+      matchedBy === 'session'
+        ? (composePartialName(input) ?? existing.name)
+        : existing.name && existing.name !== 'Booking lead' && existing.name !== 'Website lead'
+          ? existing.name
+          : (composePartialName(input) ?? existing.name),
+    phone: correctable(existing.phone, clean(input.phone)),
+    email: correctable(existing.email, normalizeEmail(input.email)),
     utmSource: fillIfBlank(existing.utmSource, clean(input.utmSource)),
     utmCampaign: fillIfBlank(existing.utmCampaign, clean(input.utmCampaign)),
     landingPage: fillIfBlank(existing.landingPage, clean(input.landingPage)),
@@ -582,7 +667,65 @@ export function buildPartialLeadUpdate(existing: ExistingPartialLead, input: Par
   if (typeof input.estimatedValue === 'number' && input.estimatedValue > 0) {
     data.estimatedValue = input.estimatedValue
   }
+
+  // ── Quote-request answers: LATEST WINS, not fill-blank ──────────────────
+  //  These are the customer's own current choices. Someone who moves their
+  //  date from the 12th to the 19th, or switches from "call me" to "text me",
+  //  is CORRECTING us — freezing the first answer would have the crew calling
+  //  at the wrong time on the wrong day. (Attribution above stays first-touch
+  //  for the opposite reason: the channel that earned the lead does not change
+  //  because they came back.) A field is only written when the customer
+  //  actually supplied it, so a later page that omits it erases nothing.
+  const prefs: Array<[string, unknown]> = [
+    ['contactPreference', normalizeContactPreference(input.contactPreference)],
+    ['bestTimeToCall', clean(input.bestTimeToCall)],
+    ['pickupZip', clean(input.pickupZip)],
+    ['destinationZip', clean(input.destinationZip)],
+    ['originCity', clean(input.originCity)],
+    ['destCity', clean(input.destCity)],
+  ]
+  for (const [key, value] of prefs) if (value != null) data[key] = value
+  if (clean(input.pickupZip)) data.zip = clean(input.pickupZip)
+  if (input.moveDate instanceof Date) data.moveDate = input.moveDate
+  if (clean(input.moveSize)) data.jobType = clean(input.moveSize)
+
   return data
+}
+
+// ── Owner re-alert policy (owner spec 2026-08-03) ─────────────────────────
+//  The quick quote fires capture on every meaningful edit, so "alert on every
+//  save" would put the same person in Discord five times while they pick a
+//  date. The owner asked for a re-alert only on a MEANINGFUL change — named
+//  in the spec as the move date, the estimated value, or the contact
+//  preference. Everything else (a typo in a ZIP, a surname correction) is the
+//  same lead and stays quiet.
+
+/** The facts that justify re-alerting. Pure + stable: same facts ⇒ same
+ *  string, so the comparison survives a redeploy. */
+export function alertFingerprint(f: {
+  moveDate?: Date | string | null
+  estimatedValue?: number | null
+  contactPreference?: string | null
+  phone?: string | null
+}): string {
+  const date =
+    f.moveDate instanceof Date
+      ? f.moveDate.toISOString().slice(0, 10)
+      : clean(typeof f.moveDate === 'string' ? f.moveDate : null)?.slice(0, 10) ?? '-'
+  return [
+    date,
+    typeof f.estimatedValue === 'number' ? String(f.estimatedValue) : '-',
+    normalizeContactPreference(f.contactPreference) ?? '-',
+    // A phone appearing for the first time genuinely changes what the owner
+    // can do with the lead, so it counts as meaningful.
+    normalizePhone(f.phone) ?? '-',
+  ].join('|')
+}
+
+/** True when the owner should be alerted again. A lead that has never been
+ *  alerted always qualifies. */
+export function shouldRealert(previous: string | null | undefined, next: string): boolean {
+  return (previous ?? '') !== next
 }
 
 export type CapturePartialResult = { lead: LeadRecord; isNew: boolean } | null
@@ -609,11 +752,15 @@ export async function capturePartialLead(
   if (!sessionId && !email) return null
 
   let existing: ExistingPartialLead | null = null
-  if (sessionId) existing = await deps.store.findBySessionId(sessionId)
+  let matchedBy: LeadMatchBasis = 'email'
+  if (sessionId) {
+    existing = await deps.store.findBySessionId(sessionId)
+    if (existing) matchedBy = 'session'
+  }
   if (!existing && email) existing = await deps.store.findOpenPartialByEmail(email)
 
   if (existing) {
-    const lead = await deps.store.update(existing.id, buildPartialLeadUpdate(existing, input, now))
+    const lead = await deps.store.update(existing.id, buildPartialLeadUpdate(existing, input, now, matchedBy))
     return { lead, isNew: false }
   }
   // Need at least a valid email to CREATE (a bare session id is not a person).
@@ -630,10 +777,13 @@ export async function capturePartialLead(
     const lead = await deps.store.create(buildPartialLeadCreate(input, now))
     return { lead, isNew: true }
   } catch (err) {
-    const raced = (sessionId ? await deps.store.findBySessionId(sessionId) : null) ??
-      (await deps.store.findOpenPartialByEmail(email))
+    const bySession = sessionId ? await deps.store.findBySessionId(sessionId) : null
+    const raced = bySession ?? (await deps.store.findOpenPartialByEmail(email))
     if (raced) {
-      const lead = await deps.store.update(raced.id, buildPartialLeadUpdate(raced, input, now))
+      const lead = await deps.store.update(
+        raced.id,
+        buildPartialLeadUpdate(raced, input, now, bySession ? 'session' : 'email')
+      )
       return { lead, isNew: false }
     }
     throw err // genuinely failed (DB down) — capturePartialLeadSafe logs + swallows
