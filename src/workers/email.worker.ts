@@ -9,6 +9,7 @@ import { buildMarketingContext, applyMarketingContext } from '../lib/marketing-c
 import { emailQueue } from '../lib/queues'
 import { bookingEligibility } from '../lib/email-eligibility'
 import { leadEligibility } from '../lib/journeys'
+import { recordQuoteConfirmationOutcome } from '../lib/quote-capture'
 import type { EmailJobData } from '../lib/queues'
 
 // ── Email template imports ─────────────────────────────────────
@@ -30,6 +31,7 @@ import OperationalAlertEmail from '../emails/operational-alert'
 import FinalInvoiceEmail from '../emails/final-invoice'
 import ReferralRewardEmail from '../emails/referral-reward'
 import QuoteFollowupEmail from '../emails/quote-followup'
+import QuoteRequestReceivedEmail from '../emails/quote-request-received'
 import { emailSubject } from '../lib/i18n'
 
 // ════════════════════════════════════════════════════════════════════════
@@ -74,6 +76,8 @@ const ALLOWED_TEMPLATES = new Set<EmailJobData['template']>([
   'quote-followup-1',
   'quote-followup-2',
   'quote-followup-final',
+  // ── Quick-quote capture (owner spec 2026-08-03) ──
+  'quote-request-received',
 ])
 
 const TEMPLATES: Record<
@@ -103,6 +107,7 @@ const TEMPLATES: Record<
   'quote-followup-1': (p) => QuoteFollowupEmail({ ...(p as any), stage: 1 }),
   'quote-followup-2': (p) => QuoteFollowupEmail({ ...(p as any), stage: 2 }),
   'quote-followup-final': (p) => QuoteFollowupEmail({ ...(p as any), stage: 3 }),
+  'quote-request-received': (p) => QuoteRequestReceivedEmail(p as any),
 }
 
 // English fallbacks. Bilingual subjects come from emailSubject(template, locale)
@@ -129,6 +134,7 @@ const SUBJECTS: Record<EmailJobData['template'], string> = {
   'quote-followup-1': 'Did your quote come through?',
   'quote-followup-2': 'What "labor-only" actually means',
   'quote-followup-final': 'Are you still planning your move?',
+  'quote-request-received': 'We received your moving estimate request',
 }
 
 // ════════════════════════════════════════════════════════════════════════
@@ -247,9 +253,25 @@ async function processEmailJob(job: Job<EmailJobData>): Promise<void> {
     recheck: bookingId
       ? () => bookingEligibility(template, bookingId)
       : leadId
-      ? () => leadEligibility(leadId)
+      ? () => leadEligibility(leadId, template)
       : undefined,
   })
+
+  // ── LEAD-SCOPED DELIVERY STATE ────────────────────────────────────────
+  //  The API records only that a job was QUEUED. This is the one place that
+  //  knows whether the provider accepted the message, so it is the only place
+  //  allowed to write 'delivered'. A DEFERRAL IS NOT A FAILURE: quiet hours and
+  //  caps mean "later", and marking that failed would send the admin chasing a
+  //  delivery problem that does not exist.
+  if (template === 'quote-request-received' && leadId) {
+    const isDeferral = !outcome.sent && Boolean(outcome.retryAt)
+    if (!isDeferral) {
+      await recordQuoteConfirmationOutcome(leadId, {
+        delivered: outcome.sent,
+        error: outcome.sent ? undefined : outcome.reason,
+      })
+    }
+  }
 
   if (!outcome.sent) {
     // ── TRUTHFUL OUTCOME REPORTING (finding EMAIL-P2-16) ──────────────────

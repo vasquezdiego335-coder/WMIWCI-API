@@ -21,6 +21,8 @@ import {
   serviceLabelFromDescription,
   truckLabelFromDescription,
   TRUCK_OPTION_LABELS,
+  buildLeadCard,
+  type LeadCardData,
 } from '../lib/booking-display'
 
 // ════════════════════════════════════════════════════════════════════════
@@ -613,3 +615,27 @@ export async function postContactMessage(payload: Record<string, unknown>): Prom
 // The discord worker imports the post* functions above; importing this module
 // boots the gateway client so the bot is online to receive slash commands.
 getDiscordClient()
+
+// ══════════════════════════════════════════════════════════════════════════
+//  New quick-quote lead — gateway twin of the REST sender.
+// ══════════════════════════════════════════════════════════════════════════
+export async function postLeadCard(payload: Record<string, unknown>): Promise<boolean> {
+  botLogger.info({ leadId: payload.leadId }, 'postLeadCard')
+  const { embeds, components } = buildLeadCard(payload as unknown as LeadCardData)
+  const channel =
+    (await getChannel('DISCORD_CHANNEL_LEADS')) ??
+    (await getChannel('DISCORD_CHANNEL_OPERATIONS')) ??
+    (await getChannel('DISCORD_CHANNEL_ALERTS')) ??
+    (await getChannel('DISCORD_CHANNEL_SCHEDULING'))
+  if (!channel) {
+    botLogger.error({ leadId: payload.leadId }, 'No Discord channel configured - lead card DROPPED')
+    return false
+  }
+  try {
+    await channel.send({ embeds: embeds as never, components: components as never, allowedMentions: { parse: [] } })
+    return true
+  } catch (err) {
+    botLogger.error({ leadId: payload.leadId, err: errMsg(err) }, 'lead card send failed')
+    return false
+  }
+}

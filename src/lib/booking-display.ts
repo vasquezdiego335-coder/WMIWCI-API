@@ -959,3 +959,182 @@ export function approvalCardDataFromBooking(
     warnings: opts?.warnings ?? [],
   }
 }
+
+// ════════════════════════════════════════════════════════════════════════
+//  THE NEW-LEAD CARD (owner spec 2026-08-03)
+//  ---------------------------------------------------------------------
+//  Until now the first Discord card for a customer appeared only AFTER they
+//  paid the deposit (src/lib/fulfillment.ts). Someone who asked what a move
+//  costs and left produced nothing an owner could act on — the whole reason
+//  a $1,049 quote request could sit unanswered.
+//
+//  This card is INFORMATIONAL: link buttons only, no custom_id actions, so it
+//  needs no entry in OWNER_ACTIONS and a click can never dead-end on a
+//  generic ack. "Call" and "Email" are tel:/mailto: links the owner taps from
+//  the phone; "Open in admin" is the dashboard.
+//
+//  Like every other builder here this file stays free of prisma and
+//  discord.js so the card is unit-testable offline.
+// ════════════════════════════════════════════════════════════════════════
+
+export type LeadCardData = {
+  leadId: string
+  firstName?: string | null
+  lastName?: string | null
+  /** Full name when first/last were not captured separately. */
+  name?: string | null
+  phone?: string | null
+  email?: string | null
+  /** DOLLARS. Null when no estimate could be produced — never rendered as $0. */
+  estimateDollars?: number | null
+  moveDate?: Date | string | null
+  moveSize?: string | null
+  pickup?: string | null
+  destination?: string | null
+  /** Raw contact-preference key; humanized here. */
+  contactPreference?: string | null
+  bestTimeToCall?: string | null
+  formStep?: string | null
+  /** Classified channel (LeadSource) + the raw string it came from. */
+  source?: string | null
+  referrer?: string | null
+  landingPage?: string | null
+  utmSource?: string | null
+  utmCampaign?: string | null
+  adminUrl?: string | null
+  /** True when this is a re-alert after a meaningful change, not a new lead. */
+  isUpdate?: boolean
+}
+
+const CONTACT_PREFERENCE_LABELS: Record<string, string> = {
+  call_asap: '📞 Call me as soon as possible',
+  text: '💬 Text me',
+  email: '✉️ Email me',
+  customer_will_contact: '🙋 They will contact us',
+}
+
+export function contactPreferenceLabel(value?: string | null): string | null {
+  const v = (value ?? '').trim().toLowerCase()
+  return v ? CONTACT_PREFERENCE_LABELS[v] ?? v.replace(/_/g, ' ') : null
+}
+
+/** Digits-only phone for a tel: link. Returns null when there is nothing
+ *  dialable, so we never render a button that opens an empty dialer. */
+export function telHref(phone?: string | null): string | null {
+  const digits = (phone ?? '').replace(/\D/g, '')
+  if (digits.length < 10) return null
+  return `tel:+${digits.length === 10 ? '1' + digits : digits}`
+}
+
+export function buildLeadCard(data: LeadCardData): { embeds: EmbedJson[]; components: ActionRowJson[] } {
+  const fullName =
+    [data.firstName, data.lastName].filter(Boolean).join(' ').trim() ||
+    (data.name ?? '').trim() ||
+    'Name not given'
+
+  // ── Money. An absent estimate is stated, never shown as $0 — quoting zero
+  //    is quoting a free move. Mirrors the site's travelPending rule.
+  const estimate =
+    typeof data.estimateDollars === 'number' && data.estimateDollars > 0
+      ? `**$${Math.round(data.estimateDollars).toLocaleString('en-US')}**`
+      : '_no estimate yet_'
+
+  const dateLabel = data.moveDate
+    ? new Date(data.moveDate).toLocaleDateString('en-US', {
+        weekday: 'short',
+        month: 'short',
+        day: 'numeric',
+        year: 'numeric',
+        timeZone: 'America/New_York',
+      })
+    : 'Not given'
+
+  const fields: EmbedField[] = []
+
+  // Phone first and on its own line: it is the thing the owner acts on.
+  fields.push(
+    field(
+      '👤 Lead',
+      [`**${fullName}**`, data.phone ? `📞 ${data.phone}` : null, data.email ? `✉️ ${data.email}` : null]
+        .filter(Boolean)
+        .join('\n'),
+      true
+    )
+  )
+
+  fields.push(
+    field(
+      '💵 Estimate',
+      [estimate, data.moveSize ? `Size: ${data.moveSize}` : null].filter(Boolean).join('\n'),
+      true
+    )
+  )
+
+  fields.push(field('📅 Move date', dateLabel, true))
+
+  fields.push(
+    field(
+      '📍 Route',
+      [`From: ${data.pickup || 'Not given'}`, `To: ${data.destination || 'Not given'}`].join('\n'),
+      true
+    )
+  )
+
+  const pref = contactPreferenceLabel(data.contactPreference)
+  fields.push(
+    field(
+      '🗣 How to reach them',
+      [pref ?? 'No preference given', data.bestTimeToCall ? `Best time: ${data.bestTimeToCall}` : null]
+        .filter(Boolean)
+        .join('\n'),
+      true
+    )
+  )
+
+  fields.push(field('🧭 Step', data.formStep || 'quote', true))
+
+  // ── Attribution. The raw referrer and landing page are shown even when the
+  //    channel is UNKNOWN — that is the whole point of the 2026-08-03 change:
+  //    an unattributed lead should still tell the owner where it came from.
+  const attribution = [
+    `Channel: ${data.source || 'UNKNOWN'}`,
+    data.moveSize ? `Tag: ${data.moveSize}` : null,
+    data.utmSource ? `utm_source: ${data.utmSource}` : null,
+    data.utmCampaign ? `utm_campaign: ${data.utmCampaign}` : null,
+    `Referrer: ${data.referrer || 'none (direct)'}`,
+    data.landingPage ? `Landed on: ${data.landingPage}` : null,
+  ]
+    .filter(Boolean)
+    .join('\n')
+  fields.push(field('📈 Where they came from', attribution))
+
+  const title = data.isUpdate ? '🔄 Lead updated — details changed' : '🆕 New quote request'
+  const embed: EmbedJson = {
+    title,
+    // Orange for a new lead (brand action colour), navy for an update so a
+    // re-alert cannot be mistaken for a second person.
+    color: data.isUpdate ? 0x0a1628 : 0xff5a1f,
+    description: data.isUpdate
+      ? 'This lead changed something that affects how you should call them.'
+      : 'They asked for a price and left their number. Call while it is warm.',
+    fields,
+    footer: { text: `Lead ID: ${data.leadId}` },
+    timestamp: new Date().toISOString(),
+  }
+
+  // ── Buttons: LINK style only (style 5 + url, never custom_id). Max 5.
+  //
+  //  ONLY http(s) URLS ARE SAFE HERE. Discord validates every link button and
+  //  rejects the WHOLE message on an unsupported scheme — so a `tel:` or
+  //  `mailto:` button does not degrade to an un-clickable button, it deletes
+  //  the entire alert. Since the alert exists precisely so a lead gets called,
+  //  losing it to make the phone tappable is the worst possible trade.
+  //
+  //  The phone and email are therefore in the FIRST embed field as plain text,
+  //  where the Discord mobile client (the one the owner actually acts on)
+  //  linkifies a phone number and an address by itself.
+  const row: ButtonJson[] = []
+  if (data.adminUrl) row.push({ type: 2, style: BTN.link, label: '🔎 Open lead in admin', url: data.adminUrl })
+
+  return { embeds: [embed], components: row.length ? [{ type: 1, components: row.slice(0, 5) }] : [] }
+}

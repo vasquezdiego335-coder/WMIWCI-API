@@ -84,6 +84,10 @@ const TRANSACTIONAL_TEMPLATES: ReadonlySet<string> = new Set([
   'information-required',
   'operational-alert',
   'final-invoice',
+  // Quick-quote capture: the REPLY to a request the customer just made, so it
+  // is exempt from caps/quiet hours and carries no unsubscribe row. Sending it
+  // must never imply promotional consent.
+  'quote-request-received',
 ])
 
 export function classifyTemplate(template: string): EmailClass {
