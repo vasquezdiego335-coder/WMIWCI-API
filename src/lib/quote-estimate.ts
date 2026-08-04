@@ -24,12 +24,16 @@
 //  PURE + OFFLINE: no prisma, no env, no network — so it is fully unit-tested.
 // ════════════════════════════════════════════════════════════════════════
 import { computeEstimate, MOVE_SIZES } from './estimate'
+import { assignTruck, type SelectableTruckSize } from './pricing-config'
 
 /** What the quick quote can tell us. Deliberately narrow: the quote page asks
  *  three questions, so anything richer belongs to the booking form's estimate. */
 export type QuoteEstimateInput = {
   /** Package key from the quote page radio group: '1br'…'5br'. */
   moveSize?: string | null
+  /** The truck the customer asked for, if any. Only ever used to UPGRADE:
+   *  anything below the package minimum is corrected upward server-side. */
+  truckSize?: string | null
 }
 
 export type QuoteEstimateResult =
@@ -39,8 +43,10 @@ export type QuoteEstimateResult =
       /** Human label for the email / Discord card, e.g. "2 Bedrooms". Never
        *  the internal key — a customer should not read "2br" in their inbox. */
       packageLabel: string
-      /** DOLLARS, server-computed. */
+      /** DOLLARS, server-computed: base package + assigned truck. */
       totalDollars: number
+      /** The package price alone, before the truck line. */
+      baseDollars: number
       /** CENTS — what Lead.estimatedValue stores. */
       totalCents: number
       /** True when the package price is a floor ("Starting at $X"), so no
@@ -50,13 +56,21 @@ export type QuoteEstimateResult =
       includedTruck: string | null
       /** Blocks automatic confirmation (floor price, review line, NY job). */
       requiresReview: boolean
+      /** The truck the SERVER assigned. Never smaller than the minimum. */
+      truckSize: SelectableTruckSize
+      /** The minimum this package requires — for honest UI copy. */
+      truckMinimum: SelectableTruckSize
+      /** DOLLARS added by the assigned truck. REPLACES, never stacks. */
+      truckUpgrade: number
+      /** True when a below-minimum request was corrected upward. */
+      truckCorrected: boolean
     }
   | {
       ok: false
       /** `unknown_package`  — not a key we sell (or a retired one).
        *  `no_package`       — nothing selected; a lead is still worth saving,
        *                       it simply carries no estimate. */
-      reason: 'unknown_package' | 'no_package'
+      reason: 'unknown_package' | 'no_package' | 'manual_plan' | 'unsupported_truck'
       /** Present for a retired key so the caller can log something useful. */
       packageKey?: string
     }
@@ -81,14 +95,25 @@ export function quoteEstimate(input: QuoteEstimateInput): QuoteEstimateResult {
   // hand-crafted payload cannot reach computeEstimate with it.
   if (key === 'not-sure') return { ok: false, reason: 'unknown_package', packageKey: key }
 
+  // ── TRUCK IS DERIVED, NOT CHOSEN ────────────────────────────────────────
+  //  A customer cannot pick a smaller truck to dodge the fee: below-minimum
+  //  requests are corrected upward, retired/unknown sizes are rejected, and a
+  //  larger truck's fee REPLACES the smaller one rather than stacking.
+  const truck = assignTruck(key, input.truckSize)
+  if (!truck.ok) {
+    return truck.reason === 'manual_plan'
+      ? { ok: false, reason: 'manual_plan', packageKey: key }
+      : { ok: false, reason: truck.reason, packageKey: key }
+  }
+
   const est = computeEstimate({ serviceType: key })
 
-  // Transportation is billed per routed mile and is NOT known at quote time —
-  // the quote page says so in its own copy. estimatedTotal is therefore the
-  // package price, which is exactly what the page displays and what a
-  // "preliminary estimate" means here. Adding an unmeasured travel figure
-  // would quote a drive we have not calculated.
-  const totalDollars = est.base
+  // Transportation is billed per ROUTED MILE and is NOT known at quote time —
+  // it is calculated separately from the truck upgrade and disclosed as its own
+  // line. estimatedTotal here is therefore the package price PLUS the required
+  // truck, which is exactly the breakdown the quote page shows. Adding an
+  // unmeasured mileage figure would quote a drive we have not calculated.
+  const totalDollars = est.base + truck.upgradeAmount
 
   return {
     ok: true,
@@ -99,6 +124,13 @@ export function quoteEstimate(input: QuoteEstimateInput): QuoteEstimateResult {
     isStarting: est.baseIsStarting,
     includedTruck: null,
     requiresReview: est.requiresReview,
+    truckSize: truck.assigned,
+    truckMinimum: truck.minimum,
+    truckUpgrade: truck.upgradeAmount,
+    truckCorrected: truck.corrected,
+    /** The package price on its own, so the UI can show the breakdown:
+     *  base package + required truck upgrade + routed mileage + add-ons. */
+    baseDollars: est.base,
   }
 }
 

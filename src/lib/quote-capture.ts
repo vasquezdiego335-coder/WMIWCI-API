@@ -86,7 +86,18 @@ export type QuoteLeadCaptureResponse =
       emailStatus: QueueStatus
       notificationStatus: QueueStatus
       /** The SERVER's price, so a stale browser can correct itself. */
-      estimate: { totalDollars: number; isStarting: boolean; packageLabel: string } | null
+      estimate: {
+        totalDollars: number
+        baseDollars: number
+        isStarting: boolean
+        packageLabel: string
+        truckSize: string
+        truckMinimum: string
+        truckUpgrade: number
+        truckCorrected: boolean
+      } | null
+      /** 5BR+/"not sure": captured, but quoted by a human. */
+      manualReview?: boolean
       leadId?: never
     }
   | { ok: true; captured: false; reason: 'spam_discarded' | 'feature_disabled' }
