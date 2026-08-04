@@ -70,10 +70,17 @@ export async function OPTIONS(req: NextRequest): Promise<NextResponse> {
   return new NextResponse(null, { status: 204, headers: corsHeaders(req.headers.get('origin')) })
 }
 
-// KILL SWITCH, not a feature flag. This endpoint is the fix for a 404, so it
-// is ON unless explicitly disabled — shipping it "off by default" would leave
-// the quick quote exactly as broken as it was.
-const enabled = () => process.env.QUOTE_LEAD_CAPTURE_ENABLED !== 'false'
+// OPT-IN FLAG. Deliberately OFF unless explicitly enabled.
+//
+// This is a NEW dedicated route that nothing depends on until the website is
+// pointed at it, so the safe default is inert: merging this PR deploys the
+// endpoint without exposing it, and the live quote page carries on using the
+// existing /api/leads path exactly as it does today. Turn it on only once the
+// API and worker deployments are healthy, then point the site at it.
+//
+// Disabled answers { ok:true, captured:false, reason:'feature_disabled' } — the
+// customer still sees their estimate, which is the whole point of the flag.
+const enabled = () => process.env.QUOTE_LEAD_CAPTURE_ENABLED === 'true'
 
 /** Strip ASCII control chars, collapse whitespace. */
 function sanitizeText(value: string): string {
