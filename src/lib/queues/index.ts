@@ -176,6 +176,8 @@ export type EmailJobData = {
     | 'quote-followup-1'     // 24h after a real quote — did it arrive
     | 'quote-followup-2'     // ~3d — objection handling (labor-only explained)
     | 'quote-followup-final' // ~7d — still moving?
+    // ── Quick-quote capture (owner spec 2026-08-03) ──
+    | 'quote-request-received' // immediate reply to a quick-quote submission
   to: string
   bookingId?: string
   /** LEAD-scoped journeys (quote follow-up). Without this the email worker
@@ -206,6 +208,7 @@ export type DiscordJobData = {
     | 'daily-schedule'
     | 'contact-message'    // a new contact-form submission (alerts the team)
     | 'reschedule-offer'   // re-post an approval card after a customer picks a new date
+    | 'lead-created'       // quick-quote lead card; link buttons only
   bookingId?: string
   payload: Record<string, unknown>
 }

@@ -348,6 +348,22 @@ const SEEDS: Seed[] = [
     subject: 'Did your moving plans change?',
   },
   {
+    key: 'quote-request-received',
+    name: 'Quote request received',
+    file: 'emails/quote-request-received.tsx',
+    category: 'lead',
+    trigger:
+      'Immediately when someone completes the contact step of the quick quote (POST /api/leads/quote-capture). Sent ONCE per lead; guarded by Lead.quoteConfirmationQueuedAt plus the guard idempotency key.',
+    journey: null,
+    flag: null,
+    wiring: 'wired',
+    stopRules: [
+      'Already queued for this lead — only an owner resend repeats it',
+      'Hard suppression (bounce / complaint / admin block)',
+    ],
+    subject: 'We received your moving estimate request',
+  },
+  {
     key: 'quote-followup-1',
     name: 'Quote follow-up — stage 1',
     file: 'emails/quote-followup.tsx',

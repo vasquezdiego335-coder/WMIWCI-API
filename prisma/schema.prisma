@@ -217,6 +217,9 @@ enum AuditAction {
   ATTRIBUTION_CORRECTED
   LEAD_CREATED
   LEAD_STATUS_CHANGED
+  /// An owner manually re-sent the quote confirmation. Recorded because a
+  /// resend puts a second email in a customer inbox and must be explainable.
+  LEAD_QUOTE_CONFIRMATION_RESENT
   PRICE_CHANGED
   BUSINESS_CONFIG_UPDATED
   // ── Action Center + Ideas & Roadmap (increment 2, owner spec 2026-07-13) ──
@@ -1964,6 +1967,46 @@ model Lead {
   marketingConsentSource  String?   @map("marketing_consent_source")
   // Disclosure/consent-text version shown when consent was given.
   marketingConsentVersion String?   @map("marketing_consent_version")
+
+  // ══════════════════════════════════════════════════════════════════════════
+  //  QUOTE-REQUEST CAPTURE (owner spec 2026-08-03). A person who asked for an
+  //  estimate, not someone who booked. All nullable: a lead captured before
+  //  this cutover simply never answered.
+  // ══════════════════════════════════════════════════════════════════════════
+  /// How the customer asked to be contacted: 'call_asap' | 'text' | 'email' |
+  /// 'customer_will_contact'. A validated String rather than an enum so a new
+  /// option on the form cannot 500 the public route before a migration ships.
+  contactPreference String? @map("contact_preference")
+  /// Free text, e.g. "weekday mornings".
+  bestTimeToCall    String? @map("best_time_to_call")
+
+  // ── QUEUE STATE vs DELIVERY STATE ────────────────────────────────────────
+  //  Not the same thing, and the schema must not blur them: putting a job in
+  //  Redis proves nothing about Resend accepting it. True per-send state lives
+  //  in EmailSend and is NOT duplicated here — these let the LEAD row answer
+  //  "did this customer get their confirmation?" without a join.
+  /// When the confirmation email was QUEUED. Never means delivered.
+  quoteConfirmationQueuedAt    DateTime? @map("quote_confirmation_queued_at")
+  /// 'queued' | 'delivered' | 'failed'. Null = never requested. Written by the
+  /// API (queued) and by the email worker (delivered/failed).
+  quoteConfirmationStatus      String?   @map("quote_confirmation_status")
+  quoteConfirmationDeliveredAt DateTime? @map("quote_confirmation_delivered_at")
+  quoteConfirmationFailedAt    DateTime? @map("quote_confirmation_failed_at")
+  /// A SHORT sanitized failure category — never a stack trace, never a provider
+  /// payload, never anything carrying customer data.
+  quoteConfirmationLastError   String?   @map("quote_confirmation_last_error")
+  /// Send count. Also the `version` in the guard's idempotency key, so an owner
+  /// resend is a NEW key rather than a refused duplicate.
+  quoteConfirmationCount       Int       @default(0) @map("quote_confirmation_count")
+
+  /// Fingerprint of the facts that justify re-alerting the owner (move date,
+  /// estimate, contact preference, first phone). Unchanged fingerprint = the
+  /// customer edited something cosmetic and Discord stays quiet.
+  alertFingerprint String?   @map("alert_fingerprint")
+  /// When the owner card was QUEUED. Same rule as the email above.
+  lastAlertedAt    DateTime? @map("last_alerted_at")
+  alertStatus      String?   @map("alert_status")
+  alertDeliveredAt DateTime? @map("alert_delivered_at")
 
   contactedAt    DateTime? @map("contacted_at")
   quotedAt       DateTime? @map("quoted_at")

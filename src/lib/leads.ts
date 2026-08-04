@@ -566,7 +566,73 @@ export type PartialLeadInput = {
   /** Home size the visitor picked on the quick quote form ("2br"). NOT a job
    *  type: it goes in its own column so `jobType` keeps a single vocabulary. */
   moveSize?: string | null
+  // ── Quote-request capture (owner spec 2026-08-03) ──────────────────────
+  /** 'call_asap' | 'text' | 'email' | 'customer_will_contact'. */
+  contactPreference?: string | null
+  /** Free text, e.g. "weekday mornings". */
+  bestTimeToCall?: string | null
 }
+
+/** Contact-preference vocabulary. A validated STRING rather than a Prisma enum
+ *  so a new option on the form is a copy change, not a migration — but an
+ *  unrecognised value is DROPPED rather than stored, so the admin column can
+ *  never fill with junk from a crafted request. */
+export const CONTACT_PREFERENCES = ['call_asap', 'text', 'email', 'customer_will_contact'] as const
+export type ContactPreference = (typeof CONTACT_PREFERENCES)[number]
+
+export function normalizeContactPreference(value?: string | null): ContactPreference | null {
+  const v = (value ?? '').trim().toLowerCase().replace(/[\s-]+/g, '_')
+  return (CONTACT_PREFERENCES as readonly string[]).includes(v) ? (v as ContactPreference) : null
+}
+
+// ── Owner re-alert policy (owner spec 2026-08-03) ─────────────────────────
+//  The quote page fires capture on every meaningful edit, so "alert on every
+//  save" would put the same person in Discord five times while they pick a
+//  date. A re-alert requires a MEANINGFUL change: the move date, the estimated
+//  value, the contact preference, or a phone number appearing for the first
+//  time (which changes what the owner can actually do with the lead).
+
+/** The facts that justify re-alerting. Pure + stable: same facts produce the
+ *  same string, so the comparison survives a redeploy. */
+export function alertFingerprint(f: {
+  moveDate?: Date | string | null
+  estimatedValue?: number | null
+  contactPreference?: string | null
+  phone?: string | null
+}): string {
+  const date =
+    f.moveDate instanceof Date
+      ? f.moveDate.toISOString().slice(0, 10)
+      : clean(typeof f.moveDate === 'string' ? f.moveDate : null)?.slice(0, 10) ?? '-'
+  return [
+    date,
+    typeof f.estimatedValue === 'number' ? String(f.estimatedValue) : '-',
+    normalizeContactPreference(f.contactPreference) ?? '-',
+    normalizePhone(f.phone) ?? '-',
+  ].join('|')
+}
+
+/** True when the owner should be alerted again. A lead never alerted qualifies. */
+export function shouldRealert(previous: string | null | undefined, next: string): boolean {
+  return (previous ?? '') !== next
+}
+
+/**
+ * HOW A REPEAT SUBMISSION IS MERGED — the policy, stated once.
+ *
+ *   'session'  matched on bookingSessionId: the SAME PERSON in the SAME
+ *              sitting, so their latest answer WINS. Someone fixing a typo in
+ *              their email or phone is CORRECTING us, and freezing the first
+ *              value would have the crew calling a wrong number forever.
+ *
+ *   'email'    matched only on a shared address against an older open lead.
+ *              Far weaker evidence — a household or work address can put two
+ *              people on one row — so identity stays FILL-BLANK-ONLY.
+ *
+ * Blank input never erases a stored value under either policy, and attribution
+ * stays first-touch under both.
+ */
+export type LeadMatchBasis = 'session' | 'email'
 
 /** Order used to only ever ADVANCE lifecycle, never regress it. */
 const LIFECYCLE_RANK: Record<string, number> = {
@@ -611,6 +677,8 @@ function partialConsentPatch(input: PartialLeadInput, now: Date): Record<string,
 export function buildPartialLeadCreate(input: PartialLeadInput, now: Date) {
   const consented = typeof input.marketingConsent === 'boolean'
   return {
+    contactPreference: normalizeContactPreference(input.contactPreference),
+    bestTimeToCall: clean(input.bestTimeToCall),
     name: composePartialName(input) ?? 'Booking lead',
     phone: clean(input.phone),
     email: normalizeEmail(input.email),
@@ -664,8 +732,16 @@ export type ExistingPartialLead = {
  *  CONVERTED), always tracks the latest step, fills blank attribution, and
  *  applies TRI-STATE consent (a fresh unchecked load — marketingConsent
  *  undefined — leaves any stored consent untouched). */
-export function buildPartialLeadUpdate(existing: ExistingPartialLead, input: PartialLeadInput, now: Date) {
+export function buildPartialLeadUpdate(
+  existing: ExistingPartialLead,
+  input: PartialLeadInput,
+  now: Date,
+  matchedBy: LeadMatchBasis = 'email'
+) {
   const fillIfBlank = <T>(cur: T | null, next: T | null | undefined): T | null => (cur == null ? (next ?? null) : cur)
+  /** Same-session: latest non-empty wins. Email-match: fill blanks only. */
+  const correctable = <T>(cur: T | null, next: T | null | undefined): T | null =>
+    matchedBy === 'session' && next != null ? next : fillIfBlank(cur, next)
 
   // Lifecycle: never downgrade. CONVERTED/SUBMITTED are sticky terminal-ish.
   const candidate = lifecycleForStep(input.formStep)
@@ -679,11 +755,18 @@ export function buildPartialLeadUpdate(existing: ExistingPartialLead, input: Par
     formStep: clean(input.formStep) ?? existing.formStep,
     bookingSessionId: existing.bookingSessionId ?? clean(input.bookingSessionId),
     // Name/phone/attribution: fill blanks only — never clobber curated data.
-    name: existing.name && existing.name !== 'Booking lead' && existing.name !== 'Website lead'
-      ? existing.name
-      : (composePartialName(input) ?? existing.name),
-    phone: fillIfBlank(existing.phone, clean(input.phone)),
-    email: fillIfBlank(existing.email, normalizeEmail(input.email)),
+    // Identity follows the merge policy: in-session the customer's latest name
+    // WINS (they are correcting a typo), while a loose email match keeps the
+    // stored name unless it is a placeholder — a shared household address must
+    // never rename someone.
+    name:
+      matchedBy === 'session'
+        ? (composePartialName(input) ?? existing.name)
+        : existing.name && existing.name !== 'Booking lead' && existing.name !== 'Website lead'
+          ? existing.name
+          : (composePartialName(input) ?? existing.name),
+    phone: correctable(existing.phone, clean(input.phone)),
+    email: correctable(existing.email, normalizeEmail(input.email)),
     utmSource: fillIfBlank(existing.utmSource, clean(input.utmSource)),
     utmCampaign: fillIfBlank(existing.utmCampaign, clean(input.utmCampaign)),
     landingPage: fillIfBlank(existing.landingPage, clean(input.landingPage)),
@@ -691,6 +774,12 @@ export function buildPartialLeadUpdate(existing: ExistingPartialLead, input: Par
     promoCode: fillIfBlank(existing.promoCode, clean(input.promoCode)),
     ...partialConsentPatch(input, now),
   }
+  // The customer's own current answers. Written only when supplied, so a
+  // later page that omits them erases nothing.
+  const pref = normalizeContactPreference(input.contactPreference)
+  if (pref != null) (data as Record<string, unknown>).contactPreference = pref
+  const best = clean(input.bestTimeToCall)
+  if (best != null) (data as Record<string, unknown>).bestTimeToCall = best
   // A real estimate only ever fills in / increases; never overwrite with null.
   if (typeof input.estimatedValue === 'number' && input.estimatedValue > 0) {
     data.estimatedValue = input.estimatedValue
@@ -722,11 +811,15 @@ export async function capturePartialLead(
   if (!sessionId && !email) return null
 
   let existing: ExistingPartialLead | null = null
-  if (sessionId) existing = await deps.store.findBySessionId(sessionId)
+  let matchedBy: LeadMatchBasis = 'email'
+  if (sessionId) {
+    existing = await deps.store.findBySessionId(sessionId)
+    if (existing) matchedBy = 'session'
+  }
   if (!existing && email) existing = await deps.store.findOpenPartialByEmail(email)
 
   if (existing) {
-    const lead = await deps.store.update(existing.id, buildPartialLeadUpdate(existing, input, now))
+    const lead = await deps.store.update(existing.id, buildPartialLeadUpdate(existing, input, now, matchedBy))
     return { lead, isNew: false }
   }
   // Need at least a valid email to CREATE (a bare session id is not a person).
