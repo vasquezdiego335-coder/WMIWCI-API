@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { composeAccessDetails } from '../../../app/api/leads/quote-capture/route'
+import { composeAccessDetails } from '../quote-access-details'
 import { buildLeadCard } from '../booking-display'
 import { isInPersonRequest, IN_PERSON_ALERT_LABEL, formatLeadAlert } from '../lead-alert'
 import { renderTemplate } from '../email-render'
