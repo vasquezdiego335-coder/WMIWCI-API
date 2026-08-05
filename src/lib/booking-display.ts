@@ -1026,6 +1026,80 @@ export function telHref(phone?: string | null): string | null {
   return `tel:+${digits.length === 10 ? '1' + digits : digits}`
 }
 
+/**
+ * A phone number a human can read back over the phone.
+ *
+ * PURE, and deliberately conservative: it only reformats what it is CERTAIN
+ * about — a 10-digit NANP number, or 11 digits starting with the country code.
+ * Anything else (an extension, an international number, a typo) is printed
+ * EXACTLY as the customer typed it. Guessing at a malformed number and
+ * printing a confident-looking `(186) 230-6673` is worse than showing the raw
+ * string: it hides the fact that the number needs a human's judgement.
+ */
+export function formatPhoneDisplay(phone?: string | null): string {
+  const raw = (phone ?? '').trim()
+  const digits = raw.replace(/\D/g, '')
+  const nanp = digits.length === 11 && digits.startsWith('1') ? digits.slice(1) : digits
+  if (nanp.length !== 10) return raw
+  // A real NANP area code and exchange never start with 0 or 1.
+  if (/^[01]/.test(nanp) || /^[01]/.test(nanp.slice(3))) return raw
+  return `(${nanp.slice(0, 3)}) ${nanp.slice(3, 6)}-${nanp.slice(6)}`
+}
+
+/**
+ * How far the visitor got, in words the owner already uses. The raw values are
+ * two different vocabularies — the quote page sends `quote`, the booking form
+ * sends `card1`..`card5` — and neither means anything at a glance.
+ */
+export function stepLabel(formStep?: string | null): string | null {
+  const s = (formStep ?? '').trim().toLowerCase()
+  if (!s) return null
+  if (s === 'quote_in_person') return 'Asked for an in-person estimate'
+  if (s === 'quote') return 'Finished the quick quote'
+  if (s === 'submitted') return 'Submitted the booking form'
+  const card = s.match(/^card(\d)$/)
+  if (card) return `Reached step ${card[1]} of the booking form`
+  return null
+}
+
+/** The route as ONE line, or null when neither end is known. */
+export function routeLine(pickup?: string | null, destination?: string | null): string | null {
+  const from = (pickup ?? '').trim()
+  const to = (destination ?? '').trim()
+  if (!from && !to) return null
+  if (from && to) return from === to ? `${from} (local)` : `${from} → ${to}`
+  return from ? `From ${from}` : `To ${to}`
+}
+
+/**
+ * Where the lead came from, in ONE line — or null when there is nothing worth
+ * a line. A channel of OTHER/UNKNOWN with no campaign tag and no referrer is
+ * not information; it is the absence of it, and it does not earn space on a
+ * card whose job is to get someone called.
+ */
+export function originLine(data: {
+  source?: string | null
+  utmSource?: string | null
+  utmCampaign?: string | null
+  referrer?: string | null
+}): string | null {
+  const channel = (data.source ?? '').trim().toUpperCase()
+  const known = channel && channel !== 'OTHER' && channel !== 'UNKNOWN' ? channel.replace(/_/g, ' ').toLowerCase() : null
+  const campaign = [data.utmSource, data.utmCampaign].map((v) => (v ?? '').trim()).filter(Boolean).join(' / ')
+  // Host only. A full URL is a paragraph on a phone and the admin has the rest.
+  let ref: string | null = null
+  const r = (data.referrer ?? '').trim()
+  if (r) {
+    try {
+      ref = new URL(r).host.replace(/^www\./, '')
+    } catch {
+      ref = r.slice(0, 60)
+    }
+  }
+  const parts = [known, campaign || null, ref ? `via ${ref}` : null].filter(Boolean)
+  return parts.length ? parts.join('  ·  ') : null
+}
+
 export function buildLeadCard(data: LeadCardData): { embeds: EmbedJson[]; components: ActionRowJson[] } {
   const fullName =
     [data.firstName, data.lastName].filter(Boolean).join(' ').trim() ||
@@ -1045,74 +1119,70 @@ export function buildLeadCard(data: LeadCardData): { embeds: EmbedJson[]; compon
       ? `**$${Math.round(data.estimateDollars).toLocaleString('en-US')}**`
       : '_no estimate yet_'
 
+  // null, not "Not given" — the field is omitted entirely when there is no
+  // date. See the LAYOUT note below.
+  //
+  // RENDERED IN UTC, AND THAT IS THE FIX, NOT THE BUG. A move date is a
+  // CALENDAR DATE, not an instant: the form sends "2026-08-29" and
+  // parseMoveDate stores it as 2026-08-29T00:00:00Z. Rendering that in
+  // America/New_York moves it back four hours — to 8pm on the 28th — so the
+  // card showed the owner THE DAY BEFORE the one the customer picked, every
+  // time. A crew sent a day early is the most expensive kind of typo, and it
+  // was invisible because "Fri, Aug 28" looks perfectly plausible.
   const dateLabel = data.moveDate
     ? new Date(data.moveDate).toLocaleDateString('en-US', {
         weekday: 'short',
         month: 'short',
         day: 'numeric',
         year: 'numeric',
-        timeZone: 'America/New_York',
+        timeZone: 'UTC',
       })
-    : 'Not given'
+    : null
 
+  // ════════════════════════════════════════════════════════════════════
+  //  LAYOUT (owner feedback 2026-08-05: "it seems ugly, more organized")
+  //  ------------------------------------------------------------------
+  //  The card is read on a phone, one-handed, while the lead is warm. So it
+  //  is built in three tiers, and NOTHING EMPTY IS PRINTED:
+  //
+  //    1. WHO + HOW TO REACH THEM — a full-width block. The old card spread
+  //       this across inline fields, so the phone number — the one thing the
+  //       owner acts on — landed in a narrow column beside "Not given".
+  //    2. THE JOB — up to three inline fields (estimate / date / route).
+  //       Discord lays inline fields three to a row, so three is exactly one
+  //       clean row; a field with nothing to say is OMITTED rather than
+  //       printed as "Not given", which is what made the old card look like a
+  //       form with blanks in it.
+  //    3. WHERE THEY CAME FROM — ONE line. The old version printed six,
+  //       including two full URLs, which pushed the phone number off a phone
+  //       screen. The full referrer and landing page live in the admin, one
+  //       tap away on the button below.
+  // ════════════════════════════════════════════════════════════════════
   const fields: EmbedField[] = []
 
-  // Phone first and on its own line: it is the thing the owner acts on.
-  fields.push(
-    field(
-      '👤 Lead',
-      [`**${fullName}**`, data.phone ? `📞 ${data.phone}` : null, data.email ? `✉️ ${data.email}` : null]
-        .filter(Boolean)
-        .join('\n'),
-      true
-    )
-  )
-
-  fields.push(
-    field(
-      '💵 Estimate',
-      [estimate, data.moveSize ? `Size: ${data.moveSize}` : null].filter(Boolean).join('\n'),
-      true
-    )
-  )
-
-  fields.push(field('📅 Move date', dateLabel, true))
-
-  fields.push(
-    field(
-      '📍 Route',
-      [`From: ${data.pickup || 'Not given'}`, `To: ${data.destination || 'Not given'}`].join('\n'),
-      true
-    )
-  )
-
   const pref = contactPreferenceLabel(data.contactPreference)
-  fields.push(
-    field(
-      '🗣 How to reach them',
-      [pref ?? 'No preference given', data.bestTimeToCall ? `Best time: ${data.bestTimeToCall}` : null]
-        .filter(Boolean)
-        .join('\n'),
-      true
-    )
-  )
-
-  fields.push(field('🧭 Step', data.formStep || 'quote', true))
-
-  // ── Attribution. The raw referrer and landing page are shown even when the
-  //    channel is UNKNOWN — that is the whole point of the 2026-08-03 change:
-  //    an unattributed lead should still tell the owner where it came from.
-  const attribution = [
-    `Channel: ${data.source || 'UNKNOWN'}`,
-    data.moveSize ? `Tag: ${data.moveSize}` : null,
-    data.utmSource ? `utm_source: ${data.utmSource}` : null,
-    data.utmCampaign ? `utm_campaign: ${data.utmCampaign}` : null,
-    `Referrer: ${data.referrer || 'none (direct)'}`,
-    data.landingPage ? `Landed on: ${data.landingPage}` : null,
+  const reach = [
+    data.phone ? `📞 **${formatPhoneDisplay(data.phone)}**` : null,
+    data.email ? `✉️ ${data.email}` : null,
+    // contactPreferenceLabel already carries its own emoji ("💬 Text me").
+    [pref, data.bestTimeToCall ? `🕒 ${data.bestTimeToCall}` : null].filter(Boolean).join('  ·  ') || null,
   ]
     .filter(Boolean)
     .join('\n')
-  fields.push(field('📈 Where they came from', attribution))
+  fields.push(field(`👤 ${fullName}`, reach || '_no contact details_'))
+
+  // ── Tier 2: the job. Inline, and only what exists. ──
+  fields.push(field('💵 Estimate', [estimate, data.moveSize || null].filter(Boolean).join('\n'), true))
+  if (dateLabel) fields.push(field('📅 Move date', dateLabel, true))
+  const route = routeLine(data.pickup, data.destination)
+  if (route) fields.push(field('📍 Route', route, true))
+
+  // ── Tier 3: one line, and only when it says something. A lead that came
+  //    straight from the site with no campaign tag needs no attribution row
+  //    at all — the absence IS the answer, and printing "Channel: UNKNOWN /
+  //    Referrer: none (direct)" spends three lines saying nothing.
+  const origin = originLine(data)
+  if (origin) fields.push(field('📈 Source', origin))
 
   // An IN-PERSON request is a different job for the owner: someone has to go
   // and look at it, and there is deliberately no number to act on. It has to
@@ -1132,7 +1202,11 @@ export function buildLeadCard(data: LeadCardData): { embeds: EmbedJson[]; compon
       ? 'This lead changed something that affects how you should call them.'
       : 'They asked for a price and left their number. Call while it is warm.',
     fields,
-    footer: { text: `Lead ID: ${data.leadId}` },
+    // The step belongs here, not in a field of its own: it is context for
+    // reading the card, not a fact to act on. The lead id stays because it is
+    // what you quote when something looks wrong — but it no longer sits above
+    // the phone number.
+    footer: { text: [stepLabel(data.formStep), `Lead ${data.leadId}`].filter(Boolean).join('  ·  ') },
     timestamp: new Date().toISOString(),
   }
 
