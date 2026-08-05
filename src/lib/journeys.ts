@@ -28,6 +28,7 @@ import { queueLogger } from './logger'
 import { nextAllowedTime } from './email-guard'
 import { effectiveMoveDate } from './email-eligibility'
 import { fireBookingTrigger, fireLeadTrigger, stopEnrollmentsFor } from './email-automation-runtime'
+import { hasPromotionalConsent } from './leads'
 
 const log = queueLogger.child({ mod: 'journeys' })
 
@@ -302,7 +303,7 @@ export async function onQuoteCreated(leadId: string): Promise<void> {
 
   const lead = await prisma.lead.findUnique({
     where: { id: leadId },
-    select: { id: true, email: true, quotedAt: true, status: true, moveDate: true },
+    select: { id: true, email: true, quotedAt: true, status: true, moveDate: true, emailMarketingConsent: true },
   })
   if (!lead) return
   if (!lead.email) {
@@ -311,6 +312,15 @@ export async function onQuoteCreated(leadId: string): Promise<void> {
   }
   if (!lead.quotedAt) {
     log.info({ leadId }, 'no real quote recorded (quotedAt is null) — refusing to schedule a quote sequence')
+    return
+  }
+
+  // Refused HERE as well as at send time. The send gate is the guarantee;
+  // this only avoids queueing three jobs that are certain to be blocked, and
+  // puts the reason in the log at the moment the owner clicks, not three days
+  // later when a stage silently does nothing.
+  if (!hasPromotionalConsent({ emailMarketingConsent: lead.emailMarketingConsent })) {
+    log.info({ leadId }, 'lead never opted in to marketing — no quote follow-up scheduled')
     return
   }
 
@@ -351,6 +361,8 @@ export type LeadState = {
   lostAt: Date | null
   moveDate: Date | null
   convertedBookingId: string | null
+  /** TRI-STATE. Required here: quote follow-ups are PROMOTIONAL (see below). */
+  emailMarketingConsent: boolean | null
 }
 
 /**
@@ -361,6 +373,26 @@ export type LeadState = {
 export function quoteFollowupBlockReason(lead: LeadState | null, now: Date = new Date()): string | null {
   if (!lead) return 'lead_deleted'
   if (!lead.email) return 'no_email'
+  // ── PROMOTIONAL CONSENT ────────────────────────────────────────────────
+  //  quote-followup-1/2/final are NOT in email-guard's TRANSACTIONAL_TEMPLATES,
+  //  so classifyTemplate returns 'promotional' — they go out under marketing
+  //  caps, quiet hours and an unsubscribe link. Everything downstream treated
+  //  them that way EXCEPT the one gate that decides whether to send: this one
+  //  checked email, quote, conversion, status and move date, and never asked
+  //  whether the person had agreed to be marketed to.
+  //
+  //  So a lead who arrived through the contact form — where no consent
+  //  checkbox is ever shown, and `emailMarketingConsent` is therefore NULL
+  //  forever — received three promotional emails the moment the owner marked
+  //  a quote given. That is the door that stayed open when the automation
+  //  trigger's was closed, and it is the louder one: automations need an
+  //  ACTIVE automation to exist, this needs only a button click.
+  //
+  //  TRI-STATE, and both false and null refuse: absence of a decision is not
+  //  permission. The rule is hasPromotionalConsent(), the tested definition.
+  if (!hasPromotionalConsent({ emailMarketingConsent: lead.emailMarketingConsent })) {
+    return 'no_marketing_consent'
+  }
   if (!lead.quotedAt) return 'no_quote'
   // Converted — the booking journey owns this customer now.
   if (lead.bookedAt || lead.convertedBookingId) return 'lead_converted'
@@ -420,6 +452,7 @@ export async function leadEligibility(leadId: string, template?: string): Promis
         lostAt: true,
         moveDate: true,
         convertedBookingId: true,
+        emailMarketingConsent: true,
       },
     })
     // Journey stages keep the full matrix; an immediate transactional reply

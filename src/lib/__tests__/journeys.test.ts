@@ -3,6 +3,8 @@
 // staging scenarios in docs/email-marketing/staging-plan.md.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import {
   ABANDONED_STAGES,
   QUOTE_STAGES,
@@ -72,6 +74,9 @@ const lead = (over: Partial<LeadState> = {}): LeadState => ({
   lostAt: null,
   moveDate: new Date('2026-08-15T15:00:00Z'),
   convertedBookingId: null,
+  // The fixture is a lead we MAY market to. Quote follow-ups are
+  // promotional, so consent is now part of what makes a lead eligible.
+  emailMarketingConsent: true,
   ...over,
 })
 
@@ -130,4 +135,53 @@ test('conversion is checked before the move date — the strongest signal wins',
     NOW
   )
   assert.equal(r, 'lead_converted')
+})
+
+// ════════════════════════════════════════════════════════════════════════
+//  PROMOTIONAL CONSENT ON QUOTE FOLLOW-UPS (2026-08-05)
+//  quote-followup-1/2/final are not in TRANSACTIONAL_TEMPLATES, so the guard
+//  treats them as promotional — caps, quiet hours, an unsubscribe link. The
+//  one gate that decided whether to SEND them never asked about consent.
+// ════════════════════════════════════════════════════════════════════════
+
+test('a lead who never opted in gets NO quote follow-up', () => {
+  // The contact form shows no consent checkbox, so these leads are NULL
+  // forever. Before this, marking a quote given sent them three promotional
+  // emails.
+  assert.equal(quoteFollowupBlockReason(lead({ emailMarketingConsent: null }), NOW), 'no_marketing_consent')
+})
+
+test('an explicit decline blocks just as hard as never being asked', () => {
+  assert.equal(quoteFollowupBlockReason(lead({ emailMarketingConsent: false }), NOW), 'no_marketing_consent')
+})
+
+test('consent is checked BEFORE the quote state — it is the more fundamental fact', () => {
+  // A lead with no consent AND no quote reports the consent reason: we may not
+  // market to them at all, which is true regardless of what else is missing.
+  assert.equal(
+    quoteFollowupBlockReason(lead({ emailMarketingConsent: null, quotedAt: null }), NOW),
+    'no_marketing_consent'
+  )
+  // ...but a missing EMAIL still wins: there is nobody to ask.
+  assert.equal(quoteFollowupBlockReason(lead({ emailMarketingConsent: null, email: null }), NOW), 'no_email')
+})
+
+test('an opted-in lead is unaffected', () => {
+  assert.equal(quoteFollowupBlockReason(lead({ emailMarketingConsent: true }), NOW), null)
+})
+
+test('the scheduler refuses too, so three doomed jobs are never queued', () => {
+  const src = readFileSync(resolve(__dirname, '../journeys.ts'), 'utf8')
+  const scheduler = src.slice(src.indexOf('export async function onQuoteCreated'), src.indexOf('export async function onLeadClosed'))
+  assert.match(scheduler, /emailMarketingConsent: true/, 'the scheduler must LOAD the column')
+  assert.match(scheduler, /hasPromotionalConsent\(/, 'and apply the same rule')
+  const guard = scheduler.indexOf('hasPromotionalConsent(')
+  const enqueueAt = scheduler.indexOf('await enqueue(')
+  assert.ok(guard > -1 && enqueueAt > guard, 'the refusal must precede the enqueue')
+})
+
+test('the send gate LOADS the consent column — a gate that cannot see it cannot enforce it', () => {
+  const src = readFileSync(resolve(__dirname, '../journeys.ts'), 'utf8')
+  const loader = src.slice(src.indexOf('export async function leadEligibility'))
+  assert.match(loader, /emailMarketingConsent: true/)
 })
