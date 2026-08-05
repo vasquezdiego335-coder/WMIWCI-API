@@ -21,6 +21,7 @@ const NOW = new Date('2026-08-04T12:00:00.000Z')
 const existing = (over: Partial<ExistingPartialLead> = {}): ExistingPartialLead => ({
   id: 'lead_1',
   status: 'NEW' as ExistingPartialLead['status'],
+  quoteConfirmationQueuedAt: null,
   name: 'Maria Delgado',
   phone: '9735551234',
   email: 'maria@example.com',

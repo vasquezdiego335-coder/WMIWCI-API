@@ -555,6 +555,13 @@ export type PartialLeadInput = {
   referrer?: string | null
   promoCode?: string | null
   estimatedValue?: number | null // cents
+  /**
+   * TRUE when `estimatedValue` came from the SERVER's price book rather than
+   * from the browser. Only /api/leads/quote-capture sets it. See
+   * mayWriteEstimate — this is what stops the booking form's own figure from
+   * undercutting a price we already emailed.
+   */
+  estimateAuthoritative?: boolean
   // ── Move details (owner spec 2026-07-28) ──────────────────────────────
   // A quick-quote or homepage estimate carries real intent. Without these a
   // captured lead is a bare address, and the follow-up email cannot say
@@ -733,6 +740,8 @@ export type ExistingPartialLead = {
   emailMarketingConsent: boolean | null
   formStep: string | null
   estimatedValue: number | null
+  /** Read so a browser figure cannot undercut a price we already emailed. */
+  quoteConfirmationQueuedAt: Date | null
   utmSource: string | null
   utmCampaign: string | null
   landingPage: string | null
@@ -796,11 +805,57 @@ export function buildPartialLeadUpdate(
   if (pref != null) (data as Record<string, unknown>).contactPreference = pref
   const best = clean(input.bestTimeToCall)
   if (best != null) (data as Record<string, unknown>).bestTimeToCall = best
-  // A real estimate only ever fills in / increases; never overwrite with null.
-  if (typeof input.estimatedValue === 'number' && input.estimatedValue > 0) {
+  // See mayWriteEstimate: a browser figure must not undercut a number we have
+  // already emailed. (The comment that used to sit here claimed this code
+  // "only ever fills in / increases". It did not — it overwrote, always.)
+  if (mayWriteEstimate(existing, input.estimatedValue, input.estimateAuthoritative === true)) {
     data.estimatedValue = input.estimatedValue
   }
   return data
+}
+
+/**
+ * MAY this submission change the lead's stored estimate?
+ *
+ * THE BUG THIS EXISTS TO STOP. Two capture surfaces write this column and they
+ * do not compute the same number:
+ *
+ *   /api/leads/quote-capture  the SERVER's price for the package, including the
+ *                             required truck-size upgrade. This is the number
+ *                             we put in the customer's confirmation email.
+ *   /api/leads/partial        the BOOKING FORM's own figure — base + labor +
+ *                             add-ons + travel, and deliberately WITHOUT the
+ *                             truck upgrade (that form treats the truck as a
+ *                             move-day line, never part of the total).
+ *
+ * A customer who quotes and then opens the booking form hits both, in that
+ * order. The old rule wrote whatever arrived last, so a lead emailed "$879"
+ * ended up stored as "$779" — the CRM disagreeing with the customer's own copy
+ * of the quote, in the direction that makes us look like we moved the price.
+ *
+ * THE RULE, and the reasoning for each branch:
+ *   1. A SERVER price always writes. It is the authority; a re-quote is a real
+ *      change and must land, up or down.
+ *   2. A blank always fills. Something beats nothing.
+ *   3. A lead we have never emailed keeps today's behaviour exactly — the
+ *      booking form is the only writer, so there is no disagreement to create.
+ *   4. Once a confirmation HAS been emailed, a browser figure may only RAISE
+ *      the number. A rise is real information (the customer added stairs, a
+ *      second location); a fall is almost always the base-only figure racing
+ *      the total we already quoted.
+ *
+ * PURE. `existing` is what is stored, `incoming` what arrived.
+ */
+export function mayWriteEstimate(
+  existing: { estimatedValue: number | null; quoteConfirmationQueuedAt?: Date | null },
+  incoming: number | null | undefined,
+  authoritative: boolean
+): boolean {
+  if (typeof incoming !== 'number' || incoming <= 0) return false // never overwrite with null/0
+  if (authoritative) return true
+  if (existing.estimatedValue == null) return true
+  if (existing.quoteConfirmationQueuedAt == null) return true
+  return incoming >= existing.estimatedValue
 }
 
 export type CapturePartialResult = { lead: LeadRecord; isNew: boolean } | null
@@ -868,6 +923,7 @@ export function defaultPartialLeadDeps(): PartialLeadDeps {
   const SELECT = {
     id: true, status: true, name: true, phone: true, email: true, bookingSessionId: true,
     lifecycle: true, emailMarketingConsent: true, formStep: true, estimatedValue: true,
+    quoteConfirmationQueuedAt: true,
     utmSource: true, utmCampaign: true, landingPage: true, referrer: true, promoCode: true,
     // Read so the update can fill `notes` ONLY when it is empty.
     notes: true,

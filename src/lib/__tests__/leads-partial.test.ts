@@ -92,6 +92,7 @@ function existing(overrides: Partial<ExistingPartialLead> = {}): ExistingPartial
   return {
     id: 'l1', status: 'NEW', name: 'Booking lead', phone: null, email: 'sam@x.com',
     bookingSessionId: 'sess-1', lifecycle: 'PARTIAL', emailMarketingConsent: null, formStep: 'card1',
+    quoteConfirmationQueuedAt: null,
     estimatedValue: null, utmSource: null, utmCampaign: null, landingPage: null, referrer: null, promoCode: null,
     notes: null,
     ...overrides,
