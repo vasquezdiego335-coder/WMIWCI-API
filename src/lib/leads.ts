@@ -571,6 +571,17 @@ export type PartialLeadInput = {
   contactPreference?: string | null
   /** Free text, e.g. "weekday mornings". */
   bestTimeToCall?: string | null
+  /**
+   * One human-readable line describing site access, composed by the caller
+   * from the quick quote's stairs / heavy-item answers.
+   *
+   * WRITTEN TO `notes`, FILL-BLANK-ONLY. `notes` is owner-editable free text,
+   * so a later capture must never overwrite what a human typed there. That
+   * does mean a customer who changes an answer will not rewrite the note —
+   * the deliberate trade: a lost correction is recoverable, the owner's own
+   * words are not.
+   */
+  accessDetails?: string | null
 }
 
 /** Contact-preference vocabulary. A validated STRING rather than a Prisma enum
@@ -679,6 +690,8 @@ export function buildPartialLeadCreate(input: PartialLeadInput, now: Date) {
   return {
     contactPreference: normalizeContactPreference(input.contactPreference),
     bestTimeToCall: clean(input.bestTimeToCall),
+    // Site access from the quick quote's step-4 answers. See accessDetails.
+    notes: clean(input.accessDetails),
     name: composePartialName(input) ?? 'Booking lead',
     phone: clean(input.phone),
     email: normalizeEmail(input.email),
@@ -725,6 +738,7 @@ export type ExistingPartialLead = {
   landingPage: string | null
   referrer: string | null
   promoCode: string | null
+  notes: string | null
 }
 
 /** Patch to UPDATE an existing lead from a repeat partial submission. Pure:
@@ -772,6 +786,8 @@ export function buildPartialLeadUpdate(
     landingPage: fillIfBlank(existing.landingPage, clean(input.landingPage)),
     referrer: fillIfBlank(existing.referrer, clean(input.referrer)),
     promoCode: fillIfBlank(existing.promoCode, clean(input.promoCode)),
+    // Access details: FILL-BLANK-ONLY. See PartialLeadInput.accessDetails.
+    notes: fillIfBlank(existing.notes, clean(input.accessDetails)),
     ...partialConsentPatch(input, now),
   }
   // The customer's own current answers. Written only when supplied, so a
@@ -853,6 +869,8 @@ export function defaultPartialLeadDeps(): PartialLeadDeps {
     id: true, status: true, name: true, phone: true, email: true, bookingSessionId: true,
     lifecycle: true, emailMarketingConsent: true, formStep: true, estimatedValue: true,
     utmSource: true, utmCampaign: true, landingPage: true, referrer: true, promoCode: true,
+    // Read so the update can fill `notes` ONLY when it is empty.
+    notes: true,
   } as const
   _partialDeps = {
     now: () => new Date(),

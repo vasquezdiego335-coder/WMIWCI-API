@@ -1034,8 +1034,14 @@ export function buildLeadCard(data: LeadCardData): { embeds: EmbedJson[]; compon
 
   // ── Money. An absent estimate is stated, never shown as $0 — quoting zero
   //    is quoting a free move. Mirrors the site's travelPending rule.
-  const estimate =
-    typeof data.estimateDollars === 'number' && data.estimateDollars > 0
+  // An in-person request was never quoted, so the card must not show a number
+  // even if one somehow reached it. The route already refuses to compute one;
+  // a card that WOULD render a stray value is a card that eventually will.
+  const inPersonEstimate = (data.formStep ?? '').trim().toLowerCase() === 'quote_in_person'
+  const estimate = inPersonEstimate
+    // Not "we could not price it" — we deliberately did not.
+    ? '_In-person estimate requested_'
+    : typeof data.estimateDollars === 'number' && data.estimateDollars > 0
       ? `**$${Math.round(data.estimateDollars).toLocaleString('en-US')}**`
       : '_no estimate yet_'
 
@@ -1108,7 +1114,15 @@ export function buildLeadCard(data: LeadCardData): { embeds: EmbedJson[]; compon
     .join('\n')
   fields.push(field('📈 Where they came from', attribution))
 
-  const title = data.isUpdate ? '🔄 Lead updated — details changed' : '🆕 New quote request'
+  // An IN-PERSON request is a different job for the owner: someone has to go
+  // and look at it, and there is deliberately no number to act on. It has to
+  // be recognisable in the channel list without opening the card.
+  const inPersonCard = (data.formStep ?? '').trim().toLowerCase() === 'quote_in_person'
+  const title = inPersonCard
+    ? '🏠 In-Person Estimate Requested'
+    : data.isUpdate
+      ? '🔄 Lead updated — details changed'
+      : '🆕 New quote request'
   const embed: EmbedJson = {
     title,
     // Orange for a new lead (brand action colour), navy for an update so a
