@@ -138,6 +138,9 @@ const QuoteLeadSchema = z.object({
   originCity: str(120),
   destCity: str(120),
   moveSize: str(40),
+  /** The truck the browser thinks applies. ADVISORY ONLY: the server derives
+   *  the minimum from the move size and corrects anything below it. */
+  truckSize: str(20),
   /**
    * The browser's DISPLAYED total, in dollars. DIAGNOSTIC ONLY — it is compared
    * against the server's own calculation and logged on mismatch. It is never
@@ -294,14 +297,29 @@ async function handle(req: NextRequest): Promise<NextResponse> {
   const inPerson = d.quoteMode === 'in_person'
 
   // ── SERVER-AUTHORITATIVE PRICING ────────────────────────────────────────
+  // An in-person request never reaches the pricing call at all. Both halves
+  // matter: the truck must still be validated for every OTHER request, and a
+  // retired or invented size must be REJECTED rather than silently swapped.
   const priced = inPerson
     ? { ok: false as const, reason: 'manual_plan' as const, packageKey: d.moveSize ?? null }
-    : quoteEstimate({ moveSize: d.moveSize })
-  if (!priced.ok && priced.reason === 'unknown_package') {
-    // Never silently default to a price for something we do not sell.
-    apiLogger.warn({ packageKey: priced.packageKey ?? '(unrecognised)' }, 'POST /api/leads — unknown package key')
-    return json({ ok: false, captured: false, error: 'validation_error', fields: ['moveSize'] }, 422)
+    : quoteEstimate({ moveSize: d.moveSize, truckSize: d.truckSize })
+  if (!priced.ok && (priced.reason === 'unknown_package' || priced.reason === 'unsupported_truck')) {
+    // Never silently default to a price for something we do not sell, and never
+    // swap a retired truck size for a different one behind the customer's back.
+    apiLogger.warn(
+      { packageKey: priced.packageKey ?? '(unrecognised)', reason: priced.reason },
+      'POST /api/leads/quote-capture — rejected package/truck'
+    )
+    return json(
+      { ok: false, captured: false, error: 'validation_error', fields: [priced.reason === 'unsupported_truck' ? 'truckSize' : 'moveSize'] },
+      422
+    )
   }
+  // 5BR+ / "not sure" cannot be auto-quoted from one truck — the move may need
+  // several trucks or several trips. The LEAD IS STILL SAVED (that is the whole
+  // point of the gate) and the owner quotes it by hand; it simply carries no
+  // automatic estimate.
+  const manualPlan = !priced.ok && priced.reason === 'manual_plan'
 
   const serverCents = priced.ok ? priced.totalCents : null
   if (priced.ok) {
@@ -384,12 +402,24 @@ async function handle(req: NextRequest): Promise<NextResponse> {
     // The server's own number, so a browser showing a stale price can correct
     // itself. Safe to expose: it is the price we publish.
     estimate: priced.ok
-      ? { totalDollars: priced.totalDollars, isStarting: priced.isStarting, packageLabel: priced.packageLabel }
+      ? {
+          totalDollars: priced.totalDollars,
+          isStarting: priced.isStarting,
+          packageLabel: priced.packageLabel,
+          // The breakdown the owner asked the page to show: base package,
+          // required truck upgrade, then routed mileage (calculated later,
+          // separately) and any other add-ons.
+          baseDollars: priced.baseDollars,
+          truckSize: priced.truckSize,
+          truckMinimum: priced.truckMinimum,
+          truckUpgrade: priced.truckUpgrade,
+          truckCorrected: priced.truckCorrected,
+        }
       : null,
-    /** True when this move is quoted by a human rather than automatically —
+    /** True when this move is quoted by a human rather than automatically:
      *  5+ bedrooms, or the customer asked for an in-person visit. The lead is
      *  captured either way; it simply carries no number. */
-    manualReview: inPerson || (!priced.ok && priced.reason === 'manual_plan'),
+    manualReview: inPerson || manualPlan,
   })
 }
 

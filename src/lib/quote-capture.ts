@@ -87,7 +87,16 @@ export type QuoteLeadCaptureResponse =
       emailStatus: QueueStatus
       notificationStatus: QueueStatus
       /** The SERVER's price, so a stale browser can correct itself. */
-      estimate: { totalDollars: number; isStarting: boolean; packageLabel: string } | null
+      estimate: {
+        totalDollars: number
+        baseDollars: number
+        isStarting: boolean
+        packageLabel: string
+        truckSize: string
+        truckMinimum: string
+        truckUpgrade: number
+        truckCorrected: boolean
+      } | null
       /** True when this move is quoted by a human rather than automatically:
        *  5+ bedrooms, or the customer asked for an in-person visit. The lead
        *  is captured either way; it simply carries no number. */
