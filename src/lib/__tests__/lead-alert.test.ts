@@ -80,8 +80,24 @@ test('the notice fires only for NEW leads, never a repeat submission', () => {
   // PREVENTS: a returning visitor re-pinging the owner on every keystroke
   // capture. A repeat submission merges and takes the update path.
   const src = readFileSync(resolve(__dirname, '../leads.ts'), 'utf8')
-  assert.match(src, /if \(res\?\.isNew\) notifyOwnerOfNewLead/, 'partial capture path')
+  assert.match(src, /if \(res\?\.isNew && opts\.notifyOwner !== false\) notifyOwnerOfNewLead/, 'partial capture path')
   assert.match(src, /if \(res\.isNew\) \{[\s\S]{0,400}notifyOwnerOfNewLead/, 'full capture path')
+})
+
+test('opting out of the notice takes an EXPLICIT false — every other caller still pings', () => {
+  // The quick quote posts its own richer card (quote-capture.ts) and would
+  // otherwise double-ping the owner. Anything that simply does not pass the
+  // option — the booking form, the homepage estimate, the QR pages — keeps the
+  // notice, so a new capture surface cannot go quiet by forgetting a flag.
+  const src = readFileSync(resolve(__dirname, '../leads.ts'), 'utf8')
+  assert.match(src, /opts: CapturePartialOptions = \{\}/, 'the option defaults to the empty object')
+  assert.match(src, /notifyOwner\?: boolean/, 'and the flag is optional')
+  assert.ok(
+    !/opts\.notifyOwner === true/.test(src),
+    'must not require an opt-IN — that would silence every existing caller'
+  )
+  const route = readFileSync(resolve(__dirname, '../../../app/api/leads/quote-capture/route.ts'), 'utf8')
+  assert.match(route, /\{ notifyOwner: false \}/, 'the quick-quote route is the one caller that opts out')
 })
 
 test('the notice is fire-and-forget so a Discord outage cannot cost a lead', () => {

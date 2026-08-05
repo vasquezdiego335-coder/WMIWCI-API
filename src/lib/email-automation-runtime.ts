@@ -38,6 +38,11 @@ import { normalizeEmail } from './email-tokens'
 import { buildMarketingContext, applyMarketingContext } from './marketing-context'
 import { validateAutomationDefinition, automationJobId, type AutomationDefinition, type TriggerKey } from './email-automation'
 import { validateAudienceDefinition, resolveCandidates, type Candidate } from './email-audience'
+// The tested promotional-consent rule + the suppression reader. Imported
+// statically: leads.ts only reaches BACK into this module through a dynamic
+// import inside a function, so the static graph stays acyclic.
+import { hasPromotionalConsent } from './leads'
+import { isSuppressed } from './email-suppression'
 import { buildRecipientContext } from './email-recipient-context'
 import { promotionsEnabled } from './email-campaign-run'
 import type { StopRuleKey } from './email-journey-config'
@@ -302,15 +307,102 @@ export async function fireBookingTrigger(trigger: TriggerKey, bookingId: string)
   }
 }
 
-/** Convenience: fire a lead-scoped trigger from an id. Fails soft. */
-export async function fireLeadTrigger(trigger: TriggerKey, leadId: string): Promise<number> {
+// ── Lead subjects: the promotional-consent gate ─────────────────────────
+//
+//  WHY THIS EXISTS. Enrollment used to ask nothing about consent, and nothing
+//  downstream asked either: `subjectMatchesAudience` returns TRUE for an
+//  automation with no audience (the shape the admin builder emits whenever the
+//  segment dropdown is left blank), `executeAutomationStage` checks the master
+//  switch and the stop rules but never a consent column, and `guardedSend`
+//  knows about suppression, caps and quiet hours — not consent. So the only
+//  thing standing between a never-opted-in lead and a promotional sequence was
+//  the audience being a lead segment, which is a choice the owner makes in a
+//  dropdown months from now.
+//
+//  Automations are promotional BY CONSTRUCTION (see the master-switch comment
+//  in executeAutomationStage), so a lead subject now needs an explicit opt-in
+//  to be enrolled at all. This is the choke point `email-audience.ts` already
+//  documents for campaigns, applied to the path campaigns don't use.
+//
+//  The RULE ITSELF is not restated here: hasPromotionalConsent() in leads.ts is
+//  the single tested definition, and this calls it.
+
+export type LeadTriggerResult =
+  | { status: 'enrolled'; count: number }
+  | { status: 'skipped'; reason: 'lead_not_found' | 'no_email' | 'no_consent' | 'suppressed' }
+  | { status: 'unavailable'; reason: string }
+
+/**
+ * PURE: may this lead be enrolled in a PROMOTIONAL automation?
+ *
+ * Exported so the rule is testable without a database, and so a caller can ask
+ * the question before doing work. `emailMarketingConsent` is tri-state and both
+ * `false` and `null` fail — absence of a decision is never permission.
+ */
+export function mayEnrollLeadSubject(lead: {
+  email?: string | null
+  emailMarketingConsent?: boolean | null
+  suppressed?: boolean
+}): { allow: true } | { allow: false; reason: 'no_email' | 'no_consent' | 'suppressed' } {
+  if (!normalizeEmail(lead.email ?? '')) return { allow: false, reason: 'no_email' }
+  if (lead.suppressed) return { allow: false, reason: 'suppressed' }
+  if (!hasPromotionalConsent({ emailMarketingConsent: lead.emailMarketingConsent })) {
+    return { allow: false, reason: 'no_consent' }
+  }
+  return { allow: true }
+}
+
+/**
+ * Fire a lead-scoped trigger from an id. Fails soft — a trigger failure must
+ * never break the business event that fired it.
+ *
+ * CONSENT IS REQUIRED BY DEFAULT. `requireMarketingConsent: false` exists for a
+ * genuinely transactional lead trigger, and there isn't one today; every
+ * current caller is promotional, so no call site passes it.
+ *
+ * `snapshot` is merged over `{ leadId }` and stored on the enrollment as the
+ * facts that qualified the subject. Automations still read the lead LIVE at
+ * every stage — the snapshot is for segmentation and for answering "why was
+ * this person enrolled?" months later, never a substitute for live state.
+ */
+export async function fireLeadTrigger(
+  trigger: TriggerKey,
+  leadId: string,
+  opts: { snapshot?: Record<string, unknown>; requireMarketingConsent?: boolean } = {}
+): Promise<LeadTriggerResult> {
   try {
-    const lead = await prisma.lead.findUnique({ where: { id: leadId }, select: { id: true, email: true } })
-    if (!lead?.email) return 0
-    return fireAutomationTrigger(trigger, { email: lead.email, leadId: lead.id, snapshot: { leadId: lead.id } })
+    const lead = await prisma.lead.findUnique({
+      where: { id: leadId },
+      select: { id: true, email: true, emailMarketingConsent: true },
+    })
+    if (!lead) return { status: 'skipped', reason: 'lead_not_found' }
+    if (!lead.email) return { status: 'skipped', reason: 'no_email' }
+
+    if (opts.requireMarketingConsent !== false) {
+      // Suppression is only worth a query once consent is present — an
+      // unconsented lead is refused either way.
+      const consented = hasPromotionalConsent({ emailMarketingConsent: lead.emailMarketingConsent })
+      const suppressed = consented ? (await isSuppressed(lead.email, 'promotional')).suppressed : false
+      const verdict = mayEnrollLeadSubject({
+        email: lead.email,
+        emailMarketingConsent: lead.emailMarketingConsent,
+        suppressed,
+      })
+      if (!verdict.allow) {
+        log.info({ trigger, leadId, reason: verdict.reason }, 'lead trigger skipped — not promotable')
+        return { status: 'skipped', reason: verdict.reason }
+      }
+    }
+
+    const count = await fireAutomationTrigger(trigger, {
+      email: lead.email,
+      leadId: lead.id,
+      snapshot: { leadId: lead.id, ...(opts.snapshot ?? {}) },
+    })
+    return { status: 'enrolled', count }
   } catch (err) {
     log.warn({ err: String(err), trigger, leadId }, 'fireLeadTrigger failed (non-fatal)')
-    return 0
+    return { status: 'unavailable', reason: 'error' }
   }
 }
 

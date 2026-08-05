@@ -900,19 +900,39 @@ export function defaultPartialLeadDeps(): PartialLeadDeps {
   return _partialDeps
 }
 
-/** Route convenience: capture a partial lead and NEVER throw. Silent by design —
- *  no notification, no promotional automation. Returns the record or null. */
+export type CapturePartialOptions = {
+  /**
+   * Post the plain new-lead notice to Discord on a NEW lead. Default true.
+   * `false` means the CALLER owns the owner-facing notification — today only
+   * the quick-quote route, which sends the richer card from quote-capture.ts.
+   */
+  notifyOwner?: boolean
+}
+
+/** Route convenience: capture a partial lead and NEVER throw. Still silent on
+ *  the PROMOTIONAL side — no automation trigger fires from here, for any caller
+ *  (the quick quote fires its own, consent-gated, from quote-capture.ts).
+ *  Returns the record or null. */
 export async function capturePartialLeadSafe(
   input: PartialLeadInput,
   context: string,
-  deps?: PartialLeadDeps
+  deps?: PartialLeadDeps,
+  opts: CapturePartialOptions = {}
 ): Promise<CapturePartialResult> {
   try {
     const res = await capturePartialLead(input, deps)
     if (res) apiLogger.info({ leadId: res.lead.id, isNew: res.isNew, context }, 'partial lead captured')
     // Tell the owner. NEW leads only -- a repeat submission merges into the
     // existing lead and takes the update path, so this cannot double-notify.
-    if (res?.isNew) notifyOwnerOfNewLead(res.lead.id, context)
+    //
+    // ONE CALLER OPTS OUT: the quick quote posts a RICHER card (buttons, the
+    // estimate, the contact preference) from quote-capture.ts, which also
+    // records delivery on the lead and re-alerts when the facts change. Both
+    // firing would ping the owner twice for the same lead -- and this plain
+    // notice would arrive first, so the useful one would look like the
+    // duplicate. quote-capture falls back to this notice if its queue is down,
+    // so opting out never costs the owner the lead.
+    if (res?.isNew && opts.notifyOwner !== false) notifyOwnerOfNewLead(res.lead.id, context)
     return res
   } catch (err) {
     apiLogger.error(
