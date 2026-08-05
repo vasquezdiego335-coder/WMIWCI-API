@@ -333,6 +333,11 @@ async function handle(req: NextRequest): Promise<NextResponse> {
       promoCode: d.promoCode,
       // SERVER value. The browser's number never reaches the database.
       estimatedValue: serverCents,
+      // ...and it is FLAGGED as the server's, so the booking form's own
+      // figure — computed in the browser, and without the truck upgrade —
+      // cannot later overwrite the number we are about to email. See
+      // leads.mayWriteEstimate.
+      estimateAuthoritative: true,
     },
     'quote-lead',
     undefined,

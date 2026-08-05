@@ -36,6 +36,7 @@ import {
   capturePartialLead,
   buildPartialLeadCreate,
   buildPartialLeadUpdate,
+  mayWriteEstimate,
   type ExistingPartialLead,
   type LeadRecord,
   type PartialLeadDeps,
@@ -638,4 +639,76 @@ test('the trigger snapshot never claims consent a lead does not have', () => {
   // No estimate is null, never 0 — a missing number and a free move are not the
   // same fact to a segment rule.
   assert.equal(quoteLeadTriggerSnapshot(captureLead({ estimatedValue: null })).estimatedValueDollars, null)
+})
+
+// ════════════════════════════════════════════════════════════════════════
+//  ESTIMATE PROVENANCE (owner report 2026-08-05, from a real lead)
+//  ---------------------------------------------------------------------
+//  A customer quoted at $879, was emailed $879 — and the CRM then said $779,
+//  because he carried on into the booking form and its partial capture wrote
+//  its own browser-computed figure over the server's. The two surfaces do not
+//  compute the same number: the quote adds the required truck-size upgrade,
+//  the booking form deliberately excludes it. Whichever arrived last won.
+// ════════════════════════════════════════════════════════════════════════
+
+const QUOTED = { estimatedValue: 87900, quoteConfirmationQueuedAt: new Date('2026-08-05T23:08:11.105Z') }
+
+test('estimate: a browser figure cannot undercut the price we already emailed', () => {
+  // The exact production sequence: quote $879 emailed, booking form sends $779.
+  assert.equal(mayWriteEstimate(QUOTED, 77900, false), false, 'the CRM must not disagree with the customer\'s copy')
+  // A rise IS real information — the customer added stairs, a second stop.
+  assert.equal(mayWriteEstimate(QUOTED, 99900, false), true)
+  assert.equal(mayWriteEstimate(QUOTED, 87900, false), true, 'the same number is not a conflict')
+})
+
+test('estimate: the SERVER price always writes, up or down', () => {
+  // A re-quote is a real change: a smaller home is a smaller price.
+  assert.equal(mayWriteEstimate(QUOTED, 55000, true), true)
+  assert.equal(mayWriteEstimate(QUOTED, 129900, true), true)
+})
+
+test('estimate: nothing is overwritten with nothing', () => {
+  for (const bad of [null, undefined, 0, -1]) {
+    assert.equal(mayWriteEstimate(QUOTED, bad as number, true), false, `refused: ${String(bad)}`)
+    assert.equal(mayWriteEstimate(QUOTED, bad as number, false), false)
+  }
+})
+
+test('estimate: a booking-only lead keeps its old behaviour exactly', () => {
+  // Never emailed ⇒ the booking form is the only writer ⇒ no disagreement is
+  // possible, so it may still move the number freely in both directions.
+  const bookingOnly = { estimatedValue: 64900, quoteConfirmationQueuedAt: null }
+  assert.equal(mayWriteEstimate(bookingOnly, 77900, false), true)
+  assert.equal(mayWriteEstimate(bookingOnly, 39900, false), true, 'no regression for the booking form alone')
+  // A blank always fills.
+  assert.equal(mayWriteEstimate({ estimatedValue: null, quoteConfirmationQueuedAt: null }, 77900, false), true)
+  // Even on a lead we HAVE emailed: there is no stored number to contradict.
+  assert.equal(
+    mayWriteEstimate({ estimatedValue: null, quoteConfirmationQueuedAt: QUOTED.quoteConfirmationQueuedAt }, 77900, false),
+    true
+  )
+})
+
+test('estimate: the update builder applies the rule, not a blind write', () => {
+  const existing = {
+    id: 'l1',
+    estimatedValue: 87900,
+    quoteConfirmationQueuedAt: new Date('2026-08-05T23:08:11.105Z'),
+  } as unknown as ExistingPartialLead
+
+  const fromBookingForm = buildPartialLeadUpdate(existing, { estimatedValue: 77900, formStep: 'card5' }, NOW, 'session')
+  assert.ok(!('estimatedValue' in fromBookingForm), 'the browser figure is refused')
+
+  const fromQuote = buildPartialLeadUpdate(
+    existing,
+    { estimatedValue: 119900, estimateAuthoritative: true, formStep: 'quote' },
+    NOW,
+    'session'
+  )
+  assert.equal(fromQuote.estimatedValue, 119900, 'a server re-quote lands')
+})
+
+test('estimate: the quote route flags its value as the server\'s', () => {
+  assert.match(routeSrc(), /estimateAuthoritative: true/, 'without this the flag defaults to false and the guard is inert')
+  assert.match(routeSrc(), /estimatedValue: serverCents/)
 })
