@@ -53,7 +53,17 @@ export type LeadAlertInput = {
   landingPage?: string | null
   utmSource?: string | null
   utmCampaign?: string | null
+  /** The capture MODE, read back off the lead. 'quote_in_person' means the
+   *  customer asked for a visit, so there is deliberately no number. */
+  formStep?: string | null
 }
+
+/** Must match IN_PERSON_LABEL in the capture route: ONE string across the
+ *  lead notes, this card, the confirmation email and the admin list, so the
+ *  same request cannot end up with three different names. */
+export const IN_PERSON_ALERT_LABEL = 'In-Person Estimate Requested'
+export const isInPersonRequest = (formStep?: string | null): boolean =>
+  (formStep ?? '').trim().toLowerCase() === 'quote_in_person'
 
 /** Human labels for the capture surfaces, so the card does not read like a
  *  database dump. Unknown sources fall through to the raw value -- inventing a
@@ -111,9 +121,19 @@ export function consentLine(consent?: boolean | null): string {
 export function formatLeadAlert(lead: LeadAlertInput): { title: string; lines: AlertLine[] } {
   const who = (lead.name ?? '').trim() || 'Someone'
   const optedIn = lead.emailMarketingConsent === true
-  const title = optedIn ? `🟢 New lead — ${who} (opted in)` : `🟡 New lead — ${who}`
+  const inPerson = isInPersonRequest(lead.formStep)
+
+  // An in-person request is a DIFFERENT job for the owner — someone has to go
+  // and look at it — so it has to be recognisable in the notification list
+  // without opening anything.
+  const title = inPerson
+    ? `🏠 ${IN_PERSON_ALERT_LABEL} — ${who}`
+    : optedIn
+      ? `🟢 New lead — ${who} (opted in)`
+      : `🟡 New lead — ${who}`
 
   const lines: AlertLine[] = []
+  if (inPerson) lines.push({ message: `${IN_PERSON_ALERT_LABEL} — no automatic price was produced.` })
 
   // Contact first: this is what the owner acts on.
   const contact = [lead.phone?.trim(), lead.email?.trim()].filter(Boolean).join('  ·  ')

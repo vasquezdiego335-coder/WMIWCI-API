@@ -30,6 +30,7 @@ import { alertFingerprint, shouldRealert } from './leads'
 import { businessPhone } from './business-contact'
 import { MOVE_SIZES } from './estimate'
 import type { LeadCardData } from './booking-display'
+import { isInPersonRequest } from './lead-alert'
 
 const log = apiLogger.child({ mod: 'quote-capture' })
 
@@ -96,7 +97,9 @@ export type QuoteLeadCaptureResponse =
         truckUpgrade: number
         truckCorrected: boolean
       } | null
-      /** 5BR+/"not sure": captured, but quoted by a human. */
+      /** True when this move is quoted by a human rather than automatically:
+       *  5+ bedrooms, or the customer asked for an in-person visit. The lead
+       *  is captured either way; it simply carries no number. */
       manualReview?: boolean
       leadId?: never
     }
@@ -248,7 +251,10 @@ async function queueConfirmationEmail(
   }
   if (claim.count === 0) return { status: 'already_queued', reason: 'already_queued' }
 
-  const estimatedPrice = formatEstimate(lead.estimatedValue)
+  // Read the MODE off the lead, not off the request that triggered this send.
+  // An owner resend months later must still produce the in-person wording.
+  const inPerson = isInPersonRequest(lead.formStep)
+  const estimatedPrice = inPerson ? null : formatEstimate(lead.estimatedValue)
 
   try {
     await emailQueue.add('quote-request-received', {
@@ -264,6 +270,7 @@ async function queueConfirmationEmail(
         // ABSENT, not empty — the template drops the whole paragraph when the
         // key is missing (owner rule: never display an empty value).
         ...(estimatedPrice ? { estimatedPrice } : {}),
+        ...(inPerson ? { inPerson: true } : {}),
         ...(lead.moveDate ? { moveDate: lead.moveDate.toISOString() } : {}),
         ...(packageLabelOf(lead.moveSize) ? { moveSize: packageLabelOf(lead.moveSize) } : {}),
         businessPhone: BUSINESS_PHONE_DISPLAY,
