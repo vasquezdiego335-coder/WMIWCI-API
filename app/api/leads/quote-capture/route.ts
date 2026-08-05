@@ -6,6 +6,7 @@ import { capturePartialLeadSafe } from '@/lib/leads'
 import { onQuoteRequestCaptured } from '@/lib/quote-capture'
 import { quoteEstimate, compareClientTotal } from '@/lib/quote-estimate'
 import { isValidMoveDate, parseMoveDate } from '@/lib/quote-date'
+import { composeAccessDetails } from '@/lib/quote-access-details'
 import type { QuoteLeadCaptureResponse } from '@/lib/quote-capture'
 
 // ════════════════════════════════════════════════════════════════════════
@@ -39,10 +40,6 @@ import type { QuoteLeadCaptureResponse } from '@/lib/quote-capture'
 // ════════════════════════════════════════════════════════════════════════
 
 export const runtime = 'nodejs'
-
-/** ONE string, so the lead notes, the Discord card, the confirmation email and
- *  the admin list cannot drift into three different names for one thing. */
-const IN_PERSON_LABEL = 'In-Person Estimate Requested'
 
 const ALLOWED_ORIGINS = (
   process.env.CORS_ALLOWED_ORIGINS ??
@@ -187,48 +184,6 @@ const QuoteLeadSchema = z.object({
   company: z.string().trim().max(200).optional(),
 })
 
-/**
- * One human-readable access line for the owner's notes, or null when the
- * customer answered nothing. Deliberately plain English: it gets read on a
- * phone, in a van, by whoever is loading the truck.
- */
-type YesNoUnsure = 'yes' | 'no' | 'not_sure'
-const SAY: Record<YesNoUnsure, string> = { yes: 'yes', no: 'no', not_sure: 'not sure' }
-
-export function composeAccessDetails(input: {
-  stairsPickup?: YesNoUnsure
-  stairsDestination?: YesNoUnsure
-  heavyItems?: YesNoUnsure
-  dateFlexible?: boolean
-  quoteMode?: 'instant' | 'in_person'
-  preferredDay?: string
-  preferredTime?: string
-  pickupAddress?: string
-  visitNotes?: string
-}): string | null {
-  const blocks: string[] = []
-
-  // The label leads, so whoever opens the lead sees what kind of request this
-  // is before they read anything else.
-  if (input.quoteMode === 'in_person') blocks.push(IN_PERSON_LABEL)
-
-  const visit: string[] = []
-  if (input.pickupAddress) visit.push(`Address: ${input.pickupAddress}`)
-  if (input.preferredDay) visit.push(`Preferred day: ${input.preferredDay}`)
-  if (input.preferredTime) visit.push(`Preferred time: ${input.preferredTime}`)
-  if (visit.length) blocks.push(visit.join('; ') + '.')
-
-  const access: string[] = []
-  if (input.stairsPickup) access.push(`Stairs at pickup: ${SAY[input.stairsPickup]}`)
-  if (input.stairsDestination) access.push(`Stairs at destination: ${SAY[input.stairsDestination]}`)
-  if (input.heavyItems) access.push(`Large or heavy items: ${SAY[input.heavyItems]}`)
-  if (input.dateFlexible) access.push('Moving date is flexible')
-  if (access.length) blocks.push(`From the quick quote — ${access.join('; ')}.`)
-
-  if (input.visitNotes) blocks.push(`Notes: ${input.visitNotes}`)
-
-  return blocks.length ? blocks.join('\n') : null
-}
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
   const res = await handle(req)
