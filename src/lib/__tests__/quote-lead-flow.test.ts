@@ -41,6 +41,7 @@ import {
   type PartialLeadDeps,
   type PartialLeadStore,
 } from '../leads'
+import { quoteEstimate } from '../quote-estimate'
 import type { LeadCardData } from '../booking-display'
 
 const NOW = new Date('2026-08-05T17:28:00.000Z')
@@ -86,6 +87,7 @@ type Recorder = {
   emails: ConfirmationEmailJob[]
   cards: LeadCardData[]
   directNotices: string[]
+  alertDelivered: string | null
   triggers: Array<{ leadId: string; snapshot: Record<string, unknown> }>
   enrollments: Set<string>
   lead: CaptureLead
@@ -107,6 +109,7 @@ function makeDeps(
     emails: [],
     cards: [],
     directNotices: [],
+    alertDelivered: null,
     triggers: [],
     enrollments: new Set<string>(),
     lead,
@@ -167,6 +170,11 @@ function makeDeps(
     async postLeadNoticeDirect(l) {
       rec.directNotices.push(l.id)
       return true
+    },
+    async recordAlertDelivered(leadId) {
+      // Mirrors recordLeadAlertOutcome(leadId, true): alertStatus 'delivered'.
+      rec.alertDelivered = leadId
+      rec.lead = { ...rec.lead, quoteConfirmationStatus: rec.lead.quoteConfirmationStatus }
     },
     async fireLeadCreated(leadId, snapshot): Promise<LeadTriggerResult> {
       rec.triggers.push({ leadId, snapshot })
@@ -314,17 +322,40 @@ test('6. the Discord lead card is still queued, with the lead facts on it', asyn
 })
 
 test('6b. a dead queue falls back to the direct notice, so the owner never loses the lead', async () => {
-  const { deps, rec } = makeDeps(captureLead(), {
+  const deadQueue = { async enqueueLeadCard() { throw new Error('ECONNREFUSED redis') } }
+  const { deps, rec } = makeDeps(captureLead(), deadQueue)
+  const out = await onQuoteRequestCaptured('lead_1', {}, deps)
+
+  assert.equal(rec.directNotices.length, 1, 'the owner still gets told')
+  assert.equal(out.notificationStatus, 'delivered_direct', 'no job exists — saying "queued" would hide the outage')
+  assert.equal(out.notificationReason, 'direct_fallback')
+  assert.equal(rec.alertDelivered, 'lead_1', 'the row must record that the owner WAS told')
+
+  // THE CLAIM IS KEPT. Releasing it would restore alertFingerprint to null and
+  // shouldRealert() compares against exactly that — so the next submission
+  // would ping again with nothing changed. One ping per submission for the
+  // length of the outage, from the code whose job is to ping once.
+  assert.ok(rec.lead.alertFingerprint, 'the delivered notice keeps its claim')
+  const again = await onQuoteRequestCaptured('lead_1', {}, deps)
+  assert.equal(rec.directNotices.length, 1, 'an unchanged resubmission during the outage must NOT re-ping')
+  assert.equal(again.notificationStatus, 'already_queued')
+})
+
+test('6c. an UPDATE never falls back — the plain notice would call it a new lead', async () => {
+  // notifyNewLead has no update mode; it titles everything "New lead". Telling
+  // the owner that someone he already called is fresh is worse than telling him
+  // nothing, so an update during an outage releases and reports honestly.
+  const { deps, rec } = makeDeps(captureLead({ alertFingerprint: 'stale-fingerprint' }), {
     async enqueueLeadCard() {
       throw new Error('ECONNREFUSED redis')
     },
   })
   const out = await onQuoteRequestCaptured('lead_1', {}, deps)
 
-  assert.equal(rec.directNotices.length, 1, 'the owner still gets told')
-  assert.equal(out.notificationStatus, 'queued')
-  assert.equal(out.notificationReason, 'direct_fallback')
-  assert.equal(rec.lead.alertFingerprint, null, 'a released claim must leave no evidence of a card that never existed')
+  assert.equal(rec.directNotices.length, 0, 'no "New lead" notice for a lead the owner already has')
+  assert.equal(out.notificationStatus, 'unavailable')
+  assert.equal(out.notificationReason, 'enqueue_failed')
+  assert.equal(rec.lead.alertFingerprint, 'stale-fingerprint', 'the claim is released so a retry can still alert')
 })
 
 // ════════════════════════════════════════════════════════════════════════
@@ -528,6 +559,72 @@ test('13d. CAPTURE_SELECT names only real Lead columns', () => {
   assert.ok(selected.includes('originZip'), 'the pickup zip column is originZip')
   assert.ok(!selected.includes('pickupZip'), 'pickupZip is NOT a Lead column — selecting it throws at runtime')
   for (const f of selected) assert.ok(fields.has(f), `CAPTURE_SELECT names a non-existent Lead field: ${f}`)
+})
+
+// ════════════════════════════════════════════════════════════════════════
+//  PRICING: the number the customer is told, in every place we tell them
+//  ---------------------------------------------------------------------
+//  Owner decision 2026-08-05: the published base is the site's number, the
+//  truck fee is added ON TOP, and the confirmation email prints the FULL
+//  price. The three numbers below are the owner's table, written out so a
+//  price-book edit that breaks the relationship fails here rather than in
+//  somebody's inbox.
+// ════════════════════════════════════════════════════════════════════════
+
+const OWNER_PRICE_TABLE: Array<[key: string, base: number, fee: number, total: number]> = [
+  ['1br', 550, 0, 550],
+  ['2br', 779, 100, 879],
+  ['3br', 1049, 150, 1199],
+  ['4br', 1449, 150, 1599],
+]
+
+test('pricing: base + truck fee = the total, for every auto-quoted package', () => {
+  for (const [key, base, fee, total] of OWNER_PRICE_TABLE) {
+    const priced = quoteEstimate({ moveSize: key })
+    assert.ok(priced.ok, `${key} must be auto-quotable`)
+    assert.equal(priced.baseDollars, base, `${key} base must match the published site price`)
+    assert.equal(priced.truckUpgrade, fee, `${key} truck fee`)
+    assert.equal(priced.totalDollars, total, `${key} total must be base + fee`)
+    assert.equal(priced.baseDollars + priced.truckUpgrade, priced.totalDollars, `${key}: the fee must be ON TOP, never folded in`)
+    assert.equal(priced.totalCents, total * 100, `${key} cents is what gets stored on the lead`)
+  }
+  // 5BR is quoted by a human — no number is produced, stored or emailed.
+  const manual = quoteEstimate({ moveSize: '5br' })
+  assert.equal(manual.ok, false)
+})
+
+test('pricing: the confirmation email prints the FULL price, not the base', async () => {
+  for (const [key, base, , total] of OWNER_PRICE_TABLE) {
+    const priced = quoteEstimate({ moveSize: key })
+    assert.ok(priced.ok)
+    // The lead stores the SERVER total in cents — that is what the email reads.
+    const { deps, rec } = makeDeps(captureLead({ moveSize: key, estimatedValue: priced.totalCents }))
+    await onQuoteRequestCaptured('lead_1', {}, deps)
+
+    const printed = rec.emails[0].payload.estimatedPrice
+    assert.equal(printed, `$${total.toLocaleString('en-US')}`, `${key}: the email must print the full price`)
+    if (base !== total) {
+      assert.notEqual(printed, `$${base.toLocaleString('en-US')}`, `${key}: printing the base would understate by the truck fee`)
+    }
+    // And the owner's card is quoted the same number as the customer.
+    assert.equal(rec.cards[0].estimateDollars, total, `${key}: the owner card must agree with the email`)
+  }
+})
+
+test('pricing: the route stores and returns the SERVER number, never the browser one', () => {
+  const s = routeSrc()
+  // What is written to the lead.
+  assert.match(s, /const serverCents = priced\.ok \? priced\.totalCents : null/, 'the stored value is the server total')
+  assert.match(s, /estimatedValue: serverCents/, 'and it is what capture receives')
+  assert.ok(!/estimatedValue: d\.estimateTotal/.test(s), 'the browser figure must never be stored')
+  // What is returned to the browser: the full total, plus the breakdown that
+  // lets the page show the fee rather than absorb it silently.
+  assert.match(s, /totalDollars: priced\.totalDollars/, 'the response carries the full price')
+  assert.match(s, /baseDollars: priced\.baseDollars/)
+  assert.match(s, /truckUpgrade: priced\.truckUpgrade/)
+  // The browser's own number is diagnostic only.
+  assert.match(s, /compareClientTotal\(priced\.totalDollars, d\.estimateTotal\)/)
+  assert.match(s, /quote total mismatch — server value used/)
 })
 
 // ════════════════════════════════════════════════════════════════════════

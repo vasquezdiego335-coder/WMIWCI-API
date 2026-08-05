@@ -71,12 +71,13 @@ function packageLabelOf(moveSize?: string | null): string | null {
  * make about the EMAIL. Delivery is decided later by the worker + guardedSend +
  * Resend, and is tracked on EmailSend. Nothing here may say "sent".
  *
- * For the owner NOTIFICATION, 'queued' means "the owner will be told" — either
- * a BullMQ job exists, or (when the queue refused it) the direct Discord notice
- * was accepted. The distinction is in the `reason`, because what the caller
- * needs to know is whether anyone is going to hear about this lead.
+ * 'delivered_direct' belongs to the owner NOTIFICATION only: the queue refused
+ * the job and the plain Discord notice went out synchronously instead. It is a
+ * SEPARATE value, not a flavour of 'queued', because no job exists in any queue
+ * — an operator counting 'unavailable' during a Redis incident would otherwise
+ * see zero and conclude the queue was healthy.
  */
-export type QueueStatus = 'queued' | 'already_queued' | 'unavailable'
+export type QueueStatus = 'queued' | 'already_queued' | 'unavailable' | 'delivered_direct'
 
 export type QuoteCaptureOutcome = {
   emailStatus: QueueStatus
@@ -281,6 +282,8 @@ export interface QuoteCaptureDeps {
   enqueueLeadCard(payload: LeadCardData): Promise<void>
   /** Direct Discord REST post. The fallback for a dead queue — see queueInternalAlert. */
   postLeadNoticeDirect(lead: CaptureLead): Promise<boolean>
+  /** Record that the owner WAS told, when the notice bypassed the queue. */
+  recordAlertDelivered(leadId: string): Promise<void>
   /** Promotional enrollment. Consent is enforced INSIDE fireLeadTrigger. */
   fireLeadCreated(leadId: string, snapshot: Record<string, unknown>): Promise<LeadTriggerResult>
   now(): Date
@@ -372,6 +375,9 @@ export function defaultQuoteCaptureDeps(): QuoteCaptureDeps {
         formStep: lead.formStep,
       })
       return res.delivered
+    },
+    async recordAlertDelivered(leadId) {
+      await recordLeadAlertOutcome(leadId, true)
     },
     async fireLeadCreated(leadId, snapshot) {
       return fireLeadTrigger('lead_created', leadId, { snapshot })
@@ -542,9 +548,39 @@ async function queueInternalAlert(
     log.info({ leadId: lead.id, isUpdate }, 'lead alert queued')
     return { status: 'queued' }
   } catch (err) {
-    // Release BOTH fields together, and only if the row still holds exactly
-    // what we wrote. Restoring the fingerprint while leaving lastAlertedAt set
-    // (the previous behaviour) left the row claiming a card that never existed.
+    // ── QUEUE DOWN ⇒ POST IT DIRECTLY ────────────────────────────────────
+    // The rich card needs Redis; the owner needs the lead. When BullMQ cannot
+    // take the job we fall back to the plain REST notice — the same one
+    // capturePartialLeadSafe sends for every other capture surface. This is why
+    // the quote route asks capture NOT to notify: exactly one card per lead,
+    // and still one when the queue is dead.
+    //
+    // ONLY FOR A FIRST ALERT. notifyNewLead has no update mode — it titles
+    // every message "New lead" — so falling back on an UPDATE would tell the
+    // owner that someone he already called is a fresh lead. A missed update
+    // card is a smaller harm than a wrong one, and matches the old behaviour
+    // exactly (the plain notice only ever fired on isNew).
+    const fallbackDelivered = isUpdate ? false : await deps.postLeadNoticeDirect(lead).catch(() => false)
+
+    if (fallbackDelivered) {
+      // KEEP THE CLAIM. Releasing it would restore alertFingerprint to null,
+      // and shouldRealert() compares against exactly that — so the NEXT
+      // submission would alert again with nothing changed. Under a sustained
+      // outage that is one ping per submission, from the code whose whole job
+      // is to ping once. The notice was delivered, so the claim is true; the
+      // row records delivery rather than a queued job that never existed.
+      await deps.recordAlertDelivered(lead.id).catch(() => undefined)
+      log.error(
+        { leadId: lead.id, err: errText(err) },
+        'lead alert enqueue failed — direct notice delivered instead'
+      )
+      return { status: 'delivered_direct', reason: 'direct_fallback' }
+    }
+
+    // Nothing reached the owner. Release BOTH fields together, and only if the
+    // row still holds exactly what we wrote, so a later submission can retry.
+    // Restoring the fingerprint while leaving lastAlertedAt set (the original
+    // behaviour) left the row claiming a card that never existed.
     const released = await deps.releaseAlert({
       leadId: lead.id,
       fingerprint,
@@ -552,23 +588,11 @@ async function queueInternalAlert(
       previousFingerprint: lead.alertFingerprint,
       previousAlertedAt: lead.lastAlertedAt,
     })
-
-    // ── QUEUE DOWN ⇒ POST IT DIRECTLY ────────────────────────────────────
-    // The rich card needs Redis; the owner needs the lead. When BullMQ cannot
-    // take the job we fall back to the plain REST notice — the same one
-    // capturePartialLeadSafe sends for every other capture surface. This is why
-    // the quote route asks capture NOT to notify: exactly one card per lead,
-    // and still one when the queue is dead. (A Redis outage is not theoretical
-    // here — it is the shape of the outage this whole flow already survives.)
-    const fallback = await deps.postLeadNoticeDirect(lead).catch(() => false)
     log.error(
-      { leadId: lead.id, released: released === 1, fallbackDelivered: fallback, err: errText(err) },
-      'lead alert enqueue failed — direct notice attempted'
+      { leadId: lead.id, released: released === 1, isUpdate, err: errText(err) },
+      'lead alert enqueue failed (non-fatal)'
     )
-    return {
-      status: fallback ? 'queued' : 'unavailable',
-      reason: fallback ? 'direct_fallback' : 'enqueue_failed',
-    }
+    return { status: 'unavailable', reason: 'enqueue_failed' }
   }
 }
 
