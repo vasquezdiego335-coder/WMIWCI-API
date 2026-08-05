@@ -133,7 +133,7 @@ export const PACKAGES: Record<PackageKey, MovePackage> = {
   'little-studio': { key: 'little-studio', label: 'Small Studio',    label_es: 'Estudio Pequeño',  rooms: 1, requiresReview: false, price: c({ kind: 'fixed', amount: 379, label: 'Small Studio' }) },
   'half-studio':   { key: 'half-studio',   label: 'Standard Studio', label_es: 'Estudio Estándar', rooms: 1, requiresReview: false, price: c({ kind: 'fixed', amount: 439, label: 'Standard Studio' }) },
   'full-studio':   { key: 'full-studio',   label: 'Large Studio',    label_es: 'Estudio Grande',   rooms: 1, requiresReview: false, price: c({ kind: 'fixed', amount: 549, label: 'Large Studio' }) },
-  '1br':           { key: '1br',           label: '1 Bedroom',     label_es: '1 Recámara',       rooms: 2, requiresReview: false, price: c({ kind: 'fixed', amount: 649, label: '1 Bedroom' }) },
+  '1br':           { key: '1br',           label: '1 Bedroom',     label_es: '1 Recámara',       rooms: 2, requiresReview: false, price: c({ kind: 'fixed', amount: 550, label: '1 Bedroom' }) },
   '2br':           { key: '2br',           label: '2 Bedrooms',    label_es: '2 Recámaras',      rooms: 3, requiresReview: false, price: c({ kind: 'fixed', amount: 779, label: '2 Bedrooms' }) },
 
   // ── Review-gated floors. `kind: 'starting'` makes "Starting at" structural:
@@ -180,6 +180,166 @@ export const BOOKING_AUTHORIZATION = {
 
 /** Crew labor add-on to collect and return a truck the CUSTOMER reserved.
  *  Due on move day, never charged in Stripe, always manually approved. */
+// ── Truck-size upgrade (owner decision, reconciled 2026-08-04) ───────────────
+//  NOT the same thing as TRUCK_PICKUP_RETURN below, which is crew time to fetch
+//  a truck the CUSTOMER rented. This is the truck WE bring: every package ships
+//  with one included, and a larger one costs the difference.
+//
+//  WHY IT LIVES HERE NOW. These amounts previously existed ONLY as a hand edit
+//  inside the GENERATED browser mirror (public/js/pricing-config.js), which the
+//  generator overwrites — so the server and the customer's screen could, and
+//  did, disagree. The server is the single source from here on; the mirror is
+//  regenerated from it and must never be hand-edited again.
+//
+//  20ft IS RETIRED (owner decision 2026-08-02) and is deliberately ABSENT
+//  rather than priced at 0: an unsupported size must be REJECTED, never
+//  silently charged as if it were something else. See truckUpgradeAmount().
+export const TRUCK_SIZE_UPGRADE = {
+  id: 'truckSizeUpgrade',
+  label: 'Larger truck',
+  label_es: 'Camión más grande',
+  requiresReview: true,
+  /** Sizes we actually operate, and what each ADDS to the package price. */
+  amountByTruck: {
+    '10ft': 0,
+    '15ft': 100,
+    '26ft': 150,
+  },
+  amountCentsByTruck: {
+    '10ft': 0,
+    '15ft': 10000,
+    '26ft': 15000,
+  },
+  note: 'The truck included with your package covers most moves of this size. A larger truck is available for the difference, confirmed after we review your inventory.',
+  note_es: 'El camión incluido en su paquete cubre la mayoría de las mudanzas de este tamaño. Hay un camión más grande disponible por la diferencia, confirmado después de revisar su inventario.',
+} as const
+
+/**
+ * THE MINIMUM TRUCK EACH PACKAGE REQUIRES.
+ *
+ * Truck size is DERIVED from the move size, not offered as a free choice. A
+ * customer cannot pick a smaller truck to dodge the upgrade fee: a 3-bedroom
+ * move does not fit in a 10ft truck, and letting someone book one produces a
+ * crew standing in a driveway with nowhere to put the furniture.
+ *
+ * A LARGER truck is allowed. The fee is then the LARGER truck's fee and it
+ * REPLACES the smaller one — 10ft to 26ft costs $150, never $100 + $150.
+ *
+ * 5BR is absent on purpose: it may need several trucks or several trips, so it
+ * cannot be quoted automatically from a single truck. See requiresManualTruckPlan.
+ */
+export const MIN_TRUCK_BY_PACKAGE: Record<string, SelectableTruckSize> = {
+  'little-studio': '10ft',
+  'half-studio': '10ft',
+  'full-studio': '10ft',
+  '1br': '10ft',
+  '2br': '15ft',
+  '3br': '26ft',
+  '4br': '26ft',
+}
+
+/** Packages that cannot be auto-quoted from one truck — owner review instead. */
+export const MANUAL_TRUCK_PLAN_PACKAGES: ReadonlySet<string> = new Set(['5br', 'not-sure'])
+
+export function requiresManualTruckPlan(packageKey?: string | null): boolean {
+  return MANUAL_TRUCK_PLAN_PACKAGES.has((packageKey ?? '').trim().toLowerCase())
+}
+
+/** Ascending capacity. Used to compare "is this at least the minimum?". */
+const TRUCK_ORDER: readonly SelectableTruckSize[] = ['10ft', '15ft', '26ft']
+const rank = (t: SelectableTruckSize) => TRUCK_ORDER.indexOf(t)
+
+export type TruckAssignment =
+  | {
+      ok: true
+      /** The size actually assigned — never smaller than the minimum. */
+      assigned: SelectableTruckSize
+      /** The minimum this package requires, for honest UI copy. */
+      minimum: SelectableTruckSize
+      /** DOLLARS. The assigned size's fee. REPLACES, never stacks. */
+      upgradeAmount: number
+      /** True when the customer asked for something below the minimum and we
+       *  corrected it upward. The UI should say so rather than silently differ. */
+      corrected: boolean
+      /** True when the customer chose a larger truck than required. */
+      upgraded: boolean
+    }
+  | { ok: false; reason: 'manual_plan' | 'unknown_package' | 'unsupported_truck' }
+
+/**
+ * Assign the truck for a package, honouring an optional customer preference.
+ *
+ * THE SERVER IS AUTHORITATIVE. A request naming a truck below the minimum is
+ * CORRECTED upward rather than rejected — the customer still gets a usable
+ * quote, and they are told what changed. A truck size we do not operate (a
+ * retired 20ft, or anything invented) IS rejected, because silently swapping it
+ * for a different size would quote a vehicle nobody agreed to.
+ */
+export function assignTruck(packageKey?: string | null, requested?: string | null): TruckAssignment {
+  const key = (packageKey ?? '').trim().toLowerCase()
+  if (!key) return { ok: false, reason: 'unknown_package' }
+  if (requiresManualTruckPlan(key)) return { ok: false, reason: 'manual_plan' }
+
+  const minimum = MIN_TRUCK_BY_PACKAGE[key]
+  if (!minimum) return { ok: false, reason: 'unknown_package' }
+
+  let assigned: SelectableTruckSize = minimum
+  let corrected = false
+  let upgraded = false
+
+  const askedRaw = (requested ?? '').trim().toLowerCase()
+  if (askedRaw) {
+    if (!isSelectableTruckSize(askedRaw)) return { ok: false, reason: 'unsupported_truck' }
+    const asked = askedRaw as SelectableTruckSize
+    if (rank(asked) < rank(minimum)) {
+      // Below the minimum: correct upward. This is the anti-dodge rule.
+      assigned = minimum
+      corrected = true
+    } else {
+      assigned = asked
+      upgraded = rank(asked) > rank(minimum)
+    }
+  }
+
+  // The assigned size's own fee — a REPLACEMENT, so upgrading 10ft -> 26ft is
+  // $150 and never the sum of the intermediate steps.
+  const upgradeAmount = truckUpgradeAmount(assigned) ?? 0
+  return { ok: true, assigned, minimum, upgradeAmount, corrected, upgraded }
+}
+
+/** The truck sizes a NEW booking may choose. 20ft is retired and excluded. */
+export const SELECTABLE_TRUCK_SIZES = ['10ft', '15ft', '26ft'] as const
+export type SelectableTruckSize = (typeof SELECTABLE_TRUCK_SIZES)[number]
+
+/**
+ * DOLLARS added by a given truck size, or null when the size is not one we
+ * operate.
+ *
+ * Returning null rather than 0 for an unknown or retired size is the whole
+ * point: 0 reads as "this truck is free", which would let a retired 20ft
+ * selection through at no charge. Callers must treat null as a rejection.
+ */
+export function truckUpgradeAmount(size?: string | null): number | null {
+  const key = (size ?? '').trim().toLowerCase()
+  if (!key) return null
+  return Object.prototype.hasOwnProperty.call(TRUCK_SIZE_UPGRADE.amountByTruck, key)
+    ? TRUCK_SIZE_UPGRADE.amountByTruck[key as SelectableTruckSize]
+    : null
+}
+
+/** CENTS twin of truckUpgradeAmount, for anything that stores money. */
+export function truckUpgradeAmountCents(size?: string | null): number | null {
+  const key = (size ?? '').trim().toLowerCase()
+  if (!key) return null
+  return Object.prototype.hasOwnProperty.call(TRUCK_SIZE_UPGRADE.amountCentsByTruck, key)
+    ? TRUCK_SIZE_UPGRADE.amountCentsByTruck[key as SelectableTruckSize]
+    : null
+}
+
+export function isSelectableTruckSize(size?: string | null): size is SelectableTruckSize {
+  return truckUpgradeAmount(size) !== null
+}
+
 export const TRUCK_PICKUP_RETURN = {
   id: 'truckPickupReturnFee',
   amount: 49,

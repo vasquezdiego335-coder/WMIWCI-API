@@ -58,16 +58,20 @@ test('a manipulated browser total cannot become the official quote', () => {
   assert.equal(cmp.serverDollars, priced.totalDollars)
 })
 
-test('the server price equals the published price book — honest submissions are unaffected', () => {
+test('the server BASE equals the published price book, and the total adds only the required truck', () => {
+  // The prominent total deliberately INCLUDES the truck the move requires — a
+  // headline price that excluded required equipment would be the "misleading
+  // lower package price" the owner ruled out. The base line still has to match
+  // the published book exactly, or the customer sees one number and we store
+  // another.
   for (const key of Object.keys(MOVE_SIZES)) {
-    if (key === 'not-sure') continue
     const priced = quoteEstimate({ moveSize: key })
-    assert.equal(priced.ok, true, `${key} must price`)
-    if (!priced.ok) continue
+    if (!priced.ok) continue // 'not-sure' and 5BR are manual plans, not prices
+    assert.equal(priced.baseDollars, MOVE_SIZES[key].price, `${key} base must equal the price book`)
     assert.equal(
       priced.totalDollars,
-      MOVE_SIZES[key].price,
-      `${key} must equal the price book, or the customer sees one number and we store another`
+      priced.baseDollars + priced.truckUpgrade,
+      `${key}: total must be base + required truck, with nothing else folded in`
     )
   }
 })
