@@ -307,3 +307,88 @@ test('the mirror is GENERATED — a hand edit is what let the two drift', skipSi
   assert.match(src.slice(0, 600), /GENERATED FILE/,
     'the header must keep saying so; the truck fees previously lived here as a hand edit and nowhere else')
 })
+
+// ══════════════════════════════════════════════════════════════════════
+//  8. THE STARTING PRICES SHOWN ON STEP 1
+//
+//  The move-size cards display a price before the contact gate. Those
+//  amounts are DERIVED in the browser from this price book plus the truck
+//  each size requires — never typed into the page. These are the figures the
+//  owner approved, pinned here so a price change that would silently alter
+//  what the cards advertise fails a test instead.
+//
+//  Every one of them EXCLUDES transportation, which is why the cards read
+//  "From" and why the note beneath them says so.
+// ══════════════════════════════════════════════════════════════════════
+
+/** What a step-1 card shows, computed the way the page computes it. */
+function cardTotal(pkgKey: string): number {
+  const pkg = (PACKAGES as Record<string, { price: { amount: number } }>)[pkgKey]
+  assert.ok(pkg, `${pkgKey} missing from the price book`)
+  const truck = (MIN_TRUCK_BY_PACKAGE as Record<string, string>)[pkgKey]
+  assert.ok(truck, `${pkgKey} has no required truck`)
+  const fee = (TRUCK_SIZE_UPGRADE.amountByTruck as Record<string, number>)[truck]
+  assert.equal(typeof fee, 'number', `no fee recorded for ${truck}`)
+  return pkg.price.amount + fee
+}
+
+const APPROVED_CARD_PRICES: Record<string, number> = {
+  '1br': 550,
+  '2br': 879,
+  '3br': 1199,
+  '4br': 1599,
+}
+
+test('every priced card shows the approved starting amount', () => {
+  for (const [key, expected] of Object.entries(APPROVED_CARD_PRICES)) {
+    assert.equal(cardTotal(key), expected, `${key} card must read $${expected}`)
+  }
+})
+
+test('the card amount INCLUDES the required truck adjustment', () => {
+  for (const key of Object.keys(APPROVED_CARD_PRICES)) {
+    const base = (PACKAGES as Record<string, { price: { amount: number } }>)[key].price.amount
+    const truck = (MIN_TRUCK_BY_PACKAGE as Record<string, string>)[key]
+    const fee = (TRUCK_SIZE_UPGRADE.amountByTruck as Record<string, number>)[truck]
+    assert.equal(cardTotal(key) - base, fee, `${key}: the card must add the ${truck} fee, not the base alone`)
+  }
+  // The one that would hide a bug: 2br's fee is non-zero, so a card showing
+  // the base price would be $100 light and nobody would notice from 1br.
+  assert.equal(cardTotal('2br') - (PACKAGES as any)['2br'].price.amount, 100)
+})
+
+test('5+ bedrooms has no card price to show', () => {
+  assert.equal(
+    (MIN_TRUCK_BY_PACKAGE as Record<string, string>)['5br'],
+    undefined,
+    '5br must have no required truck — it may need several, which is why it is quoted by hand'
+  )
+  assert.ok(requiresManualTruckPlan('5br'), 'and it must be flagged as manual')
+})
+
+test('the card amount is the server-authoritative PRE-TRANSPORTATION total', () => {
+  // Same figure the server returns for the same inputs, before any routed
+  // mileage is added — so the card and the revealed estimate cannot disagree.
+  for (const key of Object.keys(APPROVED_CARD_PRICES)) {
+    const q = quoteEstimate({ moveSize: key })
+    assert.ok(q.ok, `${key} must price`)
+    if (!q.ok) continue
+    assert.equal(
+      q.totalDollars,
+      cardTotal(key),
+      `${key}: the step-1 card and the server total must be the same number`
+    )
+  }
+})
+
+test('the browser mirror can produce those same card amounts', skipSite, () => {
+  // The page derives from the MIRROR, not from this file. If the mirror
+  // drifts, the cards advertise something the server will not honour.
+  const m = loadMirror()
+  const pkgs = m.PACKAGES as Record<string, { price: { amount: number } }>
+  const fees = (m.TRUCK_SIZE_UPGRADE as { amountByTruck: Record<string, number> }).amountByTruck
+  const MIN: Record<string, string> = { '1br': '10ft', '2br': '15ft', '3br': '26ft', '4br': '26ft' }
+  for (const [key, expected] of Object.entries(APPROVED_CARD_PRICES)) {
+    assert.equal(pkgs[key].price.amount + fees[MIN[key]], expected, `${key} in the browser mirror`)
+  }
+})
