@@ -167,6 +167,10 @@ async function processScheduledJob(job: Job<ScheduledJobData>): Promise<void> {
           moveDate: true,
           convertedBookingId: true,
           jobType: true,
+          // Quote follow-ups are PROMOTIONAL, so the gate refuses without an
+          // explicit opt-in. A select that omits this would not compile —
+          // which is the point of LeadState requiring it.
+          emailMarketingConsent: true,
         },
       })
       const block = quoteFollowupBlockReason(lead)
