@@ -1,9 +1,15 @@
 // ════════════════════════════════════════════════════════════════════════
 //  quote-capture.ts — what happens the moment a quick-quote lead is saved.
 //
-//  Owner spec 2026-08-03. Two side effects, both fail-soft, both deduped:
+//  Owner spec 2026-08-03. THREE side effects, all fail-soft, all deduped:
 //    1. ONE transactional confirmation email to the customer.
 //    2. ONE internal Discord card so the lead can be called quickly.
+//    3. ONE promotional automation enrollment — ONLY with explicit consent.
+//
+//  (3) is new. It is listed last because it runs last and matters least: it is
+//  the only one the customer did not ask for, and the only one that is skipped
+//  outright for most leads. Consent lives in its own gate (section 3) and never
+//  touches (1) — asking for an estimate earns you the estimate.
 //
 //  THE HARD RULE THIS FILE EXISTS TO KEEP: neither side effect may delay,
 //  block, or fail the customer's estimate. Every function returns an outcome
@@ -30,7 +36,8 @@ import { alertFingerprint, shouldRealert } from './leads'
 import { businessPhone } from './business-contact'
 import { MOVE_SIZES } from './estimate'
 import type { LeadCardData } from './booking-display'
-import { isInPersonRequest } from './lead-alert'
+import { isInPersonRequest, notifyNewLead } from './lead-alert'
+import { fireLeadTrigger, type LeadTriggerResult } from './email-automation-runtime'
 
 const log = apiLogger.child({ mod: 'quote-capture' })
 
@@ -61,16 +68,29 @@ function packageLabelOf(moveSize?: string | null): string | null {
  *   unavailable     we could not queue it (Redis down, no address, error)
  *
  * NOTE THE VOCABULARY: 'queued' is the strongest claim this layer can honestly
- * make. Delivery is decided later by the worker + guardedSend + Resend, and is
- * tracked on EmailSend. Nothing here may say "sent".
+ * make about the EMAIL. Delivery is decided later by the worker + guardedSend +
+ * Resend, and is tracked on EmailSend. Nothing here may say "sent".
+ *
+ * 'delivered_direct' belongs to the owner NOTIFICATION only: the queue refused
+ * the job and the plain Discord notice went out synchronously instead. It is a
+ * SEPARATE value, not a flavour of 'queued', because no job exists in any queue
+ * — an operator counting 'unavailable' during a Redis incident would otherwise
+ * see zero and conclude the queue was healthy.
  */
-export type QueueStatus = 'queued' | 'already_queued' | 'unavailable'
+export type QueueStatus = 'queued' | 'already_queued' | 'unavailable' | 'delivered_direct'
 
 export type QuoteCaptureOutcome = {
   emailStatus: QueueStatus
   emailReason?: string
   notificationStatus: QueueStatus
   notificationReason?: string
+  /**
+   * What the PROMOTIONAL trigger did. INTERNAL — logged by the route, never
+   * returned to the browser. Whether we enrolled someone in marketing is not
+   * the browser's business, and a visitor must never be able to probe our
+   * consent state by reading a response body.
+   */
+  automation?: LeadTriggerResult
 }
 
 /**
@@ -112,7 +132,20 @@ export type QuoteLeadCaptureResponse =
       fields?: string[]
     }
 
-/** The lead columns both side effects need. One read, two decisions. */
+/**
+ * The lead columns the side effects need. One read, three decisions.
+ *
+ * EVERY KEY HERE MUST BE A REAL FIELD ON `model Lead`. Prisma rejects an
+ * unknown `select` key at RUNTIME, not at compile time — `CAPTURE_SELECT` is a
+ * named `as const`, so TypeScript's excess-property check never sees it at the
+ * call site. This file shipped with `pickupZip: true` (the column is
+ * `originZip`), which made `prisma.lead.findUnique` throw on every quick-quote
+ * submission. The throw was caught by onQuoteRequestCaptured's own catch and
+ * reported as `emailStatus: 'unavailable'` — so the endpoint captured leads and
+ * silently queued NOTHING: no confirmation email, no owner card, no
+ * `quoteConfirmationQueuedAt`, for every lead, forever. See quote-lead-flow
+ * tests, which assert this shape against the generated Prisma types.
+ */
 const CAPTURE_SELECT = {
   id: true,
   name: true,
@@ -122,8 +155,9 @@ const CAPTURE_SELECT = {
   moveDate: true,
   moveSize: true,
   zip: true,
-  pickupZip: true,
+  originZip: true,
   destinationZip: true,
+  emailMarketingConsent: true,
   originCity: true,
   destCity: true,
   contactPreference: true,
@@ -141,7 +175,7 @@ const CAPTURE_SELECT = {
   lastAlertedAt: true,
 } as const
 
-type CaptureLead = {
+export type CaptureLead = {
   id: string
   name: string
   email: string | null
@@ -150,8 +184,10 @@ type CaptureLead = {
   moveDate: Date | null
   moveSize: string | null
   zip: string | null
-  pickupZip: string | null
+  originZip: string | null
   destinationZip: string | null
+  /** TRI-STATE. Gates the PROMOTIONAL trigger only — never the confirmation. */
+  emailMarketingConsent: boolean | null
   originCity: string | null
   destCity: string | null
   contactPreference: string | null
@@ -198,6 +234,159 @@ function routeLabel(city?: string | null, zip?: string | null): string | null {
 }
 
 // ════════════════════════════════════════════════════════════════════════
+//  0. THE INJECTABLE EDGE
+//  ---------------------------------------------------------------------
+//  Every effect that leaves this process — the four conditional lead writes,
+//  the two queue inserts, the direct Discord post, the automation trigger —
+//  goes through QuoteCaptureDeps. Production wiring is `defaultQuoteCaptureDeps`
+//  below and is a literal transcription of the prisma/BullMQ calls this file
+//  has always made; nothing about the ORDER, the compare-and-set predicates or
+//  the failure handling changed.
+//
+//  It exists because none of this had a single test. The one bug that mattered
+//  (see CAPTURE_SELECT) was invisible precisely because the whole chain could
+//  only be exercised against a live database and a live Redis. leads.ts already
+//  solves this with LeadStore/LeadDeps; this is the same pattern, same reasons.
+// ════════════════════════════════════════════════════════════════════════
+
+/** The queued confirmation-email job, exactly as the email worker reads it. */
+export type ConfirmationEmailJob = {
+  template: 'quote-request-received'
+  to: string
+  leadId: string
+  businessEventKey: string
+  payload: Record<string, unknown>
+}
+
+export interface QuoteCaptureDeps {
+  loadLead(leadId: string): Promise<CaptureLead | null>
+  /** Conditional claim of the confirmation send. Returns rows MATCHED (0 or 1). */
+  claimConfirmation(input: { leadId: string; force: boolean; claimedAt: Date; nextCount: number }): Promise<number>
+  /** Compare-and-set rollback — must only undo a claim THIS request wrote. */
+  releaseConfirmation(input: {
+    leadId: string
+    claimedAt: Date
+    nextCount: number
+    previousQueuedAt: Date | null
+    previousCount: number
+  }): Promise<number>
+  claimAlert(input: { leadId: string; fingerprint: string; claimedAt: Date }): Promise<number>
+  releaseAlert(input: {
+    leadId: string
+    fingerprint: string
+    claimedAt: Date
+    previousFingerprint: string | null
+    previousAlertedAt: Date | null
+  }): Promise<number>
+  enqueueConfirmationEmail(job: ConfirmationEmailJob): Promise<void>
+  enqueueLeadCard(payload: LeadCardData): Promise<void>
+  /** Direct Discord REST post. The fallback for a dead queue — see queueInternalAlert. */
+  postLeadNoticeDirect(lead: CaptureLead): Promise<boolean>
+  /** Record that the owner WAS told, when the notice bypassed the queue. */
+  recordAlertDelivered(leadId: string): Promise<void>
+  /** Promotional enrollment. Consent is enforced INSIDE fireLeadTrigger. */
+  fireLeadCreated(leadId: string, snapshot: Record<string, unknown>): Promise<LeadTriggerResult>
+  now(): Date
+}
+
+let _deps: QuoteCaptureDeps | undefined
+export function defaultQuoteCaptureDeps(): QuoteCaptureDeps {
+  if (_deps) return _deps
+  _deps = {
+    now: () => new Date(),
+    async loadLead(leadId) {
+      return (await prisma.lead.findUnique({ where: { id: leadId }, select: CAPTURE_SELECT })) as CaptureLead | null
+    },
+    async claimConfirmation({ leadId, force, claimedAt, nextCount }) {
+      const res = await prisma.lead.updateMany({
+        where: force ? { id: leadId } : { id: leadId, quoteConfirmationQueuedAt: null },
+        data: {
+          quoteConfirmationQueuedAt: claimedAt,
+          quoteConfirmationCount: nextCount,
+          quoteConfirmationStatus: 'queued',
+          // A retry clears the previous terminal failure — otherwise the admin
+          // would keep reading a stale error beside a fresh attempt.
+          quoteConfirmationFailedAt: null,
+          quoteConfirmationLastError: null,
+        },
+      })
+      return res.count
+    },
+    async releaseConfirmation({ leadId, claimedAt, nextCount, previousQueuedAt, previousCount }) {
+      const res = await prisma.lead
+        .updateMany({
+          where: { id: leadId, quoteConfirmationQueuedAt: claimedAt, quoteConfirmationCount: nextCount },
+          data: {
+            quoteConfirmationQueuedAt: previousQueuedAt,
+            quoteConfirmationCount: previousCount,
+            quoteConfirmationStatus: previousQueuedAt ? 'queued' : null,
+          },
+        })
+        .catch(() => ({ count: 0 }))
+      return res.count
+    },
+    async claimAlert({ leadId, fingerprint, claimedAt }) {
+      const res = await prisma.lead.updateMany({
+        // `not:` alone would skip NULL rows (SQL three-valued logic), so the
+        // null case is spelled out — that is the very first alert for a lead.
+        where: { id: leadId, OR: [{ alertFingerprint: null }, { alertFingerprint: { not: fingerprint } }] },
+        data: { alertFingerprint: fingerprint, lastAlertedAt: claimedAt, alertStatus: 'queued' },
+      })
+      return res.count
+    },
+    async releaseAlert({ leadId, fingerprint, claimedAt, previousFingerprint, previousAlertedAt }) {
+      const res = await prisma.lead
+        .updateMany({
+          where: { id: leadId, alertFingerprint: fingerprint, lastAlertedAt: claimedAt },
+          data: {
+            alertFingerprint: previousFingerprint,
+            lastAlertedAt: previousAlertedAt,
+            alertStatus: previousFingerprint ? 'queued' : null,
+          },
+        })
+        .catch(() => ({ count: 0 }))
+      return res.count
+    },
+    async enqueueConfirmationEmail(job) {
+      await emailQueue.add('quote-request-received', job)
+    },
+    async enqueueLeadCard(payload) {
+      await discordQueue.add('lead-created', {
+        type: 'lead-created',
+        payload: payload as unknown as Record<string, unknown>,
+      })
+    },
+    async postLeadNoticeDirect(lead) {
+      const res = await notifyNewLead({
+        id: lead.id,
+        name: lead.name,
+        email: lead.email,
+        phone: lead.phone,
+        source: lead.source,
+        moveSize: lead.moveSize,
+        moveDate: lead.moveDate,
+        originZip: lead.originZip ?? lead.zip,
+        destinationZip: lead.destinationZip,
+        estimatedValue: lead.estimatedValue,
+        emailMarketingConsent: lead.emailMarketingConsent,
+        landingPage: lead.landingPage,
+        utmSource: lead.utmSource,
+        utmCampaign: lead.utmCampaign,
+        formStep: lead.formStep,
+      })
+      return res.delivered
+    },
+    async recordAlertDelivered(leadId) {
+      await recordLeadAlertOutcome(leadId, true)
+    },
+    async fireLeadCreated(leadId, snapshot) {
+      return fireLeadTrigger('lead_created', leadId, { snapshot })
+    },
+  }
+  return _deps
+}
+
+// ════════════════════════════════════════════════════════════════════════
 //  1. THE CONFIRMATION EMAIL
 // ════════════════════════════════════════════════════════════════════════
 
@@ -224,32 +413,27 @@ function routeLabel(city?: string | null, zip?: string | null): string | null {
  */
 async function queueConfirmationEmail(
   lead: CaptureLead,
-  opts: { force?: boolean; locale?: string } = {}
+  opts: { force?: boolean; locale?: string } = {},
+  deps: QuoteCaptureDeps = defaultQuoteCaptureDeps()
 ): Promise<{ status: QueueStatus; reason?: string }> {
+  // NOTE: consent is deliberately NOT consulted here. This is the reply to a
+  // request the customer just made — transactional by classification
+  // (email-guard's TRANSACTIONAL_TEMPLATES) and by common sense. Someone who
+  // asked for an estimate gets their estimate whether or not they ticked a
+  // marketing box.
   if (!lead.email) return { status: 'unavailable', reason: 'no_email' }
 
-  const claimedAt = new Date()
+  const claimedAt = deps.now()
   const nextCount = lead.quoteConfirmationCount + 1
 
-  let claim
+  let claimed: number
   try {
-    claim = await prisma.lead.updateMany({
-      where: opts.force ? { id: lead.id } : { id: lead.id, quoteConfirmationQueuedAt: null },
-      data: {
-        quoteConfirmationQueuedAt: claimedAt,
-        quoteConfirmationCount: nextCount,
-        quoteConfirmationStatus: 'queued',
-        // A retry clears the previous terminal failure — otherwise the admin
-        // would keep reading a stale error beside a fresh attempt.
-        quoteConfirmationFailedAt: null,
-        quoteConfirmationLastError: null,
-      },
-    })
+    claimed = await deps.claimConfirmation({ leadId: lead.id, force: !!opts.force, claimedAt, nextCount })
   } catch (err) {
     log.error({ leadId: lead.id, err: errText(err) }, 'confirmation claim failed (non-fatal)')
     return { status: 'unavailable', reason: 'claim_failed' }
   }
-  if (claim.count === 0) return { status: 'already_queued', reason: 'already_queued' }
+  if (claimed === 0) return { status: 'already_queued', reason: 'already_queued' }
 
   // Read the MODE off the lead, not off the request that triggered this send.
   // An owner resend months later must still produce the in-person wording.
@@ -257,7 +441,7 @@ async function queueConfirmationEmail(
   const estimatedPrice = inPerson ? null : formatEstimate(lead.estimatedValue)
 
   try {
-    await emailQueue.add('quote-request-received', {
+    await deps.enqueueConfirmationEmail({
       template: 'quote-request-received',
       to: lead.email,
       leadId: lead.id,
@@ -283,18 +467,15 @@ async function queueConfirmationEmail(
     // ── COMPARE-AND-SET RELEASE ──────────────────────────────────────────
     // Only undo what WE wrote. If another request has since claimed the row
     // (different timestamp or count), `count` is 0 and we touch nothing.
-    const released = await prisma.lead
-      .updateMany({
-        where: { id: lead.id, quoteConfirmationQueuedAt: claimedAt, quoteConfirmationCount: nextCount },
-        data: {
-          quoteConfirmationQueuedAt: lead.quoteConfirmationQueuedAt,
-          quoteConfirmationCount: lead.quoteConfirmationCount,
-          quoteConfirmationStatus: lead.quoteConfirmationQueuedAt ? 'queued' : null,
-        },
-      })
-      .catch(() => ({ count: 0 }))
+    const released = await deps.releaseConfirmation({
+      leadId: lead.id,
+      claimedAt,
+      nextCount,
+      previousQueuedAt: lead.quoteConfirmationQueuedAt,
+      previousCount: lead.quoteConfirmationCount,
+    })
     log.error(
-      { leadId: lead.id, released: released.count === 1, err: errText(err) },
+      { leadId: lead.id, released: released === 1, err: errText(err) },
       'quote confirmation enqueue failed (non-fatal)'
     )
     return { status: 'unavailable', reason: 'enqueue_failed' }
@@ -314,7 +495,10 @@ async function queueConfirmationEmail(
  * ONLY `alertFingerprint` and left `lastAlertedAt` pointing at a card that was
  * never queued — an internally contradictory row.
  */
-async function queueInternalAlert(lead: CaptureLead): Promise<{ status: QueueStatus; reason?: string }> {
+async function queueInternalAlert(
+  lead: CaptureLead,
+  deps: QuoteCaptureDeps = defaultQuoteCaptureDeps()
+): Promise<{ status: QueueStatus; reason?: string }> {
   const fingerprint = alertFingerprint({
     moveDate: lead.moveDate,
     estimatedValue: lead.estimatedValue,
@@ -326,24 +510,16 @@ async function queueInternalAlert(lead: CaptureLead): Promise<{ status: QueueSta
     return { status: 'already_queued', reason: 'no_meaningful_change' }
   }
 
-  const claimedAt = new Date()
-  // Atomic claim: match only rows whose stored fingerprint is still the old
-  // one. `not:` alone would skip NULL rows (SQL three-valued logic), so the
-  // null case is spelled out — that is the very first alert for a lead.
-  let claim
+  const claimedAt = deps.now()
+  // Atomic claim: match only rows whose stored fingerprint is still the old one.
+  let claimed: number
   try {
-    claim = await prisma.lead.updateMany({
-      where: {
-        id: lead.id,
-        OR: [{ alertFingerprint: null }, { alertFingerprint: { not: fingerprint } }],
-      },
-      data: { alertFingerprint: fingerprint, lastAlertedAt: claimedAt, alertStatus: 'queued' },
-    })
+    claimed = await deps.claimAlert({ leadId: lead.id, fingerprint, claimedAt })
   } catch (err) {
     log.error({ leadId: lead.id, err: errText(err) }, 'alert claim failed (non-fatal)')
     return { status: 'unavailable', reason: 'claim_failed' }
   }
-  if (claim.count === 0) return { status: 'already_queued', reason: 'already_alerted' }
+  if (claimed === 0) return { status: 'already_queued', reason: 'already_alerted' }
 
   const payload: LeadCardData = {
     leadId: lead.id,
@@ -353,7 +529,7 @@ async function queueInternalAlert(lead: CaptureLead): Promise<{ status: QueueSta
     estimateDollars: typeof lead.estimatedValue === 'number' ? lead.estimatedValue / 100 : null,
     moveDate: lead.moveDate,
     moveSize: packageLabelOf(lead.moveSize),
-    pickup: routeLabel(lead.originCity, lead.pickupZip ?? lead.zip),
+    pickup: routeLabel(lead.originCity, lead.originZip ?? lead.zip),
     destination: routeLabel(lead.destCity, lead.destinationZip),
     contactPreference: lead.contactPreference,
     bestTimeToCall: lead.bestTimeToCall,
@@ -368,28 +544,52 @@ async function queueInternalAlert(lead: CaptureLead): Promise<{ status: QueueSta
   }
 
   try {
-    await discordQueue.add('lead-created', {
-      type: 'lead-created',
-      payload: payload as unknown as Record<string, unknown>,
-    })
+    await deps.enqueueLeadCard(payload)
     log.info({ leadId: lead.id, isUpdate }, 'lead alert queued')
     return { status: 'queued' }
   } catch (err) {
-    // Release BOTH fields together, and only if the row still holds exactly
-    // what we wrote. Restoring the fingerprint while leaving lastAlertedAt set
-    // (the previous behaviour) left the row claiming a card that never existed.
-    const released = await prisma.lead
-      .updateMany({
-        where: { id: lead.id, alertFingerprint: fingerprint, lastAlertedAt: claimedAt },
-        data: {
-          alertFingerprint: lead.alertFingerprint,
-          lastAlertedAt: lead.lastAlertedAt,
-          alertStatus: lead.alertFingerprint ? 'queued' : null,
-        },
-      })
-      .catch(() => ({ count: 0 }))
+    // ── QUEUE DOWN ⇒ POST IT DIRECTLY ────────────────────────────────────
+    // The rich card needs Redis; the owner needs the lead. When BullMQ cannot
+    // take the job we fall back to the plain REST notice — the same one
+    // capturePartialLeadSafe sends for every other capture surface. This is why
+    // the quote route asks capture NOT to notify: exactly one card per lead,
+    // and still one when the queue is dead.
+    //
+    // ONLY FOR A FIRST ALERT. notifyNewLead has no update mode — it titles
+    // every message "New lead" — so falling back on an UPDATE would tell the
+    // owner that someone he already called is a fresh lead. A missed update
+    // card is a smaller harm than a wrong one, and matches the old behaviour
+    // exactly (the plain notice only ever fired on isNew).
+    const fallbackDelivered = isUpdate ? false : await deps.postLeadNoticeDirect(lead).catch(() => false)
+
+    if (fallbackDelivered) {
+      // KEEP THE CLAIM. Releasing it would restore alertFingerprint to null,
+      // and shouldRealert() compares against exactly that — so the NEXT
+      // submission would alert again with nothing changed. Under a sustained
+      // outage that is one ping per submission, from the code whose whole job
+      // is to ping once. The notice was delivered, so the claim is true; the
+      // row records delivery rather than a queued job that never existed.
+      await deps.recordAlertDelivered(lead.id).catch(() => undefined)
+      log.error(
+        { leadId: lead.id, err: errText(err) },
+        'lead alert enqueue failed — direct notice delivered instead'
+      )
+      return { status: 'delivered_direct', reason: 'direct_fallback' }
+    }
+
+    // Nothing reached the owner. Release BOTH fields together, and only if the
+    // row still holds exactly what we wrote, so a later submission can retry.
+    // Restoring the fingerprint while leaving lastAlertedAt set (the original
+    // behaviour) left the row claiming a card that never existed.
+    const released = await deps.releaseAlert({
+      leadId: lead.id,
+      fingerprint,
+      claimedAt,
+      previousFingerprint: lead.alertFingerprint,
+      previousAlertedAt: lead.lastAlertedAt,
+    })
     log.error(
-      { leadId: lead.id, released: released.count === 1, err: errText(err) },
+      { leadId: lead.id, released: released === 1, isUpdate, err: errText(err) },
       'lead alert enqueue failed (non-fatal)'
     )
     return { status: 'unavailable', reason: 'enqueue_failed' }
@@ -397,7 +597,88 @@ async function queueInternalAlert(lead: CaptureLead): Promise<{ status: QueueSta
 }
 
 // ════════════════════════════════════════════════════════════════════════
-//  3. DELIVERY STATE — written by the WORKERS, not by the API
+//  3. THE MARKETING TRIGGER  (promotional — consent required)
+//  ---------------------------------------------------------------------
+//  The quick quote is the one capture surface that ASKS for marketing consent
+//  and gets an explicit answer, and until now that answer went nowhere: the
+//  lead was flagged `email_marketing_consent = true` and no automation could
+//  ever see it, because the partial-capture path is silent by design (it also
+//  serves the booking form, where a half-typed Step-1 email is not a request
+//  for anything).
+//
+//  So the trigger fires HERE — in the quote-specific side-effect module — and
+//  the partial path stays exactly as silent as it was.
+//
+//  FOUR PROPERTIES, in the order they matter:
+//    1. CONSENT. Enforced inside fireLeadTrigger (mayEnrollLeadSubject), not
+//       here, so every lead trigger in the system inherits it. A lead with
+//       consent null/false is never enrolled — and never reaches suppression
+//       lookup or automation query either.
+//    2. IDEMPOTENT. The enrollment's `dedupeKey`
+//       (automation + version + leadId) is UNIQUE; a re-fired trigger hits
+//       P2002 and is swallowed. The quote page fires capture on every
+//       meaningful edit, so this WILL fire repeatedly for one lead — by design,
+//       because consent may be given on a later edit than the one that created
+//       the lead. Repeats cost one indexed insert attempt and change nothing.
+//    3. NON-FATAL. It cannot throw (fireLeadTrigger swallows), and its result
+//       is reported, never acted on. A dead automation table must not cost a
+//       customer their confirmation email.
+//    4. SEPARATE FROM TRANSACTIONAL. It runs AFTER the confirmation email is
+//       queued, and its outcome never touches `emailStatus`.
+// ════════════════════════════════════════════════════════════════════════
+
+/**
+ * PURE: the facts that qualified this lead, recorded on the enrollment.
+ *
+ * Automations read the lead LIVE at every stage, so this is not the source of
+ * truth for anything — it is the answer to "why was this person enrolled, and
+ * what did we know at the time?", plus the fields a future automation would
+ * segment on before it has any reason to load the row.
+ */
+export function quoteLeadTriggerSnapshot(lead: CaptureLead): Record<string, unknown> {
+  return {
+    leadId: lead.id,
+    email: lead.email,
+    firstName: firstNameOf(lead.name),
+    source: lead.source,
+    capturedVia: 'quick_quote_form',
+    formStep: lead.formStep,
+    // Cents is how the column stores it; dollars is what a human segment rule
+    // ("worth more than $1,000") will be written against. Both, spelled out.
+    estimatedValueCents: lead.estimatedValue,
+    estimatedValueDollars: typeof lead.estimatedValue === 'number' ? lead.estimatedValue / 100 : null,
+    moveDate: lead.moveDate ? lead.moveDate.toISOString() : null,
+    moveSize: lead.moveSize,
+    moveSizeLabel: packageLabelOf(lead.moveSize),
+    pickupZip: lead.originZip ?? lead.zip,
+    pickupCity: lead.originCity,
+    destinationZip: lead.destinationZip,
+    destinationCity: lead.destCity,
+    contactPreference: lead.contactPreference,
+    // The consent state AT ENROLLMENT. A later withdrawal is honoured live by
+    // suppression + the audience layer; this records what we relied on.
+    marketingConsent: lead.emailMarketingConsent === true,
+  }
+}
+
+/**
+ * Fire the `lead_created` promotional trigger for a captured quote lead.
+ * NEVER throws. Returns what happened so the route can log it honestly.
+ */
+async function fireMarketingTrigger(
+  lead: CaptureLead,
+  deps: QuoteCaptureDeps = defaultQuoteCaptureDeps()
+): Promise<LeadTriggerResult> {
+  try {
+    return await deps.fireLeadCreated(lead.id, quoteLeadTriggerSnapshot(lead))
+  } catch (err) {
+    log.warn({ leadId: lead.id, err: errText(err) }, 'lead_created trigger failed (non-fatal)')
+    return { status: 'unavailable', reason: 'error' }
+  }
+}
+
+// ════════════════════════════════════════════════════════════════════════
+//  4. DELIVERY STATE — written by the WORKERS, not by the API
 // ════════════════════════════════════════════════════════════════════════
 
 /** Truncate to a short, safe category. Never a stack trace, never a provider
@@ -453,41 +734,45 @@ export async function recordLeadAlertOutcome(leadId: string, delivered: boolean)
 }
 
 // ════════════════════════════════════════════════════════════════════════
-//  4. THE ENTRY POINT
+//  5. THE ENTRY POINT
 // ════════════════════════════════════════════════════════════════════════
 
 /**
- * Fire both side effects for a freshly captured quote request. NEVER throws.
+ * Fire the side effects for a freshly captured quote request. NEVER throws.
  *
- * The email is skipped when there is no estimate to report — the owner asked
- * for the confirmation "after the lead reaches the contact-information step
- * AND an estimate has been generated". The internal alert has no such
- * condition: a lead with no estimate is still a person waiting for a call, and
- * that is precisely the one an owner most needs to see.
+ * ORDER IS THE CONTRACT: the customer's transactional email first, then the
+ * owner's card, then the promotional trigger. Each is independent, each fails
+ * soft, and a failure of a LATER one can never undo an earlier one.
  */
 export async function onQuoteRequestCaptured(
   leadId: string,
-  opts: { locale?: string; sendEmail?: boolean } = {}
+  opts: { locale?: string; sendEmail?: boolean } = {},
+  deps: QuoteCaptureDeps = defaultQuoteCaptureDeps()
 ): Promise<QuoteCaptureOutcome> {
   const fallback: QuoteCaptureOutcome = { emailStatus: 'unavailable', notificationStatus: 'unavailable' }
   try {
-    const lead = (await prisma.lead.findUnique({ where: { id: leadId }, select: CAPTURE_SELECT })) as CaptureLead | null
+    const lead = await deps.loadLead(leadId)
     if (!lead) return { ...fallback, emailReason: 'lead_not_found', notificationReason: 'lead_not_found' }
 
     let email: { status: QueueStatus; reason?: string }
     if (opts.sendEmail === false) {
       email = { status: 'unavailable', reason: 'suppressed_by_caller' }
     } else {
-      email = await queueConfirmationEmail(lead, { locale: opts.locale })
+      email = await queueConfirmationEmail(lead, { locale: opts.locale }, deps)
     }
 
-    const alert = await queueInternalAlert(lead)
+    const alert = await queueInternalAlert(lead, deps)
+
+    // LAST, and deliberately so. Marketing is the only one of the three the
+    // customer did not ask for, and the only one that may be skipped outright.
+    const automation = await fireMarketingTrigger(lead, deps)
 
     return {
       emailStatus: email.status,
       emailReason: email.reason,
       notificationStatus: alert.status,
       notificationReason: alert.reason,
+      automation,
     }
   } catch (err) {
     log.error({ leadId, err: errText(err) }, 'onQuoteRequestCaptured failed (non-fatal)')
@@ -502,13 +787,14 @@ export async function onQuoteRequestCaptured(
  */
 export async function resendQuoteConfirmation(
   leadId: string,
-  opts: { locale?: string } = {}
+  opts: { locale?: string } = {},
+  deps: QuoteCaptureDeps = defaultQuoteCaptureDeps()
 ): Promise<{ ok: boolean; reason?: string; version?: number }> {
   try {
-    const lead = (await prisma.lead.findUnique({ where: { id: leadId }, select: CAPTURE_SELECT })) as CaptureLead | null
+    const lead = await deps.loadLead(leadId)
     if (!lead) return { ok: false, reason: 'lead_not_found' }
     if (!lead.email) return { ok: false, reason: 'lead_has_no_email' }
-    const res = await queueConfirmationEmail(lead, { force: true, locale: opts.locale })
+    const res = await queueConfirmationEmail(lead, { force: true, locale: opts.locale }, deps)
     return res.status === 'queued'
       ? { ok: true, version: lead.quoteConfirmationCount + 1 }
       : { ok: false, reason: res.reason }

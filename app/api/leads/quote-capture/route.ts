@@ -7,6 +7,7 @@ import { onQuoteRequestCaptured } from '@/lib/quote-capture'
 import { quoteEstimate, compareClientTotal } from '@/lib/quote-estimate'
 import { isValidMoveDate, parseMoveDate } from '@/lib/quote-date'
 import { composeAccessDetails } from '@/lib/quote-access-details'
+import { CONSENT_VERSION, normaliseConsentSource } from '@/lib/consent'
 import type { QuoteLeadCaptureResponse } from '@/lib/quote-capture'
 
 // ════════════════════════════════════════════════════════════════════════
@@ -302,8 +303,15 @@ async function handle(req: NextRequest): Promise<NextResponse> {
       // correctly, and admin can filter on it without parsing prose.
       formStep: inPerson ? 'quote_in_person' : d.formStep || 'quote',
       marketingConsent: d.marketingConsent,
-      consentSource: d.consentSource || 'quick_quote_form',
-      consentVersion: d.consentVersion,
+      // CONSENT EVIDENCE — source, version and timestamp travel together or the
+      // record proves nothing (see lib/consent.ts). Normalised HERE against the
+      // controlled vocabulary so an unrecognised value falls back to THIS
+      // surface rather than to the partial-capture default of BOOKING_FORM,
+      // which would file a quick-quote opt-in under the wrong form. The version
+      // defaults to the disclosure currently shipped, so a cached page that
+      // predates the field still records what it showed.
+      consentSource: normaliseConsentSource(d.consentSource) ?? 'QUICK_QUOTE_FORM',
+      consentVersion: d.consentVersion || CONSENT_VERSION,
       contactPreference: d.contactPreference,
       bestTimeToCall: d.bestTimeToCall,
       accessDetails: composeAccessDetails(d),
@@ -326,7 +334,12 @@ async function handle(req: NextRequest): Promise<NextResponse> {
       // SERVER value. The browser's number never reaches the database.
       estimatedValue: serverCents,
     },
-    'quote-lead'
+    'quote-lead',
+    undefined,
+    // The owner's card comes from onQuoteRequestCaptured below — the rich one,
+    // with the estimate, the contact preference and the action buttons. Without
+    // this the owner would get two pings for every new quick-quote lead.
+    { notifyOwner: false }
   )
 
   // Persistence failed (DB down). The customer still gets their estimate —
@@ -344,6 +357,11 @@ async function handle(req: NextRequest): Promise<NextResponse> {
       isNew: result.isNew,
       emailStatus: outcome.emailStatus,
       notificationStatus: outcome.notificationStatus,
+      // Marketing enrollment, for the log ONLY — it never reaches the browser.
+      // 'skipped: no_consent' is the expected, healthy answer for most leads.
+      automationStatus: outcome.automation?.status ?? 'not_run',
+      automationReason:
+        outcome.automation && outcome.automation.status !== 'enrolled' ? outcome.automation.reason : undefined,
       packageKey: priced.ok ? priced.packageKey : null,
     },
     'quote lead captured'
