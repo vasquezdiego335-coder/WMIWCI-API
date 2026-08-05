@@ -4,6 +4,11 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
+  buildLeadCard,
+  formatPhoneDisplay,
+  routeLine,
+  stepLabel,
+  originLine,
   statusLabel,
   statusColor,
   STATUS_COLORS,
@@ -401,4 +406,109 @@ test('approvalCardDataFromBooking: cents→dollars conversion + balance math', (
   assert.equal(data.depositDollars, 49)
   assert.equal(data.moveTotal, 749)
   assert.equal(data.balanceAfterJob, 700)
+})
+
+// ════════════════════════════════════════════════════════════════════════
+//  LEAD CARD LAYOUT (owner feedback 2026-08-05: "it seems ugly")
+//  The card is read one-handed on a phone while the lead is warm. Every test
+//  here protects that: nothing empty is printed, the phone is never buried,
+//  and the move date is the day the customer actually picked.
+// ════════════════════════════════════════════════════════════════════════
+
+const sparseLead = {
+  leadId: 'lead_x',
+  name: 'Sam Rivera',
+  phone: '8626400625',
+  email: 'sam@example.com',
+  estimateDollars: 879,
+  moveDate: null,
+  moveSize: null,
+  pickup: null,
+  destination: null,
+  contactPreference: 'text',
+  bestTimeToCall: 'Anytime',
+  formStep: 'quote',
+  source: 'OTHER',
+  referrer: null,
+  landingPage: null,
+  utmSource: null,
+  utmCampaign: null,
+  adminUrl: 'https://admin.example.com/admin/leads',
+  isUpdate: false,
+} as unknown as Parameters<typeof buildLeadCard>[0]
+
+test('lead card: a fact we do not have is OMITTED, never printed as "Not given"', () => {
+  const { embeds } = buildLeadCard(sparseLead)
+  const names = (embeds[0].fields ?? []).map((f) => f.name)
+  const body = JSON.stringify(embeds[0])
+
+  assert.ok(!/Not given/i.test(body), 'the card must never print "Not given"')
+  assert.ok(!names.some((n) => /Move date/.test(n)), 'no date ⇒ no date field')
+  assert.ok(!names.some((n) => /Route/.test(n)), 'no addresses ⇒ no route field')
+  // An OTHER channel with no campaign and no referrer says nothing worth a row.
+  assert.ok(!names.some((n) => /Source/.test(n)), 'an empty attribution earns no field')
+  // What is left is what the owner acts on.
+  assert.ok(names.some((n) => n.includes('Sam Rivera')), 'the name titles the contact block')
+  assert.ok(names.some((n) => /Estimate/.test(n)))
+})
+
+test('lead card: the phone is full-width, formatted, and first', () => {
+  const { embeds } = buildLeadCard(sparseLead)
+  const first = (embeds[0].fields ?? [])[0]
+  assert.equal(first.inline, false, 'the contact block spans the card — it is not a narrow column')
+  assert.match(first.value, /\(862\) 640-0625/, 'a 10-digit number is formatted for a human')
+  assert.ok(first.value.indexOf('📞') < first.value.indexOf('✉️'), 'phone above email')
+  // The preference label carries its own emoji; the card must not double it.
+  assert.ok(!/💬\s*💬/.test(first.value), 'no doubled emoji')
+})
+
+test('lead card: the move date is the day the CUSTOMER picked', () => {
+  // parseMoveDate stores "2026-08-29" as 2026-08-29T00:00:00Z. Rendering that
+  // in America/New_York yields Aug 28 — the day before. A crew sent a day
+  // early is the most expensive kind of typo.
+  const { embeds } = buildLeadCard({ ...sparseLead, moveDate: new Date('2026-08-29T00:00:00.000Z') })
+  const dateField = (embeds[0].fields ?? []).find((f) => /Move date/.test(f.name))
+  assert.ok(dateField, 'a date we have IS shown')
+  assert.match(dateField.value, /Aug 29/, 'must not shift the calendar date backwards')
+})
+
+test('lead card: attribution is one line, and URLs are reduced to a host', () => {
+  const { embeds } = buildLeadCard({
+    ...sparseLead,
+    source: 'GOOGLE',
+    utmSource: 'google',
+    utmCampaign: 'spring_movers',
+    referrer: 'https://www.google.com/search?q=movers+near+me&client=firefox',
+  })
+  const src = (embeds[0].fields ?? []).find((f) => /Source/.test(f.name))
+  assert.ok(src, 'a real channel earns its row')
+  assert.equal(src.value.split('\n').length, 1, 'one line, not six')
+  assert.match(src.value, /via google\.com/, 'the host, never the whole query string')
+  assert.ok(!/search\?q=/.test(src.value), 'a full URL is a paragraph on a phone')
+})
+
+test('formatPhoneDisplay: reformats only what it is certain about', () => {
+  assert.equal(formatPhoneDisplay('8626400625'), '(862) 640-0625')
+  assert.equal(formatPhoneDisplay('+1 (862) 640-0625'), '(862) 640-0625')
+  // A malformed number is shown EXACTLY as typed — a confident-looking
+  // "(186) 230-6673" hides the fact that a human has to look at it.
+  assert.equal(formatPhoneDisplay('1862306673'), '1862306673')
+  assert.equal(formatPhoneDisplay('862-640-0625 ext 12'), '862-640-0625 ext 12')
+  assert.equal(formatPhoneDisplay(''), '')
+})
+
+test('routeLine / stepLabel / originLine: say something, or say nothing', () => {
+  assert.equal(routeLine(null, null), null)
+  assert.equal(routeLine('07050', '07042'), '07050 → 07042')
+  assert.equal(routeLine('07050', '07050'), '07050 (local)')
+  assert.equal(routeLine('07050', null), 'From 07050')
+
+  assert.equal(stepLabel('quote'), 'Finished the quick quote')
+  assert.equal(stepLabel('card5'), 'Reached step 5 of the booking form')
+  assert.equal(stepLabel('quote_in_person'), 'Asked for an in-person estimate')
+  assert.equal(stepLabel(null), null)
+
+  assert.equal(originLine({ source: 'OTHER' }), null, 'OTHER with nothing else is not information')
+  assert.equal(originLine({ source: 'UNKNOWN', referrer: '' }), null)
+  assert.match(originLine({ source: 'DOOR_HANGER' }) ?? '', /door hanger/)
 })
