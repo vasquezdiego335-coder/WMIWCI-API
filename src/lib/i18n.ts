@@ -156,6 +156,9 @@ const EMAIL_SUBJECTS: Record<string, { en: string; es: string }> = {
   'final-invoice':       { en: 'Your final invoice',                        es: 'Tu factura final' },
   'referral-reward':     { en: 'Your referral reward is here',              es: 'Tu recompensa por recomendarnos ya está aquí' },
   'quote-request-received': { en: 'We received your moving estimate request', es: 'Recibimos su solicitud de estimado de mudanza' },
+  'lead-nurture-1':      { en: 'To price your move, we need a few things',  es: 'Para cotizar tu mudanza necesitamos unos datos' },
+  'lead-nurture-2':      { en: 'What "labor-only" actually means',          es: 'Qué significa “solo mano de obra”' },
+  'lead-nurture-final':  { en: 'Do you still need an estimate?',            es: '¿Todavía necesitas un estimado?' },
 }
 
 export function emailSubject(template: string, locale?: string): string {

@@ -23,6 +23,7 @@ import OperationalAlert from '../src/emails/operational-alert'
 import FinalInvoice from '../src/emails/final-invoice'
 import ReferralReward from '../src/emails/referral-reward'
 import QuoteFollowup from '../src/emails/quote-followup'
+import LeadNurture from '../src/emails/lead-nurture'
 
 const OUT = resolve('email-previews')
 mkdirSync(OUT, { recursive: true })
@@ -54,6 +55,18 @@ const templates: Array<[string, React.ReactElement]> = [
   ['quote-followup-1', React.createElement(QuoteFollowup, { ...common, stage: 1, jobType: '2-bedroom apartment, 3rd floor walk-up', moveDate: '2026-08-15T15:00:00Z', bookingUrl: 'https://www.moveitclearit.com/booking-form.html' })],
   ['quote-followup-2', React.createElement(QuoteFollowup, { ...common, stage: 2, bookingUrl: 'https://www.moveitclearit.com/booking-form.html' })],
   ['quote-followup-final', React.createElement(QuoteFollowup, { ...common, stage: 3, moveDate: '2026-08-15T15:00:00Z', bookingUrl: 'https://www.moveitclearit.com/booking-form.html' })],
+  // ── Non-quote lead nurture (2026-08-06). Marketing context is supplied so
+  //    the preview shows the compliance footer the real send is blocked
+  //    without: unsubscribe link + postal address + the reason they got it.
+  ['lead-nurture-1', React.createElement(LeadNurture, { ...common, stage: 1, quoteUrl: 'https://www.moveitclearit.com/quote.html', unsubscribeUrl: 'https://moveitclearit.com/api/email/unsubscribe?token=SAMPLE', postalAddress: '123 Sample Street, Newark NJ 07103' })],
+  ['lead-nurture-2', React.createElement(LeadNurture, { ...common, stage: 2, quoteUrl: 'https://www.moveitclearit.com/quote.html', unsubscribeUrl: 'https://moveitclearit.com/api/email/unsubscribe?token=SAMPLE', postalAddress: '123 Sample Street, Newark NJ 07103' })],
+  ['lead-nurture-final', React.createElement(LeadNurture, { ...common, stage: 3, quoteUrl: 'https://www.moveitclearit.com/quote.html', unsubscribeUrl: 'https://moveitclearit.com/api/email/unsubscribe?token=SAMPLE', postalAddress: '123 Sample Street, Newark NJ 07103' })],
+  // A LONG name and a Spanish render — the two fixtures that break layouts.
+  ['lead-nurture-1-longname-es', React.createElement(LeadNurture, { ...common, locale: 'es', customerName: 'Maria del Carmen Fernandez de la Vega Rodriguez', stage: 1, quoteUrl: 'https://www.moveitclearit.com/quote.html', unsubscribeUrl: 'https://moveitclearit.com/api/email/unsubscribe?token=SAMPLE', postalAddress: '123 Sample Street, Newark NJ 07103' })],
+  // MISSING OPTIONAL DATA: no name, no unsubscribe URL, no postal address.
+  // The template must degrade rather than print "undefined" — and the SEND is
+  // blocked by the guard in this state, which is the point.
+  ['lead-nurture-1-bare', React.createElement(LeadNurture, { stage: 1, quoteUrl: 'https://www.moveitclearit.com/quote.html' })],
 ]
 
 async function main() {

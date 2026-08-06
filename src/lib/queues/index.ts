@@ -176,6 +176,11 @@ export type EmailJobData = {
     | 'quote-followup-1'     // 24h after a real quote — did it arrive
     | 'quote-followup-2'     // ~3d — objection handling (labor-only explained)
     | 'quote-followup-final' // ~7d — still moving?
+    // ── Non-quote lead nurture (owner spec 2026-08-06) — a lead with an email
+    //    and an intent but NO calculated quote. Never mentions a price. ──
+    | 'lead-nurture-1'       // +4h — what we need in order to price it
+    | 'lead-nurture-2'       // +24h — what labor-only actually means
+    | 'lead-nurture-final'   // +72h — do you still need an estimate?
     // ── Quick-quote capture (owner spec 2026-08-03) ──
     | 'quote-request-received' // immediate reply to a quick-quote submission
   to: string
@@ -241,6 +246,10 @@ export type ScheduledJobData = {
     | 'review-reminder'
     | 'repeat-reminder'
     | 'referral-ask'
+    // ── Non-quote lead nurture (LEAD-scoped) ──
+    | 'lead-nurture-1'
+    | 'lead-nurture-2'
+    | 'lead-nurture-final'
     // ── Quote follow-up (LEAD-scoped, not booking-scoped) ──
     | 'quote-followup-1'
     | 'quote-followup-2'

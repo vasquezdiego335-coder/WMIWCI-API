@@ -367,6 +367,10 @@ async function handle(req: NextRequest): Promise<NextResponse> {
       automationStatus: outcome.automation?.status ?? 'not_run',
       automationReason:
         outcome.automation && outcome.automation.status !== 'enrolled' ? outcome.automation.reason : undefined,
+      // Which lifecycle sequence the lead was routed into. 'quote' when a real
+      // number was produced, 'nurture' for an in-person / manual-review job.
+      // Log only — never returned to the browser.
+      sequence: outcome.sequence ?? 'none',
       packageKey: priced.ok ? priced.packageKey : null,
     },
     'quote lead captured'

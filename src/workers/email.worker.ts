@@ -32,6 +32,7 @@ import FinalInvoiceEmail from '../emails/final-invoice'
 import ReferralRewardEmail from '../emails/referral-reward'
 import QuoteFollowupEmail from '../emails/quote-followup'
 import QuoteRequestReceivedEmail from '../emails/quote-request-received'
+import LeadNurtureEmail from '../emails/lead-nurture'
 import { emailSubject } from '../lib/i18n'
 
 // ════════════════════════════════════════════════════════════════════════
@@ -76,6 +77,10 @@ const ALLOWED_TEMPLATES = new Set<EmailJobData['template']>([
   'quote-followup-1',
   'quote-followup-2',
   'quote-followup-final',
+  // ── Non-quote lead nurture (owner spec 2026-08-06) ──
+  'lead-nurture-1',
+  'lead-nurture-2',
+  'lead-nurture-final',
   // ── Quick-quote capture (owner spec 2026-08-03) ──
   'quote-request-received',
 ])
@@ -108,6 +113,11 @@ const TEMPLATES: Record<
   'quote-followup-2': (p) => QuoteFollowupEmail({ ...(p as any), stage: 2 }),
   'quote-followup-final': (p) => QuoteFollowupEmail({ ...(p as any), stage: 3 }),
   'quote-request-received': (p) => QuoteRequestReceivedEmail(p as any),
+  // Three send times, ONE template — the same pattern as the recovery and
+  // quote families. `stage` varies the copy; it is never inferred from a date.
+  'lead-nurture-1': (p) => LeadNurtureEmail({ ...(p as any), stage: 1 }),
+  'lead-nurture-2': (p) => LeadNurtureEmail({ ...(p as any), stage: 2 }),
+  'lead-nurture-final': (p) => LeadNurtureEmail({ ...(p as any), stage: 3 }),
 }
 
 // English fallbacks. Bilingual subjects come from emailSubject(template, locale)
@@ -135,6 +145,9 @@ const SUBJECTS: Record<EmailJobData['template'], string> = {
   'quote-followup-2': 'What "labor-only" actually means',
   'quote-followup-final': 'Are you still planning your move?',
   'quote-request-received': 'We received your moving estimate request',
+  'lead-nurture-1': 'To price your move, we need a few things',
+  'lead-nurture-2': 'What "labor-only" actually means',
+  'lead-nurture-final': 'Do you still need an estimate?',
 }
 
 // ════════════════════════════════════════════════════════════════════════

@@ -33,7 +33,7 @@ import { guardedSend } from './email-guard'
 import { isSafeUrl } from '../emails/validation'
 import { unsubscribeUrl } from './email-tokens'
 import { checkReferralEligibility } from './referral-eligibility'
-import { bookingEligibility } from './email-eligibility'
+import { bookingEligibility, bookingMarketingBlockReason, promotionalConsentBlockReason } from './email-eligibility'
 import { buildMarketingContext, applyMarketingContext } from './marketing-context'
 import { normalizeLocale, t, BIZ_NAME, BIZ_PHONE, type Locale } from './i18n'
 import ReviewRequestEmail from '../emails/review-request'
@@ -161,6 +161,22 @@ export async function onBookingCompleted(bookingId: string): Promise<void> {
     log.info({ bookingId }, 'MARKETING_FOLLOWUPS_ENABLED!=true — not scheduling follow-ups')
     return
   }
+
+  // PROMOTIONAL CONSENT (owner spec 2026-08-06). Every stage of this sequence —
+  // review request, review reminder, referral ask, repeat reminder — is
+  // classified PROMOTIONAL by email-guard, so none of them may go to somebody
+  // who never opted in. bookingEligibility refuses them at send time; refusing
+  // here means four doomed jobs never occupy the queue, and the owner sees the
+  // reason when the job is marked complete rather than 30 days later.
+  //
+  // The stamp of `completedAt` above deliberately happens FIRST and
+  // unconditionally: completion is a fact about the job, not about marketing.
+  const consentBlock = await bookingMarketingBlockReason(bookingId)
+  if (consentBlock) {
+    log.info({ bookingId, reason: consentBlock }, 'no promotional consent — post-move follow-ups not scheduled')
+    return
+  }
+
   const now = Date.now()
   // Enqueue in parallel (each self-guarded) so a Redis stall bounds the caller
   // to ~5s, not 4×5s — the admin "mark complete" request awaits this.
@@ -386,8 +402,29 @@ export async function runFollowup(bookingId: string, type: FollowupType): Promis
     if (!eligibility.eligible) return recordSkip(bookingId, type, `referral-ineligible:${eligibility.reason}`)
   }
 
-  // TCPA opt-out.
-  if (customer.marketingOptOut) return recordSkip(bookingId, type, 'opted-out')
+  // ── PROMOTIONAL CONSENT (owner spec 2026-08-06) ─────────────────────────
+  // Every follow-up in this file is sent with `emailClass: 'promotional'`, so
+  // an explicit opt-in is required. This used to check `marketingOptOut`
+  // ALONE — a flag written only by the inbound-SMS STOP webhook, and therefore
+  // false for essentially every customer — which meant "not opted OUT" was
+  // being treated as "opted IN". Tri-state consent is the real question and
+  // both `false` and `null` refuse.
+  //
+  // The rule itself is not restated: promotionalConsentBlockReason is the same
+  // predicate bookingEligibility applies at send time, and the ledger records
+  // WHICH reason so the owner can tell "they said no" from "we never asked".
+  const consentBlock = promotionalConsentBlockReason({
+    status: booking.status,
+    isInternalTest: booking.isInternalTest,
+    depositPaid: booking.depositPaid,
+    completedAt: booking.completedAt,
+    requestedDate: booking.requestedDate,
+    confirmedDate: booking.confirmedDate,
+    scheduledStart: booking.scheduledStart,
+    customerMarketingConsent: customer.emailMarketingConsent,
+    customerMarketingOptOut: customer.marketingOptOut,
+  })
+  if (consentBlock) return recordSkip(bookingId, type, consentBlock)
 
   // Quiet hours — defer into the allowed window rather than sending now.
   const wait = msUntilAllowed()

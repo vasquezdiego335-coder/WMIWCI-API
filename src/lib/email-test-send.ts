@@ -116,6 +116,10 @@ export function syntheticPayload(template: string, appUrl: string): Record<strin
     // rather than 404-ing, so the button behaves like the production one.
     checkoutUrl: `${appUrl}/api/stripe/checkout/resume?booking=TEST-BOOKING-ID`,
     invoiceUrl: `${appUrl}/my-booking/TEST-TOKEN`,
+    // The non-quote nurture's single CTA. It points at the real quick-quote
+    // page, because that is where a real number actually comes from — a test
+    // send whose one button goes nowhere teaches the owner nothing.
+    quoteUrl: `${(process.env.MARKETING_SITE_URL || 'https://www.moveitclearit.com').replace(/\/+$/, '')}/quote.html`,
     supportEmail: process.env.EMAIL_REPLY_TO ?? 'support@moveitclearit.com',
     reason: 'SAMPLE reason text for a test render.',
     message: 'SAMPLE message body for a test render.',

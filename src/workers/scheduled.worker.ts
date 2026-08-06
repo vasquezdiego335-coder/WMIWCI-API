@@ -5,10 +5,11 @@ import { emailQueue, discordQueue, scheduledQueue, smsQueue } from '../lib/queue
 import { queueLogger } from '../lib/logger'
 import { deleteFiles } from '../lib/cloudinary'
 import { runFollowup, type FollowupType } from '../lib/followups'
-import { quoteFollowupBlockReason } from '../lib/journeys'
+import { leadNurtureBlockReason, quoteFollowupBlockReason } from '../lib/journeys'
 import { isSafeUrl } from '../emails/validation'
 import { etDayRange, moveDateInRange, effectiveMoveDate } from '../lib/scheduling'
-import { markStaleLeadsAbandoned, purgeAbandonedLeads } from '../lib/leads'
+import { bookingMarketingBlockReason } from '../lib/email-eligibility'
+import { hasEverBooked, markStaleLeadsAbandoned, purgeAbandonedLeads } from '../lib/leads'
 import { dayOfMoveSms } from '../lib/waiting-time'
 import { processCampaignBatch, processRecipientRetry, sweepCampaignRuns } from '../lib/email-campaign-dispatch'
 import { retryPendingSideEffects } from '../lib/email-events'
@@ -203,6 +204,64 @@ async function processScheduledJob(job: Job<ScheduledJobData>): Promise<void> {
       break
     }
 
+    // ── Non-quote lead nurture (LEAD-scoped) ──────────────────────
+    // Sequence B: an opted-in lead with an email and an intent but NO
+    // calculated quote. leadNurtureBlockReason is the shared stop-rule check
+    // (consent / has-quote / previous customer / converted / lost / move date
+    // passed); the email worker runs it AGAIN immediately before the send, via
+    // leadEligibility, because any of those can become true in between.
+    case 'lead-nurture-1':
+    case 'lead-nurture-2':
+    case 'lead-nurture-final': {
+      const leadId = job.data.leadId
+      if (!leadId) break
+      const lead = await prisma.lead.findUnique({
+        where: { id: leadId },
+        select: {
+          name: true,
+          email: true,
+          status: true,
+          quotedAt: true,
+          bookedAt: true,
+          lostAt: true,
+          moveDate: true,
+          convertedBookingId: true,
+          // PROMOTIONAL — a select that omits this would not compile, which is
+          // the point of NurtureLeadState requiring it.
+          emailMarketingConsent: true,
+        },
+      })
+      // BOOKING history, not lead status — a returning customer must never be
+      // walked through the first-time sequence.
+      const previousCustomer = lead ? await hasEverBooked(lead.email) : false
+      const block = leadNurtureBlockReason(lead ? { ...lead, previousCustomer } : null)
+      if (block) {
+        log.info({ leadId, type, reason: block }, 'lead nurture skipped')
+        break
+      }
+      const stage = type === 'lead-nurture-1' ? 1 : type === 'lead-nurture-2' ? 2 : 3
+      await emailQueue.add(type, {
+        template: type,
+        to: lead!.email as string,
+        leadId,
+        // STABLE business identity: lead + stage. A scheduler retry reuses it,
+        // so guardedSend dedupes rather than minting a second logical send.
+        businessEventKey: `lead:${leadId}:${type}`,
+        payload: {
+          customerName: lead!.name,
+          // The quick quote is where a real number actually comes from, so that
+          // is where the one CTA goes — never the booking form, which would ask
+          // someone with no price to start a checkout.
+          quoteUrl: `${(process.env.MARKETING_SITE_URL || 'https://www.moveitclearit.com').replace(/\/+$/, '')}/quote.html?utm_source=email&utm_medium=lifecycle&utm_campaign=lead-nurture&utm_content=stage-${stage}`,
+          locale: 'en',
+          journey: 'lead-nurture',
+          stage,
+        },
+      })
+      log.info({ leadId, stage }, 'lead nurture queued')
+      break
+    }
+
     // ── 48h post-completion review request ────────────────────────
     case 'review-request-48h': {
       if (!bookingId) break
@@ -215,6 +274,15 @@ async function processScheduledJob(job: Job<ScheduledJobData>): Promise<void> {
           { bookingId, configured: Boolean(reviewDestination) },
           'GOOGLE_REVIEW_URL is missing or not a valid destination — review request NOT queued'
         )
+        break
+      }
+      // PROMOTIONAL CONSENT (owner spec 2026-08-06). review-request is
+      // promotional, so an explicit opt-in is required. bookingEligibility
+      // refuses it at send time; refusing here keeps the reason in the log at
+      // the moment the job runs rather than leaving a blocked row to explain.
+      const consentBlock = await bookingMarketingBlockReason(bookingId)
+      if (consentBlock) {
+        log.info({ bookingId, reason: consentBlock }, 'review request skipped — no promotional consent')
         break
       }
       const booking = await prisma.booking.findUnique({
