@@ -53,6 +53,8 @@ import {
   inQuietHours,
   nextAllowedTime,
   etHour,
+  inRolloutAllowlist,
+  rolloutAllowlist,
 } from '../email-guard'
 import { scopeForReason } from '../email-suppression'
 import { decideConsent, CONSENT_VERSION } from '../consent'
@@ -716,4 +718,105 @@ test('every lifecycle template the worker can send has a registry entry', () => 
   const registered = new Set(templateRegistry().map((t) => t.key))
   const missing = allowed.filter((k) => !registered.has(k))
   assert.deepEqual(missing, [], `templates with no registry entry: ${missing.join(', ')}`)
+})
+
+// ════════════════════════════════════════════════════════════════════════
+//  CONTROLLED ROLLOUT — the recipient allowlist (owner spec 2026-08-06)
+//  ---------------------------------------------------------------------
+//  A journey used to have two settings: off, and on for every eligible person.
+//  These cover the third one, and in particular the two ways a canary gate can
+//  be actively dangerous: defaulting to "block everything", and reaching
+//  transactional mail.
+// ════════════════════════════════════════════════════════════════════════
+
+test('rollout: an UNSET allowlist restricts nobody', () => {
+  // THE FAILURE THIS PREVENTS: an empty or unpropagated variable becoming a
+  // silent, total marketing outage. Restriction must be opt-IN.
+  assert.equal(inRolloutAllowlist('anyone@example.com', null), true)
+
+  const prev = process.env.EMAIL_PROMOTIONAL_ALLOWLIST
+  try {
+    delete process.env.EMAIL_PROMOTIONAL_ALLOWLIST
+    assert.equal(rolloutAllowlist(), null)
+    process.env.EMAIL_PROMOTIONAL_ALLOWLIST = '   '
+    assert.equal(rolloutAllowlist(), null, 'whitespace is not a list')
+    process.env.EMAIL_PROMOTIONAL_ALLOWLIST = ' , ,, '
+    assert.equal(rolloutAllowlist(), null, 'a list of nothing is not a list')
+  } finally {
+    if (prev === undefined) delete process.env.EMAIL_PROMOTIONAL_ALLOWLIST
+    else process.env.EMAIL_PROMOTIONAL_ALLOWLIST = prev
+  }
+})
+
+test('rollout: a configured allowlist admits addresses and whole domains', () => {
+  const list = ['diego@moveitclearit.com', '@moveitclearit.com']
+  assert.equal(inRolloutAllowlist('diego@moveitclearit.com', list), true)
+  assert.equal(inRolloutAllowlist('sebastian@moveitclearit.com', list), true, 'domain entry')
+  assert.equal(inRolloutAllowlist('DIEGO@MoveItClearIt.com ', list), true, 'address-normalised')
+  assert.equal(inRolloutAllowlist('someone@example.com', list), false)
+  // A domain entry must not match by suffix — `@clearit.com` is a different
+  // company, and `evilmoveitclearit.com` is an attacker's.
+  assert.equal(inRolloutAllowlist('a@notmoveitclearit.com', ['@moveitclearit.com']), false)
+  assert.equal(inRolloutAllowlist('', list), false)
+})
+
+test('rollout: the canary NEVER touches transactional mail', () => {
+  // A receipt, a confirmation and a move-day reminder must arrive during a
+  // canary. Asserted at the source, because the gate lives inside the
+  // `emailClass === 'promotional'` branch and that placement IS the guarantee.
+  // Line endings are whatever git checked out, so the slice boundaries are
+  // matched as patterns rather than as literal text with a `\n` in it.
+  const s = src('lib/email-guard.ts')
+  const start = s.search(/if \(emailClass === 'promotional'\) \{\s*\r?\n\s*\/\/ ── 4a\. CONTROLLED ROLLOUT/)
+  assert.ok(start > -1, 'the rollout gate must sit inside the promotional branch of guardedSend')
+  const promoBlock = s.slice(start, s.indexOf('// ── 5. payload validation'))
+  assert.match(promoBlock, /inRolloutAllowlist\(email, allowlist\)/, 'the check must be inside the promotional branch')
+  assert.equal(
+    (s.match(/!inRolloutAllowlist\(/g) ?? []).length,
+    1,
+    'exactly one place in the guard may refuse on the allowlist'
+  )
+  // ...and it is checked BEFORE quiet hours, so an operator reading the ledger
+  // sees the real reason rather than a deferral they will chase for an hour.
+  assert.ok(
+    promoBlock.indexOf('not_in_rollout_allowlist') < promoBlock.indexOf('quiet_hours'),
+    'the canary reason must win over the quiet-hours deferral'
+  )
+})
+
+test('rollout: an excluded recipient is RETRYABLE, never terminal', () => {
+  // A real lead captured during the canary must not have its idempotency key
+  // permanently burned — widening the allowlist has to be able to rescue it.
+  assert.equal(classifyBlock('not_in_rollout_allowlist'), 'retryable')
+  assert.notEqual(classifyBlock('not_in_rollout_allowlist'), 'terminal')
+})
+
+test('rollout: the schedulers refuse too, so the queue stays honest', () => {
+  // Two gates, same as every other rule here: the scheduler avoids filling the
+  // queue with certain refusals, and the send gate is the guarantee.
+  const j = src('lib/journeys.ts')
+  for (const fn of ['export async function onQuoteCreated', 'export async function onLeadCaptured']) {
+    const body = j.slice(j.indexOf(fn), j.indexOf('await enqueue(', j.indexOf(fn)))
+    assert.match(body, /inRolloutAllowlist\(/, `${fn} must apply the allowlist before enqueueing`)
+  }
+  const e = src('lib/email-eligibility.ts')
+  const booking = e.slice(e.indexOf('export async function bookingMarketingBlockReason'))
+  assert.match(booking, /inRolloutAllowlist\(/, 'booking-scoped sequences too')
+  assert.match(booking, /customer: \{ select: \{ email: true/, 'and it must load the address to check it')
+})
+
+test('rollout: the preflight is read-only', () => {
+  // A preflight that can change state is a preflight nobody dares to run.
+  const s = readFileSync(resolve(__dirname, '..', '..', '..', 'scripts/email-rollout-preflight.ts'), 'utf8')
+  for (const forbidden of ['.create(', '.update(', '.updateMany(', '.delete(', '.deleteMany(', '.upsert(', 'Queue(', '.add(']) {
+    assert.ok(!s.includes(forbidden), `the preflight must not call ${forbidden}`)
+  }
+  // ...and it must not be able to reach a send path at all. Asserted on the
+  // IMPORTS rather than on the word: the file legitimately mentions Resend in
+  // prose ("reconcile against the Resend dashboard"), and a test that fails on
+  // a comment teaches people to weaken the test.
+  const imports = (s.match(/^import .*$/gm) ?? []).join('\n')
+  assert.ok(!/guardedSend/.test(imports), 'the preflight must not import guardedSend')
+  assert.ok(!/['"].*\/resend['"]/.test(imports), 'the preflight must not import the Resend client')
+  assert.ok(!/['"].*\/queues['"]/.test(imports), 'the preflight must not import a queue')
 })
