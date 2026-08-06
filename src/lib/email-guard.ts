@@ -295,6 +295,11 @@ export function classifyBlock(reason: string): BlockClass {
   if (/^status_not_allowed:/.test(reason)) return 'terminal'
   if (/^booking_not_completed:|^booking_advanced:|^lead_converted$|^lead_lost$/.test(reason)) return 'terminal'
   if (reason === 'move_date_passed' || reason === 'deposit_already_paid') return 'terminal'
+  // CONSENT (owner spec 2026-08-06). An explicit withdrawal is final; never
+  // having been asked is not — a later opt-in must be able to rescue the send,
+  // so it stays resumable rather than closing the key forever.
+  if (reason === 'marketing_opted_out') return 'terminal'
+  if (reason === 'no_marketing_consent') return 'retryable'
   // Config/plumbing problems are fixable, so the send must survive them.
   if (reason.startsWith('validation:')) return 'retryable'
   if (reason.endsWith('_read_failed') || reason === 'suppression_read_failed') return 'retryable'

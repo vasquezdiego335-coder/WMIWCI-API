@@ -26,9 +26,9 @@ import { prisma } from './db'
 import { scheduledQueue } from './queues'
 import { queueLogger } from './logger'
 import { nextAllowedTime } from './email-guard'
-import { effectiveMoveDate } from './email-eligibility'
+import { bookingMarketingBlockReason, effectiveMoveDate } from './email-eligibility'
 import { fireBookingTrigger, fireLeadTrigger, stopEnrollmentsFor } from './email-automation-runtime'
-import { hasPromotionalConsent } from './leads'
+import { hasEverBooked, hasPromotionalConsent } from './leads'
 
 const log = queueLogger.child({ mod: 'journeys' })
 
@@ -87,6 +87,28 @@ export const QUOTE_STAGES: JourneyStage[] = [
   { type: 'quote-followup-1', delay: 24 * HOUR },
   { type: 'quote-followup-2', delay: 3 * DAY },
   { type: 'quote-followup-final', delay: 7 * DAY },
+]
+
+// ── NON-QUOTE LEAD NURTURE (owner spec 2026-08-06) ──────────────────────
+//  Anchor: the lead was captured (contact form, coupon, tracker, an in-person
+//  estimate request — anywhere someone gave us an email and an intent but no
+//  number came out the other end).
+//
+//  WHY IT IS A SEPARATE JOURNEY AND NOT A LOOSER QUOTE JOURNEY. The quote
+//  sequence's copy says "we sent you a quote". For these leads that sentence is
+//  false, and a sequence that has to lie about its own premise is the wrong
+//  sequence. The eligibility rule below is the mirror image of the quote one:
+//  it refuses a lead that HAS a quote, so the two can never both fire.
+//
+//  Three stages, matching the three the quote journey already proved out —
+//  a fourth unanswered email is noise the frequency caps would drop anyway.
+//    +4h   what we need in order to price it accurately
+//    +24h  what labor-only actually means (trust + process)
+//    +72h  do you still need an estimate? (permission to say no, then stop)
+export const LEAD_NURTURE_STAGES: JourneyStage[] = [
+  { type: 'lead-nurture-1', delay: 4 * HOUR },
+  { type: 'lead-nurture-2', delay: 24 * HOUR },
+  { type: 'lead-nurture-final', delay: 72 * HOUR },
 ]
 
 /** Stable job id — the anti-duplication guarantee at the queue level. */
@@ -157,6 +179,17 @@ export async function onCheckoutStarted(bookingId: string): Promise<void> {
     log.info({ bookingId }, 'abandoned-recovery journey disabled — not scheduling')
     return
   }
+
+  // PROMOTIONAL CONSENT (owner spec 2026-08-06). abandoned-checkout 1/2/3 are
+  // promotional templates. The send gate in bookingEligibility is the
+  // guarantee; refusing here as well means three doomed jobs are never queued
+  // and the reason is logged at checkout, not 72 hours later.
+  const consentBlock = await bookingMarketingBlockReason(bookingId)
+  if (consentBlock) {
+    log.info({ bookingId, reason: consentBlock }, 'no promotional consent — abandoned-recovery not scheduled')
+    return
+  }
+
   const now = Date.now()
   await Promise.all(
     ABANDONED_STAGES.map((s) =>
@@ -338,10 +371,67 @@ export async function onQuoteCreated(leadId: string): Promise<void> {
 }
 
 /**
+ * A lead was captured with an email and explicit marketing consent, but NO
+ * quote → start the non-quote nurture sequence (Sequence B).
+ *
+ * FOUR REFUSALS, all at schedule time, all repeated at send time:
+ *   • no explicit opt-in            — the non-negotiable rule
+ *   • a real quote exists           — the quote journey owns them
+ *   • they have booked with us before — a returning customer must never get the
+ *                                     first-time welcome sequence
+ *   • already converted / lost      — nothing left to nurture
+ *
+ * Idempotent: stable job ids mean a lead captured five times (the quick-quote
+ * page fires on every meaningful edit) still has exactly three pending jobs.
+ */
+export async function onLeadCaptured(leadId: string): Promise<void> {
+  if (!enabled('lead-nurture')) return
+
+  const lead = await prisma.lead
+    .findUnique({
+      where: { id: leadId },
+      select: {
+        id: true, email: true, status: true, quotedAt: true, bookedAt: true, lostAt: true,
+        moveDate: true, convertedBookingId: true, emailMarketingConsent: true, createdAt: true,
+      },
+    })
+    .catch((err) => {
+      log.warn({ leadId, err: err instanceof Error ? err.message : String(err) }, 'onLeadCaptured read failed (non-fatal)')
+      return null
+    })
+  if (!lead) return
+
+  // Booking HISTORY, not lead status — see leads.hasEverBooked.
+  const previousCustomer = await hasEverBooked(lead.email)
+  const block = leadNurtureBlockReason({ ...lead, previousCustomer })
+  if (block) {
+    log.info({ leadId, reason: block }, 'lead nurture not scheduled')
+    return
+  }
+
+  const anchor = Date.now()
+  for (const s of LEAD_NURTURE_STAGES) {
+    const fireAt = new Date(anchor + s.delay)
+    // A nurture email landing after the customer's own move date helps nobody.
+    if (lead.moveDate && fireAt.getTime() > lead.moveDate.getTime() + DAY) {
+      log.info({ leadId, stage: s.type }, 'nurture stage would land after the move date — skipping')
+      continue
+    }
+    await enqueue(s.type, { leadId }, fireAt, jobIdFor('lead-nurture', s.type, leadId))
+  }
+  log.info({ leadId }, 'lead nurture scheduled')
+}
+
+/**
  * A lead booked, was lost, or opted out → stop the quote sequence.
  */
 export async function onLeadClosed(leadId: string): Promise<void> {
-  await Promise.all(QUOTE_STAGES.map((s) => cancel(jobIdFor('quote', s.type, leadId))))
+  await Promise.all([
+    ...QUOTE_STAGES.map((s) => cancel(jobIdFor('quote', s.type, leadId))),
+    // The nurture dies with the same event: someone who booked must never get
+    // "do you still need an estimate?".
+    ...LEAD_NURTURE_STAGES.map((s) => cancel(jobIdFor('lead-nurture', s.type, leadId))),
+  ])
   // Converted or lost — the booking journey owns them now. Unconditional,
   // mirroring quoteFollowupBlockReason's own unconditional 'lead_converted'.
   void stopEnrollmentsFor({ leadId }, 'lead_closed')
@@ -440,6 +530,45 @@ export function transactionalLeadBlockReason(lead: LeadState | null): string | n
 /** Lead-scoped templates that are an immediate REPLY, not a journey stage. */
 const TRANSACTIONAL_LEAD_TEMPLATES: ReadonlySet<string> = new Set(['quote-request-received'])
 
+/** Stages of the non-quote nurture. They use their OWN matrix, not the quote one. */
+const NURTURE_TEMPLATES: ReadonlySet<string> = new Set(LEAD_NURTURE_STAGES.map((s) => s.type))
+
+/** A lead being nurtured, plus the one fact that is not on the row. */
+export type NurtureLeadState = LeadState & {
+  /**
+   * Derived from BOOKING history (leads.hasEverBooked), never from lead status.
+   * REQUIRED, so a caller cannot forget to ask the question.
+   */
+  previousCustomer: boolean
+}
+
+/**
+ * May this lead still receive a NON-QUOTE nurture email? Reason to abort, or
+ * null. The mirror image of quoteFollowupBlockReason: same stop rules, plus
+ * "they now have a real quote" and "they have booked with us before".
+ */
+export function leadNurtureBlockReason(lead: NurtureLeadState | null, now: Date = new Date()): string | null {
+  if (!lead) return 'lead_deleted'
+  if (!lead.email) return 'no_email'
+  // PROMOTIONAL. Same rule, same tested predicate, same tri-state refusal.
+  if (!hasPromotionalConsent({ emailMarketingConsent: lead.emailMarketingConsent })) {
+    return 'no_marketing_consent'
+  }
+  // A REAL quote exists → the quote journey owns this person. Checked before
+  // conversion so the reason names the more useful fact: the two sequences
+  // are mutually exclusive by construction, not by scheduling luck.
+  if (lead.quotedAt) return 'has_quote'
+  // A returning customer must never receive the first-time welcome sequence.
+  if (lead.previousCustomer) return 'previous_customer'
+  if (lead.bookedAt || lead.convertedBookingId) return 'lead_converted'
+  if (lead.lostAt) return 'lead_lost'
+  if (['WON', 'LOST', 'BOOKED', 'CONVERTED'].includes(lead.status.toUpperCase())) {
+    return `lead_status:${lead.status}`
+  }
+  if (lead.moveDate && lead.moveDate.getTime() + DAY < now.getTime()) return 'move_date_passed'
+  return null
+}
+
 export async function leadEligibility(leadId: string, template?: string): Promise<string | null> {
   try {
     const lead = await prisma.lead.findUnique({
@@ -458,11 +587,19 @@ export async function leadEligibility(leadId: string, template?: string): Promis
     // Journey stages keep the full matrix; an immediate transactional reply
     // gets only the rules true of every lead. `template` is optional so every
     // existing caller keeps today's behaviour.
-    const reason =
-      template && TRANSACTIONAL_LEAD_TEMPLATES.has(template)
-        ? transactionalLeadBlockReason(lead)
-        : quoteFollowupBlockReason(lead)
-    if (reason) log.info({ leadId, reason }, 'lead eligibility BLOCKED the send')
+    let reason: string | null
+    if (template && TRANSACTIONAL_LEAD_TEMPLATES.has(template)) {
+      reason = transactionalLeadBlockReason(lead)
+    } else if (template && NURTURE_TEMPLATES.has(template)) {
+      // The booking-history question is asked HERE, at send time, because it
+      // can become true between scheduling and sending — someone who booked
+      // yesterday must not get tomorrow's "still need an estimate?".
+      const previousCustomer = lead ? await hasEverBooked(lead.email) : false
+      reason = leadNurtureBlockReason(lead ? { ...lead, previousCustomer } : null)
+    } else {
+      reason = quoteFollowupBlockReason(lead)
+    }
+    if (reason) log.info({ leadId, template, reason }, 'lead eligibility BLOCKED the send')
     return reason
   } catch (err) {
     log.error(

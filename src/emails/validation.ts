@@ -142,6 +142,11 @@ export const REQUIRED_FIELDS = {
   // because the greeting is the owner's wording and every sender supplies a
   // real value rather than an empty one.
   'quote-request-received': ['firstName'],
+  // The nurture family has ONE CTA and it must be real: a "get my estimate"
+  // button with no destination is the whole point of this gate.
+  'lead-nurture-1': ['quoteUrl'],
+  'lead-nurture-2': ['quoteUrl'],
+  'lead-nurture-final': ['quoteUrl'],
   'quote-followup-1': ['bookingUrl'],
   'quote-followup-2': ['bookingUrl'],
   'quote-followup-final': ['bookingUrl'],

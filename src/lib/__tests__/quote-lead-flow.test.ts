@@ -92,6 +92,10 @@ type Recorder = {
   triggers: Array<{ leadId: string; snapshot: Record<string, unknown> }>
   enrollments: Set<string>
   lead: CaptureLead
+  /** Stand-in for Lead.quotedAt, which the CaptureLead projection does not carry. */
+  quotedAt: Date | null
+  /** 'quote:<id>' / 'nurture:<id>' in the order the sequences were started. */
+  sequencesStarted: string[]
 }
 
 /**
@@ -114,6 +118,8 @@ function makeDeps(
     triggers: [],
     enrollments: new Set<string>(),
     lead,
+    quotedAt: null,
+    sequencesStarted: [],
   }
 
   const deps: QuoteCaptureDeps = {
@@ -190,6 +196,26 @@ function makeDeps(
       if (rec.enrollments.has(key)) return { status: 'enrolled', count: 0 }
       rec.enrollments.add(key)
       return { status: 'enrolled', count: 1 }
+    },
+    // ── LIFECYCLE SEQUENCE (owner spec 2026-08-06) ──────────────────────
+    // markQuoted stamps `quotedAt` ONCE, exactly like the real one, so the
+    // "a re-capture must not restart the clock" test is a real test.
+    async markQuoted(leadId, estimatedValueCents) {
+      if (leadId !== rec.lead.id) return null
+      const newlyQuoted = rec.quotedAt === null
+      if (newlyQuoted) {
+        rec.quotedAt = NOW
+        if (rec.lead.estimatedValue == null && estimatedValueCents) {
+          rec.lead = { ...rec.lead, estimatedValue: estimatedValueCents }
+        }
+      }
+      return { newlyQuoted }
+    },
+    async startQuoteFollowup(leadId) {
+      rec.sequencesStarted.push(`quote:${leadId}`)
+    },
+    async startLeadNurture(leadId) {
+      rec.sequencesStarted.push(`nurture:${leadId}`)
     },
     ...over,
   }
@@ -711,4 +737,68 @@ test('estimate: the update builder applies the rule, not a blind write', () => {
 test('estimate: the quote route flags its value as the server\'s', () => {
   assert.match(routeSrc(), /estimateAuthoritative: true/, 'without this the flag defaults to false and the guard is inert')
   assert.match(routeSrc(), /estimatedValue: serverCents/)
+})
+
+// ════════════════════════════════════════════════════════════════════════
+//  LIFECYCLE ROUTING (owner spec 2026-08-06)
+//  ---------------------------------------------------------------------
+//  THE GAP THESE COVER: `Lead.quotedAt` was stamped ONLY by the admin's "mark
+//  quoted" button, so the quick quote — the one surface that actually
+//  calculates a price, stores it, and emails it — produced leads with
+//  quotedAt = null forever. onQuoteCreated refuses to schedule without it, so
+//  the quote follow-up sequence never ran for a single quick-quote lead.
+// ════════════════════════════════════════════════════════════════════════
+
+test('lifecycle: a real quoted number starts the QUOTE sequence', async () => {
+  const { deps, rec } = makeDeps(captureLead())
+  const out = await onQuoteRequestCaptured('lead_1', {}, deps)
+
+  assert.equal(out.sequence, 'quote')
+  assert.deepEqual(rec.sequencesStarted, ['quote:lead_1'])
+  assert.ok(rec.quotedAt, 'quotedAt is stamped, which is what onQuoteCreated requires')
+})
+
+test('lifecycle: a re-capture does NOT restart the follow-up clock', async () => {
+  // The quote page fires capture on every meaningful edit, so this runs many
+  // times for one lead. Anchoring twice would re-send stage 1.
+  const { deps, rec } = makeDeps(captureLead())
+  await onQuoteRequestCaptured('lead_1', {}, deps)
+  const first = rec.quotedAt
+  await onQuoteRequestCaptured('lead_1', {}, deps)
+
+  assert.deepEqual(rec.sequencesStarted, ['quote:lead_1'], 'started exactly once')
+  assert.equal(rec.quotedAt, first, 'the anchor never moves')
+})
+
+test('lifecycle: an IN-PERSON request gets the non-quote nurture, never the quote sequence', async () => {
+  // No number was produced, so nothing may claim one was. An estimator visit
+  // must never look like a recorded quote.
+  const { deps, rec } = makeDeps(captureLead({ formStep: 'quote_in_person' }))
+  const out = await onQuoteRequestCaptured('lead_1', {}, deps)
+
+  assert.equal(out.sequence, 'nurture')
+  assert.deepEqual(rec.sequencesStarted, ['nurture:lead_1'])
+  assert.equal(rec.quotedAt, null, 'quotedAt stays null for an in-person request')
+})
+
+test('lifecycle: a manual-review job with no stored price also routes to nurture', async () => {
+  // 5BR+ / "not sure" is captured but deliberately not auto-priced.
+  const { deps, rec } = makeDeps(captureLead({ estimatedValue: null }))
+  const out = await onQuoteRequestCaptured('lead_1', {}, deps)
+
+  assert.equal(out.sequence, 'nurture')
+  assert.deepEqual(rec.sequencesStarted, ['nurture:lead_1'])
+})
+
+test('lifecycle: a scheduling failure never costs the customer their estimate', async () => {
+  const { deps, rec } = makeDeps(captureLead(), {
+    async startQuoteFollowup() {
+      throw new Error('redis on fire')
+    },
+  })
+  const out = await onQuoteRequestCaptured('lead_1', {}, deps)
+
+  assert.equal(out.emailStatus, 'queued', 'the confirmation still went out')
+  assert.equal(out.sequence, 'none', 'and the failure is reported honestly')
+  assert.equal(rec.emails.length, 1)
 })

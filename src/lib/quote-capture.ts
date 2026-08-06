@@ -91,6 +91,15 @@ export type QuoteCaptureOutcome = {
    * consent state by reading a response body.
    */
   automation?: LeadTriggerResult
+  /**
+   * Which lifecycle sequence this lead was routed into. INTERNAL — logged, never
+   * returned to the browser, for exactly the reason `automation` is not:
+   * whether we are marketing to somebody is not the browser's business.
+   *   'quote'   — a real number was quoted; the 24h/3d/7d follow-up
+   *   'nurture' — no number (in-person / manual review); the non-quote sequence
+   *   'none'    — no email, or scheduling was unavailable
+   */
+  sequence?: 'quote' | 'nurture' | 'none'
 }
 
 /**
@@ -286,6 +295,12 @@ export interface QuoteCaptureDeps {
   recordAlertDelivered(leadId: string): Promise<void>
   /** Promotional enrollment. Consent is enforced INSIDE fireLeadTrigger. */
   fireLeadCreated(leadId: string, snapshot: Record<string, unknown>): Promise<LeadTriggerResult>
+  /** Stamp Lead.quotedAt. Returns whether THIS call was the first stamp. */
+  markQuoted(leadId: string, estimatedValueCents: number | null): Promise<{ newlyQuoted: boolean } | null>
+  /** journeys.onQuoteCreated — the 24h / 3d / 7d quote sequence. */
+  startQuoteFollowup(leadId: string): Promise<void>
+  /** journeys.onLeadCaptured — the 4h / 24h / 72h non-quote nurture. */
+  startLeadNurture(leadId: string): Promise<void>
   now(): Date
 }
 
@@ -381,6 +396,18 @@ export function defaultQuoteCaptureDeps(): QuoteCaptureDeps {
     },
     async fireLeadCreated(leadId, snapshot) {
       return fireLeadTrigger('lead_created', leadId, { snapshot })
+    },
+    async markQuoted(leadId, estimatedValueCents) {
+      const { markLeadQuoted } = await import('./leads')
+      return markLeadQuoted(leadId, { estimatedValueCents })
+    },
+    async startQuoteFollowup(leadId) {
+      const { onQuoteCreated } = await import('./journeys')
+      await onQuoteCreated(leadId)
+    },
+    async startLeadNurture(leadId) {
+      const { onLeadCaptured } = await import('./journeys')
+      await onLeadCaptured(leadId)
     },
   }
   return _deps
@@ -678,7 +705,73 @@ async function fireMarketingTrigger(
 }
 
 // ════════════════════════════════════════════════════════════════════════
-//  4. DELIVERY STATE — written by the WORKERS, not by the API
+//  4. THE LIFECYCLE SEQUENCE  (promotional — consent required downstream)
+//  ---------------------------------------------------------------------
+//  THE GAP THIS CLOSES. `Lead.quotedAt` was stamped by exactly one thing: the
+//  owner clicking "mark quoted" in the admin. So the quick quote — the surface
+//  that actually calculates a price, stores it, and puts it in an email the
+//  customer can read — produced leads with `quotedAt = null` forever, and
+//  `onQuoteCreated` refuses to schedule anything without it. The quote
+//  follow-up sequence therefore never ran for a single quick-quote lead. The
+//  one path guaranteed to have a real quote was the one path excluded from the
+//  quote journey.
+//
+//  WHAT COUNTS AS A QUOTE, and why it is exactly this test: a quote exists when
+//  we TOLD THE CUSTOMER A NUMBER. That is the same condition
+//  queueConfirmationEmail uses to decide whether to print the estimate — read
+//  off the LEAD, not off the request, so an owner resend months later agrees.
+//
+//    • a stored server-priced estimate, not an in-person request → QUOTE.
+//      Stamp quotedAt (once) and start the quote follow-up sequence.
+//    • an in-person visit request, or a 5BR+/"not sure" job we deliberately
+//      refuse to auto-price → NO QUOTE. quotedAt stays null (an estimator
+//      visit must never look like a recorded quote), and the lead goes to the
+//      non-quote nurture instead, whose copy never mentions a price.
+//
+//  Both branches are downstream of consent: onQuoteCreated and onLeadCaptured
+//  each refuse a lead without an explicit opt-in, and the send gates refuse
+//  again. Nothing here decides whether marketing is allowed — it decides only
+//  WHICH sequence a lead belongs to if marketing is allowed at all.
+// ════════════════════════════════════════════════════════════════════════
+
+/** PURE: did we quote this lead a real number? Exported for the tests. */
+export function hasRealQuote(lead: Pick<CaptureLead, 'formStep' | 'estimatedValue'>): boolean {
+  if (isInPersonRequest(lead.formStep)) return false
+  return typeof lead.estimatedValue === 'number' && lead.estimatedValue > 0
+}
+
+/**
+ * Route the captured lead into the sequence its evidence supports.
+ * NEVER throws; a scheduling failure cannot cost the customer their estimate.
+ */
+async function startLifecycleSequence(
+  lead: CaptureLead,
+  deps: QuoteCaptureDeps = defaultQuoteCaptureDeps()
+): Promise<'quote' | 'nurture' | 'none'> {
+  try {
+    if (!lead.email) return 'none'
+
+    if (!hasRealQuote(lead)) {
+      await deps.startLeadNurture(lead.id)
+      return 'nurture'
+    }
+
+    // IDEMPOTENT BY CONSTRUCTION. The quote page fires capture on every
+    // meaningful edit, so this runs many times for one lead. `markQuoted`
+    // stamps `quotedAt` only when it is null and reports whether THIS call was
+    // the first — so the 24h/3d/7d clock is anchored once, on the first real
+    // price, and a later edit never restarts it.
+    const marked = await deps.markQuoted(lead.id, lead.estimatedValue)
+    if (marked?.newlyQuoted) await deps.startQuoteFollowup(lead.id)
+    return 'quote'
+  } catch (err) {
+    log.warn({ leadId: lead.id, err: errText(err) }, 'lifecycle sequence not started (non-fatal)')
+    return 'none'
+  }
+}
+
+// ════════════════════════════════════════════════════════════════════════
+//  5. DELIVERY STATE — written by the WORKERS, not by the API
 // ════════════════════════════════════════════════════════════════════════
 
 /** Truncate to a short, safe category. Never a stack trace, never a provider
@@ -767,12 +860,17 @@ export async function onQuoteRequestCaptured(
     // customer did not ask for, and the only one that may be skipped outright.
     const automation = await fireMarketingTrigger(lead, deps)
 
+    // ...and the lifecycle sequence, which is marketing too: every stage of
+    // both branches is consent-gated at schedule time and again at send time.
+    const sequence = await startLifecycleSequence(lead, deps)
+
     return {
       emailStatus: email.status,
       emailReason: email.reason,
       notificationStatus: alert.status,
       notificationReason: alert.reason,
       automation,
+      sequence,
     }
   } catch (err) {
     log.error({ leadId, err: errText(err) }, 'onQuoteRequestCaptured failed (non-fatal)')

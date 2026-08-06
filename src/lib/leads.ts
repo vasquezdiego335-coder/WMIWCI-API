@@ -25,7 +25,7 @@
 import { LeadSource, LeadStatus, LeadLifecycle } from '@prisma/client'
 import { prisma } from './db'
 import { apiLogger } from './logger'
-import { CONSENT_VERSION, decideConsent, normaliseConsentSource } from './consent'
+import { CONSENT_VERSION, decideConsent, normaliseConsentSource, type ConsentSource } from './consent'
 
 const OPEN_STATUSES: LeadStatus[] = [LeadStatus.NEW, LeadStatus.CONTACTED, LeadStatus.QUOTE_SENT, LeadStatus.FOLLOW_UP]
 
@@ -51,6 +51,29 @@ export type LeadInput = {
   referrer?: string | null
   promoCode?: string | null
   estimatedValue?: number | null // cents
+  // ── MARKETING CONSENT (owner spec 2026-08-06) ─────────────────────────
+  //  Until now this ingestion path — the contact form, the coupon popup, the
+  //  marketing tracker, the "not sure" booking — carried NO consent fields at
+  //  all. Every lead it created was structurally `null` forever, because there
+  //  was nowhere to put an answer even when a form asked the question. That is
+  //  why PR #31's honest note said contact-form leads "will receive none": not
+  //  because they declined, but because nobody could record that they agreed.
+  //
+  //  TRI-STATE, and the tri-state is the product: `undefined` means the form
+  //  presented no choice and must change nothing. Only `decideConsent` (the one
+  //  rule module) is allowed to turn these into column writes.
+  /** true / false ONLY when the form actually showed an unchecked checkbox. */
+  marketingConsent?: boolean | null
+  /** Capture surface from the controlled vocabulary, e.g. 'CONTACT_FORM'. */
+  consentSource?: string | null
+  /** The disclosure version the person actually read. */
+  consentVersion?: string | null
+  /**
+   * Set by the caller after a suppression lookup. Suppression beats every
+   * consent claim a form can make, so a resubscribe can never happen by
+   * submitting a form (see decideConsent rule 1).
+   */
+  isSuppressed?: boolean
 }
 
 export type LeadRecord = { id: string; status: LeadStatus }
@@ -129,9 +152,30 @@ function composeNotes(input: LeadInput): string | null {
   return parts.length ? parts.join('\n') : null
 }
 
+/**
+ * Consent columns for a CREATE. Pure.
+ *
+ * A create writes all four EXPLICITLY, including the all-null case, so a lead
+ * from a form with no checkbox is unambiguously "never asked" rather than
+ * "field absent". `decideConsent` is not used here: there is no existing record
+ * to reason about, and its rules are all about what may CHANGE.
+ */
+function consentColumnsForCreate(input: LeadInput, now: Date, defaultSource: ConsentSource) {
+  // Suppression beats a fresh claim too — a suppressed address that ticks a box
+  // on a new form is still suppressed, and must not be recorded as consenting.
+  const asked = typeof input.marketingConsent === 'boolean' && !input.isSuppressed
+  return {
+    emailMarketingConsent: asked ? (input.marketingConsent as boolean) : null,
+    marketingConsentAt: asked ? now : null,
+    marketingConsentSource: asked ? (normaliseConsentSource(input.consentSource) ?? defaultSource) : null,
+    marketingConsentVersion: asked ? (clean(input.consentVersion) ?? CONSENT_VERSION) : null,
+  }
+}
+
 /** The row to CREATE from a fresh submission. Pure. */
 export function buildLeadCreate(input: LeadInput, now: Date) {
   return {
+    ...consentColumnsForCreate(input, now, 'CONTACT_FORM'),
     name: clean(input.name) ?? 'Website lead',
     phone: clean(input.phone),
     email: normalizeEmail(input.email),
@@ -170,6 +214,14 @@ export type ExistingLead = {
   destCity: string | null
   jobType: string | null
   promoCode: string | null
+  // ── CONSENT, REQUIRED not optional (owner spec 2026-08-06) ────────────
+  //  The merge rules can only be applied against what is already on the record
+  //  — "an unchecked box on a later form never revokes an earlier opt-in" is a
+  //  statement about the EXISTING value. A store that forgets to select these
+  //  therefore cannot compile, which is how the rule stays enforced.
+  emailMarketingConsent: boolean | null
+  marketingConsentSource: string | null
+  marketingConsentVersion: string | null
 }
 
 /** The patch to UPDATE an existing OPEN lead with a repeat submission. Pure:
@@ -181,9 +233,28 @@ export function buildLeadUpdate(existing: ExistingLead, input: LeadInput, now: D
     ? [existing.notes, `[${now.toISOString().slice(0, 10)}] ${newMsg}`].filter(Boolean).join('\n')
     : existing.notes
   const fillIfBlank = <T>(cur: T | null, next: T | null | undefined): T | null => (cur == null ? (next ?? null) : cur)
+  // Consent merge — the SAME rule module the booking form and the quick quote
+  // use, so the three capture surfaces cannot drift. `changes` is empty in the
+  // common case (no checkbox on this form), which is exactly what "silence
+  // changes nothing" has to look like in a patch object.
+  const consent = decideConsent(
+    {
+      consent: existing.emailMarketingConsent,
+      consentSource: existing.marketingConsentSource,
+      consentVersion: existing.marketingConsentVersion,
+    },
+    {
+      consent: input.marketingConsent,
+      source: input.consentSource,
+      version: clean(input.consentVersion) ?? CONSENT_VERSION,
+      isSuppressed: input.isSuppressed === true,
+    },
+    now
+  )
   return {
     lastActivityAt: now,
     notes: appended,
+    ...consent.changes,
     // Fill blanks only — don't clobber existing values.
     name: existing.name && existing.name !== 'Website lead' ? existing.name : (clean(input.name) ?? existing.name),
     phone: fillIfBlank(existing.phone, clean(input.phone)),
@@ -240,6 +311,9 @@ export function defaultLeadDeps(): LeadDeps {
           select: {
             id: true, status: true, name: true, phone: true, notes: true, message: true,
             moveDate: true, zip: true, originCity: true, destCity: true, jobType: true, promoCode: true,
+            // Required by ExistingLead — the consent merge cannot be applied
+            // against a record it cannot see.
+            emailMarketingConsent: true, marketingConsentSource: true, marketingConsentVersion: true,
           },
         })
       },
@@ -290,7 +364,13 @@ function notifyOwnerOfNewLead(leadId: string, context: string): void {
  *  still fire its Discord/email alert regardless. */
 export async function ingestLeadSafe(input: LeadInput, context: string): Promise<CreateOrUpdateResult | null> {
   try {
-    const res = await createOrUpdateLead(input)
+    // SUPPRESSION FIRST, and only when this submission actually claims a
+    // consent decision — otherwise it is a pointless query on every contact
+    // form post. A suppressed address can never be re-subscribed by filling in
+    // a form, so the lookup happens BEFORE the pure builders decide anything.
+    const suppressed =
+      typeof input.marketingConsent === 'boolean' ? await isAddressSuppressed(input.email) : false
+    const res = await createOrUpdateLead({ ...input, isSuppressed: suppressed })
     apiLogger.info({ leadId: res.lead.id, isNew: res.isNew, context }, 'lead persisted')
     // lead_created automation trigger — a NEW lead only, never a repeat
     // submission merge. Dynamically imported so this module keeps its
@@ -1077,6 +1157,71 @@ export async function purgeAbandonedLeads(now: Date = new Date(), afterDays: num
   } catch (err) {
     apiLogger.error({ err: err instanceof Error ? err.message : String(err) }, 'purgeAbandonedLeads failed (non-fatal)')
     return 0
+  }
+}
+
+// ════════════════════════════════════════════════════════════════════════
+//  SUPPRESSION + BOOKING HISTORY — two facts the lifecycle keeps asking for.
+// ════════════════════════════════════════════════════════════════════════
+
+/** Is this address on the do-not-send list, at any scope? Fails CLOSED (a read
+ *  error answers "suppressed"), because the cost of a wrong `false` here is a
+ *  form silently re-subscribing somebody who unsubscribed. */
+export async function isAddressSuppressed(email?: string | null): Promise<boolean> {
+  const normalized = normalizeEmail(email)
+  if (!normalized) return false
+  try {
+    return (await prisma.emailSuppression.findUnique({ where: { email: normalized }, select: { id: true } })) !== null
+  } catch (err) {
+    apiLogger.warn({ err: String(err).slice(0, 200) }, 'suppression lookup failed — treating as suppressed')
+    return true
+  }
+}
+
+/**
+ * PURE: does this booking count as "this person has moved with us before"?
+ *
+ * DELIBERATELY NOT "a booking row exists". A booking parked in DRAFT or
+ * PENDING_PAYMENT is somebody who started a form, which is precisely the
+ * first-time customer the welcome sequence is for. What makes someone a
+ * previous customer is that a booking was actually taken: a confirmed date, or
+ * money captured.
+ */
+export function countsAsPriorBooking(b: {
+  status: string
+  depositPaid: boolean
+  isInternalTest: boolean
+}): boolean {
+  if (b.isInternalTest) return false
+  if (b.depositPaid) return true
+  return ['CONFIRMED', 'SCHEDULED', 'IN_PROGRESS', 'COMPLETED'].includes(b.status)
+}
+
+/**
+ * Has this address ever actually booked a move with us?
+ *
+ * BOOKING HISTORY, NOT LEAD STATUS — owner spec 2026-08-06, and the distinction
+ * matters. A returning customer who fills in the quick quote form gets a BRAND
+ * NEW lead row with status NEW (the dedupe deliberately starts a fresh lead once
+ * the old one is closed), so every lead-status test would call them a first-time
+ * enquiry and put them back through the welcome sequence they already had.
+ *
+ * FAILS CLOSED: a read error answers `true`, so an outage suppresses a welcome
+ * sequence rather than sending a returning customer "nice to meet you".
+ */
+export async function hasEverBooked(email?: string | null): Promise<boolean> {
+  const normalized = normalizeEmail(email)
+  if (!normalized) return false
+  try {
+    const bookings = await prisma.booking.findMany({
+      where: { customer: { email: normalized } },
+      select: { status: true, depositPaid: true, isInternalTest: true },
+      take: 25,
+    })
+    return bookings.some(countsAsPriorBooking)
+  } catch (err) {
+    apiLogger.warn({ err: String(err).slice(0, 200) }, 'booking-history lookup failed — treating as a previous customer')
+    return true
   }
 }
 

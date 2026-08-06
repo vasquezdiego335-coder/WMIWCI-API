@@ -31,6 +31,11 @@ const snap = (over: Partial<BookingSnapshot> = {}): BookingSnapshot => ({
   requestedDate: FUTURE,
   confirmedDate: FUTURE,
   scheduledStart: FUTURE,
+  // A customer we MAY market to. Promotional templates now require an explicit
+  // opt-in (owner spec 2026-08-06), so consent is part of what makes a booking
+  // eligible — the consent cases have their own tests below.
+  customerMarketingConsent: true,
+  customerMarketingOptOut: false,
   ...over,
 })
 

@@ -5,6 +5,7 @@ import { notifyLead } from '@/lib/notify'
 import { apiLogger } from '@/lib/logger'
 import { rateLimit, tooManyRequests, LIMITS, clientIp } from '@/lib/rate-limit'
 import { ingestLeadSafe } from '@/lib/leads'
+import { CONSENT_VERSION, normaliseConsentSource } from '@/lib/consent'
 
 // ════════════════════════════════════════════════════════════════════════
 //  POST /api/notify/lead — internal, server-to-server.
@@ -30,6 +31,15 @@ const Body = z.object({
   // Either key works; the tracker posts `language`, the rest of the app uses `locale`.
   language: z.string().trim().max(8).optional(),
   locale: z.string().trim().max(8).optional(),
+  // ── MARKETING CONSENT (owner spec 2026-08-06) ────────────────────────
+  //  The tracker is a separate application with its own forms. This endpoint
+  //  now ACCEPTS a consent decision so a tracker form that shows an unchecked
+  //  checkbox can record it — previously there was nowhere to put the answer,
+  //  so every tracker lead was structurally `null` no matter what it asked.
+  //  TRI-STATE: omit the field entirely when no choice was presented.
+  marketing_consent: z.boolean().optional(),
+  consent_source: z.string().trim().max(40).optional(),
+  consent_version: z.string().trim().max(40).optional(),
 })
 
 function tokenOk(req: NextRequest): boolean {
@@ -71,10 +81,27 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
   const d = parsed.data
   // Persist to the admin Lead table BEFORE notifying (marketing tracker feed).
-  await ingestLeadSafe(
-    { name: d.name, phone: d.phone, email: d.email, message: d.message, source: d.source ?? 'marketing-tracker', foundUs: d.found_us },
+  const lead = await ingestLeadSafe(
+    {
+      name: d.name,
+      phone: d.phone,
+      email: d.email,
+      message: d.message,
+      source: d.source ?? 'marketing-tracker',
+      foundUs: d.found_us,
+      marketingConsent: d.marketing_consent,
+      consentSource: normaliseConsentSource(d.consent_source) ?? 'CONTACT_FORM',
+      consentVersion: d.consent_version || CONSENT_VERSION,
+    },
     'notify-lead',
   )
+  // Sequence B. Self-refusing for anyone without an explicit opt-in, so a
+  // tracker that never asks the question enrols nobody.
+  if (lead) {
+    void import('@/lib/journeys')
+      .then((m) => m.onLeadCaptured(lead.lead.id))
+      .catch((err) => apiLogger.warn({ err: String(err).slice(0, 200) }, 'lead nurture trigger failed (non-fatal)'))
+  }
   try {
     // notifyLead is internally guarded (each send is non-fatal); this await just
     // ensures the work is done before the serverless function freezes.

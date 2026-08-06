@@ -32,7 +32,7 @@
 import { classifyTemplate } from './email-guard'
 import { TEMPLATE_ALLOWED_STATUSES } from '../emails/status'
 import { REQUIRED_FIELDS } from '../emails/validation'
-import { ABANDONED_STAGES, QUOTE_STAGES, REMINDER_OFFSETS } from './journeys'
+import { ABANDONED_STAGES, LEAD_NURTURE_STAGES, QUOTE_STAGES, REMINDER_OFFSETS } from './journeys'
 import type { EmailClass } from './email-suppression'
 
 /** How a template is reached today. Honest about the difference. */
@@ -405,6 +405,51 @@ const SEEDS: Seed[] = [
     subject: 'Are you still planning your move?',
   },
 
+  // ── Non-quote lead nurture (promotional) ──────────────────────────────
+  {
+    key: 'lead-nurture-1',
+    name: 'Lead nurture — what we need',
+    file: 'emails/lead-nurture.tsx',
+    category: 'lead',
+    trigger:
+      '4 hours after an OPTED-IN lead is captured with no calculated quote (contact form, coupon, tracker, in-person estimate request).',
+    journey: 'lead-nurture',
+    flag: 'EMAIL_JOURNEYS_ENABLED',
+    wiring: 'flag-gated',
+    stopRules: [
+      'No explicit marketing consent — the sequence is never scheduled and never sent',
+      'A real quote appears (Lead.quotedAt) — the quote journey owns them instead',
+      'They have booked with us before — a returning customer never gets the first-time sequence',
+      'Lead converted or lost',
+      'The move date has passed',
+    ],
+    subject: 'To price your move, we need a few things',
+  },
+  {
+    key: 'lead-nurture-2',
+    name: 'Lead nurture — how labor-only works',
+    file: 'emails/lead-nurture.tsx',
+    category: 'lead',
+    trigger: '24 hours after capture.',
+    journey: 'lead-nurture',
+    flag: 'EMAIL_JOURNEYS_ENABLED',
+    wiring: 'flag-gated',
+    stopRules: ['No marketing consent', 'Quote created', 'Previous customer', 'Converted or lost', 'Frequency cap'],
+    subject: 'What "labor-only" actually means',
+  },
+  {
+    key: 'lead-nurture-final',
+    name: 'Lead nurture — final check-in',
+    file: 'emails/lead-nurture.tsx',
+    category: 'lead',
+    trigger: '72 hours after capture. Last stage — there is deliberately no fourth.',
+    journey: 'lead-nurture',
+    flag: 'EMAIL_JOURNEYS_ENABLED',
+    wiring: 'flag-gated',
+    stopRules: ['No marketing consent', 'Quote created', 'Previous customer', 'Converted or lost', 'Frequency cap'],
+    subject: 'Do you still need an estimate?',
+  },
+
   // ── Lead intake (transactional) ───────────────────────────────────────
   {
     key: 'lead-acknowledgement',
@@ -554,6 +599,30 @@ export function journeyRegistry(): JourneyEntry[] {
         'A stage that would land after the move date is skipped at schedule time',
       ],
       conversionGoal: 'Quoted lead becomes a booking',
+      source: 'src/lib/journeys.ts',
+    },
+    {
+      key: 'lead-nurture',
+      name: 'Non-quote lead nurture',
+      anchor: 'Lead captured with an email and explicit marketing consent, and NO calculated quote',
+      audience: 'An opted-in enquiry we have not been able to price yet',
+      emailClass: 'promotional',
+      flag: 'EMAIL_JOURNEYS_ENABLED',
+      enabled: flagOn('EMAIL_JOURNEYS_ENABLED'),
+      stages: LEAD_NURTURE_STAGES.map((s, i) => ({
+        type: s.type,
+        template: s.type,
+        delayMs: s.delay,
+        label: i === LEAD_NURTURE_STAGES.length - 1 ? 'Final' : `Stage ${i + 1}`,
+      })),
+      stopRules: [
+        'Marketing consent is not exactly true → never scheduled, and refused again at send time',
+        'A real quote is recorded → journeys.leadNurtureBlockReason returns has_quote; the quote journey takes over',
+        'The person has booked with us before (BOOKING history, not lead status)',
+        'Lead converted or lost → onLeadClosed cancels the sequence',
+        'A stage that would land after the move date is skipped at schedule time',
+      ],
+      conversionGoal: 'Enough detail to produce a real quote',
       source: 'src/lib/journeys.ts',
     },
     {
