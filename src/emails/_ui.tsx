@@ -835,44 +835,75 @@ export function ContactRow({
   labels?: { phone?: string; email?: string; website?: string }
 }) {
   const L = { phone: 'Call or text', email: 'Email', website: 'Website', ...(labels || {}) }
-  const item = (icon: IconName, label: string, value: string, href: string) => (
-    <td className="contactcell stack" width="33.33%" valign="top" style={{ width: '33.33%', padding: '0 6px' }}>
-      <table role="presentation" cellPadding={0} cellSpacing={0} border={0}>
-        <tbody>
-          <tr>
-            <td
-              width={36}
-              height={36}
-              align="center"
-              valign="middle"
-              style={{ width: '36px', height: '36px', background: C.navyTint, borderRadius: '10px' }}
-            >
-              <Icon name={icon} color={C.navy} size={18} />
-            </td>
-            <td width={10} style={{ width: '10px' }}>
-              &nbsp;
-            </td>
-            <td valign="middle">
-              <div style={{ fontFamily: FONT, fontSize: '10px', fontWeight: 700, letterSpacing: '1px', textTransform: 'uppercase' as const, color: C.label }}>
-                {label}
-              </div>
-              <a href={href} style={{ fontFamily: FONT, fontSize: '13px', fontWeight: 600, color: C.navy, textDecoration: 'none' }}>
-                {value}
-              </a>
-            </td>
-          </tr>
-        </tbody>
-      </table>
-    </td>
+
+  // ── WHY THIS IS A VERTICAL LIST AND NOT THREE COLUMNS ──────────────────
+  //  It used to be three <td> at 33.33%. The arithmetic never worked:
+  //
+  //    container 600 − card padding 60      = 540px inner
+  //    540 / 3 = 180, − 12px cell padding   = 168px per column
+  //    icon 36 + gap 10 + "hello@moveitclearit.com" at 13px/600 ≈ 166px
+  //                                          = 212px NEEDED
+  //
+  //  The middle column was 44px over its share. With no `table-layout:fixed`
+  //  the percentages are only a hint, so the client widened that column and
+  //  took the space from its neighbours — leaving the three icons at three
+  //  different offsets. Reported from a real inbox as "not aligned, it's all
+  //  over", which is exactly what unequal columns look like.
+  //
+  //  `table-layout:fixed` would have honoured the thirds, but then the address
+  //  wraps to "hello@moveitclearit." / "com", which is worse.
+  //
+  //  So: ONE COLUMN, one row per contact method. This is not a new design — it
+  //  is the `.contactcell` mobile rule (display:block, width:100%) promoted to
+  //  every width, and most of this traffic is on a phone and already saw it.
+  //  The icon column is a FIXED 36px, so every icon shares one left edge no
+  //  matter how long a value gets, and the value cell has 494px to work with —
+  //  nearly triple what the longest one needs. It cannot fall out of alignment
+  //  again, for any phone format, address or domain we might use later.
+  const row = (icon: IconName, label: string, value: string, href: string, last = false) => (
+    <tr>
+      <td
+        width={36}
+        height={36}
+        align="center"
+        valign="middle"
+        style={{ width: '36px', height: '36px', background: C.navyTint, borderRadius: '10px' }}
+      >
+        <Icon name={icon} color={C.navy} size={18} />
+      </td>
+      <td width={10} style={{ width: '10px' }}>
+        &nbsp;
+      </td>
+      <td valign="middle" style={{ paddingBottom: last ? '0' : '12px', paddingTop: '0' }}>
+        <div style={{ fontFamily: FONT, fontSize: '10px', fontWeight: 700, letterSpacing: '1px', textTransform: 'uppercase' as const, color: C.label }}>
+          {label}
+        </div>
+        <a href={href} style={{ fontFamily: FONT, fontSize: '13px', fontWeight: 600, color: C.navy, textDecoration: 'none' }}>
+          {value}
+        </a>
+      </td>
+    </tr>
   )
+
+  // A spacer ROW rather than margin on the icon cell: a bare `padding-bottom`
+  // on the 36px tile stretches the tile itself in Outlook, so the gap goes
+  // between rows instead.
+  const gap = (key: string) => (
+    <tr key={key}>
+      <td colSpan={3} height={12} style={{ height: '12px', lineHeight: '12px', fontSize: 0 }}>
+        &nbsp;
+      </td>
+    </tr>
+  )
+
   return (
     <table role="presentation" width="100%" cellPadding={0} cellSpacing={0} border={0}>
       <tbody>
-        <tr>
-          {item('phone', L.phone, phone, `tel:${phone.replace(/[^0-9+]/g, '')}`)}
-          {item('mail', L.email, email, `mailto:${email}`)}
-          {item('globe', L.website, websiteLabel, website)}
-        </tr>
+        {row('phone', L.phone, phone, `tel:${phone.replace(/[^0-9+]/g, '')}`, true)}
+        {gap('g1')}
+        {row('mail', L.email, email, `mailto:${email}`, true)}
+        {gap('g2')}
+        {row('globe', L.website, websiteLabel, website, true)}
       </tbody>
     </table>
   )

@@ -165,15 +165,52 @@ const DAY_MS = 24 * HOUR_MS
 //      recorded, visible in the admin, and waits for a deliberate re-drive.
 // ════════════════════════════════════════════════════════════════════════
 
-/** The configured canary list, or null when there is no restriction. */
+/**
+ * The configured canary list, or null when there is no restriction.
+ *
+ * ENTRIES MUST LOOK LIKE A RECIPIENT — they contain '@', because that is the
+ * only thing this list can ever match against. Anything else is DISCARDED with
+ * a loud log rather than kept.
+ *
+ * WHY THAT MATTERS, and it was a real question from a real operator: the name
+ * ends in a word that reads like a flag, so `EMAIL_PROMOTIONAL_ALLOWLIST=true`
+ * is the obvious thing to type. Kept as an entry, "true" matches nobody — and
+ * a list that matches nobody blocks EVERY promotional email, silently, with
+ * the variable looking correctly set. That is precisely the silent total
+ * outage the UNSET rule above exists to prevent, arriving through the front
+ * door instead.
+ *
+ * So a value with no usable entries is treated as UNSET. It is the same
+ * decision as the empty case, for the same reason: a malformed restriction is
+ * not a restriction, and guessing "block everyone" from a typo is the one
+ * behaviour nobody would want.
+ */
 export function rolloutAllowlist(): string[] | null {
   const raw = (process.env.EMAIL_PROMOTIONAL_ALLOWLIST ?? '').trim()
   if (!raw) return null
-  const entries = raw
+  const candidates = raw
     .split(',')
     .map((e) => e.trim().toLowerCase())
     .filter(Boolean)
-  return entries.length > 0 ? entries : null
+  const entries = candidates.filter((e) => e.includes('@'))
+  const discarded = candidates.filter((e) => !e.includes('@'))
+  if (discarded.length > 0) {
+    log.error(
+      { discarded, kept: entries.length },
+      'EMAIL_PROMOTIONAL_ALLOWLIST contains entries that are not an address or @domain — they were IGNORED. ' +
+        'An allowlist is a list of recipients, not a true/false flag.'
+    )
+  }
+  if (entries.length === 0) {
+    if (candidates.length > 0) {
+      log.error(
+        'EMAIL_PROMOTIONAL_ALLOWLIST is set but contains NO usable address or @domain — treating it as unset (no restriction) ' +
+          'rather than blocking every promotional email on what is almost certainly a typo.'
+      )
+    }
+    return null
+  }
+  return entries
 }
 
 /**
