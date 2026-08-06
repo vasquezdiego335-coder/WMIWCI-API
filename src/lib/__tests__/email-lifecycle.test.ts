@@ -859,3 +859,59 @@ test('the resubscribe page tells the truth when the mirror fails', () => {
   // resubscribe must not be reported as done.
   assert.equal(classifyBlock('marketing_opted_out'), 'terminal')
 })
+
+// ════════════════════════════════════════════════════════════════════════
+//  TWO THINGS REAL USE FOUND (2026-08-06)
+// ════════════════════════════════════════════════════════════════════════
+
+test('rollout: a flag-shaped value is ignored, never read as "block everybody"', () => {
+  // The variable name ends in a word that reads like a flag, so `=true` is the
+  // obvious thing to type. Kept as an entry it matches nobody — and a list
+  // matching nobody blocks EVERY promotional email while looking correctly
+  // set. That is the silent total outage the UNSET rule exists to prevent.
+  const prev = process.env.EMAIL_PROMOTIONAL_ALLOWLIST
+  try {
+    for (const junk of ['true', 'false', '1', 'yes', 'enabled', 'true,false']) {
+      process.env.EMAIL_PROMOTIONAL_ALLOWLIST = junk
+      assert.equal(rolloutAllowlist(), null, `"${junk}" must be treated as unset`)
+      assert.equal(
+        inRolloutAllowlist('anyone@example.com', rolloutAllowlist()),
+        true,
+        `"${junk}" must not block everybody`
+      )
+    }
+    // A real entry mixed with junk keeps the real one and drops the junk.
+    process.env.EMAIL_PROMOTIONAL_ALLOWLIST = 'true,diego@moveitclearit.com'
+    assert.deepEqual(rolloutAllowlist(), ['diego@moveitclearit.com'])
+    assert.equal(inRolloutAllowlist('diego@moveitclearit.com', rolloutAllowlist()), true)
+    assert.equal(inRolloutAllowlist('someone@else.com', rolloutAllowlist()), false)
+  } finally {
+    if (prev === undefined) delete process.env.EMAIL_PROMOTIONAL_ALLOWLIST
+    else process.env.EMAIL_PROMOTIONAL_ALLOWLIST = prev
+  }
+})
+
+test('the support block cannot fall out of alignment again', () => {
+  // REPORTED FROM A REAL INBOX: "the phone number was not aligned, it's all
+  // over". Three 33.33% columns, but icon 36 + gap 10 + a 23-character email
+  // at 13px needs ~212px and the column only had 168px. Percentages without
+  // `table-layout:fixed` are a hint, so the client widened that column and
+  // took the space from its neighbours — three icons, three different offsets.
+  // Comments stripped first: the fix documents the old arithmetic in the very
+  // characters it forbids, so scanning the raw file would fail on the
+  // explanation rather than on a regression.
+  const ui = src('emails/_ui.tsx')
+  const fn = ui
+    .slice(ui.indexOf('export function ContactRow'), ui.indexOf('//  COMPOSITE BLOCKS'))
+    .split(/\r?\n/)
+    .filter((line) => !/^\s*\/\//.test(line))
+    .join('\n')
+  assert.ok(!/33\.33%/.test(fn), 'the contact row must not use thirds — the longest value does not fit')
+  assert.match(fn, /width=\{36\}/, 'the icon column stays a FIXED width so every icon shares one left edge')
+
+  // And the invariant that matters, asserted on the RENDERED output of every
+  // template that uses it: no fractional-width contact columns anywhere.
+  const rendered = readFileSync(resolve(__dirname, '..', '..', '..', 'email-previews/quote-request-received.html'), 'utf8')
+  assert.ok(!rendered.includes('33.33%'), 'rendered email still contains a thirds column')
+  assert.equal((rendered.match(/width:36px;height:36px/g) ?? []).length, 3, 'three fixed-width icon tiles')
+})
