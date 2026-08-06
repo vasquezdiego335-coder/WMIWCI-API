@@ -31,7 +31,7 @@
 
 import { prisma } from './db'
 import { queueLogger } from './logger'
-import { classifyTemplate } from './email-guard'
+import { classifyTemplate, inRolloutAllowlist, rolloutAllowlist } from './email-guard'
 import { TEMPLATE_ALLOWED_STATUSES, type BookingStatus } from '../emails/status'
 
 const log = queueLogger.child({ mod: 'email-eligibility' })
@@ -261,10 +261,17 @@ export async function bookingMarketingBlockReason(bookingId: string): Promise<st
   try {
     const row = await prisma.booking.findUnique({
       where: { id: bookingId },
-      select: { isInternalTest: true, customer: { select: { emailMarketingConsent: true, marketingOptOut: true } } },
+      select: {
+        isInternalTest: true,
+        customer: { select: { email: true, emailMarketingConsent: true, marketingOptOut: true } },
+      },
     })
     if (!row) return 'booking_deleted'
     if (row.isInternalTest) return 'internal_test_booking'
+    // CONTROLLED ROLLOUT. During a canary, do not even queue a sequence for
+    // somebody outside the allowlist — the send gate would refuse every stage
+    // anyway, and a queue full of certain refusals hides the real ones.
+    if (!inRolloutAllowlist(row.customer?.email ?? '', rolloutAllowlist())) return 'not_in_rollout_allowlist'
     return promotionalConsentBlockReason({
       // Only the consent fields are consulted; the rest are placeholders that
       // promotionalConsentBlockReason never reads.

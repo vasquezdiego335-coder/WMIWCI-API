@@ -38,7 +38,9 @@
     "gen:pricing-config": "tsx scripts/gen-pricing-config.ts",
     "preview:emails": "tsx scripts/preview-all-emails.ts",
     "agent:dryrun": "tsx scripts/email-agent-dryrun.ts",
-    "agent:cost": "tsx scripts/email-agent-cost.ts"
+    "agent:cost": "tsx scripts/email-agent-cost.ts",
+    "email:preflight-rollout": "tsx scripts/email-rollout-preflight.ts",
+    "email:queue-audit": "tsx scripts/email-queue-audit.ts"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.600.0",

@@ -25,7 +25,7 @@
 import { prisma } from './db'
 import { scheduledQueue } from './queues'
 import { queueLogger } from './logger'
-import { nextAllowedTime } from './email-guard'
+import { inRolloutAllowlist, nextAllowedTime, rolloutAllowlist } from './email-guard'
 import { bookingMarketingBlockReason, effectiveMoveDate } from './email-eligibility'
 import { fireBookingTrigger, fireLeadTrigger, stopEnrollmentsFor } from './email-automation-runtime'
 import { hasEverBooked, hasPromotionalConsent } from './leads'
@@ -357,6 +357,12 @@ export async function onQuoteCreated(leadId: string): Promise<void> {
     return
   }
 
+  // CONTROLLED ROLLOUT. Unset allowlist ⇒ no restriction; see email-guard.
+  if (!inRolloutAllowlist(lead.email, rolloutAllowlist())) {
+    log.info({ leadId }, 'outside the rollout allowlist — no quote follow-up scheduled')
+    return
+  }
+
   const anchor = lead.quotedAt.getTime()
   for (const s of QUOTE_STAGES) {
     const fireAt = new Date(anchor + s.delay)
@@ -406,6 +412,12 @@ export async function onLeadCaptured(leadId: string): Promise<void> {
   const block = leadNurtureBlockReason({ ...lead, previousCustomer })
   if (block) {
     log.info({ leadId, reason: block }, 'lead nurture not scheduled')
+    return
+  }
+
+  // CONTROLLED ROLLOUT. Unset allowlist ⇒ no restriction; see email-guard.
+  if (!inRolloutAllowlist(lead.email ?? '', rolloutAllowlist())) {
+    log.info({ leadId }, 'outside the rollout allowlist — lead nurture not scheduled')
     return
   }
 

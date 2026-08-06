@@ -136,6 +136,60 @@ export const CAPS = {
 const HOUR_MS = 3_600_000
 const DAY_MS = 24 * HOUR_MS
 
+// ════════════════════════════════════════════════════════════════════════
+//  CONTROLLED ROLLOUT — the recipient allowlist (owner spec 2026-08-06)
+//  ---------------------------------------------------------------------
+//  THE GAP THIS FILLS. Before this, a journey had exactly two settings: OFF,
+//  and ON FOR EVERY ELIGIBLE PERSON. `EMAIL_JOURNEYS_ENABLED=true` is a single
+//  keystroke that turns a sequence loose on the whole eligible database at
+//  once, and the first evidence that the copy, the links or the timing are
+//  wrong arrives as replies from real customers.
+//
+//  So there is now a third setting: ON, FOR THESE ADDRESSES ONLY.
+//
+//  RULES, and each one is deliberate:
+//    • UNSET means NO RESTRICTION. An empty variable cannot be allowed to mean
+//      "block everything" — that would turn a typo, or a variable that failed
+//      to propagate to one of the two Railway services, into a silent and
+//      total marketing outage. Restriction is opt-IN.
+//    • PROMOTIONAL ONLY. A canary must never delay a receipt, a booking
+//      confirmation or a move-day reminder. Transactional mail ignores this
+//      entirely.
+//    • An entry is either a full address (`diego@moveitclearit.com`) or a
+//      DOMAIN (`@moveitclearit.com`), so the whole team can be enrolled
+//      without listing everyone.
+//    • The refusal is RETRYABLE, not terminal. A real lead captured during the
+//      canary must not have its idempotency key permanently burned — widen the
+//      allowlist and the send can still happen. It is not given a `nextAttemptAt`
+//      either, so it does not sit in the queue re-deferring for weeks; it is
+//      recorded, visible in the admin, and waits for a deliberate re-drive.
+// ════════════════════════════════════════════════════════════════════════
+
+/** The configured canary list, or null when there is no restriction. */
+export function rolloutAllowlist(): string[] | null {
+  const raw = (process.env.EMAIL_PROMOTIONAL_ALLOWLIST ?? '').trim()
+  if (!raw) return null
+  const entries = raw
+    .split(',')
+    .map((e) => e.trim().toLowerCase())
+    .filter(Boolean)
+  return entries.length > 0 ? entries : null
+}
+
+/**
+ * PURE: may this address receive PROMOTIONAL mail under the current rollout?
+ *
+ * `allowlist === null` is "no canary configured" and answers true for
+ * everyone — see the UNSET rule above.
+ */
+export function inRolloutAllowlist(email: string, allowlist: string[] | null): boolean {
+  if (allowlist === null) return true
+  const addr = normalizeEmail(email)
+  if (!addr) return false
+  const domain = addr.slice(addr.lastIndexOf('@'))
+  return allowlist.some((entry) => (entry.startsWith('@') ? entry === domain : entry === addr))
+}
+
 /** Hour of day in America/New_York — DST-safe, host-timezone independent. */
 export function etHour(d: Date): number {
   const s = new Intl.DateTimeFormat('en-US', {
@@ -300,6 +354,9 @@ export function classifyBlock(reason: string): BlockClass {
   // so it stays resumable rather than closing the key forever.
   if (reason === 'marketing_opted_out') return 'terminal'
   if (reason === 'no_marketing_consent') return 'retryable'
+  // A canary exclusion is a property of TODAY'S ROLLOUT, not of this person.
+  // Retryable so widening the allowlist can still let the send through.
+  if (reason === 'not_in_rollout_allowlist') return 'retryable'
   // Config/plumbing problems are fixable, so the send must survive them.
   if (reason.startsWith('validation:')) return 'retryable'
   if (reason.endsWith('_read_failed') || reason === 'suppression_read_failed') return 'retryable'
@@ -584,6 +641,16 @@ export async function guardedSend(input: GuardedSendInput): Promise<SendOutcome>
 
   // ── 4. quiet hours + frequency caps (PROMOTIONAL only) ────────────────
   if (emailClass === 'promotional') {
+    // ── 4a. CONTROLLED ROLLOUT ──────────────────────────────────────────
+    // Checked FIRST inside this block, so a canary refusal is reported as
+    // itself rather than as a quiet-hours deferral the operator would then
+    // spend an afternoon chasing.
+    const allowlist = rolloutAllowlist()
+    if (!inRolloutAllowlist(email, allowlist)) {
+      l.info({ allowlistSize: allowlist?.length }, 'blocked: outside the rollout allowlist')
+      return refuse('not_in_rollout_allowlist')
+    }
+
     if (inQuietHours()) {
       const retryAt = nextAllowedTime()
       l.info({ retryAt }, 'deferred: quiet hours')
