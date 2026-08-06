@@ -196,7 +196,8 @@ export async function suppress(input: SuppressInput): Promise<SuppressionResult>
 }
 
 export type ResubscribeResult =
-  | { status: 'removed' }
+  /** `mirrored: false` = the list is clean but Customer.marketingOptOut lagged. */
+  | { status: 'removed'; mirrored: boolean }
   | { status: 'not_suppressed' }
   | { status: 'hard_suppression_refused' }
   | { status: 'write_failed'; error: unknown }
@@ -226,8 +227,37 @@ export async function resubscribe(email: string): Promise<ResubscribeResult> {
       where: { email: normalized, scope: 'promotional' },
     })
     if (count > 0) {
-      log.info('promotional suppression removed (resubscribe)')
-      return { status: 'removed' }
+      // ── UN-MIRROR (found by a production smoke test, 2026-08-06) ────────
+      //  `unsubscribeEmail` sets Customer.marketingOptOut = true. Nothing ever
+      //  set it back. So a customer who unsubscribed and then clicked "keep me
+      //  subscribed" had their suppression row deleted, was shown "You are back
+      //  on the list" — and stayed permanently blocked, because
+      //  promotionalConsentBlockReason reads marketingOptOut and classifies
+      //  `marketing_opted_out` as TERMINAL. The page was telling them something
+      //  that was not true.
+      //
+      //  A ONE-WAY MIRROR IS THE BUG. This makes it symmetric: the same write
+      //  the unsubscribe path makes, undone by the path that undoes it.
+      //
+      //  CHANNEL CAVEAT, stated rather than hidden: marketingOptOut is also set
+      //  by the inbound-SMS STOP webhook, and this cannot tell the two apart —
+      //  so an email resubscribe will also clear an SMS STOP. That conflation
+      //  already existed in the other direction (an EMAIL unsubscribe sets the
+      //  SMS flag); making it symmetric is strictly better than leaving people
+      //  silently un-resubscribable. Separating the channels needs its own
+      //  column, which is a schema change and a different piece of work.
+      let mirrored = true
+      await prisma.customer
+        .updateMany({ where: { email: normalized }, data: { marketingOptOut: false } })
+        .catch((err) => {
+          mirrored = false
+          log.warn(
+            { err: String(err) },
+            'suppression removed but Customer.marketingOptOut mirror NOT cleared — follow-ups stay blocked for this address'
+          )
+        })
+      log.info({ mirrored }, 'promotional suppression removed (resubscribe)')
+      return { status: 'removed', mirrored }
     }
 
     // Nothing deleted: either there was no row, or it is an 'all' block we must

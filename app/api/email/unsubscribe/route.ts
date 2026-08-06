@@ -210,6 +210,20 @@ export async function POST(req: NextRequest): Promise<Response> {
                    change. You will keep receiving occasional moving tips and offers.</p>`,
         })
       case 'removed':
+        if (!result.mirrored) {
+          // TRUTHFULNESS. The suppression IS gone, but the older
+          // Customer.marketingOptOut flag still blocks post-move follow-ups,
+          // so "you are back on the list" would be only half true. Say what is
+          // actually the case and give them a path that works.
+          apiLogger.error('resubscribe removed the suppression but the Customer mirror did NOT clear')
+          return page({
+            title: "You're mostly back",
+            body: `<p>We have taken this address off our unsubscribe list, but one older
+                     preference did not update, so some messages may still be held.</p>
+                   <p class="muted">Email <a href="mailto:${SUPPORT}">${SUPPORT}</a> and we
+                     will finish it by hand — that always works.</p>`,
+          })
+        }
         return page({
           title: 'You are back on the list',
           body: `<p>We will send you occasional moving tips and offers again. You can change
