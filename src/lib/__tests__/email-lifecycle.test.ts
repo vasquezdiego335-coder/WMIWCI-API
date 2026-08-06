@@ -820,3 +820,42 @@ test('rollout: the preflight is read-only', () => {
   assert.ok(!/['"].*\/resend['"]/.test(imports), 'the preflight must not import the Resend client')
   assert.ok(!/['"].*\/queues['"]/.test(imports), 'the preflight must not import a queue')
 })
+
+// ════════════════════════════════════════════════════════════════════════
+//  THE UNSUBSCRIBE MIRROR (found by a production smoke test, 2026-08-06)
+//  ---------------------------------------------------------------------
+//  `unsubscribeEmail` sets Customer.marketingOptOut = true. Nothing ever set
+//  it back, so somebody who unsubscribed and then clicked "keep me subscribed"
+//  had their suppression row deleted, was shown "You are back on the list",
+//  and stayed permanently blocked — promotionalConsentBlockReason reads that
+//  flag and `marketing_opted_out` classifies as TERMINAL. The page was telling
+//  them something untrue.
+// ════════════════════════════════════════════════════════════════════════
+
+test('resubscribe un-mirrors the flag that unsubscribe set', () => {
+  const s = src('lib/email-suppression.ts')
+  const unsub = s.slice(s.indexOf('export async function unsubscribeEmail'))
+  const resub = s.slice(s.indexOf('export async function resubscribe'), s.indexOf('export type UnsubscribeResult'))
+
+  assert.match(unsub, /data: \{ marketingOptOut: true \}/, 'unsubscribe sets the mirror')
+  assert.match(resub, /data: \{ marketingOptOut: false \}/, 'resubscribe must clear the same mirror')
+  // Only when a suppression was ACTUALLY removed — clearing an opt-out for
+  // somebody who was never suppressed would be inventing consent.
+  assert.ok(
+    resub.indexOf('if (count > 0)') < resub.indexOf('marketingOptOut: false'),
+    'the mirror clears only inside the "we removed a row" branch'
+  )
+  // ...and the outcome is REPORTED, so the page cannot claim a change it did
+  // not fully make.
+  assert.match(resub, /return \{ status: 'removed', mirrored \}/)
+  assert.match(s, /\{ status: 'removed'; mirrored: boolean \}/, 'the type carries the partial-success case')
+})
+
+test('the resubscribe page tells the truth when the mirror fails', () => {
+  const r = readFileSync(resolve(__dirname, '..', '..', '..', 'app/api/email/unsubscribe/route.ts'), 'utf8')
+  assert.match(r, /if \(!result\.mirrored\)/, 'the route must act on the partial-success flag')
+  assert.match(r, /You're mostly back/, 'and say so rather than claiming full success')
+  // The flag is terminal downstream, which is exactly why a half-done
+  // resubscribe must not be reported as done.
+  assert.equal(classifyBlock('marketing_opted_out'), 'terminal')
+})
