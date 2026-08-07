@@ -214,6 +214,12 @@ function makeDeps(
     async startQuoteFollowup(leadId) {
       rec.sequencesStarted.push(`quote:${leadId}`)
     },
+    // The RETRYABLE re-enrolment (owner spec 2026-08-07). Recorded separately
+    // from `quote:` so a test can tell "the trigger fired again" (wrong — it is
+    // a one-per-event statement) from "the schedule was re-ensured" (right).
+    async ensureQuoteFollowup(leadId) {
+      rec.sequencesStarted.push(`ensure-quote:${leadId}`)
+    },
     async startLeadNurture(leadId) {
       rec.sequencesStarted.push(`nurture:${leadId}`)
     },
@@ -758,16 +764,37 @@ test('lifecycle: a real quoted number starts the QUOTE sequence', async () => {
   assert.ok(rec.quotedAt, 'quotedAt is stamped, which is what onQuoteCreated requires')
 })
 
-test('lifecycle: a re-capture does NOT restart the follow-up clock', async () => {
+test('lifecycle: a re-capture does NOT restart the follow-up clock, but DOES re-ensure the schedule', async () => {
   // The quote page fires capture on every meaningful edit, so this runs many
-  // times for one lead. Anchoring twice would re-send stage 1.
+  // times for one lead. Anchoring twice would re-send stage 1 — so the ANCHOR
+  // is stamped once and the one-per-event trigger fires once.
+  //
+  // The RE-ENSURE is the 2026-08-07 fix. The old code did nothing at all on a
+  // repeat capture, so a first attempt refused for a temporary reason (rollout
+  // allowlist, Redis stall, consent given on a LATER save of this very form)
+  // was the only attempt the lead would ever get.
   const { deps, rec } = makeDeps(captureLead())
   await onQuoteRequestCaptured('lead_1', {}, deps)
   const first = rec.quotedAt
   await onQuoteRequestCaptured('lead_1', {}, deps)
+  await onQuoteRequestCaptured('lead_1', {}, deps)
 
-  assert.deepEqual(rec.sequencesStarted, ['quote:lead_1'], 'started exactly once')
+  assert.deepEqual(
+    rec.sequencesStarted,
+    ['quote:lead_1', 'ensure-quote:lead_1', 'ensure-quote:lead_1'],
+    'the trigger fires once; the schedule is re-ensured on every later save'
+  )
   assert.equal(rec.quotedAt, first, 'the anchor never moves')
+})
+
+test('lifecycle: a closed lead cannot be re-quoted into a sequence', async () => {
+  // markLeadQuoted returns null for a BOOKED/LOST lead. The old code carried on
+  // and reported `sequence: 'quote'` anyway, which was simply untrue.
+  const { deps, rec } = makeDeps(captureLead(), { async markQuoted() { return null } })
+  const out = await onQuoteRequestCaptured('lead_1', {}, deps)
+
+  assert.equal(out.sequence, 'none')
+  assert.deepEqual(rec.sequencesStarted, [], 'no sequence of any kind')
 })
 
 test('lifecycle: an IN-PERSON request gets the non-quote nurture, never the quote sequence', async () => {

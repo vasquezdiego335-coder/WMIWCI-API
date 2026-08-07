@@ -239,6 +239,15 @@ export type ScheduledJobData = {
     // captures to ABANDONED, then purges long-abandoned ones per the retention
     // policy. Never touches quoted/converted leads or consent proof.
     | 'lead-maintenance'
+    // Hourly: re-enrol quoted leads whose follow-up sequence was refused for a
+    // TEMPORARY reason (rollout allowlist, Redis stall, late consent) and would
+    // otherwise stay stranded forever. Bounded + idempotent; see
+    // journeys.repairStrandedQuoteJourneys.
+    | 'lifecycle-repair'
+    // Daily: the marketing discovery sweep — deterministic reactivation
+    // audiences -> at most ONE drafted campaign + a Discord ask. Never sends;
+    // flag-gated on EMAIL_MARKETING_AGENT_ENABLED. See email-marketing-agent.ts.
+    | 'marketing-discovery'
     | 'daily-schedule-morning'
     | 'daily-schedule-evening'
     // ── Phase 3 post-move follow-ups (handled by runFollowup in followups.ts) ──

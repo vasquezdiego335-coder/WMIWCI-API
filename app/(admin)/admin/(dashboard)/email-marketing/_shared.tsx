@@ -22,7 +22,18 @@ export const EMAIL_TABS: Array<{ href: string; label: string; ownerOnly?: boolea
   { href: '/admin/email-marketing/settings', label: 'Settings' },
 ]
 
-export function EmailTabs({ active, isOwner }: { active: string; isOwner: boolean }) {
+export function EmailTabs({
+  active,
+  isOwner,
+  campaignsBadge,
+}: {
+  active: string
+  isOwner: boolean
+  /** Campaigns AWAITING A DECISION (drafts) — not historical campaigns. Pages
+   *  that already know the count pass it; the tab then reads "Campaigns ● N"
+   *  so a waiting draft is visible from every email-marketing screen. */
+  campaignsBadge?: number
+}) {
   return (
     <nav
       aria-label="Email marketing sections"
@@ -30,6 +41,7 @@ export function EmailTabs({ active, isOwner }: { active: string; isOwner: boolea
     >
       {EMAIL_TABS.filter((t) => isOwner || !t.ownerOnly).map((t) => {
         const on = t.href === active
+        const badge = t.href === '/admin/email-marketing/campaigns' && (campaignsBadge ?? 0) > 0 ? campaignsBadge : null
         return (
           // Which tab is current was communicated by colour, weight and an
           // underline — all purely visual. aria-current states it outright.
@@ -48,6 +60,23 @@ export function EmailTabs({ active, isOwner }: { active: string; isOwner: boolea
             }}
           >
             {t.label}
+            {badge != null && (
+              <span
+                aria-label={`${badge} awaiting approval`}
+                style={{
+                  marginLeft: '6px',
+                  padding: '1px 7px',
+                  fontSize: '11px',
+                  fontWeight: 800,
+                  color: '#fff',
+                  backgroundColor: COLORS.orange,
+                  borderRadius: '999px',
+                  verticalAlign: '1px',
+                }}
+              >
+                {badge}
+              </span>
+            )}
           </Link>
         )
       })}

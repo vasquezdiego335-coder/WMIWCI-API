@@ -832,8 +832,14 @@ const APPROVAL_COPY: Record<string, { effect: string; risk: string }> = {
     risk: 'Very low. This can only ADD a suppression, never remove one.',
   },
   retryTransientSendOnce: {
-    effect: 'One send whose failure was classified transient is re-opened for exactly one more attempt.',
-    risk: 'A message could reach the customer later than expected. Delivered and ambiguous sends are refused, so a duplicate is not possible.',
+    // HONEST ABOUT ITS OWN REACH (audited 2026-08-07): this clears the block on
+    // the ledger row. It does not enqueue anything, and nothing polls for
+    // re-opened rows — so it only results in a delivery when a producer comes
+    // back for that send (a lifecycle journey re-enrolling, a campaign re-run).
+    // Saying "one more attempt" implied a retry engine that does not exist.
+    effect:
+      'The block on one send whose failure was classified transient is cleared, so a later attempt is allowed. It does not itself re-send: a lifecycle stage will be picked up again by its journey, a one-off send will not.',
+    risk: 'A message could reach the customer later than expected, or not at all if nothing produces it again. Delivered and ambiguous sends are refused, so a duplicate is not possible.',
   },
   // ── Always-approval tools ──
   resumeMarketingDispatch: {

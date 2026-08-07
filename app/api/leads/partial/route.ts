@@ -17,9 +17,29 @@ import { capturePartialLeadSafe } from '@/lib/leads'
 //      so the form behaves exactly as it did before the feature.
 //    - Never 500s for a business reason (capturePartialLeadSafe never throws);
 //      the client fires this fire-and-forget and ignores the response.
-//    - SILENT: no Discord/email/SMS, no promotional automation — entering an
-//      email is not consent, and this must not spam the owner or the visitor.
+//    - SILENT WITHOUT CONSENT: no Discord, no email, no promotional automation.
+//      Entering an email is not consent.
 //  Mirrors /api/contact for CORS + sanitize + rate-limit + honeypot.
+//
+//  ── STEP 1 IS NO LONGER A DEAD END (owner spec 2026-08-07) ──────────────
+//  This route stored the lead and its consent and then scheduled NOTHING. So
+//  somebody could start a booking, type their email, deliberately tick "yes,
+//  email me", leave before /api/bookings — and never hear from us again. The
+//  capture was working perfectly and going nowhere.
+//
+//  A consented, eligible partial lead now enters the SAME non-quote nurture
+//  every other consented lead uses (journeys.onLeadCaptured, Sequence B). No
+//  second email universe: one sequence, one set of stop rules, one send gate.
+//  onLeadCaptured refuses on its own for a lead with no explicit opt-in, one
+//  that already has a real quote, a previous customer, or a converted/lost
+//  lead — so this call is safe for every visitor, and silent for most.
+//
+//  AND IT HANDS OVER CLEANLY. When the visitor does reach /api/bookings, the
+//  booking hand-over (journeys.onBookingCreated) converts the lead and cancels
+//  Sequence B before starting the abandoned-checkout journey — so nobody ever
+//  holds "still thinking about moving?" and "you left something behind" at the
+//  same time. If a real quote arrives instead, ensureQuoteJourney cancels
+//  Sequence B and Sequence A takes over. The booking always wins.
 // ════════════════════════════════════════════════════════════════════════
 
 export const runtime = 'nodejs'
@@ -177,6 +197,27 @@ async function handle(req: NextRequest): Promise<NextResponse> {
     },
     'partial-lead',
   )
+
+  // ── SEQUENCE B ENROLMENT ────────────────────────────────────────────────
+  // Fired only when this submission could plausibly change the answer, because
+  // the booking form calls this route from FIVE triggers (debounce, blur, nav,
+  // consent toggle, exit beacon) and a lead is worth at most one enrolment:
+  //   • isNew                    — the first capture; enrol if consent came with it
+  //   • marketingConsent === true — the toggle-on save, which is exactly when a
+  //                                previously-ineligible lead becomes eligible
+  // Repeat saves that carry no consent claim skip it entirely, so the common
+  // case costs nothing. Enrolment is idempotent anyway (stable job ids), so a
+  // duplicate call could only ever cost a Redis round trip.
+  //
+  // Fire-and-forget: a Redis outage must never turn a silent, best-effort
+  // capture into a visible failure. onLeadCaptured owns every refusal.
+  if (result && (result.isNew || d.marketingConsent === true)) {
+    void import('@/lib/journeys')
+      .then((m) => m.onLeadCaptured(result.lead.id))
+      .catch((err) =>
+        apiLogger.warn({ err: String(err).slice(0, 200) }, 'lead nurture trigger failed (non-fatal)')
+      )
+  }
 
   return NextResponse.json({ ok: true, captured: !!result, isNew: result?.isNew ?? false })
 }

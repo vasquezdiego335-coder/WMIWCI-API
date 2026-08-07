@@ -6,9 +6,29 @@
 // The retry is the sharp edge here, so it is narrow on purpose:
 //   • it CANNOT re-send something already delivered (reopenForRetry refuses),
 //   • it does NOT bypass suppression, eligibility or validation — it only moves
-//     the row back to `retry_pending`; the next attempt runs the FULL guard,
+//     the row back to `retry_pending`; any later attempt runs the FULL guard,
 //   • an `ambiguous` row can be re-driven, because that is exactly the case a
 //     human is meant to resolve after checking the provider dashboard.
+//
+// ── WHAT THIS BUTTON DOES NOT DO (audited 2026-08-07) ────────────────────
+// It RE-OPENS the ledger row. It does not re-enqueue a job, and nothing in the
+// system polls for re-opened rows: `email-guard.dueForRetry()` is written,
+// exported and has NO caller, so a `retry_pending` row sits until something
+// independently produces the same logical send again.
+//
+// In practice that means:
+//   • a JOURNEY stage recovers on its own — the lifecycle re-enrols (see
+//     journeys.ensureQuoteJourney / repairStrandedQuoteJourneys) and the guard
+//     RESUMES this very row rather than minting a duplicate. Re-opening it
+//     genuinely helps.
+//   • a one-off send (a campaign recipient, an automation stage) has no such
+//     producer, so re-opening it alone will not deliver anything.
+//
+// Building a general re-driver would mean storing the rendered job payload on
+// EmailSend — a schema change and a real duplicate-send risk — so it is NOT
+// done here. The response below says which case the operator is in rather than
+// promising a retry that may never come; a button that lies about what it did
+// is how the stranded-lead bug stayed invisible for a fortnight.
 
 import { NextRequest, NextResponse } from 'next/server'
 import { getSession } from '@/lib/auth'
@@ -104,8 +124,14 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     .catch((err) => log.warn({ err: String(err) }, 'audit write failed (retry still applied)'))
 
   log.info({ sendId: parsed.data.id, previousStatus: row.status, by: session?.userId }, 'send re-opened for retry')
+  // Journey stages have a producer that will come back for this row; one-off
+  // sends do not. Say which, so nobody waits on an email that is not coming.
+  const hasProducer = /^(quote-followup|lead-nurture|abandoned-checkout|job-reminder)/.test(row.template)
   return NextResponse.json({
     ok: true,
-    note: 'Re-opened. The next attempt runs the full send guard — suppression, live state and validation all apply again.',
+    note: hasProducer
+      ? 'Re-opened. This is a lifecycle stage, so the journey will pick it up and resume this same send — the full guard (suppression, live state, validation) applies again.'
+      : 'Re-opened, and the block is cleared — but nothing re-sends a one-off message on its own. It will only go out if something produces this send again. Re-run the campaign or automation if you need it delivered.',
+    willBeRetriedAutomatically: hasProducer,
   })
 }

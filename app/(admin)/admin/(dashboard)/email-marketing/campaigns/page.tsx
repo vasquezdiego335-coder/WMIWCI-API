@@ -19,6 +19,7 @@ import { allowedTransitions, type CampaignState } from '@/lib/email-campaign'
 import { diagnoseRun, explainRunError } from '@/lib/email-run-diagnosis'
 import { needsReapproval } from '@/lib/email-campaign-approval'
 import CampaignComposer from './CampaignComposer'
+import { discoveryStatus } from '@/lib/email-marketing-agent'
 import { PageHeader, Card, COLORS, Empty, tableStyles as T, SoftBadge, tableScrollProps } from '../../_ui'
 import { EmailTabs, RangePicker, money } from '../_shared'
 
@@ -140,6 +141,15 @@ export default async function EmailCampaignsPage({ searchParams }: { searchParam
     manageError = err instanceof Error ? err.message : String(err)
   }
 
+  // ── AI CAMPAIGN DISCOVERY STATUS (owner spec 2026-08-07) ────────────────
+  //  The owner must be able to TELL whether automatic discovery is on and
+  //  alive — otherwise "no campaigns" and "the agent is dead" look identical.
+  //  Pool counts included: two bounded audience queries on an owner page.
+  const agent = await discoveryStatus({ includePool: isOwner }).catch(() => null)
+  const draftCount = manageRows.filter((c) => c.status === 'DRAFT').length
+  const fmtDt = (d: Date) =>
+    d.toLocaleString('en-US', { timeZone: 'America/New_York', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) + ' ET'
+
   return (
     <div>
       <PageHeader
@@ -147,7 +157,63 @@ export default async function EmailCampaignsPage({ searchParams }: { searchParam
         subtitle="Email → booking → collected revenue → finalized profit. A campaign is judged by money, never by opens."
         actions={<RangePicker base="/admin/email-marketing/campaigns" active={range} />}
       />
-      <EmailTabs active="/admin/email-marketing/campaigns" isOwner={isOwner} />
+      <EmailTabs active="/admin/email-marketing/campaigns" isOwner={isOwner} campaignsBadge={draftCount} />
+
+      {/* AI discovery + Discord health — states truth, sends nothing. */}
+      {agent && (
+        <Card>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: '18px 28px', alignItems: 'flex-start' }}>
+            <div style={{ minWidth: '190px' }}>
+              <p style={{ margin: 0, fontSize: '11px', fontWeight: 800, letterSpacing: '0.06em', color: COLORS.muted }}>AI CAMPAIGN DISCOVERY</p>
+              <p style={{ margin: '4px 0 0', fontSize: '15px', fontWeight: 800, color: agent.enabled ? '#10B981' : COLORS.muted }}>
+                {agent.enabled ? 'ACTIVE' : 'OFF'}
+              </p>
+              {agent.enabled ? (
+                <p style={{ margin: '3px 0 0', fontSize: '12px', color: COLORS.muted, lineHeight: 1.5 }}>
+                  {agent.schedule}. Last checked: {agent.lastSweep ? fmtDt(agent.lastSweep.at) : 'never (waiting for the first run)'}.
+                  <br />Next check: {fmtDt(agent.nextCheckAt)}.
+                </p>
+              ) : (
+                <p style={{ margin: '3px 0 0', fontSize: '12px', color: COLORS.muted, lineHeight: 1.5 }}>
+                  Reason: {agent.disabledReason}. Drafts a campaign only when {agent.minAudience}+ people are eligible; never suggests the same audience twice within {agent.cooldownDays} days; never sends anything itself.
+                </p>
+              )}
+            </div>
+            {agent.pool && (
+              <div style={{ minWidth: '190px' }}>
+                <p style={{ margin: 0, fontSize: '11px', fontWeight: 800, letterSpacing: '0.06em', color: COLORS.muted }}>ELIGIBLE AUDIENCE TODAY</p>
+                {agent.pool.map((p) => (
+                  <p key={p.segment} style={{ margin: '4px 0 0', fontSize: '12.5px', color: COLORS.ink }}>
+                    {p.label}: <strong>{p.eligible}</strong>
+                  </p>
+                ))}
+                <p style={{ margin: '4px 0 0', fontSize: '11.5px', color: COLORS.muted }}>
+                  Suggestion threshold: {agent.minAudience}+ · Awaiting approval: <strong>{agent.awaitingApproval}</strong>
+                </p>
+              </div>
+            )}
+            <div style={{ minWidth: '190px' }}>
+              <p style={{ margin: 0, fontSize: '11px', fontWeight: 800, letterSpacing: '0.06em', color: COLORS.muted }}>DISCORD CAMPAIGN ALERTS</p>
+              <p style={{ margin: '4px 0 0', fontSize: '15px', fontWeight: 800, color: agent.discordConfigured ? '#10B981' : COLORS.red }}>
+                {agent.discordConfigured ? 'CONFIGURED' : 'NOT CONFIGURED'}
+              </p>
+              <p style={{ margin: '3px 0 0', fontSize: '12px', color: COLORS.muted, lineHeight: 1.5 }}>
+                Channel: marketing ({agent.channelId.slice(0, 4)}…{agent.channelId.slice(-4)}).
+                <br />
+                Last notification:{' '}
+                {agent.lastNotification
+                  ? `${fmtDt(agent.lastNotification.at)} — ${agent.lastNotification.delivered ? 'delivered' : 'FAILED (retried daily; the campaign is still listed below)'}`
+                  : 'none yet'}
+              </p>
+            </div>
+          </div>
+          {agent.enabled && !agent.lastSweep && (
+            <p style={{ margin: '10px 0 0', fontSize: '12px', color: COLORS.muted }}>
+              No campaigns need your attention. The marketing agent is active and will draft one — and notify Discord — when a meaningful eligible audience exists.
+            </p>
+          )}
+        </Card>
+      )}
 
       <div style={{ marginBottom: '20px' }}>
         <CampaignComposer

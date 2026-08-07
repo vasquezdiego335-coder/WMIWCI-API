@@ -116,6 +116,13 @@ function bookingFormUrl(deps: ContextDeps, utmContent: string): string {
   return `${marketingSiteUrl(deps)}/booking-form.html?utm_source=email&utm_medium=campaign&utm_content=${encodeURIComponent(utmContent)}`
 }
 
+/** The quick-quote page — where a lead with NO price goes to get one. A
+ *  contact-lead reactivation must never point at the booking form: asking
+ *  someone with no quote to start a checkout is the wrong ask. */
+function quoteFormUrl(deps: ContextDeps, utmContent: string): string {
+  return `${marketingSiteUrl(deps)}/quote.html?utm_source=email&utm_medium=campaign&utm_content=${encodeURIComponent(utmContent)}`
+}
+
 // ── Registry ────────────────────────────────────────────────────────────
 
 export type ContextRequirement = 'lead' | 'booking' | 'completed_booking' | 'customer'
@@ -213,8 +220,42 @@ const CAMPAIGN_TEMPLATES: CampaignTemplateEntry[] = [
   {
     template: 'quote-followup-final',
     requires: 'lead',
-    allowedSegments: ['quoted_leads_no_booking'],
+    // The reactivation pool (owner spec 2026-08-07): a quoted lead 14+ days
+    // quiet DID get a real quote, so "still moving?" is honest copy for them.
+    // Stages 1 and 2 stay journey-only — "did our quote arrive?" two weeks
+    // late reads as a system that lost track of the customer.
+    allowedSegments: ['quoted_leads_no_booking', 'quick_quote_reactivation'],
     build: quoteFollowupBuilder(3),
+  },
+  {
+    // Contact-lead reactivation (owner spec 2026-08-07). These people never
+    // received a number, so the ONLY honest ask is "do you still need an
+    // estimate?" — the same premise lead-nurture-final ships in the lifecycle.
+    // The CTA is the QUOTE page, never the booking form.
+    template: 'lead-nurture-final',
+    requires: 'lead',
+    allowedSegments: ['contact_lead_reactivation'],
+    build: async (candidate, deps) => {
+      if (!candidate.leadId) return fail('context_missing:leadId')
+      const lead = await deps.loadLead(candidate.leadId)
+      if (!lead) return fail('context_missing:lead')
+      if (!lead.email) return fail('context_missing:lead_email')
+      // A lead with a REAL quote belongs to the quote family, not this one —
+      // the exact mutual exclusion the lifecycle enforces, applied to bulk.
+      if (lead.quotedAt) return fail('context_ineligible:has_quote')
+      if (lead.bookedAt || lead.convertedBookingId) return fail('context_ineligible:lead_converted')
+      if (lead.lostAt) return fail('context_ineligible:lead_lost')
+      return {
+        ok: true,
+        payload: {
+          customerName: lead.name ?? 'there',
+          quoteUrl: quoteFormUrl(deps, 'contact-reactivation'),
+          locale: 'en',
+          journey: 'lead-nurture',
+          stage: 3,
+        },
+      }
+    },
   },
   {
     template: 'abandoned-checkout',

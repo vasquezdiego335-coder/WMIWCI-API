@@ -8,8 +8,17 @@
 // "no quote sequence without a real quote" rule.
 //
 // Idempotent by design: markLeadQuoted only reports newlyQuoted=true the first
-// time, and onQuoteCreated is fired ONLY on that first stamp, so re-marking a lead
-// cannot restart the follow-up clock. A closed lead (BOOKED/LOST) is refused.
+// time, so the follow-up CLOCK is anchored once and re-marking never restarts it.
+// A closed lead (BOOKED/LOST) is refused.
+//
+// RE-MARKING NOW RE-ENSURES THE SEQUENCE (owner spec 2026-08-07). The old rule —
+// "fire onQuoteCreated only on the first stamp" — meant the journey got exactly
+// one attempt ever, so a lead whose enrolment was refused for a temporary reason
+// (rollout allowlist, Redis stall, consent recorded later) stayed quoted forever
+// with no follow-up and no way back. Clicking again now calls
+// ensureQuoteJourney, which re-runs the full eligibility matrix and re-creates
+// only the stages that are genuinely missing. The `quote_created` automation
+// trigger still fires exactly once, on the real transition.
 
 import { NextRequest, NextResponse } from 'next/server'
 import { getSession } from '@/lib/auth'
@@ -17,7 +26,7 @@ import { prisma } from '@/lib/db'
 import { apiLogger } from '@/lib/logger'
 import { denyReason, type Role } from '@/lib/permissions'
 import { markLeadQuoted } from '@/lib/leads'
-import { onQuoteCreated } from '@/lib/journeys'
+import { ensureQuoteJourney, onQuoteCreated } from '@/lib/journeys'
 import { z } from 'zod'
 
 // A real estimate is optional — a quote can be given verbally — but if supplied
@@ -39,14 +48,21 @@ export async function POST(req: NextRequest, { params }: { params: { id: string 
     return NextResponse.json({ error: 'That lead does not exist, or it is already booked or lost.' }, { status: 404 })
   }
 
-  // Start the recovery sequence ONLY when this call newly recorded the quote.
-  // onQuoteCreated re-reads the lead and refuses to schedule if it is not
-  // genuinely open with a quote, so this is safe even under a race.
-  if (result.newlyQuoted) {
-    await onQuoteCreated(result.leadId).catch((err) =>
-      apiLogger.error({ err: err instanceof Error ? err.message : String(err), leadId: result.leadId }, 'onQuoteCreated failed (non-fatal)')
-    )
-  }
+  // Both paths re-read the lead and refuse to schedule anything that is not
+  // genuinely open with a live quote, so this is safe even under a race. The
+  // first stamp ALSO fires the one-per-event automation trigger; a re-mark only
+  // ensures the stages exist.
+  const enrolment = await (result.newlyQuoted ? onQuoteCreated(result.leadId) : ensureQuoteJourney(result.leadId)).catch(
+    (err) => {
+      apiLogger.error(
+        { err: err instanceof Error ? err.message : String(err), leadId: result.leadId },
+        'quote journey enrolment failed (non-fatal)'
+      )
+      return null
+    }
+  )
+  const followupScheduled = enrolment?.scheduled === true
+  const followupReason = enrolment && !enrolment.scheduled ? enrolment.reason : undefined
 
   await prisma.auditLog
     .create({
@@ -57,6 +73,11 @@ export async function POST(req: NextRequest, { params }: { params: { id: string 
           event: 'lead_quoted',
           leadId: result.leadId,
           newlyQuoted: result.newlyQuoted,
+          // What the lifecycle actually did, not what we hoped it did. A
+          // `followupStarted: true` that was really a silent refusal is exactly
+          // how the stranded-lead bug stayed invisible for weeks.
+          followupScheduled,
+          followupReason: followupReason ?? null,
           estimatedValueCents: parsed.data.estimatedValueCents ?? null,
           by: session?.name ?? null,
         },
@@ -64,5 +85,11 @@ export async function POST(req: NextRequest, { params }: { params: { id: string 
     })
     .catch(() => undefined)
 
-  return NextResponse.json({ ok: true, leadId: result.leadId, newlyQuoted: result.newlyQuoted, followupStarted: result.newlyQuoted })
+  return NextResponse.json({
+    ok: true,
+    leadId: result.leadId,
+    newlyQuoted: result.newlyQuoted,
+    followupStarted: followupScheduled,
+    followupReason: followupReason ?? null,
+  })
 }

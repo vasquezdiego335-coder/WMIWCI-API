@@ -41,6 +41,8 @@ export default async function EmailOverviewPage({ searchParams }: { searchParams
   const activeCampaigns = campaignCounts
     .filter((c) => c.status === 'ACTIVE' || c.status === 'SCHEDULED')
     .reduce((n, c) => n + c._count, 0)
+  // Drafts awaiting a DECISION — what the Campaigns tab badge counts.
+  const draftCampaigns = campaignCounts.filter((c) => c.status === 'DRAFT').reduce((n, c) => n + c._count, 0)
   const conversions = attribution.rows.reduce((n, r) => n + (r.bookings ?? 0), 0)
 
   const templates = templateRegistry()
@@ -57,7 +59,7 @@ export default async function EmailOverviewPage({ searchParams }: { searchParams
         subtitle="Every customer email this business sends — what fired it, who got it, and what it produced."
         actions={<RangePicker base="/admin/email-marketing" active={range} />}
       />
-      <EmailTabs active="/admin/email-marketing" isOwner={isOwner} />
+      <EmailTabs active="/admin/email-marketing" isOwner={isOwner} campaignsBadge={draftCampaigns} />
 
       <Callout tone="warning" title="Email Marketing is in BETA — owner-only until staging passes">
         Every page here is live and reading real data. What has NOT happened is a staging rehearsal against a real
