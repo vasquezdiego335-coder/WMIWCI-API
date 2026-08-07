@@ -95,6 +95,29 @@ export type LiveSubjectState = {
   lead?: { status: string; bookedAt: Date | null; convertedBookingId: string | null; lostAt: Date | null; moveDate: Date | null } | null
   suppressed?: { reason: string } | null
   referralAskSent?: boolean
+  // ── PROMOTIONAL CONSENT, AT SEND TIME (owner spec 2026-08-07) ─────────
+  //  THE HOLE THIS CLOSES. Every automation stage sends with
+  //  `emailClass: 'promotional'`, and `guardedSend` does NOT check consent —
+  //  it checks suppression, caps, quiet hours and the rollout allowlist, and
+  //  delegates "may we market to this person" to the CALLER's `recheck`.
+  //
+  //  On the LEAD side that was covered: `fireLeadTrigger` refuses to enrol
+  //  anyone without an explicit opt-in. On the BOOKING side nothing asked at
+  //  all — `fireBookingTrigger` checked only `isInternalTest`, and this state
+  //  object did not carry a consent field for a stop rule to read. So an
+  //  ACTIVE automation on any booking trigger (booking_started,
+  //  payment_captured, move_completed, review_eligible, referral_eligible…)
+  //  would have sent promotional mail to customers who never opted in.
+  //
+  //  It is the SAME defect PR #32 fixed for `bookingBlockReason`, one layer
+  //  over: the journeys path was closed and the automation path was left open.
+  //  It never fired in production only because no automation had been built
+  //  yet — a trap armed for the owner's first one.
+  //
+  //  TRI-STATE, and both `false` and `null` refuse. Loaded for BOTH subject
+  //  types, so the lead side gains the same send-time guarantee its enrolment
+  //  gate already gave it.
+  marketing?: { consent: boolean | null; optOut: boolean } | null
 }
 
 /**
@@ -106,6 +129,22 @@ export function evaluateStopRules(def: AutomationDefinition, state: LiveSubjectS
   const rule = (k: StopRuleKey): boolean => def.stopRules[k] !== false
 
   if (state.suppressed) return { stop: true, reason: `suppressed:${state.suppressed.reason.toLowerCase()}` }
+
+  // ── PROMOTIONAL CONSENT ────────────────────────────────────────────────
+  //  Checked BEFORE every subject-specific rule, and NOT switchable by
+  //  `def.stopRules`: every stage this runtime sends is classified
+  //  promotional, so no amount of correct booking or lead state makes the
+  //  send permitted. An owner cannot untick this in the automation builder,
+  //  because it is not a preference — it is the rule the whole system is
+  //  built on (src/lib/consent.ts). Absent (`undefined`) means the caller did
+  //  not load it and this rule stays silent; `null` means we looked and the
+  //  person was never asked, which refuses.
+  if (state.marketing !== undefined && state.marketing !== null) {
+    if (state.marketing.optOut) return { stop: true, reason: 'marketing_opted_out' }
+    if (!hasPromotionalConsent({ emailMarketingConsent: state.marketing.consent })) {
+      return { stop: true, reason: 'no_marketing_consent' }
+    }
+  }
 
   const lead = state.lead
   if (lead) {
@@ -153,6 +192,10 @@ async function loadLiveState(enrollment: { bookingId: string | null; leadId: str
         confirmedDate: true,
         requestedDate: true,
         review: { select: { id: true } },
+        // The consent columns the promotional stop rule needs. Loaded on every
+        // recheck, not conditionally: every stage this runtime sends is
+        // promotional, so there is no case where they are not wanted.
+        customer: { select: { emailMarketingConsent: true, marketingOptOut: true } },
       },
     })
     state.booking = b
@@ -164,6 +207,10 @@ async function loadLiveState(enrollment: { bookingId: string | null; leadId: str
           cancelled: b.status === 'CANCELLED',
         }
       : null
+    // A booking with no customer row is not somebody we may market to.
+    // Defaulting to `null` consent rather than leaving it undefined is what
+    // makes this fail CLOSED.
+    if (b) state.marketing = { consent: b.customer?.emailMarketingConsent ?? null, optOut: b.customer?.marketingOptOut ?? false }
     if (b) {
       const referral = await prisma.emailSend.findFirst({
         where: { template: 'referral', bookingId: enrollment.bookingId, status: 'delivered' },
@@ -173,10 +220,22 @@ async function loadLiveState(enrollment: { bookingId: string | null; leadId: str
     }
   }
   if (enrollment.leadId) {
-    state.lead = await prisma.lead.findUnique({
+    const l = await prisma.lead.findUnique({
       where: { id: enrollment.leadId },
-      select: { status: true, bookedAt: true, convertedBookingId: true, lostAt: true, moveDate: true },
+      select: {
+        status: true, bookedAt: true, convertedBookingId: true, lostAt: true, moveDate: true,
+        emailMarketingConsent: true,
+      },
     })
+    state.lead = l
+      ? { status: l.status, bookedAt: l.bookedAt, convertedBookingId: l.convertedBookingId, lostAt: l.lostAt, moveDate: l.moveDate }
+      : null
+    // A lead-scoped enrolment is already consent-gated at ENROLMENT time
+    // (fireLeadTrigger). Loading it again here is the send-time twin: consent
+    // can be withdrawn between enrolment and stage 3, and the stage that runs
+    // three days later must ask again. A booking enrolment's consent (loaded
+    // above) wins if both are present — the booking is the more specific fact.
+    if (l && state.marketing === undefined) state.marketing = { consent: l.emailMarketingConsent, optOut: false }
   }
   const suppression = await prisma.emailSuppression.findUnique({
     where: { email: normalizeEmail(enrollment.email) },
@@ -292,9 +351,36 @@ export async function fireBookingTrigger(trigger: TriggerKey, bookingId: string)
   try {
     const booking = await prisma.booking.findUnique({
       where: { id: bookingId },
-      select: { id: true, isInternalTest: true, customer: { select: { id: true, email: true } } },
+      select: {
+        id: true,
+        isInternalTest: true,
+        customer: {
+          select: { id: true, email: true, emailMarketingConsent: true, marketingOptOut: true },
+        },
+      },
     })
     if (!booking || booking.isInternalTest || !booking.customer?.email) return 0
+
+    // ── PROMOTIONAL CONSENT, AT ENROLMENT (owner spec 2026-08-07) ────────
+    //  The exact twin of the gate `fireLeadTrigger` has always had, which is
+    //  why its absence here was easy to miss: the lead side refused, the
+    //  booking side enrolled anybody with a booking. Every automation stage is
+    //  promotional, so an enrolment without consent is an enrolment that can
+    //  only ever produce refused sends — and, before the stop rule added
+    //  above, produced REAL ones.
+    //
+    //  The send gate is still the guarantee; refusing here means the reason is
+    //  logged at the business event rather than days later, and no doomed
+    //  enrolment is written at all.
+    if (booking.customer.marketingOptOut) {
+      log.info({ trigger, bookingId, reason: 'marketing_opted_out' }, 'booking trigger skipped — not promotable')
+      return 0
+    }
+    if (!hasPromotionalConsent({ emailMarketingConsent: booking.customer.emailMarketingConsent })) {
+      log.info({ trigger, bookingId, reason: 'no_consent' }, 'booking trigger skipped — not promotable')
+      return 0
+    }
+
     return fireAutomationTrigger(trigger, {
       email: booking.customer.email,
       bookingId: booking.id,

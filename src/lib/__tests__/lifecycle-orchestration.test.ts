@@ -154,7 +154,7 @@ function harness(over: Partial<Pick<Harness, 'leads' | 'customerConsent' | 'prio
       h.calls.push(`convertLead:${bookingId}`)
       // The canonical consent propagation: an explicit booking-payload value
       // wins, otherwise whatever the matched lead already recorded.
-      const lead = [...h.leads.values()].find(
+      const lead = Array.from(h.leads.values()).find(
         (l) => (opts.bookingSessionId && l.id === opts.bookingSessionId) || l.email === email
       )
       const effective =
@@ -252,7 +252,7 @@ test('4. calling the quote scheduler twice creates no duplicate stages', async (
   await ensureQuoteJourney(LEAD_ID, h.deps)
 
   assert.equal(h.jobs.size, 3, 'still exactly three jobs')
-  for (const [id, job] of h.jobs) {
+  for (const [id, job] of Array.from(h.jobs.entries())) {
     assert.equal(job.fireAt.getTime(), first.get(id)!.fireAt.getTime(), `${id} kept its original fire time`)
   }
 })
@@ -359,7 +359,7 @@ test('11. contact → quick quote: B stops and A takes over (no overlapping copy
   h.leads.get(LEAD_ID)!.quotedAt = NOW
   await onQuoteCreated(LEAD_ID, h.deps)
 
-  const ids = [...h.jobs.keys()]
+  const ids = Array.from(h.jobs.keys())
   assert.ok(ids.every((id) => id.includes('__quote__')), `only quote stages remain: ${ids.join(',')}`)
   assert.equal(ids.length, 3)
 })
@@ -542,7 +542,7 @@ test('24. after a booking, no prospect sequence can coexist with the checkout se
     h.deps
   )
 
-  const remaining = [...h.jobs.keys()]
+  const remaining = Array.from(h.jobs.keys())
   assert.ok(
     remaining.every((id) => id.includes('__abandoned__')),
     `only the checkout journey survives: ${remaining.join(',')}`
