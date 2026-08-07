@@ -5,7 +5,7 @@ import { BOOKING_FEE_CENTS, createBookingCheckout } from '@/lib/stripe'
 import { apiLogger } from '@/lib/logger'
 import { AGREEMENT_VERSION } from '@/lib/agreement'
 import { notifyBookingCreated } from '@/lib/notify'
-import { onCheckoutStarted, onLeadClosed } from '@/lib/journeys'
+import { onBookingCreated } from '@/lib/journeys'
 import { checkServiceArea, travelFeeDollars, type AddressInput } from '@/lib/service-area'
 import { verifyAddress, type VerifiedAddress } from '@/lib/address-verify'
 import { assessAddress } from '@/lib/address'
@@ -14,7 +14,7 @@ import { etDateTimeToInstant } from '@/lib/scheduling'
 import { computeEstimate, MOVE_SIZES } from '@/lib/estimate'
 import { nextBookingReference } from '@/lib/booking-reference'
 import { rateLimit, tooManyRequests, LIMITS, clientIp } from '@/lib/rate-limit'
-import { ingestLeadSafe, markLeadConverted } from '@/lib/leads'
+import { ingestLeadSafe } from '@/lib/leads'
 import { TRUCK_PICKUP_RETURN, DISCOUNT_POLICY } from '@/lib/pricing-config'
 // Next.js App Router route files may export ONLY route handlers, so the Zod
 // schema and the review-reason builder live in lib/ — where they are also
@@ -554,39 +554,63 @@ async function handleBooking(req: NextRequest): Promise<NextResponse> {
 
   apiLogger.info({ bookingId: booking.id, customerId: customer.id, serviceType: data.serviceType }, 'Booking created')
 
-  // ── ABANDONED-BOOKING RECOVERY ──────────────────────────────────────────
-  // The booking now sits in PENDING_PAYMENT with a Stripe Checkout URL. If the
-  // customer never completes the deposit, this is the anchor for the recovery
-  // sequence. Stages self-cancel the moment the booking leaves PENDING_PAYMENT
-  // (fulfillPaidCheckout calls onBookingPaid, and every stage re-reads the
-  // booking at send time anyway). Flag-gated OFF by default; never fatal.
-  try {
-    await onCheckoutStarted(booking.id)
-  } catch (err) {
-    apiLogger.error({ err: err instanceof Error ? err.message : String(err), bookingId: booking.id }, 'onCheckoutStarted failed (non-fatal)')
+  // ── "Not sure which service" = a quote request. Also drop it into the Lead
+  //    pipeline so it is tracked as a lead, not just an unpriced booking.
+  //    Non-fatal.
+  //
+  //    RUNS BEFORE THE HAND-OVER BELOW, and the order matters: the hand-over
+  //    converts the matching OPEN lead. Ingesting afterwards created a BRAND
+  //    NEW lead, status NEW, for somebody who had just booked — a customer
+  //    sitting in the prospect pipeline forever, and a `lead_created` trigger
+  //    fired on a converted person. Ingesting first means this submission
+  //    either merges into the Step-1 partial lead or creates the lead that is
+  //    then immediately converted. One lead, correctly closed.
+  if (data.serviceType === 'not-sure') {
+    await ingestLeadSafe(
+      {
+        name: data.fullName,
+        email: data.email,
+        phone: data.phone,
+        source: data.source ?? 'website',
+        foundUs: data.foundUs,
+        jobType: 'quote-request',
+        moveDate: requestedDate,
+        originCity: data.pickupAddresses?.[0]?.city ?? undefined,
+        destCity: data.destinationAddress?.city ?? undefined,
+      },
+      'not-sure-booking',
+    )
   }
 
-  // ── LEAD CONVERSION ─────────────────────────────────────────────────────
-  // If this customer was a tracked lead, they have now booked. Convert the
-  // matching OPEN lead (stamps convertedBookingId/bookedAt — the columns
-  // audiences and attribution already read) and stop any quote follow-up
-  // sequence for it. Best-effort: never blocks the booking response.
-  try {
-    const convertedLeadId = await markLeadConverted(customer.email, booking.id, {
-      // Match the exact partial lead captured in Step 1 (session first, then
-      // email) and propagate the visitor's promotional consent onto the Customer.
-      bookingSessionId: data.bookingSessionId,
-      marketingConsent: data.marketingConsent,
-      // Controlled vocabulary + the disclosure version the visitor actually
-      // saw. `booking_step_1` was an ad-hoc string, and the version was never
-      // recorded at all — so a consent record could not say WHAT was agreed to.
-      consentSource: 'BOOKING_FORM',
-      consentVersion: CONSENT_VERSION,
-    })
-    if (convertedLeadId) await onLeadClosed(convertedLeadId)
-  } catch (err) {
-    apiLogger.error({ err: err instanceof Error ? err.message : String(err), bookingId: booking.id }, 'lead conversion failed (non-fatal)')
-  }
+  // ── BOOKING LIFECYCLE HAND-OVER ─────────────────────────────────────────
+  // ONE call, because the ORDER of its three steps is the whole point.
+  //
+  //   1. convert the matching OPEN lead and propagate the visitor's marketing
+  //      consent onto the durable Customer record (the canonical write);
+  //   2. cancel the lead's own journeys — a person who just booked must never
+  //      get "still thinking about your move?" or "did our quote arrive?";
+  //   3. start the abandoned-checkout recovery sequence, which READS the
+  //      consent written in step 1.
+  //
+  // This route used to run step 3 first and step 1 second, so for every
+  // brand-new customer the consent gate read `null` and refused the recovery
+  // sequence moments before the same request recorded their explicit opt-in.
+  // Sequencing that by hand in a 700-line route is what allowed it; the order
+  // now lives in journeys.onBookingCreated, where it is tested. Never fatal —
+  // the customer's checkout is already created and returned below.
+  const { convertedLeadId } = await onBookingCreated({
+    bookingId: booking.id,
+    email: customer.email,
+    // Match the exact partial lead captured in Step 1 (session first, then email).
+    bookingSessionId: data.bookingSessionId,
+    marketingConsent: data.marketingConsent,
+    // Controlled vocabulary + the disclosure version the visitor actually saw.
+    // `booking_step_1` was an ad-hoc string, and the version was never recorded
+    // at all — so a consent record could not say WHAT was agreed to.
+    consentSource: 'BOOKING_FORM',
+    consentVersion: CONSENT_VERSION,
+  })
+  if (convertedLeadId) apiLogger.info({ bookingId: booking.id, convertedLeadId }, 'lead converted (booking created)')
 
   // ── Owner alert: a new booking was started (non-fatal; never blocks booking) ──
   // The customer is intentionally NOT messaged here — they receive the existing
@@ -610,25 +634,6 @@ async function handleBooking(req: NextRequest): Promise<NextResponse> {
     })
   } catch (err) {
     apiLogger.error({ err, bookingId: booking.id }, 'owner booking alert failed (non-fatal)')
-  }
-
-  // ── "Not sure which service" = a quote request. Also drop it into the Lead
-  //    pipeline so it is tracked as a lead, not just an unpriced booking. Non-fatal. ──
-  if (data.serviceType === 'not-sure') {
-    await ingestLeadSafe(
-      {
-        name: data.fullName,
-        email: data.email,
-        phone: data.phone,
-        source: data.source ?? 'website',
-        foundUs: data.foundUs,
-        jobType: 'quote-request',
-        moveDate: requestedDate,
-        originCity: data.pickupAddresses?.[0]?.city ?? undefined,
-        destCity: data.destinationAddress?.city ?? undefined,
-      },
-      'not-sure-booking',
-    )
   }
 
   return NextResponse.json({

@@ -297,8 +297,12 @@ export interface QuoteCaptureDeps {
   fireLeadCreated(leadId: string, snapshot: Record<string, unknown>): Promise<LeadTriggerResult>
   /** Stamp Lead.quotedAt. Returns whether THIS call was the first stamp. */
   markQuoted(leadId: string, estimatedValueCents: number | null): Promise<{ newlyQuoted: boolean } | null>
-  /** journeys.onQuoteCreated — the 24h / 3d / 7d quote sequence. */
+  /** journeys.onQuoteCreated — the 24h / 3d / 7d quote sequence, PLUS the
+   *  `quote_created` automation trigger. Only for the genuine first stamp. */
   startQuoteFollowup(leadId: string): Promise<void>
+  /** journeys.ensureQuoteJourney — the same scheduling, idempotent, WITHOUT
+   *  re-firing the one-per-event automation trigger. */
+  ensureQuoteFollowup(leadId: string): Promise<void>
   /** journeys.onLeadCaptured — the 4h / 24h / 72h non-quote nurture. */
   startLeadNurture(leadId: string): Promise<void>
   now(): Date
@@ -404,6 +408,10 @@ export function defaultQuoteCaptureDeps(): QuoteCaptureDeps {
     async startQuoteFollowup(leadId) {
       const { onQuoteCreated } = await import('./journeys')
       await onQuoteCreated(leadId)
+    },
+    async ensureQuoteFollowup(leadId) {
+      const { ensureQuoteJourney } = await import('./journeys')
+      await ensureQuoteJourney(leadId)
     },
     async startLeadNurture(leadId) {
       const { onLeadCaptured } = await import('./journeys')
@@ -761,8 +769,20 @@ async function startLifecycleSequence(
     // stamps `quotedAt` only when it is null and reports whether THIS call was
     // the first — so the 24h/3d/7d clock is anchored once, on the first real
     // price, and a later edit never restarts it.
+    //
+    // THE FIRST STAMP IS NOT THE ONLY CHANCE (owner spec 2026-08-07). This used
+    // to be `if (marked?.newlyQuoted) startQuoteFollowup(...)` and nothing
+    // else — so if scheduling was refused at that instant for a TEMPORARY
+    // reason (the rollout allowlist, a Redis stall, consent that arrives on a
+    // later save of this very form) the lead kept `quotedAt` forever and no
+    // code path ever looked at it again. Every subsequent save now RE-ENSURES
+    // the sequence. The trigger is still fired exactly once, on the real
+    // transition; only the scheduling is repeated, and that is idempotent at
+    // three separate layers (see journeys.ensureQuoteJourney).
     const marked = await deps.markQuoted(lead.id, lead.estimatedValue)
-    if (marked?.newlyQuoted) await deps.startQuoteFollowup(lead.id)
+    if (!marked) return 'none'
+    if (marked.newlyQuoted) await deps.startQuoteFollowup(lead.id)
+    else await deps.ensureQuoteFollowup(lead.id)
     return 'quote'
   } catch (err) {
     log.warn({ leadId: lead.id, err: errText(err) }, 'lifecycle sequence not started (non-fatal)')

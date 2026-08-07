@@ -344,6 +344,26 @@ async function processScheduledJob(job: Job<ScheduledJobData>): Promise<void> {
       break
     }
 
+    // ── STRANDED LIFECYCLE REPAIR (owner spec 2026-08-07) ─────────
+    // Enrolment used to get exactly one attempt, at the instant a quote was
+    // recorded. A refusal for a TEMPORARY reason — the rollout allowlist during
+    // a canary, a Redis stall, consent that arrives on a later form save — left
+    // the lead quoted forever with no follow-up and nothing that would ever look
+    // at it again. This is the retry. It only touches leads the send layer has
+    // never seen, inside the journey's own 14-day window, with an explicit
+    // opt-in, still open — and every candidate re-passes the full eligibility
+    // matrix. A no-op costs one indexed query.
+    case 'lifecycle-repair': {
+      const { repairStrandedQuoteJourneys } = await import('../lib/journeys')
+      const report = await repairStrandedQuoteJourneys()
+      if (report.scheduled > 0) {
+        log.warn(report, 'stranded quote journeys repaired — a temporary block had stopped them enrolling')
+      } else {
+        log.info(report, 'lifecycle repair sweep complete (nothing stranded)')
+      }
+      break
+    }
+
     // ── 7 AM: Today's confirmed jobs ──────────────────────────────
     case 'daily-schedule-morning': {
       // Day boundaries pinned to America/New_York (not the server's local zone),
@@ -715,6 +735,18 @@ async function registerCronJobs(): Promise<void> {
     'lead-maintenance',
     { type: 'lead-maintenance' },
     { repeat: { pattern: '20 3 * * *', tz: 'America/New_York' }, jobId: 'cron:lead-maintenance' }
+  )
+
+  // ── Stranded lifecycle repair (owner spec 2026-08-07) ──
+  // Hourly at :35, off the other sweeps. Hourly rather than daily because the
+  // condition it repairs is TEMPORARY by definition: when the owner widens the
+  // rollout allowlist, the leads quoted during the canary should enter their
+  // sequence within the hour, not the next morning. Bounded batch, and a pass
+  // with nothing to do is one indexed query.
+  await scheduledQueue.add(
+    'lifecycle-repair',
+    { type: 'lifecycle-repair' },
+    { repeat: { pattern: '35 * * * *' }, jobId: 'cron:lifecycle-repair' }
   )
 
   // The agent cron previously ran every 5 minutes under the SAME jobId. BullMQ

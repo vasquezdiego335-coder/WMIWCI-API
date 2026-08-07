@@ -171,13 +171,40 @@ test('an opted-in lead is unaffected', () => {
 })
 
 test('the scheduler refuses too, so three doomed jobs are never queued', () => {
+  // COMMENTS STRIPPED FIRST. A source-scanning test that reads its own
+  // explanatory prose proves nothing — this file's history already has two
+  // instances of exactly that.
   const src = readFileSync(resolve(__dirname, '../journeys.ts'), 'utf8')
-  const scheduler = src.slice(src.indexOf('export async function onQuoteCreated'), src.indexOf('export async function onLeadClosed'))
-  assert.match(scheduler, /emailMarketingConsent: true/, 'the scheduler must LOAD the column')
-  assert.match(scheduler, /hasPromotionalConsent\(/, 'and apply the same rule')
-  const guard = scheduler.indexOf('hasPromotionalConsent(')
-  const enqueueAt = scheduler.indexOf('await enqueue(')
-  assert.ok(guard > -1 && enqueueAt > guard, 'the refusal must precede the enqueue')
+    .split('\n')
+    .filter((l) => !l.trim().startsWith('//') && !l.trim().startsWith('*') && !l.trim().startsWith('/*'))
+    .join('\n')
+  const scheduler = src.slice(
+    src.indexOf('export async function ensureQuoteJourney'),
+    src.indexOf('export async function cancelLeadNurture')
+  )
+  assert.ok(scheduler.length > 0, 'ensureQuoteJourney is the scheduler')
+  // It applies the SHARED matrix rather than a second hand-written consent
+  // check — which is what stops the two from ever drifting.
+  assert.match(scheduler, /quoteFollowupBlockReason\(/, 'and apply the same rule as the send gate')
+  const guard = scheduler.indexOf('quoteFollowupBlockReason(')
+  const scheduleAt = scheduler.indexOf('scheduleStages(')
+  assert.ok(guard > -1 && scheduleAt > guard, 'the refusal must precede the enqueue')
+  // The column has to be LOADED or the rule cannot be applied. It now comes
+  // from the deps seam, so the requirement is stated on the shared lead type.
+  assert.match(src, /loadLead\(leadId: string\): Promise<JourneyLead \| null>/)
+  assert.match(src, /emailMarketingConsent: true/, 'the production loader selects it')
+})
+
+test('quoteFollowupBlockReason is the ONE matrix — the scheduler owns no second consent rule', () => {
+  // The scheduler used to inline hasPromotionalConsent(). That was correct, but
+  // it was a SECOND copy of the rule, and the send gate's copy could change
+  // without it. Now there is one predicate and both call it.
+  const src = readFileSync(resolve(__dirname, '../journeys.ts'), 'utf8')
+    .split('\n')
+    .filter((l) => !l.trim().startsWith('//') && !l.trim().startsWith('*') && !l.trim().startsWith('/*'))
+    .join('\n')
+  const calls = src.match(/hasPromotionalConsent\(/g) ?? []
+  assert.equal(calls.length, 2, 'exactly two call sites: quoteFollowupBlockReason and leadNurtureBlockReason')
 })
 
 test('the send gate LOADS the consent column — a gate that cannot see it cannot enforce it', () => {

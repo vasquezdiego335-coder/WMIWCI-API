@@ -214,12 +214,14 @@ test('8. booking stops the quote sequence and the abandoned-checkout sequence', 
   }
 
   // SCHEDULE-TIME: the cancel ids must match the ids the scheduler created.
-  // A typo here means cancel() looks up a job that was never made and the
-  // email still fires — which is exactly why this is asserted, not assumed.
-  const s = src('lib/journeys.ts')
-  const closed = s.slice(s.indexOf('export async function onLeadClosed'), s.indexOf('//  SEND-TIME ELIGIBILITY'))
-  assert.match(closed, /QUOTE_STAGES\.map\(\(s\) => cancel\(jobIdFor\('quote', s\.type, leadId\)\)\)/)
-  assert.match(closed, /LEAD_NURTURE_STAGES\.map\(\(s\) => cancel\(jobIdFor\('lead-nurture', s\.type, leadId\)\)\)/)
+  // A typo here means cancel() looks up a job that was never made and the email
+  // still fires — which is exactly why this is asserted, not assumed. It used
+  // to be asserted by matching the SOURCE of onLeadClosed, which broke the
+  // moment the call was routed through a dependency seam and proved nothing
+  // about behaviour either way. The real end-to-end assertion — schedule, then
+  // close, then check the queue is empty — lives in
+  // lifecycle-orchestration.test.ts ("6. a booking while Sequence A is queued").
+  // What stays here is the id CONTRACT both sides share.
   assert.equal(jobIdFor('quote', 'quote-followup-1', 'l1'), 'journey__quote__quote-followup-1__l1')
   assert.equal(jobIdFor('lead-nurture', 'lead-nurture-1', 'l1'), 'journey__lead-nurture__lead-nurture-1__l1')
 })
