@@ -244,6 +244,10 @@ export type ScheduledJobData = {
     // otherwise stay stranded forever. Bounded + idempotent; see
     // journeys.repairStrandedQuoteJourneys.
     | 'lifecycle-repair'
+    // Daily: the marketing discovery sweep — deterministic reactivation
+    // audiences -> at most ONE drafted campaign + a Discord ask. Never sends;
+    // flag-gated on EMAIL_MARKETING_AGENT_ENABLED. See email-marketing-agent.ts.
+    | 'marketing-discovery'
     | 'daily-schedule-morning'
     | 'daily-schedule-evening'
     // ── Phase 3 post-move follow-ups (handled by runFollowup in followups.ts) ──

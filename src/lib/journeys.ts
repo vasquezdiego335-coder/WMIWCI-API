@@ -221,6 +221,8 @@ export function planStageTimes(
   const { now } = opts
   const moveCutoff = opts.moveDate ? opts.moveDate.getTime() + DAY : null
   let cursor = now
+  let recovering = false
+  let prevFireAt = Number.NEGATIVE_INFINITY
   return stages.map((stage) => {
     const natural = anchor + stage.delay
     const overdue = natural < now
@@ -228,7 +230,17 @@ export function planStageTimes(
     if (overdue) {
       fireAt = cursor
       cursor += RECOVERY_STAGE_SPACING_MS
+      recovering = true
+    } else if (recovering && fireAt < prevFireAt + RECOVERY_STAGE_SPACING_MS) {
+      // A staggered stage can catch up with the next NATURAL one — e.g. a
+      // sweep on day 6 puts stage 2 at now+24h while stage 3's own time is
+      // only hours later. Once a plan is in recovery, every later stage keeps
+      // the full spacing, so a recovered sequence can never compress into a
+      // burst. An on-time plan never sets `recovering`, so designed cadences
+      // (Sequence B's 4h→24h gap included) are untouched.
+      fireAt = prevFireAt + RECOVERY_STAGE_SPACING_MS
     }
+    prevFireAt = fireAt
     const skip = moveCutoff !== null && fireAt > moveCutoff ? 'after_move_date' : undefined
     return { stage, fireAt, overdue, skip }
   })

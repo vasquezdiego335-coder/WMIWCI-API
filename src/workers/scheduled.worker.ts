@@ -364,6 +364,27 @@ async function processScheduledJob(job: Job<ScheduledJobData>): Promise<void> {
       break
     }
 
+    // ── MARKETING DISCOVERY (owner spec 2026-08-07) ───────────────
+    // The AI marketing agent's daily sweep: deterministic reactivation
+    // audiences → at most one DRAFT campaign + a Discord opportunity notice.
+    // It cannot send — dispatch stays behind the admin's validate → approve →
+    // start chain — and it is flag-gated OFF until the owner enables it.
+    case 'marketing-discovery': {
+      const { discoverCampaignOpportunities } = await import('../lib/email-marketing-agent')
+      const report = await discoverCampaignOpportunities()
+      if (!report.ran) {
+        log.info({ reason: report.reason }, 'marketing discovery skipped')
+      } else if (report.created) {
+        log.info(
+          { campaignId: report.created.campaignId, eligible: report.created.eligible, discordPosted: report.created.discordPosted },
+          'marketing discovery drafted a campaign — waiting for owner approval'
+        )
+      } else {
+        log.info({ considered: report.considered }, 'marketing discovery complete (no opportunity today)')
+      }
+      break
+    }
+
     // ── 7 AM: Today's confirmed jobs ──────────────────────────────
     case 'daily-schedule-morning': {
       // Day boundaries pinned to America/New_York (not the server's local zone),
@@ -735,6 +756,17 @@ async function registerCronJobs(): Promise<void> {
     'lead-maintenance',
     { type: 'lead-maintenance' },
     { repeat: { pattern: '20 3 * * *', tz: 'America/New_York' }, jobId: 'cron:lead-maintenance' }
+  )
+
+  // ── Marketing discovery (owner spec 2026-08-07) ──
+  // Daily at 10:05 ET — late enough that overnight captures have settled,
+  // inside business hours so the owner sees the Discord ask when it can be
+  // acted on. Flag-gated inside the job; the cron itself is always registered
+  // so enabling the agent never needs a worker restart.
+  await scheduledQueue.add(
+    'marketing-discovery',
+    { type: 'marketing-discovery' },
+    { repeat: { pattern: '5 10 * * *', tz: 'America/New_York' }, jobId: 'cron:marketing-discovery' }
   )
 
   // ── Stranded lifecycle repair (owner spec 2026-08-07) ──

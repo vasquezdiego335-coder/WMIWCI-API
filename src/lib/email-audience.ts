@@ -22,6 +22,7 @@
 
 import { prisma } from './db'
 import { normalizeEmail } from './email-tokens'
+import { activeLifecycleReason, activeRecoveryReason, reactivationCutoff } from './email-reactivation'
 
 /** Hard ceiling on any audience query. No segment may scan without a bound. */
 export const MAX_AUDIENCE = 5000
@@ -38,6 +39,14 @@ export const SEGMENTS = {
   review_eligible: 'Completed move, no review recorded',
   referral_eligible: 'Positive review, no referral ask sent',
   reengagement_eligible: 'No activity for the selected number of days',
+  // ── Reactivation pool (owner spec 2026-08-07) ─────────────────────────
+  //  The 14-day rule lives in email-reactivation.ts. These segments are the
+  //  SQL half: leads whose lifecycle has finished and who have aged into the
+  //  campaign pool. They are DISTINCT audiences on purpose — "requested a
+  //  quote and went quiet" and "wrote to us and went quiet" deserve different
+  //  copy, and neither is "abandoned checkout", which requires a real booking.
+  quick_quote_reactivation: 'Quoted 14+ days ago, opted in, never booked',
+  contact_lead_reactivation: 'Contacted us 14+ days ago, opted in, never quoted or booked',
 } as const
 
 export type SegmentKey = keyof typeof SEGMENTS
@@ -246,6 +255,39 @@ export async function resolveCandidates(def: AudienceDefinition): Promise<Candid
         .map((l) => ({ email: l.email as string, name: l.name, customerId: null, leadId: l.id, bookingId: null }))
     }
 
+    // ── Reactivation pool (owner spec 2026-08-07) ─────────────────────────
+    //  Consent is enforced IN THE SQL here, unlike the legacy segments —
+    //  these two exist only for people we may market to, so matching anyone
+    //  else is wasted work the shared consent gate would discard anyway.
+    //  The 14-day age + "not converted/lost" mirror
+    //  email-reactivation.reactivationBlockReason; the active-lifecycle
+    //  exclusion runs in resolveAudienceDetailed for every segment.
+    case 'quick_quote_reactivation':
+    case 'contact_lead_reactivation': {
+      const quoted = def.segment === 'quick_quote_reactivation'
+      const cutoff = reactivationCutoff(new Date())
+      const leads = await prisma.lead.findMany({
+        where: {
+          ...leadWhere(f),
+          emailMarketingConsent: true,
+          convertedBookingId: null,
+          bookedAt: null,
+          lostAt: null,
+          status: { notIn: ['BOOKED', 'LOST'] },
+          // "Still planning your move?" must not land after the move.
+          OR: [{ moveDate: null }, { moveDate: { gte: new Date() } }],
+          ...(quoted
+            ? { quotedAt: { not: null, lte: cutoff } }
+            : { quotedAt: null, lastActivityAt: { lte: cutoff } }),
+        },
+        select: { id: true, email: true, name: true },
+        take,
+      })
+      return leads
+        .filter((l) => l.email)
+        .map((l) => ({ email: l.email as string, name: l.name, customerId: null, leadId: l.id, bookingId: null }))
+    }
+
     case 'abandoned_booking': {
       const rows = await prisma.booking.findMany({
         where: { ...bookingWhere(f), status: 'PENDING_PAYMENT', depositPaid: false },
@@ -395,6 +437,8 @@ export type AudiencePreview = {
     /** No explicit promotional opt-in (fails closed — absence is not consent). */
     noConsent: number
     duplicate: number
+    /** A lifecycle journey currently owns them — the campaign waits its turn. */
+    activeLifecycle: number
   }
   /** Who would actually be mailed. */
   eligible: number
@@ -416,7 +460,7 @@ export async function previewAudience(def: AudienceDefinition): Promise<Audience
     segment: def.segment,
     segmentLabel: SEGMENTS[def.segment],
     totalCandidates: 0,
-    excluded: { invalidAddress: 0, unsubscribed: 0, hardBounce: 0, complaint: 0, otherSuppression: 0, marketingOptOut: 0, noConsent: 0, duplicate: 0 },
+    excluded: { invalidAddress: 0, unsubscribed: 0, hardBounce: 0, complaint: 0, otherSuppression: 0, marketingOptOut: 0, noConsent: 0, duplicate: 0, activeLifecycle: 0 },
     eligible: 0,
     truncated: false,
     sample: [],
@@ -445,10 +489,11 @@ export async function previewAudience(def: AudienceDefinition): Promise<Audience
     }
 
     const emails = unique.map((c) => c.email)
-    const [suppressions, optedOut, consenting] = await Promise.all([
+    const [suppressions, optedOut, consenting, lifecycleOwned] = await Promise.all([
       prisma.emailSuppression.findMany({ where: { email: { in: emails } }, select: { email: true, reason: true } }),
       prisma.customer.findMany({ where: { email: { in: emails }, marketingOptOut: true }, select: { email: true } }),
       consentingEmails(emails),
+      lifecycleOwnedEmails(emails),
     ])
 
     const byEmail = new Map(suppressions.map((s) => [s.email, s.reason as string]))
@@ -483,6 +528,13 @@ export async function previewAudience(def: AudienceDefinition): Promise<Audience
       // opt-in is NOT permission, so this fails closed.
       if (!consenting.has(c.email)) {
         base.excluded.noConsent++
+        continue
+      }
+      // LIFECYCLE BEATS CAMPAIGNS — the preview shows the same exclusion the
+      // dispatch applies, so the owner's count is the count that sends.
+      const owned = lifecycleOwned.get(c.email)
+      if (owned && !(c.bookingId && owned === 'active_checkout_recovery')) {
+        base.excluded.activeLifecycle++
         continue
       }
       eligible.push(c)
@@ -580,11 +632,12 @@ export async function resolveAudienceDetailed(
   }
 
   const emails = unique.map((c) => c.email)
-  const [suppressions, optedOut, consenting, priorAmbiguous] = await Promise.all([
+  const [suppressions, optedOut, consenting, priorAmbiguous, lifecycleOwned] = await Promise.all([
     prisma.emailSuppression.findMany({ where: { email: { in: emails } }, select: { email: true, reason: true } }),
     prisma.customer.findMany({ where: { email: { in: emails }, marketingOptOut: true }, select: { email: true } }),
     consentingEmails(emails),
     priorAmbiguousEmails(emails, opts.campaignId ?? null, opts.ambiguousWindowDays ?? AMBIGUOUS_WINDOW_DAYS),
+    lifecycleOwnedEmails(emails),
   ])
   const suppressionByEmail = new Map(suppressions.map((s) => [s.email, s.reason as string]))
   const optOut = new Set(optedOut.map((c) => normalizeEmail(c.email)))
@@ -609,6 +662,21 @@ export async function resolveAudienceDetailed(
       excluded.push({ candidate: c, reason: 'no_consent' })
       continue
     }
+    // ── LIFECYCLE BEATS CAMPAIGNS (owner spec 2026-08-07) ─────────────────
+    // Someone a journey currently owns — an active quote follow-up, an active
+    // nurture, an active checkout recovery — must not also receive a generic
+    // campaign the same week. Before this, the ONLY thing separating the two
+    // was the daily frequency cap at send time, which DEFERS rather than
+    // drops: the person got both, a day apart. Excluding them here means the
+    // campaign simply never claims them; when the lifecycle lets go and they
+    // age into the reactivation pool, the next dispatch may.
+    // Booking-scoped segments are exempt for their OWN booking's recovery —
+    // an abandoned_booking campaign IS the recovery conversation.
+    const owned = lifecycleOwned.get(c.email)
+    if (owned && !(c.bookingId && owned === 'active_checkout_recovery')) {
+      excluded.push({ candidate: c, reason: `active_lifecycle:${owned}` })
+      continue
+    }
     // CROSS-RUN AMBIGUOUS OUTCOME (audit E-03). Within one run the idempotency
     // key makes a resend impossible, but the key is scoped PER RUN — a second
     // dispatch of the same campaign mints a new key, so someone whose previous
@@ -623,6 +691,57 @@ export async function resolveAudienceDetailed(
   }
 
   return { eligible, excluded, truncated }
+}
+
+/**
+ * Which of these addresses does a LIFECYCLE currently own?
+ *
+ * Answered from DATE MATH on the database rows (email-reactivation.ts owns the
+ * windows), deliberately not from the Redis queue: the answer is deterministic,
+ * testable, and survives a queue wipe. Erring a day on the side of "still
+ * owned" is the safe error — the campaign waits, nobody is double-mailed.
+ *
+ * FAILS OPEN on a read error: the shared consent/suppression gates and the
+ * send-time frequency caps still stand, and losing a whole campaign to a
+ * transient read failure is the worse outcome.
+ */
+async function lifecycleOwnedEmails(emails: string[]): Promise<Map<string, string>> {
+  const owned = new Map<string, string>()
+  if (emails.length === 0) return owned
+  const now = new Date()
+  try {
+    const [leads, bookings] = await Promise.all([
+      prisma.lead.findMany({
+        where: { email: { in: emails }, bookedAt: null, convertedBookingId: null, lostAt: null },
+        select: { email: true, quotedAt: true, lastActivityAt: true, createdAt: true },
+      }),
+      prisma.booking.findMany({
+        where: {
+          status: 'PENDING_PAYMENT',
+          depositPaid: false,
+          isInternalTest: false,
+          customer: { email: { in: emails } },
+        },
+        select: { createdAt: true, status: true, depositPaid: true, customer: { select: { email: true } } },
+      }),
+    ])
+    for (const l of leads) {
+      const email = normalizeEmail(l.email ?? '')
+      if (!email || owned.has(email)) continue
+      const reason = activeLifecycleReason(l, now)
+      if (reason) owned.set(email, reason)
+    }
+    for (const b of bookings) {
+      const email = normalizeEmail(b.customer.email)
+      if (!email || owned.has(email)) continue
+      const reason = activeRecoveryReason(b, now)
+      if (reason) owned.set(email, reason)
+    }
+  } catch (err) {
+    // Logged by the caller's own diagnostics; an empty map means "no exclusions".
+    console.warn(`lifecycle-owned lookup failed (fails open): ${err instanceof Error ? err.message : String(err)}`)
+  }
+  return owned
 }
 
 /**

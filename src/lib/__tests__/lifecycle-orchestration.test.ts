@@ -650,6 +650,31 @@ test('an on-time enrolment never touches the recovery stagger', () => {
     QUOTE_STAGES.map((s) => NOW.getTime() + s.delay)
   )
   assert.ok(plan.every((p) => !p.overdue))
+  // Sequence B's designed 4h→24h gap is under the recovery spacing; an
+  // on-time plan must keep it exactly (the min-gap rule is recovery-only).
+  const nurture = planStageTimes(LEAD_NURTURE_STAGES, NOW.getTime(), { now: NOW.getTime() })
+  assert.deepEqual(
+    nurture.map((p) => p.fireAt),
+    LEAD_NURTURE_STAGES.map((s) => NOW.getTime() + s.delay)
+  )
+})
+
+test('a recovered plan can NEVER compress into a burst — every gap keeps the full spacing', () => {
+  // The owner's hard rule: it is fine for a repair sweep to CREATE all three
+  // jobs in one pass; it is not fine for the customer to RECEIVE overdue
+  // emails bunched together. The nasty case is a sweep on day 6: stage 2 is
+  // staggered to now+24h, and stage 3's own natural time is only hours after
+  // that. Without the min-gap rule they land ~7h apart.
+  const anchor = NOW.getTime() - 6 * DAY
+  const plan = planStageTimes(QUOTE_STAGES, anchor, { now: NOW.getTime() })
+  assert.equal(plan[0].fireAt, NOW.getTime())
+  assert.equal(plan[1].fireAt, NOW.getTime() + RECOVERY_STAGE_SPACING_MS)
+  for (let i = 1; i < plan.length; i++) {
+    assert.ok(
+      plan[i].fireAt - plan[i - 1].fireAt >= RECOVERY_STAGE_SPACING_MS,
+      `gap ${i} is ${(plan[i].fireAt - plan[i - 1].fireAt) / HOUR}h — must be >= 24h`
+    )
+  }
 })
 
 test('a stale quote is refused rather than drip-fed weeks late', async () => {
