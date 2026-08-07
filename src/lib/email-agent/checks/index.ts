@@ -40,6 +40,7 @@ import { webhookChecks } from './webhook'
 import { providerChecks } from './provider'
 import { schedulerChecks } from './scheduler'
 import { infrastructureChecks } from './infrastructure'
+import { marketingChecks } from './marketing'
 
 const log = queueLogger.child({ mod: 'email-agent-checks' })
 
@@ -57,6 +58,9 @@ export const ALL_CHECKS: CheckDefinition[] = [
   ...webhookChecks,
   ...consentChecks,
   ...campaignChecks,
+  // The ops agent watches the MARKETING agent: a stopped discovery cron, a
+  // failed Discord notice, a draft nobody has acted on (owner spec 2026-08-07).
+  ...marketingChecks,
   ...runChecks,
   ...sendChecks,
 ]

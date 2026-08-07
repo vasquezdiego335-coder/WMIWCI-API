@@ -462,7 +462,7 @@ test('every checkId emitted in the source is declared in the catalogue', () => {
   // PREVENTS: a finding whose checkId memory retrieval and the admin filter
   // can never match, which would silently hide a whole class of problem.
   const dir = resolve(__dirname, '../email-agent/checks')
-  const files = ['campaign.ts', 'run.ts', 'send.ts', 'consent.ts', 'webhook.ts', 'provider.ts', 'scheduler.ts', 'infrastructure.ts']
+  const files = ['campaign.ts', 'run.ts', 'send.ts', 'consent.ts', 'webhook.ts', 'provider.ts', 'scheduler.ts', 'infrastructure.ts', 'marketing.ts']
   const declared = new Set(CHECK_IDS)
   for (const file of files) {
     const src = readFileSync(resolve(dir, file), 'utf8')
@@ -475,7 +475,7 @@ test('every checkId emitted in the source is declared in the catalogue', () => {
 
 test('every declared emit is actually produced somewhere', () => {
   const dir = resolve(__dirname, '../email-agent/checks')
-  const all = ['campaign.ts', 'run.ts', 'send.ts', 'consent.ts', 'webhook.ts', 'provider.ts', 'scheduler.ts', 'infrastructure.ts']
+  const all = ['campaign.ts', 'run.ts', 'send.ts', 'consent.ts', 'webhook.ts', 'provider.ts', 'scheduler.ts', 'infrastructure.ts', 'marketing.ts']
     .map((f) => readFileSync(resolve(dir, f), 'utf8'))
     .join('\n')
   for (const def of ALL_CHECKS) {

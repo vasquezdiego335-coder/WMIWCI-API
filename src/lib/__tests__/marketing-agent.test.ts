@@ -77,12 +77,17 @@ test('the AI receives aggregates only — no per-customer data enters the prompt
 
 test('the Discord notice carries counts and campaign facts, never a customer identity', () => {
   const s = src('email-marketing-agent.ts')
-  const poster = s.slice(s.indexOf('async function postCampaignOpportunity'), s.indexOf('export type DiscoveryReport'))
+  // The message body is built in buildOpportunityMessage; the poster only
+  // transports it. Scan from the builder through the poster.
+  const poster = s.slice(s.indexOf('export function buildOpportunityMessage'), s.indexOf('export interface DiscoveryDeps'))
   for (const forbidden of ['sample', 'candidate', 'recipients.map', 'lead.email', 'customer.email']) {
     assert.ok(!poster.includes(forbidden), `the Discord notice must not include ${forbidden}`)
   }
   assert.match(poster, /input\.eligible/, 'aggregate count')
   assert.match(poster, /DRAFT — nothing sends until you approve it/)
+  // The full content contract — recipients, rationale, discount, ID, admin
+  // link, PII absence — is asserted against the REAL rendered message in
+  // marketing-discovery-flow.test.ts.
 })
 
 test('AI copy failure keeps the deterministic draft — discovery works with zero AI', () => {
@@ -106,4 +111,48 @@ test('the cron is registered and the worker dispatches it', () => {
   assert.match(worker, /case 'marketing-discovery'/)
   assert.match(worker, /jobId: 'cron:marketing-discovery'/)
   assert.match(readFileSync(resolve(__dirname, '../queues/index.ts'), 'utf8'), /\| 'marketing-discovery'/)
+})
+
+// ── Admin visibility (owner spec 2026-08-07): impossible to miss ────────
+
+function page(rel: string): string {
+  return readFileSync(resolve(__dirname, '../../../app/(admin)/admin/(dashboard)', rel), 'utf8')
+}
+
+test('the admin HOME dashboard surfaces a waiting campaign above the money grid', () => {
+  const s = page('page.tsx')
+  assert.match(s, /CAMPAIGN READY FOR YOUR APPROVAL/)
+  assert.match(s, /Review campaign/)
+  assert.match(s, /\/admin\/email-marketing\/campaigns/)
+  // Priority: system-problem callouts render BEFORE the campaign card, the
+  // campaign card BEFORE the stats grid.
+  const setupIdx = s.indexOf('Financial setup required')
+  const cardIdx = s.indexOf('CAMPAIGN READY FOR YOUR APPROVAL')
+  const gridIdx = s.indexOf('Money-spine cards')
+  assert.ok(setupIdx > -1 && cardIdx > setupIdx && gridIdx > cardIdx, 'critical > campaign > analytics')
+  // Fails soft: a read error must show no card, never break the dashboard.
+  assert.match(s, /\.catch\(\(\) => \[\] as Array/)
+  // Touch target ≥44px for mobile.
+  assert.match(s, /minHeight: '44px'/)
+})
+
+test('the Campaigns tab shows an attention badge, wired from both pages that know the count', () => {
+  const shared = page('email-marketing/_shared.tsx')
+  assert.match(shared, /campaignsBadge/)
+  assert.match(shared, /awaiting approval/)
+  assert.match(page('email-marketing/page.tsx'), /campaignsBadge=\{draftCampaigns\}/)
+  assert.match(page('email-marketing/campaigns/page.tsx'), /campaignsBadge=\{draftCount\}/)
+})
+
+test('the campaigns page states agent + Discord status, and has an honest empty state', () => {
+  const s = page('email-marketing/campaigns/page.tsx')
+  assert.match(s, /AI CAMPAIGN DISCOVERY/)
+  assert.match(s, /discoveryStatus\(/)
+  assert.match(s, /DISCORD CAMPAIGN ALERTS/)
+  assert.match(s, /Last notification/)
+  assert.match(s, /No campaigns need your attention/)
+  // The status panel never prints the bot token, and shows only a truncated
+  // channel id.
+  assert.ok(!s.includes('DISCORD_BOT_TOKEN'), 'no secret name in the page')
+  assert.match(s, /channelId\.slice\(0, 4\)/)
 })

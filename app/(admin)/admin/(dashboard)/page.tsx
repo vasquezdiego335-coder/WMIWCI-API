@@ -104,14 +104,39 @@ async function getDashboardData() {
     unacknowledged: board.jobs.reduce((s, j) => s + j.unacknowledged, 0),
   }
 
-  return { setup, todayBookings, pendingApproval, pendingDiscounts, revenue, thisMonthExpenses, totalBookings, outstandingBalances, unpaidCrew, movesMissingLabor, liveJobCount: liveJobs.length, attentionReminders, staffing }
+  // ── CAMPAIGN READY (owner spec 2026-08-07) ────────────────────────────
+  //  A campaign the owner never notices is no campaign system — so a waiting
+  //  draft is surfaced on the FIRST page the owner opens, not three tabs deep.
+  //  Fails soft to "no card": a read error here must never break the dashboard.
+  const campaignDrafts = await prisma.marketingCampaign
+    .findMany({
+      where: { channel: 'EMAIL', status: 'DRAFT' },
+      orderBy: { createdAt: 'desc' },
+      take: 5,
+      select: { id: true, name: true, notes: true, createdByName: true, createdAt: true },
+    })
+    .catch(() => [] as Array<{ id: string; name: string; notes: string | null; createdByName: string | null; createdAt: Date }>)
+  const newest = campaignDrafts[0] ?? null
+  const campaignReady = newest
+    ? {
+        count: campaignDrafts.length,
+        name: newest.name,
+        fromAgent: newest.createdByName === 'marketing-agent',
+        // The draft-time eligible count and rationale travel in the notes the
+        // agent writes. Parsed leniently; absent lines simply do not render.
+        eligible: Number(newest.notes?.match(/Eligible at draft time: (\d+)/)?.[1] ?? NaN),
+        audience: newest.notes?.match(/Audience: ([^\n]+)/)?.[1] ?? null,
+      }
+    : null
+
+  return { setup, todayBookings, pendingApproval, pendingDiscounts, revenue, thisMonthExpenses, totalBookings, outstandingBalances, unpaidCrew, movesMissingLabor, liveJobCount: liveJobs.length, attentionReminders, staffing, campaignReady }
 }
 
 const SEVERITY_ICON: Record<string, string> = { CRITICAL: '🚨', HIGH: '⚠️', MEDIUM: '🟠', LOW: '🔹', INFO: 'ℹ️' }
 
 export default async function AdminDashboard() {
   const session = await getSession()
-  const { setup, todayBookings, pendingApproval, pendingDiscounts, revenue, thisMonthExpenses, totalBookings, outstandingBalances, unpaidCrew, movesMissingLabor, liveJobCount, attentionReminders, staffing } = await getDashboardData()
+  const { setup, todayBookings, pendingApproval, pendingDiscounts, revenue, thisMonthExpenses, totalBookings, outstandingBalances, unpaidCrew, movesMissingLabor, liveJobCount, attentionReminders, staffing, campaignReady } = await getDashboardData()
 
   const revenueCents = revenue.netCollectedCents
   const expenseCents = thisMonthExpenses._sum?.amount ?? 0
@@ -162,6 +187,68 @@ export default async function AdminDashboard() {
             staffing.unacknowledged > 0 ? `${staffing.unacknowledged} unacknowledged assignment${staffing.unacknowledged === 1 ? '' : 's'}` : null,
           ].filter(Boolean).join(' · ')}. <Link href="/admin/scheduling" style={{ color: '#FF5A1F', fontWeight: 700 }}>Open the scheduling board →</Link>
         </Callout>
+      )}
+
+      {/* ── CAMPAIGN READY (owner spec 2026-08-07) ──────────────────────────
+          Placed BELOW the system-problem callouts (a broken system outranks an
+          opportunity) and ABOVE the money grid, so a waiting campaign is one of
+          the first things read on a healthy day. Styled as a business
+          opportunity — brand navy/orange card — never as an error banner. */}
+      {campaignReady && (
+        <div
+          style={{
+            background: 'linear-gradient(135deg, #0A1628 0%, #14263f 100%)',
+            border: '1px solid #C9A961',
+            borderRadius: '14px',
+            padding: '18px 20px',
+            marginBottom: '18px',
+            display: 'flex',
+            flexWrap: 'wrap',
+            alignItems: 'center',
+            gap: '14px',
+            boxShadow: '0 2px 10px rgba(10,22,40,0.25)',
+          }}
+        >
+          <span style={{ fontSize: '26px' }} aria-hidden>📣</span>
+          <div style={{ flex: '1 1 260px', minWidth: 0 }}>
+            <p style={{ margin: 0, fontSize: '11px', fontWeight: 800, letterSpacing: '0.08em', color: '#C9A961' }}>
+              CAMPAIGN READY FOR YOUR APPROVAL
+            </p>
+            <p style={{ margin: '4px 0 0', fontSize: '16px', fontWeight: 700, color: '#F5F1EA', lineHeight: 1.3 }}>
+              {campaignReady.name}
+              {Number.isFinite(campaignReady.eligible) && (
+                <span style={{ fontWeight: 500, color: '#F5F1EA', opacity: 0.85 }}> · {campaignReady.eligible} eligible {campaignReady.eligible === 1 ? 'lead' : 'leads'}</span>
+              )}
+            </p>
+            {campaignReady.audience && (
+              <p style={{ margin: '4px 0 0', fontSize: '12.5px', color: '#F5F1EA', opacity: 0.75, lineHeight: 1.45 }}>
+                {campaignReady.audience}
+              </p>
+            )}
+            <p style={{ margin: '4px 0 0', fontSize: '11.5px', color: '#F5F1EA', opacity: 0.6 }}>
+              {campaignReady.fromAgent ? 'Prepared by the marketing agent. ' : ''}Nothing sends until you approve it
+              {campaignReady.count > 1 ? ` · ${campaignReady.count} drafts waiting` : ''}.
+            </p>
+          </div>
+          <Link
+            href="/admin/email-marketing/campaigns"
+            style={{
+              flexShrink: 0,
+              padding: '11px 20px',
+              backgroundColor: '#FF5A1F',
+              color: '#fff',
+              fontSize: '13.5px',
+              fontWeight: 700,
+              borderRadius: '10px',
+              textDecoration: 'none',
+              minHeight: '44px',
+              display: 'inline-flex',
+              alignItems: 'center',
+            }}
+          >
+            Review campaign →
+          </Link>
+        </div>
       )}
 
       {/* Money-spine cards (owner spec 2026-07-13). Net profit / cash available
