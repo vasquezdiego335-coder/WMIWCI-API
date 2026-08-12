@@ -103,6 +103,8 @@ export type ApprovableBooking = {
   depositAmount: number
   displayId: string
   customerToken: string
+  /** Optional so offline-test fakes need not set it; prisma always returns it. */
+  customerTokenExpiry?: Date | null
   itemsDescription: string | null
   arrivalWindow: string | null
   totalEstimate: number | null
@@ -150,10 +152,12 @@ export type CommitArgs = {
 
 export interface ApprovalStore {
   loadBooking(sel: { bookingId?: string; discordMessageId?: string }): Promise<ApprovableBooking | null>
-  /** Atomic conditional UPDATE; returns rows changed (1 = won the claim). */
+  /** Atomic conditional UPDATE; returns rows changed (1 = won the claim).
+   *  `portalExpiry` rides the same UPDATE (see extendedPortalExpiry). */
   claimConfirm(
     bookingId: string,
     sched: { confirmedDate: Date; scheduledStart: Date; scheduledEnd: Date } | null,
+    portalExpiry: Date,
   ): Promise<number>
   rollbackClaim(bookingId: string): Promise<void>
   reloadStatus(bookingId: string): Promise<ApprovableBooking | null>
@@ -215,6 +219,18 @@ export function checkApprovable(
   return { ok: true }
 }
 
+/** Portal-token expiry after approval. Tokens are minted with a ~7-day life at
+ *  booking creation, so a move approved a week+ out had a DEAD portal link by
+ *  move day (audit finding). On approval, extend to the greatest of the
+ *  existing expiry and (scheduled move date + 3 days); with no known date,
+ *  fall back to now + 30 days. Never shrinks an already-later expiry.
+ *  Pure — no I/O — unit-tested directly. */
+export function extendedPortalExpiry(current: Date | null, moveDate: Date | null, now: Date): Date {
+  const DAY_MS = 24 * 60 * 60 * 1000
+  const candidate = moveDate ? new Date(moveDate.getTime() + 3 * DAY_MS) : new Date(now.getTime() + 30 * DAY_MS)
+  return current && current.getTime() > candidate.getTime() ? current : candidate
+}
+
 const errResult = (
   code: ApprovalErrorCode,
   message: string,
@@ -251,7 +267,12 @@ export async function approveBooking(
   // 1) ATOMIC CLAIM — win the PENDING_APPROVAL → CONFIRMED transition before
   //    touching Stripe. Exactly one concurrent approver gets rows-changed === 1.
   const sched = confirmationScheduleData(booking)
-  const claimed = await store.claimConfirm(booking.id, sched)
+  // Extend the portal token so the link the customer already has survives to
+  // move day (+3d buffer). Rides the claim UPDATE as one extra field — no
+  // extra write. Not undone by rollbackClaim: a longer-lived token on a
+  // still-pending booking is harmless (it was valid before approval too).
+  const portalExpiry = extendedPortalExpiry(booking.customerTokenExpiry ?? null, sched?.confirmedDate ?? null, new Date())
+  const claimed = await store.claimConfirm(booking.id, sched, portalExpiry)
   if (claimed === 0) {
     const fresh = await store.reloadStatus(booking.id)
     if (fresh?.status === 'CONFIRMED') {
@@ -497,10 +518,13 @@ function prismaApprovalStore(): ApprovalStore {
       const b = await prisma.booking.findFirst({ where: { OR: or }, include: { customer: true } })
       return b as unknown as ApprovableBooking | null
     },
-    async claimConfirm(bookingId, sched) {
+    async claimConfirm(bookingId, sched, portalExpiry) {
       const res = await prisma.booking.updateMany({
         where: { id: bookingId, status: 'PENDING_APPROVAL' },
-        data: { status: 'CONFIRMED', depositPaid: true, ...(sched ?? {}) },
+        // customerTokenExpiry: tokens die ~7 days after creation, so week-out
+        // moves had dead portal links on move day — extend (never shrink) to
+        // move date + 3d / now + 30d. Computed pure in extendedPortalExpiry.
+        data: { status: 'CONFIRMED', depositPaid: true, customerTokenExpiry: portalExpiry, ...(sched ?? {}) },
       })
       return res.count
     },

@@ -256,6 +256,11 @@ enum AuditAction {
   EMAIL_CAMPAIGN_RUN_CANCELLED
   EMAIL_CAMPAIGN_RETRY_INITIATED
   EMAIL_LEAD_QUOTED
+  // ── Moving OS Phase 1 (owner spec 2026-08-11) ──
+  // Fleet CRUD leaves a trace like every other admin write. Additive: no
+  // existing value is renamed or removed.
+  TRUCK_CREATED
+  TRUCK_UPDATED
 }
 
 // ── Hardening enums (increment 2.1) ──────────────────────────────────────────
@@ -681,6 +686,14 @@ enum TruckSource {
   NOT_REQUIRED
 }
 
+/// Operational state of a fleet truck (Moving OS Phase 1). RETIRED trucks stay
+/// in the table so historical bookings keep their assignment.
+enum TruckStatus {
+  AVAILABLE
+  MAINTENANCE
+  RETIRED
+}
+
 /// Is travel time paid, and how? Per assignment, because it varies by worker.
 enum TravelPayPolicy {
   UNPAID // travel recorded for analysis only
@@ -1089,6 +1102,19 @@ model Booking {
   //    the anchor time for the post-move follow-up sequence. ──
   completedAt DateTime? @map("completed_at")
 
+  // ── Moving OS Phase 1 (owner spec 2026-08-11) — admin Book Move workspace.
+  //    All nullable/defaulted: existing bookings read honestly as "not set".
+  //    truckId assigns a FLEET truck (Truck model); the free-text truck* fields
+  //    above stay for customer-provided trucks. priceOverrideReason records WHY
+  //    the owner priced away from the server recommendation (pairs with the
+  //    PRICE_CHANGED audit — per-booking pricing, never the price book). ──
+  truckId             String?  @map("truck_id")
+  priceOverrideReason String?  @map("price_override_reason")
+  originPropertyType  String?  @map("origin_property_type") // house|apartment|storage|office|other
+  destPropertyType    String?  @map("dest_property_type")
+  serviceMode         String?  @map("service_mode") // full_service|labor_only|loading_only|unloading_only
+  coiRequired         Boolean  @default(false) @map("coi_required")
+
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
 
@@ -1104,6 +1130,9 @@ model Booking {
   followUps     FollowUpLedger[]
   expenses      Expense[] // job-linked expenses (admin OS) — reduce this job's profit
   closeout      MoveCloseout? // Phase 2 financial closeout
+  // Moving OS Phase 1: deleting a truck never deletes a booking (SetNull).
+  truck          Truck?                 @relation(fields: [truckId], references: [id], onDelete: SetNull)
+  inventoryItems BookingInventoryItem[]
 
   @@index([status])
   @@index([customerId])
@@ -1115,6 +1144,71 @@ model Booking {
   @@index([ownerAssignedSource])
   @@index([originCity])
   @@map("bookings")
+}
+
+// ── Moving OS Phase 1 (owner spec 2026-08-11) ────────────────────────────────
+//    Fleet + structured inventory. Trucks become entities (double-booking is
+//    detectable); inventory follows lead → quote → job → crew with no retyping.
+
+/// A fleet truck the business can assign to a move. `source` reuses the
+/// closeout TruckSource enum (RENTAL default — Diego rents U-Hauls today).
+model Truck {
+  id            String      @id @default(cuid())
+  name          String
+  size          String // "10ft" | "15ft" | "26ft" | other free text
+  source        TruckSource @default(RENTAL)
+  status        TruckStatus @default(AVAILABLE)
+  capacityNotes String?     @map("capacity_notes")
+  active        Boolean     @default(true)
+  createdAt     DateTime    @default(now()) @map("created_at")
+  updatedAt     DateTime    @updatedAt @map("updated_at")
+
+  bookings Booking[]
+
+  @@map("trucks")
+}
+
+/// A reusable catalog entry for the inventory picker. Seeded lazily from
+/// DEFAULT_INVENTORY_CATALOG (src/lib/inventory-catalog.ts); owners can extend.
+model InventoryCatalogItem {
+  id       String @id @default(cuid())
+  name     String @unique
+  category String // "furniture"|"boxes"|"beds"|"appliances"|"tvs"|"specialty"|"heavy"|"other"
+
+  isHeavy           Boolean @default(false) @map("is_heavy")
+  needsDisassembly  Boolean @default(false) @map("needs_disassembly")
+  typicalVolumeCuFt Int?    @map("typical_volume_cu_ft")
+  recommendedMovers Int?    @map("recommended_movers")
+  protectionNotes   String? @map("protection_notes")
+
+  active    Boolean  @default(true)
+  createdAt DateTime @default(now()) @map("created_at")
+
+  items BookingInventoryItem[]
+
+  @@map("inventory_catalog_items")
+}
+
+/// One inventory line on a booking. `name`/`isHeavy`/`needsDisassembly` are
+/// SNAPSHOTS taken at booking time — custom items have no catalog row, and a
+/// later catalog edit must never rewrite what a past move actually carried.
+model BookingInventoryItem {
+  id               String  @id @default(cuid())
+  bookingId        String  @map("booking_id")
+  catalogItemId    String? @map("catalog_item_id")
+  name             String
+  quantity         Int     @default(1)
+  isHeavy          Boolean @default(false) @map("is_heavy")
+  needsDisassembly Boolean @default(false) @map("needs_disassembly")
+  notes            String?
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  booking     Booking               @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  catalogItem InventoryCatalogItem? @relation(fields: [catalogItemId], references: [id], onDelete: SetNull)
+
+  @@index([bookingId])
+  @@map("booking_inventory_items")
 }
 
 // ── Email outbox (src/outbox). Self-contained: bookingId is a plain reference

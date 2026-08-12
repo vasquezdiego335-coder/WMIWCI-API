@@ -1,7 +1,8 @@
 import { prisma } from '@/lib/db'
 import { getSession } from '@/lib/auth'
 import Link from 'next/link'
-import type { Prisma } from '@prisma/client'
+import { LeadStatus, type Prisma } from '@prisma/client'
+import { statusBadge, marketingBadge, LEAD_STATUS_LABELS, PARTIAL_LIFECYCLES } from './_badges'
 
 export const revalidate = 30
 
@@ -12,27 +13,32 @@ export const revalidate = 30
 //  booking. Read + filter view (server component + direct Prisma, mirroring
 //  /admin/customers). Consent + suppression status are surfaced so promotional
 //  audiences can be reasoned about at a glance.
+//  Stage 2C (Moving OS Phase 1): pipeline counts bar (one chip per LeadStatus,
+//  linking to ?status=), status filter, and row links to /admin/leads/[id].
 // ════════════════════════════════════════════════════════════════════════
 
 type View = 'all' | 'partial' | 'converted' | 'abandoned' | 'opted_in' | 'no_consent' | 'door_hanger' | 'referral'
 
-const PARTIAL_LIFECYCLES = ['PARTIAL', 'IN_PROGRESS', 'ABANDONED'] as const
+const PIPELINE_STATUSES = Object.values(LeadStatus)
 
 export default async function AdminLeads({
   searchParams,
 }: {
-  searchParams: { q?: string; view?: string; campaign?: string; from?: string; to?: string; page?: string }
+  searchParams: { q?: string; view?: string; status?: string; campaign?: string; from?: string; to?: string; page?: string }
 }) {
   await getSession()
 
   const q = (searchParams.q ?? '').trim()
   const view = (searchParams.view ?? 'all') as View
+  const statusRaw = (searchParams.status ?? '').trim().toUpperCase()
+  const status = (PIPELINE_STATUSES as string[]).includes(statusRaw) ? (statusRaw as LeadStatus) : null
   const campaign = (searchParams.campaign ?? '').trim()
   const from = searchParams.from ?? ''
   const to = searchParams.to ?? ''
   const page = Math.max(1, parseInt(searchParams.page ?? '1', 10) || 1)
 
   const where: Prisma.LeadWhereInput = {}
+  if (status) where.status = status
   if (q) {
     where.OR = [
       { name: { contains: q, mode: 'insensitive' } },
@@ -82,6 +88,24 @@ export default async function AdminLeads({
   const pages = Math.ceil(total / PER)
   const counts = await leadCounts()
 
+  // Pipeline counts — one chip per LeadStatus, UNFILTERED so the bar always
+  // shows the whole funnel (the chip itself applies the ?status= filter).
+  const grouped = await prisma.lead.groupBy({ by: ['status'], _count: { _all: true } })
+  const pipelineCounts = new Map(grouped.map((g) => [g.status, g._count._all]))
+
+  // Preserve the composable filters when a pipeline chip toggles.
+  const baseQuery = (withStatus: LeadStatus | null) => {
+    const p = new URLSearchParams()
+    if (view !== 'all') p.set('view', view)
+    if (withStatus) p.set('status', withStatus)
+    if (q) p.set('q', q)
+    if (campaign) p.set('campaign', campaign)
+    if (from) p.set('from', from)
+    if (to) p.set('to', to)
+    const s = p.toString()
+    return `/admin/leads${s ? `?${s}` : ''}`
+  }
+
   return (
     <div>
       <h1 style={h1}>Leads</h1>
@@ -103,13 +127,30 @@ export default async function AdminLeads({
       <div style={filterBar}>
         <form method="GET" style={{ display: 'flex', gap: '10px', alignItems: 'center', flexWrap: 'wrap' }}>
           <input type="hidden" name="view" value={view} />
+          {status && <input type="hidden" name="status" value={status} />}
           <input name="q" defaultValue={q} placeholder="Search name, email, phone…" style={searchInput} />
           <input name="campaign" defaultValue={campaign} placeholder="Campaign…" style={{ ...searchInput, minWidth: '160px' }} />
           <label style={dateLabel}>From <input type="date" name="from" defaultValue={from} style={dateInput} /></label>
           <label style={dateLabel}>To <input type="date" name="to" defaultValue={to} style={dateInput} /></label>
           <button type="submit" style={filterBtn}>Filter</button>
-          {(q || campaign || from || to) && <Link href={`/admin/leads?view=${view}`} style={{ fontSize: '13px', color: '#6B7280' }}>Clear</Link>}
+          {(q || campaign || from || to || status) && <Link href={`/admin/leads?view=${view}`} style={{ fontSize: '13px', color: '#6B7280' }}>Clear</Link>}
         </form>
+      </div>
+
+      {/* Pipeline counts bar (Stage 2C) — the sales funnel at a glance. Each
+          chip filters by ?status=; clicking the active chip clears it. */}
+      <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', marginBottom: '14px' }}>
+        {PIPELINE_STATUSES.map((s) => {
+          const active = status === s
+          return (
+            <Link key={s} href={baseQuery(active ? null : s)} style={{ ...pipelineChip, ...(active ? pipelineChipActive : {}) }}>
+              <span>{LEAD_STATUS_LABELS[s] ?? s}</span>
+              <span style={{ ...pipelineCount, ...(active ? { background: 'rgba(255,255,255,0.22)', color: '#FFFFFF' } : {}) }}>
+                {(pipelineCounts.get(s) ?? 0).toLocaleString()}
+              </span>
+            </Link>
+          )
+        })}
       </div>
 
       <div style={tableWrap}>
@@ -129,8 +170,11 @@ export default async function AdminLeads({
               return (
                 <tr key={l.id} style={tr}>
                   <td style={td}>
-                    <div style={{ fontWeight: 500, color: '#0A1628' }}>{l.name}</div>
-                    <div style={{ fontSize: '11px', color: '#9CA3AF' }}>{l.email ?? '—'}</div>
+                    {/* Row link (Stage 2C): the lead name opens the detail page. */}
+                    <Link href={`/admin/leads/${l.id}`} style={{ textDecoration: 'none' }}>
+                      <div style={{ fontWeight: 500, color: '#0A1628' }}>{l.name}</div>
+                      <div style={{ fontSize: '11px', color: '#9CA3AF' }}>{l.email ?? '—'}</div>
+                    </Link>
                   </td>
                   <td style={td}>{l.phone ?? '—'}</td>
                   <td style={td}>{l.formStep ? l.formStep.replace(/^card/, 'Step ') : '—'}</td>
@@ -152,7 +196,7 @@ export default async function AdminLeads({
       {pages > 1 && (
         <div style={{ display: 'flex', gap: '8px', justifyContent: 'center', marginTop: '24px', flexWrap: 'wrap' }}>
           {Array.from({ length: Math.min(pages, 20) }, (_, i) => i + 1).map((p) => (
-            <Link key={p} href={`/admin/leads?view=${view}&q=${encodeURIComponent(q)}&campaign=${encodeURIComponent(campaign)}&from=${from}&to=${to}&page=${p}`}
+            <Link key={p} href={`/admin/leads?view=${view}${status ? `&status=${status}` : ''}&q=${encodeURIComponent(q)}&campaign=${encodeURIComponent(campaign)}&from=${from}&to=${to}&page=${p}`}
               style={{ padding: '6px 12px', borderRadius: '6px', fontSize: '13px', fontWeight: p === page ? 700 : 400, backgroundColor: p === page ? '#FF5A1F' : '#FFFFFF', color: p === page ? '#FFFFFF' : '#374151', textDecoration: 'none', boxShadow: '0 1px 3px rgba(0,0,0,0.06)' }}>
               {p}
             </Link>
@@ -171,31 +215,16 @@ async function leadCounts() {
   return { partial, optedIn }
 }
 
-function statusBadge(lifecycle: string | null, status: string, convertedBookingId: string | null) {
-  if (lifecycle === 'CONVERTED' || convertedBookingId) {
-    const inner = <span style={{ ...badge, background: '#DCFCE7', color: '#166534' }}>Converted</span>
-    return convertedBookingId ? <Link href={`/admin/jobs/${convertedBookingId}`} style={{ textDecoration: 'none' }}>{inner}</Link> : inner
-  }
-  if (lifecycle && (PARTIAL_LIFECYCLES as readonly string[]).includes(lifecycle)) {
-    const label = lifecycle === 'ABANDONED' ? 'Abandoned' : 'Partial'
-    return <span style={{ ...badge, background: '#FEF3C7', color: '#92400E' }}>{label}</span>
-  }
-  return <span style={{ ...badge, background: '#EFF2F6', color: '#475569' }}>{status.replace(/_/g, ' ').toLowerCase()}</span>
-}
-
-function marketingBadge(consent: boolean | null, supp?: { reason: string; scope: string }) {
-  if (supp) {
-    const label = supp.reason === 'UNSUBSCRIBED' ? 'Unsubscribed' : 'Suppressed'
-    return <span style={{ ...badge, background: '#FEE2E2', color: '#991B1B' }} title={`${supp.reason} (${supp.scope})`}>{label}</span>
-  }
-  if (consent === true) return <span style={{ ...badge, background: '#DBEAFE', color: '#1E40AF' }}>Opted in</span>
-  return <span style={{ fontSize: '12px', color: '#9CA3AF' }}>—</span>
-}
+// statusBadge / marketingBadge moved to ./_badges (Stage 2C) so the detail
+// page renders the identical badges.
 
 const h1: React.CSSProperties = { fontSize: '24px', fontWeight: 700, color: '#0A1628', margin: '0 0 4px' }
 const subtitle: React.CSSProperties = { fontSize: '13px', color: '#6B7280', margin: '0 0 20px' }
 const chip: React.CSSProperties = { padding: '6px 12px', borderRadius: '100px', fontSize: '12.5px', fontWeight: 600, color: '#475569', background: '#FFFFFF', textDecoration: 'none', boxShadow: '0 1px 3px rgba(0,0,0,0.06)' }
 const chipActive: React.CSSProperties = { background: '#0A1628', color: '#FFFFFF' }
+const pipelineChip: React.CSSProperties = { display: 'inline-flex', alignItems: 'center', gap: '7px', padding: '7px 13px', borderRadius: '100px', fontSize: '12.5px', fontWeight: 600, color: '#374151', background: '#FFFFFF', textDecoration: 'none', border: '1px solid #E5E7EB', boxShadow: '0 1px 3px rgba(0,0,0,0.05)' }
+const pipelineChipActive: React.CSSProperties = { background: '#FF5A1F', borderColor: '#FF5A1F', color: '#FFFFFF' }
+const pipelineCount: React.CSSProperties = { fontSize: '11px', fontWeight: 800, padding: '1px 7px', borderRadius: '100px', background: '#F3F4F6', color: '#0A1628', fontVariantNumeric: 'tabular-nums' }
 const filterBar: React.CSSProperties = { backgroundColor: '#FFFFFF', borderRadius: '10px', padding: '14px 16px', marginBottom: '18px', boxShadow: '0 1px 4px rgba(0,0,0,0.06)' }
 const searchInput: React.CSSProperties = { padding: '8px 12px', border: '1px solid #D1D5DB', borderRadius: '6px', fontSize: '13px', minWidth: '220px', outline: 'none' }
 const dateLabel: React.CSSProperties = { fontSize: '12px', color: '#6B7280', display: 'flex', gap: '6px', alignItems: 'center' }
@@ -206,4 +235,3 @@ const table: React.CSSProperties = { width: '100%', borderCollapse: 'collapse' }
 const th: React.CSSProperties = { padding: '12px 16px', textAlign: 'left', fontSize: '11px', fontWeight: 600, color: '#6B7280', letterSpacing: '0.06em', textTransform: 'uppercase', backgroundColor: '#F9FAFB', borderBottom: '1px solid #E5E7EB', whiteSpace: 'nowrap' }
 const tr: React.CSSProperties = { borderBottom: '1px solid #F3F4F6' }
 const td: React.CSSProperties = { padding: '12px 16px', fontSize: '13px', color: '#374151' }
-const badge: React.CSSProperties = { fontSize: '11px', padding: '3px 8px', borderRadius: '100px', fontWeight: 600, whiteSpace: 'nowrap' }

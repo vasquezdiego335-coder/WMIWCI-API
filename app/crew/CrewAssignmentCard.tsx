@@ -38,7 +38,9 @@ export default function CrewAssignmentCard({ a }: { a: A }) {
   async function clock(action: 'CLOCK_IN' | 'BREAK_START' | 'BREAK_END' | 'CLOCK_OUT') {
     setBusy(action); setErr('')
     try {
-      const res = await fetch(`/api/admin/crew-assignments/${a.id}/clock`, { method: 'POST', headers: { 'Content-Type': 'application/json', ...csrf() }, body: JSON.stringify({ action }) })
+      // Crew-reachable clock route (middleware 403s /api/admin/* for CREW).
+      // Its schema is { action, at? } — same body shape we send.
+      const res = await fetch(`/api/crew/assignments/${a.id}/clock`, { method: 'POST', headers: { 'Content-Type': 'application/json', ...csrf() }, body: JSON.stringify({ action }) })
       if (!res.ok) { const j = await res.json().catch(() => ({})); setErr(j.error ?? 'Clock action failed.'); return }
       router.refresh()
     } catch { setErr('Network error.') } finally { setBusy(null) }

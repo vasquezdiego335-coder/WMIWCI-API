@@ -17,6 +17,9 @@ const GROUPS: Group[] = [
   {
     title: 'Overview',
     items: [
+      // Book Move first: the phone-call workspace is the highest-frequency
+      // owner action (Moving OS Phase 1, owner spec 2026-08-11).
+      { href: '/admin/book', label: 'Book Move', icon: '📞' },
       { href: '/admin', label: 'Dashboard', icon: '🏠' },
       { href: '/admin/action-center', label: 'Action Center', icon: '🔔' },
       { href: '/admin/schedule', label: 'Calendar', icon: '📅' },
@@ -31,6 +34,7 @@ const GROUPS: Group[] = [
       { href: '/admin/customers', label: 'Customers', icon: '👤' },
       { href: '/admin/leads', label: 'Leads', icon: '📈' },
       { href: '/admin/staff', label: 'Staff & Crew', icon: '👥' },
+      { href: '/admin/trucks', label: 'Trucks', icon: '🛻' },
     ],
   },
   {

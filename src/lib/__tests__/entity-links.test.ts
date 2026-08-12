@@ -15,9 +15,9 @@ test('expense / owner_transaction / customer / crew link to their list pages', (
   assert.equal(entityLink('crew', 'u1'), '/admin/staff')
 })
 
-test('lead has no page yet → null link (never a broken 404)', () => {
-  assert.equal(entityLink('lead', 'l1'), null)
-  assert.equal(hasEntityPage('lead'), false)
+test('lead links to the detail page shipped in Moving OS Phase 1 (Stage 2C)', () => {
+  assert.equal(entityLink('lead', 'l1'), '/admin/leads/l1')
+  assert.equal(hasEntityPage('lead'), true)
   assert.equal(hasEntityPage('booking'), true)
 })
 

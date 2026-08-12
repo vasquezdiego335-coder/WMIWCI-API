@@ -141,6 +141,14 @@ export type Action =
   | 'booking.approve' // approve a PENDING_APPROVAL booking (captures the $49 hold)
   | 'booking.decline' // decline/deny before capture (releases the hold)
   | 'booking.test_payment' // create a controlled internal test booking (staging only)
+  // ── Moving OS Phase 1 (owner spec 2026-08-11) ──
+  // All three are OPERATIONS (OWNER + MANAGER): booking a phone customer, keeping
+  // the fleet list current, and working the lead pipeline move no owner money.
+  // Creating a booking never captures the $49 hold — capture stays behind the
+  // owner-only booking.approve.
+  | 'booking.create_admin' // create a booking from the admin Book Move workspace
+  | 'truck.manage' // fleet CRUD: create/edit trucks, status, retirement
+  | 'lead.manage' // manual lead entry + pipeline transitions (contacted/lost/…)
   // System
   | 'audit.view'
 

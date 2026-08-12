@@ -103,6 +103,11 @@ export async function performSync(now = new Date()): Promise<SyncResult> {
       truckReservationStatus: b.truckReservationStatus,
       truckReservationNumber: b.truckReservationNumber,
       jobStartedAt: b.job?.startedAt ?? null,
+      // Moving OS Phase 1: fleet-truck double-booking rule. The booking query
+      // uses `include`, so every scalar (truckId, confirmedDate, scheduledEnd)
+      // is already loaded — this just carries them into the pure rule shape.
+      truckId: b.truckId,
+      confirmedDate: b.confirmedDate,
       crew: (b.job?.crew ?? []).map((c) => ({
         userId: c.userId,
         userName: c.user.name,

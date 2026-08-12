@@ -17,6 +17,7 @@ import {
   ADDRESS_TIERS, ADDRESS_FALLBACK, MISSING_ADDRESS_TIERS, MISSING_ADDRESS_FALLBACK,
 } from './reminder-severity'
 import { entityLink } from './entity-links'
+import { truckConflictBetween, etDayKey } from './truck-conflicts'
 
 export type Severity = 'CRITICAL' | 'HIGH' | 'MEDIUM' | 'LOW' | 'INFO'
 export type Category =
@@ -81,6 +82,13 @@ export interface RuleBooking {
   truckReservationStatus: string | null
   truckReservationNumber: string | null
   jobStartedAt: Date | null
+  // ── Moving OS Phase 1: fleet-truck double-booking detection. Optional so
+  //    existing fixtures/callers keep compiling — a missing truckId simply
+  //    means the booking has no fleet truck and can never truck-conflict.
+  //    confirmedDate is the date-only fallback the pure truck lib uses for
+  //    the conservative same-ET-day check on rows without scheduledStart. ──
+  truckId?: string | null
+  confirmedDate?: Date | null
   crew: RuleCrew[]
   hasFailedPayment: boolean
   hasWorkerPayExpense: boolean
@@ -435,6 +443,70 @@ export function evaluateCrewOverlaps(bookings: RuleBooking[], now: Date): Remind
   return out
 }
 
+// ── Cross-booking rule: truck double-booked (Moving OS Phase 1) ──────────────
+// Two live bookings assigned the SAME fleet truck with overlapping windows —
+// or unknown times on the same ET day (the pure lib's conservative rule). The
+// dedupeKey is truck+day, so three jobs colliding on one truck on one day
+// collapse into ONE reminder listing all of them instead of three near-dupes.
+
+const toTruckShape = (b: RuleBooking) => ({
+  id: b.id,
+  truckId: b.truckId ?? null,
+  scheduledStart: b.scheduledStart,
+  scheduledEnd: b.scheduledEnd,
+  confirmedDate: b.confirmedDate ?? null,
+  status: b.status,
+})
+
+export function evaluateTruckOverlaps(bookings: RuleBooking[], now: Date): ReminderCandidate[] {
+  const out: ReminderCandidate[] = []
+  const basisOf = (b: RuleBooking) => b.scheduledStart ?? b.confirmedDate ?? null
+  // Same recency window as the crew rule: recent past + future, live statuses.
+  const live = bookings.filter((b) => {
+    if (!LIVE_STATUSES.includes(b.status) || !b.truckId) return false
+    const basis = basisOf(b)
+    return !!basis && basis.getTime() > now.getTime() - DAY
+  })
+
+  const byTruck = new Map<string, RuleBooking[]>()
+  for (const b of live) {
+    const list = byTruck.get(b.truckId!) ?? []
+    list.push(b)
+    byTruck.set(b.truckId!, list)
+  }
+
+  for (const [truckId, group] of Array.from(byTruck.entries())) {
+    if (group.length < 2) continue
+    // Bookings involved in any conflict, bucketed by the ET day they collide on.
+    const byDay = new Map<string, Map<string, RuleBooking>>()
+    for (let i = 0; i < group.length; i++) {
+      for (let j = i + 1; j < group.length; j++) {
+        const a = group[i], b = group[j]
+        if (!truckConflictBetween(toTruckShape(a), toTruckShape(b))) continue
+        const basisA = basisOf(a)!, basisB = basisOf(b)!
+        const day = etDayKey(basisA.getTime() <= basisB.getTime() ? basisA : basisB)
+        const bucket = byDay.get(day) ?? new Map<string, RuleBooking>()
+        bucket.set(a.id, a)
+        bucket.set(b.id, b)
+        byDay.set(day, bucket)
+      }
+    }
+    for (const [day, bucket] of Array.from(byDay.entries())) {
+      const involved = Array.from(bucket.values())
+      const starts = involved.map((b) => basisOf(b)!).sort((x, y) => x.getTime() - y.getTime())
+      const names = involved.map((b) => b.customerName).join(', ')
+      out.push({
+        reminderType: 'truck-double-booked', category: 'JOBS_SCHEDULING', severity: 'CRITICAL',
+        title: `Truck double-booked: ${involved.length} jobs share one truck on ${day}`,
+        description: `${names} are all assigned the same truck with overlapping (or unknown) move windows on ${day}. A truck can only be in one place — reassign a truck or reschedule a job.`,
+        sourceEntityType: 'truck', sourceEntityId: truckId, sourceUrl: '/admin/trucks',
+        dedupeKey: key('truck-double-booked', 'truck', truckId, day), dueAt: starts[0],
+      })
+    }
+  }
+  return out
+}
+
 // ── Expense / owner-money / lead / customer rules ─────────────────────────────
 
 export function evaluateExpenses(expenses: RuleExpense[], now: Date): ReminderCandidate[] {
@@ -546,6 +618,7 @@ export function evaluateAll(input: RuleInput, now: Date): ReminderCandidate[] {
   const raw = [
     ...input.bookings.flatMap((b) => evaluateBooking(b, now)),
     ...evaluateCrewOverlaps(input.bookings, now),
+    ...evaluateTruckOverlaps(input.bookings, now),
     ...evaluateExpenses(input.expenses, now),
     ...evaluateOwnerTransactions(input.ownerTransactions, now),
     ...evaluateLeads(input.leads, now),

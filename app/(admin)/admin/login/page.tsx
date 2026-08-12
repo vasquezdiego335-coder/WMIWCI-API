@@ -29,7 +29,13 @@ export default function AdminLogin() {
         return
       }
 
-      router.replace('/admin')
+      // Honor ?next= only for same-site paths: must start with exactly one '/'
+      // ('//host' is protocol-relative = open redirect; '\' variants ditto).
+      // Read from window.location so this stays a plain client component
+      // (useSearchParams would force a Suspense boundary on the login page).
+      const next = new URLSearchParams(window.location.search).get('next')
+      const safeNext = next && next.startsWith('/') && !next.startsWith('//') && !next.includes('\\') ? next : '/admin'
+      router.replace(safeNext)
     } catch {
       setError('Network error — please try again')
     } finally {

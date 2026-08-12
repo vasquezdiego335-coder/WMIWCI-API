@@ -59,7 +59,11 @@ export async function middleware(req: NextRequest): Promise<NextResponse> {
       if (pathname.startsWith('/api/')) {
         return NextResponse.json({ error: 'Insufficient permissions' }, { status: 403 })
       }
-      return NextResponse.redirect(new URL('/admin', req.url))
+      // Send the user to a surface their role CAN reach. Redirecting a CREW
+      // session to /admin would re-fail this same gate on every request — the
+      // confirmed login redirect loop. The role gates above are unchanged.
+      const fallback = session.role === UserRole.CREW ? '/crew' : '/admin'
+      return NextResponse.redirect(new URL(fallback, req.url))
     }
   }
 

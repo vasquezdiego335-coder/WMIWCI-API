@@ -7,9 +7,8 @@
 
 export type EntityType = 'booking' | 'expense' | 'owner_transaction' | 'lead' | 'customer' | 'crew' | 'job'
 
-// Which entity types currently have a real admin destination. Leads are
-// intentionally absent — the Leads UI is a roadmap item, so lead reminders show
-// no link rather than a 404. Update this map (not the rules) when pages ship.
+// Which entity types currently have a real admin destination. Update this map
+// (not the rules) when pages ship.
 const ENTITY_ROUTES: Record<EntityType, ((id: string) => string) | null> = {
   booking: (id) => `/admin/jobs/${id}`,
   job: (id) => `/admin/jobs/${id}`,
@@ -17,7 +16,8 @@ const ENTITY_ROUTES: Record<EntityType, ((id: string) => string) | null> = {
   owner_transaction: () => '/admin/owner-money',
   customer: () => '/admin/customers',
   crew: () => '/admin/staff',
-  lead: null, // no lead detail page yet (roadmap: leads-pipeline-ui)
+  // Lead detail shipped in Moving OS Phase 1 Stage 2C (/admin/leads/[id]).
+  lead: (id) => `/admin/leads/${id}`,
 }
 
 /** Admin URL for an entity, or null when the destination does not exist. */

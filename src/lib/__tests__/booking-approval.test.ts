@@ -5,6 +5,7 @@ import {
   declineBooking,
   checkApprovable,
   checkDeclinable,
+  extendedPortalExpiry,
   type ApprovableBooking,
   type ApprovalDeps,
   type ApprovalStore,
@@ -383,4 +384,23 @@ test('decline still cancels even if the hold release fails (non-fatal)', async (
   assert.equal((res as { holdReleased: boolean }).holdReleased, false)
   assert.equal(h.state.booking?.status, 'CANCELLED') // still cancelled
   assert.equal(h.state.declines.length, 1)
+})
+
+// ── Portal token survives to move day (extendedPortalExpiry) ──────────────────
+
+test('extendedPortalExpiry: extends to move date + 3 days, never shrinks, 30-day fallback', () => {
+  const now = new Date('2026-08-01T12:00:00.000Z')
+  const moveDate = new Date('2026-08-20T12:00:00.000Z')
+  // Stale 7-day token from creation → pushed out to move date + 3 days.
+  assert.equal(
+    extendedPortalExpiry(new Date('2026-08-08T12:00:00.000Z'), moveDate, now).toISOString(),
+    '2026-08-23T12:00:00.000Z',
+  )
+  // No current expiry at all → still move date + 3 days.
+  assert.equal(extendedPortalExpiry(null, moveDate, now).toISOString(), '2026-08-23T12:00:00.000Z')
+  // Current expiry already LATER than move date + 3d → kept (never shrinks).
+  const farOut = new Date('2026-12-01T00:00:00.000Z')
+  assert.equal(extendedPortalExpiry(farOut, moveDate, now), farOut)
+  // No move date known → falls back to now + 30 days.
+  assert.equal(extendedPortalExpiry(null, null, now).toISOString(), '2026-08-31T12:00:00.000Z')
 })
