@@ -9,6 +9,8 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
   recommendEstimate,
+  itemCrewFloor,
+  specialtyCrewFloor,
   BASE_BY_PACKAGE,
   CREW_MIN,
   CREW_MAX,
@@ -16,7 +18,18 @@ import {
   type EstimateAssistantInput,
 } from '../estimate-assistant'
 import { MOVE_SIZES } from '../estimate'
+import { DEFAULT_INVENTORY_CATALOG } from '../inventory-catalog'
 import { MIN_TRUCK_BY_PACKAGE, MANUAL_TRUCK_PLAN_PACKAGES } from '../pricing-config'
+
+/** The house catalog's own rating for a named item — the number the name-based
+ *  floor must agree with. Read from the live table so this test can never
+ *  quietly encode a second opinion (the module derives it the same way). */
+function catalogMovers(itemName: string): number {
+  const row = DEFAULT_INVENTORY_CATALOG.find((r) => r.name === itemName)
+  assert.ok(row, `${itemName} must exist in DEFAULT_INVENTORY_CATALOG`)
+  assert.ok(row!.recommendedMovers, `${itemName} must carry a mover rating`)
+  return row!.recommendedMovers!
+}
 
 const base = (over: Partial<EstimateAssistantInput> = {}): EstimateAssistantInput => ({
   serviceType: null,
@@ -103,17 +116,270 @@ test('assistant: 2+ heavy items or a 3-mover item add exactly one crew member', 
   assert.equal(heavy.crewSize, 3, '1br base 2 + 1 for two heavy items')
   assert.ok(heavy.reasons.some((r) => /heavy/i.test(r)))
 
-  const piano = recommendEstimate(
-    base({ serviceType: '1br', inventory: [{ name: 'Upright piano', quantity: 1, isHeavy: true, recommendedMovers: 4 }] })
+  // A 3-mover item adds exactly one crew member on top of the package base.
+  // (Its own 3-mover FLOOR is not binding here — 2 + 1 already reaches 3. The
+  // floor rule itself is covered by the "item floor" tests below.)
+  const bigCrew = recommendEstimate(
+    base({ serviceType: '1br', inventory: [{ name: 'Gun safe', quantity: 1, isHeavy: true, recommendedMovers: 3 }] })
   )
-  assert.equal(piano.crewSize, 3, 'recommendedMovers >= 3 adds one crew member')
-  assert.ok(piano.reasons.some((r) => /movers/i.test(r)))
+  assert.equal(bigCrew.crewSize, 3, 'recommendedMovers >= 3 adds one crew member')
+  assert.ok(bigCrew.reasons.some((r) => /movers/i.test(r)))
 
   // One heavy item without a movers recommendation is NOT a crew trigger.
   const one = recommendEstimate(
     base({ serviceType: '1br', inventory: [{ name: 'Dresser', quantity: 1, isHeavy: true }] })
   )
   assert.equal(one.crewSize, 2)
+})
+
+// ── Item crew FLOOR (fix pass item 5) ───────────────────────────────────────
+// An item's recommendedMovers is a FLOOR, not one number in an average: the
+// package base can never talk a 4-mover item down to a 3-mover crew, and when
+// the floor is what decided the number the reason names the item.
+
+test('floor: studio package + a 4-mover piano recommends 4 movers and names the item', () => {
+  const rec = recommendEstimate(
+    base({
+      serviceType: 'full-studio',
+      inventory: [{ name: 'Piano (upright)', quantity: 1, isHeavy: true, recommendedMovers: 4 }],
+    })
+  )
+  // Studio base crew is 2 and the big-crew adjustment only adds 1 → the old
+  // math landed on 3. The item floor is what makes this a 4-mover job.
+  assert.equal(BASE_BY_PACKAGE['full-studio'].crew, 2, 'guard: the package base really is small')
+  assert.equal(rec.crewSize, 4, 'the 4-mover item sets the crew, the package base does not average it away')
+  const named = rec.reasons.find((r) => /piano \(upright\)/i.test(r) && /requires 4 movers/i.test(r))
+  assert.ok(named, `a reason must name the item that set the floor — got ${JSON.stringify(rec.reasons)}`)
+  assert.ok(/raised to 4/i.test(named!), 'the reason says the crew was raised to the item floor')
+})
+
+test('floor: 2BR + a 3-mover pool table never drops below 3', () => {
+  const rec = recommendEstimate(
+    base({
+      serviceType: '2br',
+      inventory: [
+        { name: 'Pool table', quantity: 1, isHeavy: true, recommendedMovers: 3 },
+        { name: 'Box (medium)', quantity: 12 },
+      ],
+    })
+  )
+  assert.ok(rec.crewSize >= 3, `crew ${rec.crewSize} must never fall under the 3-mover item floor`)
+  // 2BR base 3 + the existing big-crew adjustment = 4; the floor of 3 is not
+  // binding, so no floor reason is written (we never claim a rule we did not use).
+  assert.equal(rec.crewSize, 4, '2BR base 3 + one big-crew item')
+  assert.ok(
+    !rec.reasons.some((r) => /requires 3 movers/i.test(r)),
+    'a floor that did not decide the number must not claim credit'
+  )
+})
+
+test('floor: an item needing more than the cap gets capped at 5 with an explicit reason', () => {
+  const rec = recommendEstimate(
+    base({
+      serviceType: '2br',
+      inventory: [{ name: 'Commercial gun safe', quantity: 1, isHeavy: true, recommendedMovers: 7 }],
+    })
+  )
+  assert.equal(rec.crewSize, CREW_MAX, 'the cap still stands — we never promise a crew we cannot field')
+  const capped = rec.reasons.find((r) => /commercial gun safe/i.test(r) && /requires 7 movers/i.test(r))
+  assert.ok(capped, `the shortfall must be stated, not swallowed — got ${JSON.stringify(rec.reasons)}`)
+  assert.ok(/capped at 5/i.test(capped!), 'the reason says the crew was capped')
+  assert.ok(
+    /second trip|outside help/i.test(capped!),
+    'the reason tells the owner what to do about the gap'
+  )
+  assert.ok(!rec.reasons.some((r) => /raised to 7/i.test(r)), 'never claim a 7-person crew')
+})
+
+test('floor: a floor at exactly the cap is honoured without the over-cap warning', () => {
+  const rec = recommendEstimate(
+    base({ serviceType: '1br', inventory: [{ name: 'Hot tub', quantity: 1, isHeavy: true, recommendedMovers: 5 }] })
+  )
+  assert.equal(rec.crewSize, 5)
+  assert.ok(rec.reasons.some((r) => /hot tub requires 5 movers/i.test(r)))
+  assert.ok(!rec.reasons.some((r) => /capped at/i.test(r)), 'nothing was capped away here')
+})
+
+test('floor: the floor never LOWERS a crew the job already earned', () => {
+  const rec = recommendEstimate(
+    base({
+      serviceType: '4br',
+      inventory: [
+        { name: 'Washer', quantity: 1, isHeavy: true, recommendedMovers: 2 },
+        { name: 'Dryer', quantity: 1, isHeavy: true, recommendedMovers: 2 },
+      ],
+    })
+  )
+  // 4BR base 4 + 1 for two heavy items = 5; a 2-mover item must not pull it down.
+  assert.equal(rec.crewSize, 5)
+  assert.ok(!rec.reasons.some((r) => /requires 2 movers/i.test(r)))
+})
+
+test('floor: missing / junk recommendedMovers values are ignored, never crash', () => {
+  const junk = recommendEstimate(
+    base({
+      serviceType: '1br',
+      inventory: [
+        { name: 'Lamp', quantity: 1, recommendedMovers: null },
+        { name: 'Rug', quantity: 1 },
+        { name: 'Broken row', quantity: 1, recommendedMovers: 0 },
+        { name: 'Negative row', quantity: 1, recommendedMovers: -3 },
+        { name: 'NaN row', quantity: 1, recommendedMovers: Number.NaN },
+      ],
+    })
+  )
+  assert.equal(junk.crewSize, BASE_BY_PACKAGE['1br'].crew, 'junk values leave the base crew alone')
+  assert.ok(junk.crewSize >= CREW_MIN)
+  assert.ok(!junk.reasons.some((r) => /requires .* movers/i.test(r)))
+
+  // A fractional catalog value floors to whole movers (3.9 people is 3 people).
+  const fractional = recommendEstimate(
+    base({ serviceType: 'little-studio', inventory: [{ name: 'Marble table', quantity: 1, recommendedMovers: 3.9 }] })
+  )
+  assert.equal(fractional.crewSize, 3, 'base 2 + big-crew adjustment 1, floor 3 not binding above it')
+})
+
+test('floor: itemCrewFloor picks the biggest requirement and is tie-stable', () => {
+  assert.equal(itemCrewFloor([]), null)
+  assert.equal(itemCrewFloor([{ name: 'Rug', quantity: 1 }]), null)
+
+  const biggest = itemCrewFloor([
+    { name: 'Couch', quantity: 1, recommendedMovers: 2 },
+    { name: 'Piano (upright)', quantity: 1, recommendedMovers: 4 },
+    { name: 'Safe', quantity: 1, recommendedMovers: 3 },
+  ])
+  assert.deepEqual(biggest, { movers: 4, name: 'Piano (upright)' })
+
+  const tie = itemCrewFloor([
+    { name: 'Safe', quantity: 1, recommendedMovers: 3 },
+    { name: 'Pool table', quantity: 1, recommendedMovers: 3 },
+  ])
+  assert.deepEqual(tie, { movers: 3, name: 'Safe' }, 'first item wins a tie → deterministic reasons')
+})
+
+// ── R2-7.2: the floor fires on a HAND-TYPED specialty line ──────────────────
+//
+// THE DEFECT: the Book Move inventory picker lets the owner type a line that
+// is not in the catalog. A typed "Piano" therefore arrived with
+// recommendedMovers = null, so the item floor above never fired and the
+// recommendation came back at the package base — a 2-3 mover piano job — even
+// though the SAME name sets hasPiano = true on the booking through
+// admin-booking's PIANO_RE. The booking said "there is a piano here" while the
+// crew plan said "two people".
+//
+// These tests are written so the DEFECT would fail them: each one uses a line
+// with NO catalog id and NO recommendedMovers, which is exactly the input the
+// old floor ignored.
+
+test('R2-7.2: a hand-typed "Piano" line reaches the same crew floor as the catalog row', () => {
+  const pianoMovers = catalogMovers('Piano (upright)')
+
+  // A custom line: the owner typed it, so there is no catalog row behind it.
+  const typed = recommendEstimate(
+    base({ serviceType: 'full-studio', inventory: [{ name: 'Piano', quantity: 1 }] })
+  )
+  assert.equal(
+    BASE_BY_PACKAGE['full-studio'].crew,
+    2,
+    'guard: the package base really is small, so only the floor can produce the right number',
+  )
+  assert.equal(
+    typed.crewSize,
+    pianoMovers,
+    'a typed piano must reach the house floor, not the package base',
+  )
+  const named = typed.reasons.find((r) => /piano/i.test(r) && /requires \d+ movers/i.test(r))
+  assert.ok(named, `the reason must name the item that set the floor — got ${JSON.stringify(typed.reasons)}`)
+  assert.ok(new RegExp(`raised to ${pianoMovers}`, 'i').test(named!), 'the reason says what the crew was raised to')
+
+  // And it agrees with the catalog line for the same item, so which way the
+  // owner entered the piano cannot change the crew.
+  const fromCatalog = recommendEstimate(
+    base({
+      serviceType: 'full-studio',
+      inventory: [{ name: 'Piano (upright)', quantity: 1, isHeavy: true, recommendedMovers: pianoMovers }],
+    })
+  )
+  assert.equal(typed.crewSize, fromCatalog.crewSize, 'typed and catalog entry must staff the same job the same way')
+})
+
+test('R2-7.2: typed safes and pool tables reach their own house floors', () => {
+  const safeMovers = catalogMovers('Safe')
+  const poolMovers = catalogMovers('Pool table')
+
+  const safe = recommendEstimate(base({ serviceType: 'little-studio', inventory: [{ name: 'Gun safe', quantity: 1 }] }))
+  assert.equal(safe.crewSize, safeMovers, 'a typed safe reaches the safe floor')
+
+  const pool = recommendEstimate(base({ serviceType: 'little-studio', inventory: [{ name: 'Pool table', quantity: 1 }] }))
+  assert.equal(pool.crewSize, poolMovers, 'a typed pool table reaches the pool-table floor')
+
+  // Plain typed lines are NOT specialty items — the floor must not fire on
+  // everything the owner types by hand.
+  const plain = recommendEstimate(
+    base({ serviceType: 'little-studio', inventory: [{ name: 'Fish tank (55 gal)', quantity: 1 }] })
+  )
+  assert.equal(plain.crewSize, BASE_BY_PACKAGE['little-studio'].crew, 'an ordinary typed line changes nothing')
+  assert.ok(!plain.reasons.some((r) => /requires \d+ movers/i.test(r)))
+})
+
+test('R2-7.2: the floor number is READ from the house catalog, never a second opinion', () => {
+  // specialtyCrewFloor must agree with DEFAULT_INVENTORY_CATALOG for each kind,
+  // so editing a rating there moves this rule with it.
+  assert.deepEqual(specialtyCrewFloor('Piano'), { movers: catalogMovers('Piano (upright)'), kind: 'piano' })
+  assert.deepEqual(specialtyCrewFloor('upright piano'), { movers: catalogMovers('Piano (upright)'), kind: 'piano' })
+  assert.deepEqual(specialtyCrewFloor('Gun safe (600 lb)'), { movers: catalogMovers('Safe'), kind: 'safe' })
+  assert.deepEqual(specialtyCrewFloor('Billiards table'), { movers: catalogMovers('Pool table'), kind: 'pool table' })
+  assert.deepEqual(specialtyCrewFloor('pool  table'), { movers: catalogMovers('Pool table'), kind: 'pool table' })
+
+  // Not specialty, empty, junk → no claim at all.
+  for (const name of ['Couch (3-seat)', 'Medium box', '', '   ']) {
+    assert.equal(specialtyCrewFloor(name), null, `${JSON.stringify(name)} must claim no floor`)
+  }
+  // The regexes have no /g flag, so repeated calls are stable (a lastIndex bug
+  // here would make the floor fire on alternate lines only).
+  for (let n = 0; n < 3; n++) {
+    assert.deepEqual(specialtyCrewFloor('Piano'), { movers: catalogMovers('Piano (upright)'), kind: 'piano' })
+  }
+})
+
+test('R2-7.2: a typed specialty line still cannot exceed the crew cap or lower an earned crew', () => {
+  // 4BR base 4 + two heavy items = 5; a typed pool table (floor 3) must not
+  // pull it down.
+  const big = recommendEstimate(
+    base({
+      serviceType: '4br',
+      inventory: [
+        { name: 'Washer', quantity: 1, isHeavy: true, recommendedMovers: 2 },
+        { name: 'Dryer', quantity: 1, isHeavy: true, recommendedMovers: 2 },
+        { name: 'Pool table', quantity: 1 },
+      ],
+    })
+  )
+  assert.equal(big.crewSize, CREW_MAX)
+  assert.ok(!big.reasons.some((r) => /raised to 3/i.test(r)), 'a floor that did not decide the number claims nothing')
+
+  // A typed line with a junk catalog value still gets its NAME floor: the
+  // name and the rating are independent signals.
+  const junkRating = recommendEstimate(
+    base({ serviceType: 'little-studio', inventory: [{ name: 'Piano', quantity: 1, recommendedMovers: Number.NaN }] })
+  )
+  assert.equal(junkRating.crewSize, catalogMovers('Piano (upright)'))
+})
+
+test('floor: the acceptance case is untouched — no item movers, no floor reason', () => {
+  const rec = recommendEstimate(
+    base({
+      serviceType: '2br',
+      inventory: [
+        { name: 'Couch (3-seat)', quantity: 2 },
+        { name: 'Queen bed frame', quantity: 1, needsDisassembly: true },
+      ],
+      destStairFlights: 2,
+      destHasElevator: false,
+    })
+  )
+  assert.equal(rec.crewSize, 3)
+  assert.ok(!rec.reasons.some((r) => /requires .* movers/i.test(r)))
 })
 
 // ── Stairs / elevator hour rules ────────────────────────────────────────────

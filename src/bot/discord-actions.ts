@@ -490,6 +490,8 @@ export async function createJobChannels(
     customerPhone: payload.customerPhone as string | undefined,
     serviceType: serviceLabelFromDescription(items) ?? undefined,
     moveDate: (payload.requestedDate as string | undefined) ?? (payload.confirmedDate as string | undefined),
+    // Item R3-1 — a day-level job shows the DATE, not the anchor's "12:00 AM".
+    startTimeKnown: typeof payload.startTimeKnown === 'boolean' ? payload.startTimeKnown : null,
     originAddress: payload.originAddress as string | undefined,
     destAddress: payload.destAddress as string | undefined,
     truckOptionLabel:

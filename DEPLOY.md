@@ -1,5 +1,12 @@
 # Deployment Guide — wmiwci-backend.vercel.app
 
+> **The authoritative runbook is [`docs/deployment.md`](docs/deployment.md).**
+> It describes the current Railway admin service (`nixpacks.toml`) and carries
+> the **pre-deploy verification** order — typecheck → `npm run test:moving-os` →
+> migration preflight → backup → migrate → postcheck. This file predates that
+> and still describes a Vercel target; use it only for the environment-variable
+> and secret-generation reference below.
+
 ## Overview
 - **Framework:** Next.js 14 (App Router)
 - **Hosting:** Vercel → `wmiwci-backend.vercel.app`

@@ -35,15 +35,18 @@
 //  offline with in-memory fakes (src/lib/__tests__/booking-approval.test.ts);
 //  defaultApprovalDeps() wires the real prisma / Stripe / queues in production.
 // ════════════════════════════════════════════════════════════════════════
-import type { BookingStatus } from '@prisma/client'
+import type { BookingStatus, Prisma } from '@prisma/client'
 import { prisma } from './db'
 import { captureDeposit, cancelDeposit, retrieveChargeForIntent } from './stripe'
 import { emailQueue, smsQueue } from './queues'
-import { confirmationScheduleData, formatEastern } from './scheduling'
+import { confirmationScheduleData, formatMoveWhen, type ConfirmationScheduleData } from './scheduling'
 import { t } from './i18n'
 import { outboxEnabled, emitApproved } from '../outbox/integration'
 import { can, type Role } from './permissions'
 import { apiLogger } from './logger'
+import { ensureStaffingRequirement, type EnsureStaffingResult, type StaffingBookingRow } from './staffing-plan'
+import { moveTimeKnown } from './booking-display'
+import { isMigrationMissing as isMigrationMissingShared, MIGRATION_MISSING_MESSAGE } from './migration-window'
 
 // ── Public types ────────────────────────────────────────────────────────────
 
@@ -69,6 +72,10 @@ export type ApprovalErrorCode =
   | 'no_payment_intent'
   | 'capture_failed'
   | 'raced'
+  /** ITEM P0-E — the migrations this job's crew plan needs are not applied, so
+   *  approving would capture $49 and leave the job unstaffed. Refused BEFORE
+   *  the claim and BEFORE the capture: nothing moved, nothing to undo. */
+  | 'migration_missing'
 
 export type ApprovalResult =
   | {
@@ -117,6 +124,13 @@ export type ApprovableBooking = {
   confirmedDate: Date | null
   scheduledStart: Date | null
   scheduledEnd: Date | null
+  /** Booking.startTimeKnown (item R2-1). FALSE = the owner committed to a DATE,
+   *  not an hour: approval must not fabricate a `scheduledStart` from the 00:00
+   *  ET day anchor, and the notification says the date without a time. Optional
+   *  so offline fakes and a caller running before migration
+   *  20260812010000_start_time_known is applied keep compiling and keep the
+   *  legacy behavior (only an explicit `false` changes anything). */
+  startTimeKnown?: boolean | null
   estimatedHours: number | null
   customer: { name: string; email: string; phone: string | null; locale: string }
 }
@@ -153,16 +167,28 @@ export type CommitArgs = {
 export interface ApprovalStore {
   loadBooking(sel: { bookingId?: string; discordMessageId?: string }): Promise<ApprovableBooking | null>
   /** Atomic conditional UPDATE; returns rows changed (1 = won the claim).
-   *  `portalExpiry` rides the same UPDATE (see extendedPortalExpiry). */
+   *  `portalExpiry` rides the same UPDATE (see extendedPortalExpiry).
+   *  `sched.scheduledStart/End` are NULLABLE (item R2-1): a day-level booking
+   *  is confirmed for a DATE and this write must not invent an hour for it. */
   claimConfirm(
     bookingId: string,
-    sched: { confirmedDate: Date; scheduledStart: Date; scheduledEnd: Date } | null,
+    sched: ConfirmationScheduleData | null,
     portalExpiry: Date,
   ): Promise<number>
   rollbackClaim(bookingId: string): Promise<void>
   reloadStatus(bookingId: string): Promise<ApprovableBooking | null>
   /** Payment upsert + Job upsert + AuditLog in ONE transaction. */
   commitApproval(args: CommitArgs): Promise<void>
+  /** Give the just-confirmed job its ONE staffing requirement (correctness pass
+   *  item 1). Optional so existing callers/fakes stay valid; production wires
+   *  it in prismaApprovalStore. NEVER part of the money transaction — see the
+   *  call site in approveBooking for why. */
+  ensureStaffing?(args: { bookingId: string }): Promise<StaffingEnsureOutcome>
+  /** ITEM P0-E — can this job be staffed AT ALL right now? Asked BEFORE the
+   *  claim and BEFORE the capture, because `ensureStaffing` is deliberately
+   *  fail-soft and runs AFTER the money has moved. Optional so existing fakes
+   *  stay valid (absent ⇒ the caller vouches); production wires it. */
+  staffingReadiness?(args: { bookingId: string }): Promise<StaffingReadiness>
   /** Atomic claim of a deny-able booking → CANCELLED; returns rows changed. */
   claimCancel(bookingId: string): Promise<number>
   /** AuditLog for a decline (BOOKING_STATE_CHANGED). */
@@ -180,6 +206,32 @@ export interface ApprovalNotifier {
   sendApproved(booking: ApprovableBooking, capturedCents: number, approvedBy: string): Promise<void>
   /** Booking-declined email: hold released, customer not charged. */
   sendDeclined(booking: ApprovableBooking): Promise<void>
+}
+
+/** ITEM P0-E — the pre-capture verdict. `ready:false` means a MIGRATION is
+ *  missing and the crew requirement provably cannot be written; the approval is
+ *  refused before anything moves. Anything else is `ready:true` (a flaky probe
+ *  must not block the owner — `commitApproval` would fail loudly anyway). */
+export type StaffingReadiness = { ready: boolean; reason?: string }
+
+/** What the staffing ensure did — reported in the approval log, never fatal. */
+export type StaffingEnsureOutcome = {
+  ensured: boolean
+  /** 'admin_book_move' (the owner's captured plan) | 'derived' (rebuilt from
+   *  the booking's own inventory/access columns). */
+  planSource?: string
+  /** 'created' | 'filled' (null columns only) | 'unchanged' (the owner's row
+   *  was already there and is left alone). */
+  action?: string
+  requiredWorkers?: number
+  requiredDrivers?: number
+  /** TRUE when the booking had to be re-read WITHOUT the newest columns because
+   *  their migration is not applied yet (item R2-3): the requirement was still
+   *  created, from a DERIVED plan, instead of nothing being created at all. */
+  degraded?: boolean
+  /** Why nothing was written (no job row yet, tables missing, …) or why the
+   *  read was degraded. */
+  reason?: string
 }
 
 export type DeclineCommitArgs = {
@@ -231,6 +283,432 @@ export function extendedPortalExpiry(current: Date | null, moveDate: Date | null
   return current && current.getTime() > candidate.getTime() ? current : candidate
 }
 
+// ── ITEM R2-3(a) / R3-2 — EVERY read on this path survives an unapplied
+//    migration ──────────────────────────────────────────────────────────────
+//
+// Migrations here are applied BY HAND, so "code deployed, SQL not yet run" is a
+// NORMAL state that can last hours. The staffing read used to select
+// `staffingPlan` unconditionally: with migration 20260812000000_staffing_plan
+// unapplied, Prisma raised P2022 and the WHOLE ensure died — including the
+// DERIVED path, which needs no new column at all. The result was the original
+// defect on the default path: booking CONFIRMED, $49 captured, Job created, no
+// staffing requirement, for the entire deploy window.
+//
+// ITEM R3-2 — round 2 built that ladder and wired it to the STAFFING read only.
+// The FIRST read of the whole flow, `store.loadBooking`, was still
+// `prisma.booking.findFirst({ include: { customer: true } })`. An `include`
+// (like an omitted `select`) makes Prisma request `$scalars` FROM THE GENERATED
+// SCHEMA — which now declares `startTimeKnown` and `staffingPlan` — so in the
+// same deploy window that read raised P2022 and approveBooking threw on its
+// first statement. Neither approval surface wraps it, so EVERY approval 500'd
+// and NO deposit was captured: strictly worse than the bug the ladder fixed.
+//
+// So: EXPLICIT SELECT LISTS everywhere (a column nobody asked for can never
+// break an old deploy) plus the same two-tier ladder for the columns that DO
+// need the newest migrations. A booking read without `staffingPlan` simply has
+// no captured plan — exactly the public-booking case the spine already handles
+// by deriving one — and one read without `startTimeKnown` falls back to the
+// anchor-shape rule in scheduling.moveIsDayLevel.
+
+/** Unapplied-migration signature. THE implementation lives in
+ *  `src/lib/migration-window.ts` (one detector, shared by the approval path,
+ *  the Stripe fulfillment, the customer portal and the email renderers);
+ *  re-exported here because this is where its importers found it. */
+export const isMigrationMissing = isMigrationMissingShared
+
+/** ITEM P0-E — columns that predate the ENTIRE Moving OS migration set
+ *  (20260811000000_moving_os_phase1 and everything after it). This is the rung
+ *  that must never fail: on a database with none of the three applied, this is
+ *  still a valid projection, and `derivePlanFromBooking` builds an honest
+ *  requirement from exactly these columns.
+ *
+ *  WHY IT WAS SPLIT OUT (the round-4 defect): STAFFING_BOOKING_SELECT called
+ *  itself "columns that exist independently of the round-2 migrations" — true
+ *  of round 2, FALSE of phase 1, because it named `truckId`, `serviceMode` and
+ *  the `truck` / `inventoryItems` relations, all created by
+ *  20260811000000_moving_os_phase1. So on a deploy where none of the three had
+ *  been run, BOTH rungs raised P2022/P2021, the throw escaped
+ *  `ensureStaffingForBooking`, and `repairStaffing` swallowed it — after the
+ *  $49 was already captured. Money taken, job unstaffed, nothing said. */
+export const STAFFING_BOOKING_SELECT_BASE = {
+  id: true,
+  bedrooms: true,
+  originStairCount: true,
+  destStairCount: true,
+  originHasElevator: true,
+  destHasElevator: true,
+  needsPacking: true,
+  needsAssembly: true,
+  needsDisassembly: true,
+  crewInstructions: true,
+  estimatedHours: true,
+  scheduledStart: true,
+  scheduledEnd: true,
+  confirmedDate: true,
+  // ITEM R2-4 — who is actually driving on a booking with no serviceMode.
+  // These are the ORIGINAL truck columns (deposit_paid_and_truck_addon and
+  // earlier), not the Phase 1 fleet ones, so they belong on the base rung:
+  // `deriveTransportFromBooking` reads only these plus itemsDescription.
+  truckProvider: true,
+  truckSize: true,
+  truckReservationStatus: true,
+  truckReturnResponsibility: true,
+  truckAddonDueOnMoveDay: true,
+  itemsDescription: true,
+} satisfies Prisma.BookingSelect
+
+/** Columns + relations created by 20260811000000_moving_os_phase1. Losing them
+ *  costs the fleet-truck source and the structured inventory: the plan is still
+ *  built, from the booking's own legacy truck columns and bedroom count. */
+export const STAFFING_BOOKING_SELECT_PHASE1 = {
+  truckId: true,
+  serviceMode: true,
+  truck: { select: { source: true } },
+  inventoryItems: {
+    select: {
+      name: true,
+      quantity: true,
+      isHeavy: true,
+      needsDisassembly: true,
+      catalogItem: { select: { recommendedMovers: true } },
+    },
+  },
+} satisfies Prisma.BookingSelect
+
+/** Kept as the historical name (base + phase 1) so existing importers and tests
+ *  keep compiling. Prefer the two halves above when building a ladder. */
+export const STAFFING_BOOKING_SELECT = {
+  ...STAFFING_BOOKING_SELECT_BASE,
+  ...STAFFING_BOOKING_SELECT_PHASE1,
+} satisfies Prisma.BookingSelect
+
+/** Columns added by the round-2 migrations: the owner's captured plan
+ *  (20260812000000_staffing_plan) and the day-level flag
+ *  (20260812010000_start_time_known). Selecting these is what can fail. */
+export const STAFFING_BOOKING_SELECT_NEW = {
+  staffingPlan: true,
+  startTimeKnown: true,
+} satisfies Prisma.BookingSelect
+
+/** Booking columns the APPROVAL flow itself reads (everything `ApprovableBooking`
+ *  declares), all of which predate the round-2/3 migrations. Explicit, so a
+ *  column added to schema.prisma tomorrow cannot break today's deploy. */
+export const APPROVAL_BOOKING_SELECT = {
+  id: true,
+  status: true,
+  stripePaymentIntentId: true,
+  depositAmount: true,
+  displayId: true,
+  customerToken: true,
+  customerTokenExpiry: true,
+  itemsDescription: true,
+  arrivalWindow: true,
+  totalEstimate: true,
+  originAddress: true,
+  destAddress: true,
+  serviceAreaZone: true,
+  travelFee: true,
+  manualReviewRequired: true,
+  requestedDate: true,
+  confirmedDate: true,
+  scheduledStart: true,
+  scheduledEnd: true,
+  estimatedHours: true,
+  customer: { select: { name: true, email: true, phone: true, locale: true } },
+} satisfies Prisma.BookingSelect
+
+/** The approval read's newest column (migration 20260812010000). Selecting this
+ *  is what can fail; losing it degrades the day-level determination to
+ *  `scheduling.moveIsDayLevel`'s anchor-shape rule, nothing else. */
+export const APPROVAL_BOOKING_SELECT_NEW = { startTimeKnown: true } satisfies Prisma.BookingSelect
+
+/** One step of a degraded read: the select to try, and — for every rung after
+ *  the first — what was lost by getting here. */
+export type ReadRung = { select: Prisma.BookingSelect; degradedReason?: string }
+
+/**
+ * THE degraded read. Tries each rung in order; a MIGRATION-shaped failure
+ * (P2021/P2022/"does not exist" — never a real outage) falls to the next one.
+ * Only the LAST rung's failure propagates, so a ladder is honest about the
+ * point at which nothing is left to try.
+ *
+ * `read` performs exactly ONE findFirst/findUnique with the select it is given,
+ * and is injected so every ladder here is unit-tested with no database.
+ *
+ * ITEM P0-E: this generalises the old two-rung helper. The two-rung version had
+ * its fallback call UNWRAPPED, so a second migration-shaped failure escaped —
+ * which is exactly what happened when the "safe" staffing rung turned out to
+ * name Phase 1 columns.
+ */
+export async function readBookingThroughRungs<T>(
+  read: (select: Prisma.BookingSelect) => Promise<unknown>,
+  rungs: readonly ReadRung[],
+): Promise<{ row: T | null; degraded: boolean; reason?: string }> {
+  if (rungs.length === 0) throw new Error('readBookingThroughRungs: at least one rung is required')
+  for (let i = 0; i < rungs.length; i++) {
+    const rung = rungs[i]
+    const isLast = i === rungs.length - 1
+    try {
+      const row = (await read(rung.select)) as T | null
+      return i === 0
+        ? { row, degraded: false }
+        : { row, degraded: true, ...(rung.degradedReason ? { reason: rung.degradedReason } : {}) }
+    } catch (e) {
+      if (isLast || !isMigrationMissing(e)) throw e
+    }
+  }
+  /* istanbul ignore next — unreachable: the last rung either returns or throws */
+  throw new Error('readBookingThroughRungs: no rung produced a row')
+}
+
+/**
+ * ONE degraded read, two rungs. Kept as the published two-rung shape (the
+ * approval read uses it); implemented on `readBookingThroughRungs` so there is
+ * exactly one ladder.
+ */
+export async function readBookingWithFallback<T>(
+  read: (select: Prisma.BookingSelect) => Promise<unknown>,
+  base: Prisma.BookingSelect,
+  newColumns: Prisma.BookingSelect,
+  degradedReason: string,
+): Promise<{ row: T | null; degraded: boolean; reason?: string }> {
+  return readBookingThroughRungs<T>(read, [
+    { select: { ...base, ...newColumns } },
+    { select: base, degradedReason },
+  ])
+}
+
+/** Reads a booking row for the staffing spine, degrading to the pre-migration
+ *  column set rather than failing.
+ *
+ *  THREE rungs, because there are three independent migrations to be ahead of:
+ *    1. everything            — the owner's captured plan + the day-level flag
+ *    2. minus round 2/3       — plan DERIVED, day-level inferred from the anchor
+ *    3. minus Phase 1 as well — no fleet-truck source, no structured inventory;
+ *                               the plan comes from the booking's own legacy
+ *                               truck columns and bedroom count
+ *  Rung 3 names ONLY columns that predate the whole Moving OS set, so on any
+ *  database this codebase can be deployed against, staffing still happens. */
+export async function loadStaffingBookingRow(
+  read: (select: Prisma.BookingSelect) => Promise<unknown>,
+): Promise<{ booking: StaffingBookingRow | null; degraded: boolean; reason?: string }> {
+  const { row, degraded, reason } = await readBookingThroughRungs<StaffingBookingRow>(read, [
+    { select: { ...STAFFING_BOOKING_SELECT, ...STAFFING_BOOKING_SELECT_NEW } },
+    {
+      select: STAFFING_BOOKING_SELECT,
+      degradedReason: 'staffingPlan/startTimeKnown not in the database yet — plan derived from the booking',
+    },
+    {
+      select: STAFFING_BOOKING_SELECT_BASE,
+      degradedReason:
+        'truck/inventory columns from 20260811000000_moving_os_phase1 not in the database yet — plan derived from the booking without fleet-truck or structured-inventory evidence',
+    },
+  ])
+  return { booking: row, degraded, ...(reason ? { reason } : {}) }
+}
+
+/**
+ * ITEM R3-2 — the read `approveBooking`/`declineBooking` start from, and the one
+ * the admin status route gates on. Same ladder, explicit columns.
+ *
+ * `extraColumns` lets a caller add columns it needs on top of the approval set
+ * (the status route adds `depositPaid`) WITHOUT reopening the include-everything
+ * hole. The degraded row simply has no `startTimeKnown`, which every consumer
+ * already treats as "unknown" rather than "timed".
+ */
+export async function loadApprovableBooking<T extends ApprovableBooking = ApprovableBooking>(
+  read: (select: Prisma.BookingSelect) => Promise<unknown>,
+  extraColumns: Prisma.BookingSelect = {},
+): Promise<{ booking: T | null; degraded: boolean; reason?: string }> {
+  const { row, degraded, reason } = await readBookingWithFallback<T>(
+    read,
+    { ...APPROVAL_BOOKING_SELECT, ...extraColumns },
+    APPROVAL_BOOKING_SELECT_NEW,
+    'startTimeKnown not in the database yet — day-level scheduling inferred from the 00:00 ET day anchor',
+  )
+  return { booking: row, degraded, ...(reason ? { reason } : {}) }
+}
+
+/** The status route's read: the approval columns plus `depositPaid` (which
+ *  decides declined-vs-cancellation copy). */
+export type StatusRouteBooking = ApprovableBooking & { depositPaid: boolean }
+export const STATUS_ROUTE_EXTRA_COLUMNS = { depositPaid: true } satisfies Prisma.BookingSelect
+/** The same columns as one object, for a write that must RETURN a row without
+ *  naming the newest ones (`prisma.booking.update` returns `$scalars` too). */
+export const STATUS_ROUTE_BOOKING_SELECT = {
+  ...APPROVAL_BOOKING_SELECT,
+  ...STATUS_ROUTE_EXTRA_COLUMNS,
+} satisfies Prisma.BookingSelect
+
+// ── ITEM R3-5 — ONE staffing ensure, reachable from every owner action ───────
+//
+// `ensureStaffingRequirement` is create-if-missing, which makes it a REPAIR
+// mechanism: run it again and a job whose approval-time staffing write failed
+// (transient DB error, unapplied migration) finally gets its requirement. Round
+// 2 wired that repair to the already-confirmed approval REPLAY only — and no
+// production surface can reach a replay: the admin route's VALID_TRANSITIONS
+// has no CONFIRMED→CONFIRMED edge, the admin UI offers only Mark-scheduled and
+// Cancel, Discord's /approve refuses a non-PENDING_APPROVAL booking, and the
+// Approve button is removed after success. So the job stayed unstaffed forever.
+//
+// This is the shared implementation the reachable triggers call:
+//   • approval (capture + replay)          — prismaApprovalStore.ensureStaffing
+//   • CONFIRMED → SCHEDULED                — the admin status route
+//   • the first crew assignment            — labor-service.ensureJobForBooking
+// All three are things the owner already does, all of them idempotent.
+
+/** The database surface `ensureStaffingForBooking` needs. Injected so the
+ *  ensure — including its degraded read — is unit-tested with no database. */
+export type StaffingEnsureDeps = {
+  /** The Job row for this booking, or null when none exists yet. */
+  findJobId(bookingId: string): Promise<string | null>
+  /** ONE booking findUnique with the given select (the ladder drives it). */
+  readBooking(select: Prisma.BookingSelect): Promise<unknown>
+  /** Run the spine's create-if-missing ensure in a transaction. */
+  ensure(args: { jobId: string; booking: StaffingBookingRow; createdById: string | null }): Promise<EnsureStaffingResult>
+}
+
+/** The database surface the PRE-CAPTURE readiness probe needs. Injected so the
+ *  probe is unit-tested with no database. */
+export type StaffingReadinessDeps = {
+  /** ONE booking findUnique with the given select (the ladder drives it). */
+  readBooking(select: Prisma.BookingSelect): Promise<unknown>
+  /** Touch the crew-requirement table. Any projection will do — the point is to
+   *  learn NOW whether the table is readable, not to read a row. */
+  probeRequirements(): Promise<void>
+}
+
+/**
+ * ITEM P0-E — "either both, or an honest failure BEFORE the capture."
+ *
+ * `ensureStaffingForBooking` runs after `commitApproval` and is deliberately
+ * fail-soft, so before this existed a missing migration produced: $49 captured,
+ * booking CONFIRMED, NO staffing requirement, and one log line nobody reads.
+ * This asks the same questions first, and answers `ready:false` ONLY for a
+ * migration-shaped failure — the one condition that is certain to still be
+ * true a second later, and the one an owner can actually fix.
+ *
+ * A NON-migration failure returns `ready:true`: a flaky probe must not stand
+ * between the owner and a booking they are approving on the phone, and a real
+ * outage will surface loudly in `commitApproval` (which is inside a
+ * transaction) rather than silently.
+ */
+export async function checkStaffingReadiness(deps: StaffingReadinessDeps): Promise<StaffingReadiness> {
+  try {
+    await loadStaffingBookingRow(deps.readBooking)
+  } catch (e) {
+    if (!isMigrationMissing(e)) return { ready: true, reason: `staffing readiness probe inconclusive: ${asMessage(e)}` }
+    return { ready: false, reason: `the booking cannot be read for staffing (${asMessage(e)})` }
+  }
+  try {
+    await deps.probeRequirements()
+  } catch (e) {
+    if (!isMigrationMissing(e)) return { ready: true, reason: `staffing readiness probe inconclusive: ${asMessage(e)}` }
+    return { ready: false, reason: `the crew-requirement table cannot be read (${asMessage(e)})` }
+  }
+  return { ready: true }
+}
+
+function prismaStaffingReadinessDeps(bookingId: string): StaffingReadinessDeps {
+  return {
+    readBooking: (select) => prisma.booking.findUnique({ where: { id: bookingId }, select }),
+    probeRequirements: async () => {
+      // Explicit select: an unqualified read here would ask for `$scalars` and
+      // break on a column this table does not have yet — turning the probe
+      // itself into the false alarm it exists to prevent.
+      await prisma.jobStaffingRequirement.findFirst({ select: { id: true } })
+    },
+  }
+}
+
+function prismaStaffingEnsureDeps(bookingId: string): StaffingEnsureDeps {
+  return {
+    async findJobId(id) {
+      const job = await prisma.job.findUnique({ where: { bookingId: id }, select: { id: true } })
+      return job?.id ?? null
+    },
+    readBooking: (select) => prisma.booking.findUnique({ where: { id: bookingId }, select }),
+    ensure: ({ jobId, booking, createdById }) =>
+      prisma.$transaction((tx) => ensureStaffingRequirement(tx, { jobId, booking, createdById })),
+  }
+}
+
+/**
+ * Give a booking's job THE staffing requirement it must have. Create-if-missing
+ * (an owner-edited row is never overwritten — see staffing-plan.ts), fail-soft
+ * on an unapplied migration, and honest about what it did.
+ *
+ * MAY THROW on a real database error — every caller wraps it, because a
+ * staffing gap must never fail an approval, a status change or a crew
+ * assignment. `tryEnsureStaffingForBooking` is that wrapper.
+ */
+export async function ensureStaffingForBooking(
+  args: { bookingId: string; jobId?: string | null; createdById?: string | null },
+  deps: StaffingEnsureDeps = prismaStaffingEnsureDeps(args.bookingId),
+): Promise<StaffingEnsureOutcome> {
+  let jobId = args.jobId ?? null
+  if (!jobId) {
+    try {
+      jobId = await deps.findJobId(args.bookingId)
+    } catch (e) {
+      // House rule: fail SOFT on an unapplied migration, with an honest
+      // message, instead of a 500 nobody can act on.
+      if (!isMigrationMissing(e)) throw e
+      return { ensured: false, reason: 'jobs table not in the database yet (migration not applied)' }
+    }
+  }
+  if (!jobId) return { ensured: false, reason: 'no job row for this booking' }
+
+  // ITEM R2-3(a) — degrade to the pre-migration column set rather than losing
+  // the whole ensure. The plan the owner captured in Book Move is null on
+  // public bookings and legacy rows anyway, and staffing-plan.ts DERIVES one
+  // from the booking's own inventory / access / truck columns.
+  const { booking, degraded, reason } = await loadStaffingBookingRow(deps.readBooking)
+  if (!booking) return { ensured: false, reason: 'booking not found' }
+  const res = await deps.ensure({ jobId, booking, createdById: args.createdById ?? null })
+  return {
+    ensured: true,
+    action: res.outcome,
+    planSource: res.plan.source,
+    requiredWorkers: res.data.requiredWorkers,
+    requiredDrivers: res.data.requiredDrivers,
+    ...(degraded ? { degraded, reason } : {}),
+  }
+}
+
+/**
+ * `ensureStaffingForBooking` that NEVER throws — for the repair triggers, where
+ * the owner's actual action (marking a job scheduled, assigning a crew member)
+ * must succeed whatever staffing does. Logs both outcomes.
+ *
+ * ITEM P0-E — HONEST ABOUT THE BACKSTOP. This comment used to say "the Action
+ * Center surfaces a still-missing requirement". It does not: there is no
+ * staffing rule in reminder-rules.ts. The only surfacing is
+ * conflict-engine.ts's INFORMATIONAL NO_STAFFING_REQUIREMENT on the
+ * scheduling/dispatch views — and during the migration window that creates the
+ * gap, the Action Center scan cannot run at all (reminder-sync loads bookings
+ * with an `include`). The real guarantee is upstream: `approveBooking` refuses
+ * BEFORE the capture when the requirement provably cannot be written, so a
+ * fail-soft here is a genuine edge case, not the normal deploy window.
+ */
+export async function tryEnsureStaffingForBooking(
+  args: { bookingId: string; jobId?: string | null; createdById?: string | null; trigger: string },
+  deps?: StaffingEnsureDeps,
+): Promise<StaffingEnsureOutcome> {
+  try {
+    const outcome = await ensureStaffingForBooking(args, deps)
+    apiLogger.info({ bookingId: args.bookingId, trigger: args.trigger, ...outcome }, 'staffing requirement ensured')
+    return outcome
+  } catch (e) {
+    const message = asMessage(e)
+    apiLogger.error(
+      { bookingId: args.bookingId, trigger: args.trigger, err: message },
+      'staffing requirement could not be ensured (non-fatal — the owner action still stands)',
+    )
+    return { ensured: false, reason: message }
+  }
+}
+
 const errResult = (
   code: ApprovalErrorCode,
   message: string,
@@ -257,12 +735,57 @@ export async function approveBooking(
   }
 
   // Idempotent replay: already approved → report success without re-capturing.
+  //
+  // ITEM R2-3(b): the replay STILL ensures staffing. This early return used to
+  // sit in front of the staffing block, so once an ensure had failed — a
+  // transient DB error, or the unapplied migration above — nothing could ever
+  // create that requirement again: the booking was CONFIRMED, so every later
+  // approval returned right here. Re-approving is the ONLY repair the owner has,
+  // and the ensure is create-if-missing, so running it on an already-confirmed
+  // booking either heals the gap or reports 'unchanged'. Never fatal.
   if (booking.status === 'CONFIRMED') {
+    await repairStaffing(deps, booking.id, 'already_confirmed')
     return { ok: true, outcome: 'already_confirmed', booking, capturedCents: null, receiptUrl: null }
   }
 
   const guard = checkApprovable(booking.status, !!booking.stripePaymentIntentId)
   if (!guard.ok) return errResult(guard.code, guard.message, booking)
+
+  // 0) ITEM P0-E — CAN THIS JOB BE STAFFED AT ALL? Asked here, before the claim
+  //    and before the capture, because the staffing write (3b) is fail-soft by
+  //    design and runs AFTER the money has moved. During the code-before-SQL
+  //    window that combination produced the exact outcome the owner's rule
+  //    forbids: $49 captured, booking CONFIRMED, no crew requirement, and a log
+  //    line saying "non-fatal". Either BOTH happen, or the approval refuses
+  //    here — having claimed nothing, captured nothing and told the owner
+  //    precisely which migration to apply.
+  //
+  //    Only a MIGRATION-shaped failure refuses (see checkStaffingReadiness); a
+  //    flaky probe never stands between the owner and an approval.
+  if (store.staffingReadiness) {
+    let readiness: StaffingReadiness
+    try {
+      readiness = await store.staffingReadiness({ bookingId: booking.id })
+    } catch (e) {
+      logger.warn(
+        { bookingId: booking.id, err: asMessage(e) },
+        'staffing readiness probe threw — approval continues (the money transaction will surface a real outage)',
+      )
+      readiness = { ready: true }
+    }
+    if (!readiness.ready) {
+      logger.error(
+        { bookingId: booking.id, source, reason: readiness.reason },
+        'approval REFUSED before capture — migrations not applied, so the job could not be staffed',
+      )
+      return errResult(
+        'migration_missing',
+        `${MIGRATION_MISSING_MESSAGE}. Approving now would capture the $49 and leave this job with no crew plan, so NOTHING was captured — apply the migration, then approve again.` +
+          (readiness.reason ? ` (${readiness.reason})` : ''),
+        booking,
+      )
+    }
+  }
 
   // 1) ATOMIC CLAIM — win the PENDING_APPROVAL → CONFIRMED transition before
   //    touching Stripe. Exactly one concurrent approver gets rows-changed === 1.
@@ -276,6 +799,9 @@ export async function approveBooking(
   if (claimed === 0) {
     const fresh = await store.reloadStatus(booking.id)
     if (fresh?.status === 'CONFIRMED') {
+      // Same replay repair as above (item R2-3(b)) — this branch is reached both
+      // by a genuine race and by a retry of a booking somebody already approved.
+      await repairStaffing(deps, booking.id, 'claim_lost_already_confirmed')
       return { ok: true, outcome: 'already_confirmed', booking: fresh, capturedCents: null, receiptUrl: null }
     }
     return errResult('raced', 'This booking was just handled by someone else — no action taken.', fresh ?? booking)
@@ -351,6 +877,25 @@ export async function approveBooking(
     'Booking approved → $49 captured → CONFIRMED',
   )
 
+  // 3b) STAFFING — the job created above gets its ONE staffing requirement
+  //     (correctness pass item 1). This is the path the DEFAULT admin deposit
+  //     mode (stripe_link) and every public booking take: booking →
+  //     PENDING_PAYMENT → $49 hold → PENDING_APPROVAL → here. Before this,
+  //     only bookings created CONFIRMED by the admin route ever got a
+  //     requirement, so the most-used path landed a confirmed job with no
+  //     staffing plan and dispatch could not warn about anything.
+  //
+  //     FAIL-SOFT, AND DELIBERATELY OUTSIDE THE MONEY TRANSACTION: the deposit
+  //     is already captured at Stripe. A staffing write that throws INSIDE
+  //     commitApproval's transaction would abort that transaction in Postgres
+  //     (catching the JS error does not un-abort it — the following COMMIT
+  //     degrades to ROLLBACK), silently discarding the Payment/Job/AuditLog for
+  //     money that really moved. So it runs in its own short transaction right
+  //     after the commit, and a failure is logged, never raised: a missing
+  //     staffing row is a dispatch gap the Action Center can surface, while a
+  //     lost capture is unrecoverable.
+  await repairStaffing(deps, booking.id, 'captured')
+
   // 4) NOTIFY — only now, after the state is truthful. Non-fatal + time-boxed
   //    so a Redis stall can't blow Discord's 3s interaction window or undo the
   //    capture. A failed notification leaves the money + booking intact.
@@ -363,6 +908,42 @@ export async function approveBooking(
   }
 
   return { ok: true, outcome: 'captured', booking, capturedCents, receiptUrl }
+}
+
+/**
+ * Run the staffing ensure for a confirmed booking. Called from BOTH the capture
+ * path and the idempotent-replay paths (item R2-3(b)) — a replay is the only
+ * repair mechanism after a failed ensure, and the ensure is create-if-missing so
+ * replaying it can never disturb an owner-edited requirement.
+ *
+ * NEVER THROWS: an exception here would turn a successful $49 capture into an
+ * error the caller reports as a failure, and invite a double-approve.
+ *
+ * ITEM P0-E — a gap here has NO automatic backstop (there is no staffing rule
+ * in the Action Center; see tryEnsureStaffingForBooking's note), which is why
+ * approveBooking now refuses BEFORE the capture when the requirement cannot be
+ * written. Anything that still lands here is logged at ERROR, including the
+ * "ran but wrote nothing" case, which used to be logged as an info line.
+ */
+async function repairStaffing(deps: ApprovalDeps, bookingId: string, phase: string): Promise<void> {
+  const { store, logger } = deps
+  if (!store.ensureStaffing) return
+  try {
+    const staffing = await store.ensureStaffing({ bookingId })
+    if (staffing.ensured) {
+      logger.info({ bookingId, phase, ...staffing }, 'Approval staffing requirement ensured')
+    } else {
+      logger.error(
+        { bookingId, phase, ...staffing },
+        'NO staffing requirement was written for this booking — dispatch cannot warn about crew for it',
+      )
+    }
+  } catch (e) {
+    logger.error(
+      { bookingId, phase, err: asMessage(e) },
+      'staffing requirement could not be created after approval (non-fatal — booking IS confirmed and captured)',
+    )
+  }
 }
 
 function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
@@ -515,8 +1096,16 @@ function prismaApprovalStore(): ApprovalStore {
       if (sel.discordMessageId) or.push({ discordApprovalMessageId: sel.discordMessageId })
       if (sel.bookingId) or.push({ id: sel.bookingId })
       if (or.length === 0) return null
-      const b = await prisma.booking.findFirst({ where: { OR: or }, include: { customer: true } })
-      return b as unknown as ApprovableBooking | null
+      // ITEM R3-2 — the FIRST statement of approveBooking. It used to be
+      // `include: { customer: true }`, which asks Postgres for every column the
+      // GENERATED client knows about: during the code-before-SQL window that
+      // read raised P2022 and every approval 500'd with no deposit captured.
+      // Explicit columns + the degraded ladder instead.
+      const { booking, degraded, reason } = await loadApprovableBooking((select) =>
+        prisma.booking.findFirst({ where: { OR: or }, select }),
+      )
+      if (degraded) apiLogger.warn({ bookingId: booking?.id ?? null, reason }, 'approval read degraded (unapplied migration) — approval continues')
+      return booking
     },
     async claimConfirm(bookingId, sched, portalExpiry) {
       const res = await prisma.booking.updateMany({
@@ -524,6 +1113,14 @@ function prismaApprovalStore(): ApprovalStore {
         // customerTokenExpiry: tokens die ~7 days after creation, so week-out
         // moves had dead portal links on move day — extend (never shrink) to
         // move date + 3d / now + 30d. Computed pure in extendedPortalExpiry.
+        //
+        // ITEM R2-1: `sched` is the ONLY source of the schedule columns, and
+        // confirmationScheduleData now returns scheduledStart/End = null for a
+        // day-level booking (startTimeKnown = false). Spreading it therefore
+        // writes explicit NULLs instead of the 00:00 ET day anchor this claim
+        // used to promote into scheduledStart — no fabricated crew hour ever
+        // reaches the row, so `truck-conflicts` keeps treating the booking as
+        // "unknown time ⇒ the whole ET day is held".
         data: { status: 'CONFIRMED', depositPaid: true, customerTokenExpiry: portalExpiry, ...(sched ?? {}) },
       })
       return res.count
@@ -535,8 +1132,12 @@ function prismaApprovalStore(): ApprovalStore {
       })
     },
     async reloadStatus(bookingId) {
-      const b = await prisma.booking.findUnique({ where: { id: bookingId }, include: { customer: true } })
-      return b as unknown as ApprovableBooking | null
+      // Same ladder (item R3-2): this read decides whether a lost claim is an
+      // idempotent replay or a real race, so it must not die on a new column.
+      const { booking } = await loadApprovableBooking((select) =>
+        prisma.booking.findUnique({ where: { id: bookingId }, select }),
+      )
+      return booking
     },
     async commitApproval(a) {
       await prisma.$transaction([
@@ -572,6 +1173,18 @@ function prismaApprovalStore(): ApprovalStore {
         }),
       ])
     },
+    async ensureStaffing({ bookingId }) {
+      // Runs AFTER commitApproval's transaction (see the call site): the Job
+      // upsert has committed, so the job row is readable here. THE shared
+      // implementation lives in ensureStaffingForBooking so the approval, the
+      // CONFIRMED→SCHEDULED transition and the first crew assignment (item
+      // R3-5) all create the same row the same way.
+      return ensureStaffingForBooking({ bookingId })
+    },
+    async staffingReadiness({ bookingId }) {
+      // ITEM P0-E — asked BEFORE the claim/capture (see approveBooking step 0).
+      return checkStaffingReadiness(prismaStaffingReadinessDeps(bookingId))
+    },
     async claimCancel(bookingId) {
       const res = await prisma.booking.updateMany({
         where: { id: bookingId, status: { in: DENYABLE as BookingStatus[] } },
@@ -592,7 +1205,28 @@ function queueApprovalNotifier(): ApprovalNotifier {
     async sendApproved(booking, capturedCents, approvedBy) {
       const locale = booking.customer.locale
       const when = booking.requestedDate
-      const dateStr = when ? formatEastern(when) : 'your move date'
+      // ITEM R2-1 — no midnight in the approval notification. A day-level
+      // booking's requestedDate IS the 00:00 ET day anchor, so formatEastern
+      // rendered a confident "Thursday, January 15, 2026 at 12:00 AM" for a job
+      // whose hour nobody has chosen. formatMoveWhen drops the time when
+      // startTimeKnown === false and is identical otherwise.
+      // ITEM R3-2 — the SHARED rule (booking-display.moveTimeKnown), not
+      // `startTimeKnown !== false`: during the code-before-SQL window the flag
+      // is unreadable, and the old test would then have printed "12:00 AM" for
+      // exactly the day-level bookings this guard exists for. A stored
+      // scheduledStart still proves a real hour.
+      const timeKnown = moveTimeKnown({
+        date: when,
+        scheduledStart: booking.scheduledStart,
+        startTimeKnown: booking.startTimeKnown,
+      })
+      const dateStr = when ? formatMoveWhen(when, booking.startTimeKnown) : 'your move date'
+      // The templates fall back to formatting the hour out of `date` when no
+      // timeLabel is given — the same midnight, one layer down. An arrival
+      // window the owner typed always wins; otherwise say the time is still to
+      // be confirmed rather than printing one.
+      const timeLabel =
+        booking.arrivalWindow ?? (timeKnown ? undefined : locale === 'es' ? 'Hora por confirmar' : 'Time to be confirmed')
       const appUrl = process.env.APP_URL ?? 'https://wmiwci-api.vercel.app'
       const portalUrl = `${appUrl}/my-booking/${booking.customerToken}`
 
@@ -621,7 +1255,7 @@ function queueApprovalNotifier(): ApprovalNotifier {
             customerName: booking.customer.name,
             displayId: booking.displayId,
             date: when?.toISOString(),
-            timeLabel: booking.arrivalWindow ?? undefined,
+            timeLabel,
             amountPaid: String(Math.round(capturedCents / 100)),
             originAddress: booking.originAddress ?? undefined,
             destAddress: booking.destAddress ?? undefined,

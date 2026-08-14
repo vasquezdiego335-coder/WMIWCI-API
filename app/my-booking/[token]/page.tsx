@@ -1,10 +1,13 @@
 import { Fragment } from 'react'
+import type { Prisma } from '@prisma/client'
 import { prisma } from '@/lib/db'
+import { readBookingWithMigrationFallback } from '@/lib/migration-window'
 import { notFound } from 'next/navigation'
 import { CopyReference } from './CopyReference'
 import { accessSections } from '@/lib/booking-access'
 import { customerBalance, JOB_MONEY_PAYMENT_SELECT } from '@/lib/job-money'
 import { waitingMinutesBetween, WAITING_GRACE_MINUTES, WAITING_POLICY } from '@/lib/waiting-time'
+import { moveTimeKnown } from '@/lib/booking-display'
 
 export const revalidate = 0
 
@@ -203,9 +206,16 @@ function buildCustomerView(booking: BookingRecord): CustomerBookingView {
   const dateConfirmed = !!confirmedStart
   const dateSource = confirmedStart ?? booking.requestedDate ?? null
   const requestedDate = dateSource ? fmtDate(dateSource) : null
+  // ITEM R3-1 — the "Around …" line ran `fmtTime` over `requestedDate`, which
+  // for a move with no committed crew hour is a 00:00 ET DAY ANCHOR, so the
+  // customer's own booking page told them their move was "Around 12:00 AM".
+  // `moveTimeKnown` is the shared rule: no real hour ⇒ no time row at all, and
+  // the date above it still says everything we actually know.
   const requestedTime = booking.scheduledStart
     ? `${fmtTime(booking.scheduledStart)}${booking.scheduledEnd ? ` – ${fmtTime(booking.scheduledEnd)}` : ''}`
-    : booking.requestedDate ? `Around ${fmtTime(booking.requestedDate)}` : null
+    : booking.requestedDate && moveTimeKnown({ date: booking.requestedDate, startTimeKnown: booking.startTimeKnown })
+      ? `Around ${fmtTime(booking.requestedDate)}`
+      : null
 
   const origin = cleanAddr(booking.originAddress)
   const destination = cleanAddr(booking.destAddress)
@@ -443,18 +453,41 @@ function nextSteps(v: CustomerBookingView): { t: string; b: string }[] {
 }
 
 // ── Data ────────────────────────────────────────────────────────────────────
-async function loadBooking(token: string) {
-  return prisma.booking.findFirst({
-    where: { customerToken: token, customerTokenExpiry: { gte: new Date() } },
-    include: {
-      customer: { select: { name: true } },
-      // The blessed payment select — the balance model needs amounts, refunds
-      // and dispute state, not just a status.
-      payments: { select: JOB_MONEY_PAYMENT_SELECT },
-      files: { select: { id: true } },
-      receipt: { select: { cloudinaryUrl: true } },
-    },
-  })
+const PORTAL_INCLUDE = {
+  customer: { select: { name: true } },
+  // The blessed payment select — the balance model needs amounts, refunds
+  // and dispute state, not just a status.
+  payments: { select: JOB_MONEY_PAYMENT_SELECT },
+  files: { select: { id: true } },
+  receipt: { select: { cloudinaryUrl: true } },
+} as const
+
+type PortalBooking = Prisma.BookingGetPayload<{ include: typeof PORTAL_INCLUDE }>
+
+// ── ITEM P0-E — this page must not 500 on the customer who just paid ────────
+// This read was a bare `include:`, which makes Prisma ask Postgres for
+// `$scalars` FROM THE GENERATED SCHEMA. Migrations here are applied by hand, so
+// during the normal code-before-SQL window it raised P2022 and the page 500'd —
+// and this is exactly where Stripe's success redirect sends a customer who has
+// just had $49 authorized. They saw a generic error immediately after paying.
+//
+// The fallback names every column that certainly exists (derived from the
+// generated schema minus the pending migrations' columns, see
+// src/lib/migration-window.ts), so the page renders in full apart from the
+// newest flags. `startTimeKnown` is the only one this view reads, and
+// `moveTimeKnown` already treats an absent flag as "unknown" and falls back to
+// the 00:00 ET anchor SHAPE — so a day-level move still shows no time row
+// rather than "Around 12:00 AM".
+async function loadBooking(token: string): Promise<PortalBooking | null> {
+  const where = { customerToken: token, customerTokenExpiry: { gte: new Date() } }
+  const { row, degraded, reason } = await readBookingWithMigrationFallback<PortalBooking>(
+    (args) => prisma.booking.findFirst({ where, ...(args as object) }),
+    PORTAL_INCLUDE,
+  )
+  if (degraded) {
+    console.warn('[my-booking] booking read degraded (unapplied migration) — page renders without the newest columns:', reason)
+  }
+  return row
 }
 
 export default async function BookingStatusPage({ params }: { params: { token: string } }) {

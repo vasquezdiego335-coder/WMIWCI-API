@@ -110,23 +110,205 @@ export function moneyFromDollars(n: unknown): string | null {
 
 const TZ = 'America/New_York'
 
-/** "Sat, Jul 12 · 4:00 PM" in Eastern time. */
-export function jobDateTime(date?: Date | string | null): string {
-  if (!date) return 'Date to be confirmed'
-  const d = typeof date === 'string' ? new Date(date) : date
-  if (Number.isNaN(d.getTime())) return 'Date to be confirmed'
-  const day = new Intl.DateTimeFormat('en-US', {
-    timeZone: TZ,
-    weekday: 'short',
-    month: 'short',
-    day: 'numeric',
-  }).format(d)
-  const time = new Intl.DateTimeFormat('en-US', {
-    timeZone: TZ,
-    hour: 'numeric',
+// ════════════════════════════════════════════════════════════════════════
+//  THE booking-aware "when" formatter (item R3-1)
+//  ----------------------------------------------------------------------
+//  A move is EITHER an instant (the owner committed to a crew hour) or a
+//  DATE (they did not). For the second kind `requestedDate`/`confirmedDate`
+//  hold a 00:00 ET DAY ANCHOR — a value whose time-of-day is not a fact
+//  about the job. Seven customer- and owner-facing surfaces formatted that
+//  anchor WITH a time and told everyone the move was at **12:00 AM**.
+//
+//  This is the ONE place that decides. Every surface that renders a move's
+//  "when" — the Discord owner/crew/approved cards, the pre-approval and
+//  move-reminder emails, the confirmation SMS, the customer portal, the
+//  admin jobs list, and any generic anchor timestamp such as the Action
+//  Center's `dueAt` — goes through `moveWhenParts` / `formatMoveWhen`.
+//  It lives HERE, in the pure module (no prisma, no env, no network), so an
+//  email template and a React server component can both import it.
+//
+//  A day-level move renders the DATE. A timed move keeps its real hour.
+//  Nothing renders nothing.
+// ════════════════════════════════════════════════════════════════════════
+
+/** A booking row (any subset), or an explicit `{ date, startTimeKnown }`. */
+export type MoveWhenInput = {
+  /** An explicit instant. Wins over the row's own schedule columns. */
+  date?: Date | string | null
+  scheduledStart?: Date | string | null
+  confirmedDate?: Date | string | null
+  requestedDate?: Date | string | null
+  /** Booking.startTimeKnown. FALSE = day-level; never print an hour. */
+  startTimeKnown?: boolean | null
+}
+
+export type MoveWhenOptions = {
+  /** BCP-47 tag — 'es-US' for the Spanish templates. Default 'en-US'. */
+  locale?: string
+  timeZone?: string
+  dateFormat?: Intl.DateTimeFormatOptions
+  timeFormat?: Intl.DateTimeFormatOptions
+  /** Joiner used by `formatMoveWhen` between date and time. */
+  separator?: string
+}
+
+const DEFAULT_DATE_FORMAT: Intl.DateTimeFormatOptions = { weekday: 'short', month: 'short', day: 'numeric' }
+const DEFAULT_TIME_FORMAT: Intl.DateTimeFormatOptions = { hour: 'numeric', minute: '2-digit' }
+
+function asDate(value?: Date | string | null): Date | null {
+  if (value === null || value === undefined) return null
+  const d = value instanceof Date ? value : new Date(value)
+  return Number.isNaN(d.getTime()) ? null : d
+}
+
+function asInput(input?: MoveWhenInput | Date | string | null): MoveWhenInput {
+  if (input === null || input === undefined) return {}
+  if (input instanceof Date || typeof input === 'string') return { date: input }
+  return input
+}
+
+/**
+ * Is this instant EXACTLY midnight Eastern — the shape `admin-booking`
+ * writes for a move with no committed crew hour?
+ *
+ * This is the FAIL-SOFT half of the rule: a surface that could not read
+ * `startTimeKnown` (a `select` that omitted it, a legacy row, a DB where
+ * migration 20260812010000 has not run yet, or a `Reminder.dueAt` copied
+ * off the anchor) can still tell an anchor from a crew hour, because no
+ * real move starts at 00:00:00.000 ET.
+ */
+export function isDayAnchor(value?: Date | string | null, timeZone: string = TZ): boolean {
+  const d = asDate(value)
+  if (!d) return false
+  if (d.getTime() % 1000 !== 0) return false // sub-second ⇒ a real timestamp
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone,
+    hourCycle: 'h23',
+    hour: '2-digit',
     minute: '2-digit',
-  }).format(d)
-  return `${day} · ${time}`
+    second: '2-digit',
+  }).formatToParts(d)
+  const at = (type: string): string | undefined => parts.find((p) => p.type === type)?.value
+  return at('hour') === '00' && at('minute') === '00' && at('second') === '00'
+}
+
+/** The instant a move happens — same precedence as scheduling.effectiveMoveDate. */
+export function moveWhenInstant(input?: MoveWhenInput | Date | string | null): Date | null {
+  const b = asInput(input)
+  return asDate(b.date) ?? asDate(b.scheduledStart) ?? asDate(b.confirmedDate) ?? asDate(b.requestedDate)
+}
+
+/**
+ * Does a real crew hour stand behind this move?
+ *
+ *   1. a stored `scheduledStart` is PROOF of one (nothing writes that column
+ *      without a committed time any more — item R2-1);
+ *   2. a readable `startTimeKnown` decides;
+ *   3. otherwise the SHAPE of the instant decides — a 00:00:00.000 ET value
+ *      is a day anchor, never an hour someone chose.
+ *
+ * It lives HERE rather than in `scheduling.ts` because this module is
+ * deliberately prisma-free, so an email template and a React server component
+ * can import it. `scheduling.moveIsDayLevel` — the write-side question — is
+ * this function negated, and delegates to it rather than keeping a copy.
+ */
+export function moveTimeKnown(input?: MoveWhenInput | Date | string | null): boolean {
+  const b = asInput(input)
+  if (asDate(b.scheduledStart)) return true
+  if (b.startTimeKnown === false) return false
+  if (b.startTimeKnown === true) return true
+  return !isDayAnchor(moveWhenInstant(b))
+}
+
+export type MoveWhenParts = {
+  /** The formatted date, or null when there is no date signal at all. */
+  date: string | null
+  /** The formatted hour — NULL for a day-level move. Never "12:00 AM". */
+  time: string | null
+  timeKnown: boolean
+  instant: Date | null
+}
+
+/** The date and (only when real) the time, formatted separately so a caller
+ *  can put them in different rows — a KV table, an embed field, an SMS. */
+export function moveWhenParts(input?: MoveWhenInput | Date | string | null, opts: MoveWhenOptions = {}): MoveWhenParts {
+  const b = asInput(input)
+  const instant = moveWhenInstant(b)
+  if (!instant) return { date: null, time: null, timeKnown: false, instant: null }
+  const locale = opts.locale || 'en-US'
+  const timeZone = opts.timeZone || TZ
+  const timeKnown = moveTimeKnown(b)
+  return {
+    date: new Intl.DateTimeFormat(locale, { timeZone, ...(opts.dateFormat ?? DEFAULT_DATE_FORMAT) }).format(instant),
+    time: timeKnown
+      ? new Intl.DateTimeFormat(locale, { timeZone, ...(opts.timeFormat ?? DEFAULT_TIME_FORMAT) }).format(instant)
+      : null,
+    timeKnown,
+    instant,
+  }
+}
+
+/** One line: "Sat, Jul 12 · 4:00 PM" for a timed move, "Sat, Jul 12" for a
+ *  day-level one, '' when there is no date at all (callers word that case). */
+export function formatMoveWhen(input?: MoveWhenInput | Date | string | null, opts: MoveWhenOptions = {}): string {
+  const p = moveWhenParts(input, opts)
+  if (!p.date) return ''
+  return p.time ? `${p.date}${opts.separator ?? ' · '}${p.time}` : p.date
+}
+
+/** "Sat, Jul 12 · 4:00 PM" in Eastern time — or "Sat, Jul 12" when no crew
+ *  hour was ever committed. `startTimeKnown` is optional: without it the day
+ *  anchor is still detected by shape (see `moveTimeKnown`). */
+export function jobDateTime(date?: Date | string | null, startTimeKnown?: boolean | null): string {
+  return formatMoveWhen({ date, startTimeKnown }) || 'Date to be confirmed'
+}
+
+/**
+ * The move's "when" for a SHORT TEXT MESSAGE — a medium date, plus the short
+ * time only when a real one exists. Null when there is no date at all, so the
+ * caller words that case in its own voice ("your requested date").
+ *
+ * Item R3-1: the confirmation SMS used `dateStyle:'medium', timeStyle:'short'`
+ * unconditionally, which texted the customer "Jul 15, 2027, 12:00 AM" off the
+ * day anchor. The output for a TIMED move is byte-identical to what that
+ * combined format produced.
+ */
+export function smsMoveWhen(input?: MoveWhenInput | Date | string | null, locale = 'en-US'): string | null {
+  const p = moveWhenParts(input, {
+    locale,
+    dateFormat: { dateStyle: 'medium' },
+    timeFormat: { timeStyle: 'short' },
+  })
+  if (!p.date) return null
+  return p.time ? `${p.date}, ${p.time}` : p.date
+}
+
+/**
+ * The `timeLabel` a move email should carry (item R2-1, moved here in R3-1 so
+ * the reminder worker can reach it without importing the render layer — it is
+ * re-exported from `outbox/services/premiumEmails` for its original callers).
+ *
+ * Every premium template does `time = timeLabel || <hour formatted out of the
+ * date>`. For a DAY-LEVEL booking that date is the 00:00 ET anchor, so the
+ * fallback told the customer their move was at "12:00 AM". An arrival window
+ * the owner actually typed always wins; otherwise, when there is no real hour,
+ * say so instead of printing one.
+ *
+ * It also keeps the send guard honest: `job-reminder` and `final-confirmation`
+ * declare `timeLabel` REQUIRED (emails/validation.ts), so a day-level booking
+ * with no label is not merely unlabelled — the whole email is refused.
+ */
+export function moveTimeLabel(
+  b: { arrivalWindow?: string | null; scheduledStart?: Date | null; startTimeKnown?: boolean | null } | null,
+  locale: string,
+  /** A caller-supplied instant (e.g. the customer's newly picked slot) is a
+   *  real time by construction and overrides the booking's own flag. */
+  explicitInstant?: boolean,
+): string | undefined {
+  if (b?.arrivalWindow) return b.arrivalWindow
+  if (explicitInstant) return undefined
+  if (!b || moveTimeKnown(b)) return undefined
+  return locale.startsWith('es') ? 'Hora por confirmar' : 'Time to be confirmed'
 }
 
 /** "4:08 PM" in Eastern time — for "Started by Diego · 4:08 PM". */
@@ -362,6 +544,9 @@ export type JobCardData = {
   customerPhone?: string | null
   serviceType?: string | null // human label, e.g. "2 Bedrooms"
   moveDate?: Date | string | null
+  /** Booking.startTimeKnown (item R3-1). FALSE ⇒ `moveDate` is a 00:00 ET day
+   *  anchor and the card shows the DATE only — never "12:00 AM". */
+  startTimeKnown?: boolean | null
   originAddress?: string | null
   destAddress?: string | null
   truckOptionLabel?: string | null
@@ -407,7 +592,7 @@ export function buildJobCard(data: JobCardData): { embeds: EmbedJson[]; componen
 
   fields.push(field('Customer', data.customerName || 'Name pending', true))
   fields.push(field('Service', data.serviceType || 'Move — details in admin', true))
-  fields.push(field('Date & Time', jobDateTime(data.moveDate), true))
+  fields.push(field('Date & Time', jobDateTime(data.moveDate, data.startTimeKnown), true))
 
   fields.push(field('Pickup', data.originAddress || 'Address pending — check admin', true))
   fields.push(field('Destination', data.destAddress || 'Address pending — check admin', true))
@@ -553,6 +738,9 @@ export type ApprovalCardData = {
   customerPhone?: string | null
   // Move
   requestedDate?: Date | string | null
+  /** Booking.startTimeKnown (item R3-1). FALSE ⇒ `requestedDate` is a 00:00 ET
+   *  day anchor; the Move field shows the DATE only. */
+  startTimeKnown?: boolean | null
   serviceType?: string | null // human label; falls back to parsing rawDescription
   truckOptionLabel?: string | null
   originAddress?: string | null
@@ -634,7 +822,7 @@ export function buildBookingApprovalCard(data: ApprovalCardData): {
     field(
       '📅 Move',
       [
-        jobDateTime(data.requestedDate),
+        jobDateTime(data.requestedDate, data.startTimeKnown),
         data.serviceType || serviceLabelFromDescription(data.rawDescription) || 'Service in details',
         `🚚 ${data.truckOptionLabel || truckLabelFromDescription(data.rawDescription) || TRUCK_OPTION_LABELS['own-truck']}`,
       ]
@@ -853,6 +1041,9 @@ export type ApprovalBookingInput = {
   itemsDescription?: string | null
   customerNotes?: string | null
   requestedDate?: Date | string | null
+  /** Booking.startTimeKnown (item R3-1) — optional so a `select` written before
+   *  migration 20260812010000_start_time_known still satisfies this type. */
+  startTimeKnown?: boolean | null
   baseRate?: number | null
   totalEstimate?: number | null
   travelFee?: number | null // cents
@@ -908,6 +1099,9 @@ export function approvalCardDataFromBooking(
     customerEmail: b.customer?.email ?? null,
     customerPhone: b.customer?.phone ?? null,
     requestedDate: b.requestedDate ?? null,
+    // Item R3-1: carried so the Move field renders the DATE for a day-level
+    // booking instead of the anchor's "12:00 AM".
+    startTimeKnown: b.startTimeKnown ?? null,
     serviceType: serviceLabelFromDescription(b.itemsDescription),
     truckOptionLabel: b.truckAddonDueOnMoveDay
       ? TRUCK_OPTION_LABELS['truck-pickup-return']

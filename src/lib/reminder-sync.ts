@@ -20,7 +20,7 @@ import {
   type ExistingReminder,
 } from './reminder-rules'
 import {
-  SCAN_LOCK_KEY, SCAN_STALE_MS, decideClaim, isScanLive, sanitizeScanError,
+  SCAN_LOCK_KEY, SCAN_STALE_MS, SCANNED_BOOKING_STATUSES, decideClaim, isScanLive, sanitizeScanError,
   type ClaimTrigger,
 } from './scan-lock'
 import { queueLogger } from './logger'
@@ -41,15 +41,43 @@ export interface SyncResult {
  *  worker / scripts that manage their own ScanRun. Prefer runScan() elsewhere. */
 export async function performSync(now = new Date()): Promise<SyncResult> {
   // ── Load operational data (active + recently completed, never internal tests) ──
+  //
+  // R3-3: the status list is SCANNED_BOOKING_STATUSES (scan-lock.ts) — the same
+  // constant the kick report checks before it may say a booking is covered, so
+  // the claim and the query cannot drift. It gained PENDING_PAYMENT: the
+  // default `stripe_link` create writes `truckId` on a PENDING_PAYMENT row, so
+  // without it the truck-double-booked rule was evaluating a set that could not
+  // contain the rows it exists to catch.
+  //
+  // WHAT ELSE THE WIDENING TURNS ON — checked rule by rule, not assumed. Every
+  // booking rule is status-gated (ACTIVE_STATUSES / LIVE_STATUSES / 'COMPLETED'
+  // / a named status) and therefore still skips PENDING_PAYMENT, with exactly
+  // TWO exceptions, both of which need a real defect present before they say
+  // anything:
+  //   • `payment-failed` — a FAILED payment on a non-cancelled booking. On a
+  //     PENDING_PAYMENT row that is the deposit itself failing, which is the
+  //     one thing the owner most wants to hear about. Wanted, not noise.
+  //   • `worker-pay-double-count` — needs a WORKER_PAY expense AND crew pay
+  //     data, neither of which the create writes; reachable only if someone
+  //     hand-builds payroll on an unpaid hold, where it is still true.
+  // The exact reachable set is pinned by a test (truck-hold.test.ts, "widening
+  // the loader to PENDING_PAYMENT does not add booking-rule noise") so a new
+  // ungated rule cannot start shouting at unpaid holds unnoticed.
+  //
+  // The 500-row cap is now ordered rather than arbitrary: most-recently-touched
+  // first, so a booking that was just created or edited — the one the kick is
+  // reporting on — can never be the row truncation drops. `id` breaks ties so
+  // two scans a millisecond apart see the same page.
   const [bookings, generalExpenses, ownerTxs, leads, customers] = await Promise.all([
     prisma.booking.findMany({
       where: {
         isInternalTest: false,
         OR: [
-          { status: { in: ['PENDING_APPROVAL', 'CONFIRMED', 'SCHEDULED', 'IN_PROGRESS'] } },
+          { status: { in: [...SCANNED_BOOKING_STATUSES] } },
           { status: 'COMPLETED', updatedAt: { gte: new Date(now.getTime() - 30 * DAY) } },
         ],
       },
+      orderBy: [{ updatedAt: 'desc' }, { id: 'desc' }],
       include: {
         customer: { select: { name: true, phone: true, email: true } },
         payments: { select: JOB_MONEY_PAYMENT_SELECT },
@@ -108,6 +136,16 @@ export async function performSync(now = new Date()): Promise<SyncResult> {
       // is already loaded — this just carries them into the pure rule shape.
       truckId: b.truckId,
       confirmedDate: b.confirmedDate,
+      // P0-A: how long the job runs. The truck-double-booked rule derives a
+      // hold's window from it, so a cross-midnight overlap the create-time
+      // guard now refuses is also DETECTED here if one ever got committed
+      // (an audited override, a truck reassignment, a hand-edited status).
+      estimatedHours: b.estimatedHours,
+      // Item R2-1: does a real crew hour exist behind this move date? Drives
+      // the copy (never print a 00:00 ET day anchor as "12:00 AM") and splits
+      // `job-no-start-time` into "day-level by choice" vs "time genuinely
+      // missing". Loaded by the same `include` above.
+      startTimeKnown: b.startTimeKnown,
       crew: (b.job?.crew ?? []).map((c) => ({
         userId: c.userId,
         userName: c.user.name,

@@ -47,6 +47,12 @@ export type BookingSnapshot = {
   requestedDate: Date | null
   confirmedDate: Date | null
   scheduledStart: Date | null
+  /** Booking.startTimeKnown (item R2-1). FALSE = the move is scheduled by DATE
+   *  and no crew hour exists; `effectiveMoveDate` then returns a 00:00 ET DAY
+   *  ANCHOR whose time-of-day means nothing. Optional so a `select` written
+   *  before migration 20260812010000_start_time_known — or against a DB where
+   *  it is not applied yet — still satisfies this type. */
+  startTimeKnown?: boolean | null
   // ── PROMOTIONAL CONSENT (owner spec 2026-08-06) ───────────────────────
   //  BOTH FIELDS ARE REQUIRED, and that is the point. A `select` that omits
   //  them does not compile, so a future send path cannot quietly re-open the
@@ -58,12 +64,35 @@ export type BookingSnapshot = {
   customerMarketingOptOut: boolean
 }
 
-/** The move date, using the same precedence as the scheduling layer. */
+/**
+ * The move date, using the same precedence as the scheduling layer.
+ *
+ * ⚠ ITEM R2-1 — this is a DATE, and only sometimes a TIME. When
+ * `moveTimeIsKnown(b)` is false the value is the booking's 00:00 ET day anchor
+ * and its hour is not a fact about the job. Callers may sort, compare and do
+ * day math on it freely; NOTHING may render its time-of-day without checking
+ * `moveTimeIsKnown` first (scheduling.formatMoveWhen does that check for you).
+ * Printing it blind is how "12:00 AM" reached the approval notification, the
+ * daily digest and the Action Center copy.
+ */
 export function effectiveMoveDate(b: Pick<BookingSnapshot, 'scheduledStart' | 'confirmedDate' | 'requestedDate'>) {
   return b.scheduledStart ?? b.confirmedDate ?? b.requestedDate
 }
 
-/** Has the move day fully passed? A job at 9am is still "today" all day. */
+/**
+ * Does this booking have a real crew hour behind its move date (item R2-1)?
+ * A stored `scheduledStart` is proof of one — nothing writes that column
+ * without a committed time any more. Otherwise the column decides, and an
+ * unreadable/absent `startTimeKnown` keeps the legacy assumption (true).
+ */
+export function moveTimeIsKnown(b: Pick<BookingSnapshot, 'scheduledStart' | 'startTimeKnown'>): boolean {
+  if (b.scheduledStart) return true
+  return b.startTimeKnown !== false
+}
+
+/** Has the move day fully passed? A job at 9am is still "today" all day.
+ *  Day math only — safe on a day-anchor date (a day-level move "passes" at
+ *  00:00 ET the day after, which is the honest reading of a date-only job). */
 export function movePassed(b: BookingSnapshot, now: Date = new Date()): boolean {
   const d = effectiveMoveDate(b)
   return d ? d.getTime() + DAY_MS < now.getTime() : false

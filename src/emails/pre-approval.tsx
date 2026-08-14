@@ -23,6 +23,7 @@ import {
   P,
   money,
 } from './_ui'
+import { moveWhenParts } from '../lib/booking-display'
 
 // ════════════════════════════════════════════════════════════════════════
 //  PRE-CONFIRMATION EMAIL  ("We've received your booking request")
@@ -38,6 +39,9 @@ interface Props {
   displayId?: string
   requestedDate?: string
   timeLabel?: string
+  /** Booking.startTimeKnown (item R3-1). FALSE ⇒ `requestedDate` is a 00:00 ET
+   *  DAY ANCHOR: render the date, never an hour. */
+  startTimeKnown?: boolean | null
   service?: string
   estimate?: string
   crewSize?: string | number
@@ -68,6 +72,7 @@ export default function PreApprovalEmail({
   displayId = '',
   requestedDate,
   timeLabel,
+  startTimeKnown,
   service,
   estimate,
   crewSize,
@@ -94,11 +99,18 @@ export default function PreApprovalEmail({
 }: Props) {
   const es = (locale ?? 'en').toLowerCase().startsWith('es')
   const locStr = es ? 'es-US' : 'en-US'
-  const dateOnly = requestedDate
-    ? new Date(requestedDate).toLocaleDateString(locStr, { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric', timeZone: 'America/New_York' })
-    : es ? 'Por confirmar' : 'To be confirmed'
-  const timeOnly =
-    timeLabel || (requestedDate ? new Date(requestedDate).toLocaleTimeString(locStr, { hour: 'numeric', minute: '2-digit', timeZone: 'America/New_York' }) : undefined)
+  // ITEM R3-1 — `requestedDate` is the move's DAY ANCHOR when nobody committed
+  // to a crew hour, so the old `toLocaleTimeString` fallback printed a "Time:
+  // 12:00 AM" row that was never a fact. moveWhenParts is the ONE booking-aware
+  // formatter: it returns a time only when a real one exists. An explicit
+  // `timeLabel` (an arrival window the owner typed, or "Time to be confirmed"
+  // from moveTimeLabel) still wins.
+  const when = moveWhenParts(
+    { date: requestedDate, startTimeKnown },
+    { locale: locStr, dateFormat: { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' } },
+  )
+  const dateOnly = when.date ?? (es ? 'Por confirmar' : 'To be confirmed')
+  const timeOnly = timeLabel || when.time || undefined
   const access = [stairs, elevator].filter(Boolean).join(' · ')
 
   const t = es

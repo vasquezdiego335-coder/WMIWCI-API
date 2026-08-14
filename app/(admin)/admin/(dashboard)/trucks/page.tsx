@@ -1,6 +1,6 @@
 import { prisma } from '@/lib/db'
 import { etDayRange, effectiveMoveDate } from '@/lib/scheduling'
-import { TRUCK_CONFLICT_STATUSES } from '@/lib/truck-conflicts'
+import { TRUCK_HOLD_STATUSES } from '@/lib/truck-conflicts'
 import { PageHeader, StatCard, StatGrid, COLORS, Empty, tableStyles as T, tableScrollProps, Badge, SoftBadge, Callout } from '../_ui'
 import TruckForm from './TruckForm'
 import TruckActions from './TruckActions'
@@ -61,7 +61,9 @@ export default async function TrucksPage() {
       where: {
         truckId: { not: null },
         isInternalTest: false,
-        status: { in: [...TRUCK_CONFLICT_STATUSES] },
+        // R2-2: TRUCK_HOLD_STATUSES — the ONE list. A truck assigned to an
+        // unpaid PENDING_PAYMENT booking is not free, so it counts here too.
+        status: { in: [...TRUCK_HOLD_STATUSES] },
       },
       select: { truckId: true, scheduledStart: true, confirmedDate: true, requestedDate: true },
     })
@@ -96,7 +98,7 @@ export default async function TrucksPage() {
     <div>
       <PageHeader
         title="Trucks"
-        subtitle="The fleet. Assign a truck on Book Move and double-bookings become detectable — the Action Center flags two jobs sharing one truck."
+        subtitle="The fleet. Assign a truck on Book Move and the next Action Center scan flags two jobs holding the same truck on the same day — unpaid holds included."
       />
 
       {migrationMissing ? (
@@ -111,7 +113,7 @@ export default async function TrucksPage() {
             <StatCard label="Fleet" value={String(activeTrucks.length)} accent={COLORS.navy} sub={trucks.length > activeTrucks.length ? `${trucks.length - activeTrucks.length} deactivated` : 'active trucks'} />
             <StatCard label="Available" value={String(available)} accent={COLORS.green} sub="ready to assign" />
             <StatCard label="In maintenance" value={String(maintenance)} accent={maintenance > 0 ? COLORS.amber : COLORS.green} sub={maintenance > 0 ? 'not assignable' : 'all healthy'} />
-            <StatCard label="Assigned today" value={String(todayTotal)} accent={todayTotal > 0 ? COLORS.orange : COLORS.navy} sub="live jobs with this fleet" />
+            <StatCard label="Assigned today" value={String(todayTotal)} accent={todayTotal > 0 ? COLORS.orange : COLORS.navy} sub="jobs and unpaid holds on this fleet" />
           </StatGrid>
 
           <TruckForm />

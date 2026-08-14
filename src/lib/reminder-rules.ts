@@ -17,7 +17,7 @@ import {
   ADDRESS_TIERS, ADDRESS_FALLBACK, MISSING_ADDRESS_TIERS, MISSING_ADDRESS_FALLBACK,
 } from './reminder-severity'
 import { entityLink } from './entity-links'
-import { truckConflictBetween, etDayKey } from './truck-conflicts'
+import { truckConflictBetween, etDayKey, holdsTruck, isPendingTruckHold } from './truck-conflicts'
 
 export type Severity = 'CRITICAL' | 'HIGH' | 'MEDIUM' | 'LOW' | 'INFO'
 export type Category =
@@ -89,6 +89,18 @@ export interface RuleBooking {
   //    the conservative same-ET-day check on rows without scheduledStart. ──
   truckId?: string | null
   confirmedDate?: Date | null
+  /** Booking.estimatedHours (P0-A). How long the job actually runs, which is
+   *  how the truck rule knows an 18:00 4BR occupies its truck past midnight
+   *  while a 20:00 studio does not. Optional: absent → the flat truck fallback,
+   *  the pre-P0-A behaviour, so existing fixtures and callers are unchanged. */
+  estimatedHours?: number | null
+  /** Booking.startTimeKnown (item R2-1). FALSE = the owner booked a DATE and
+   *  has not committed to a crew hour, so `requestedDate`/`confirmedDate` are
+   *  00:00 ET day anchors whose time-of-day must never be printed. Optional:
+   *  absent keeps the legacy assumption (a time is known), so existing
+   *  fixtures and a loader running before migration
+   *  20260812010000_start_time_known is applied behave exactly as before. */
+  startTimeKnown?: boolean | null
   crew: RuleCrew[]
   hasFailedPayment: boolean
   hasWorkerPayExpense: boolean
@@ -156,6 +168,17 @@ const DAY = 24 * HOUR
 const money = (cents: number) => `$${(cents / 100).toFixed(2)}`
 const et = (d: Date) =>
   d.toLocaleString('en-US', { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', timeZone: 'America/New_York' })
+/** Date without the hour — for a move whose crew time nobody has chosen. */
+const etDate = (d: Date) =>
+  d.toLocaleString('en-US', { weekday: 'short', month: 'short', day: 'numeric', timeZone: 'America/New_York' })
+/** THE move-time display rule for rule copy (item R2-1): full timestamp when a
+ *  real crew hour exists, date alone when the booking is day-level. A booking
+ *  with no `scheduledStart` and `startTimeKnown === false` has a 00:00 ET day
+ *  anchor for a date — printing `et()` on it told the owner the job is at
+ *  12:00 AM. Anything else (a stored scheduledStart, or an unread/absent flag)
+ *  keeps the previous output exactly. */
+const etMove = (d: Date, b: Pick<RuleBooking, 'scheduledStart' | 'startTimeKnown'>) =>
+  !b.scheduledStart && b.startTimeKnown === false ? etDate(d) : et(d)
 const key = (rule: string, type: string, id: string, extra?: string) =>
   extra ? `${rule}:${type}:${id}:${extra}` : `${rule}:${type}:${id}`
 // Centralized so a booking link is never hand-built (and lead links stay null).
@@ -190,7 +213,10 @@ export function evaluateBooking(b: RuleBooking, now: Date): ReminderCandidate[] 
   const out: ReminderCandidate[] = []
   const start = b.scheduledStart ?? b.requestedDate
   const startsWithin = (ms: number) => !!start && start.getTime() - now.getTime() < ms && start.getTime() > now.getTime() - DAY
-  const when = start ? ` (move ${et(start)})` : ''
+  // Item R2-1: a day-level booking's `start` is a 00:00 ET day anchor. It is
+  // still the right value to SORT, compare and set `dueAt` from — only its
+  // time-of-day is a fiction, so the printed copy drops the hour.
+  const when = start ? ` (move ${etMove(start, b)})` : ''
 
   // BOOKING_DATA ---------------------------------------------------------------
   if (ACTIVE_STATUSES.includes(b.status)) {
@@ -255,7 +281,7 @@ export function evaluateBooking(b: RuleBooking, now: Date): ReminderCandidate[] 
     out.push({
       reminderType: 'booking-approval-overdue', category: 'BOOKING_DATA', severity: 'CRITICAL',
       title: `${b.customerName}: booking not approved and move is close`,
-      description: `The requested move date is ${start ? et(start) : 'soon'} but the booking is still waiting for approval. Approve or decline it now.`,
+      description: `The requested move date is ${start ? etMove(start, b) : 'soon'} but the booking is still waiting for approval. Approve or decline it now.`,
       sourceEntityType: 'booking', sourceEntityId: b.id, sourceUrl: jobUrl(b.id),
       dedupeKey: key('booking-approval-overdue', 'booking', b.id), dueAt: start,
     })
@@ -267,17 +293,38 @@ export function evaluateBooking(b: RuleBooking, now: Date): ReminderCandidate[] 
       out.push({
         reminderType: 'job-24h-no-crew', category: 'JOBS_SCHEDULING', severity: 'CRITICAL',
         title: `${b.customerName}: job starts within 24 hours with no crew`,
-        description: `This job starts ${start ? et(start) : 'soon'} and nobody is assigned to it. Assign the crew now.`,
+        description: `This job starts ${start ? etMove(start, b) : 'soon'} and nobody is assigned to it. Assign the crew now.`,
         sourceEntityType: 'booking', sourceEntityId: b.id, sourceUrl: jobUrl(b.id),
         dedupeKey: key('job-24h-no-crew', 'booking', b.id), dueAt: start,
       })
     }
 
+    // Item R2-1. Two different situations share "confirmed with no
+    // scheduledStart", and they deserve different words:
+    //
+    //  • startTimeKnown === false — the owner DELIBERATELY took the booking at
+    //    day level. Nothing is broken; the hour is still owed to the crew and
+    //    the truck check is holding the whole day until it exists. MEDIUM.
+    //  • otherwise — a confirmed job that should have a time and does not
+    //    (a legacy row, or a schedule write that did not land). HIGH.
+    //
+    // The old copy claimed the booking was "invisible to the calendar and daily
+    // digest". That was never true: `scheduling.moveDateInRange` coalesces
+    // scheduledStart → confirmedDate → requestedDate, which is exactly how the
+    // digest and the schedule views query. Saying so trained the owner to
+    // distrust a correct list. Same reminderType/dedupeKey in both branches, so
+    // a booking that later gets a real time resolves ONE reminder, not two.
     if (b.status === 'CONFIRMED' && !b.scheduledStart) {
+      const dayLevel = b.startTimeKnown === false
       out.push({
-        reminderType: 'job-no-start-time', category: 'JOBS_SCHEDULING', severity: 'HIGH',
-        title: `${b.customerName}: confirmed job has no start time`,
-        description: `This booking is confirmed but has no scheduled start time, so it is invisible to the calendar and daily digest.`,
+        reminderType: 'job-no-start-time', category: 'JOBS_SCHEDULING',
+        severity: dayLevel ? 'MEDIUM' : 'HIGH',
+        title: dayLevel
+          ? `${b.customerName}: no crew start time committed yet`
+          : `${b.customerName}: confirmed job has no start time`,
+        description: dayLevel
+          ? `This move is booked at DAY level${when} — no crew hour has been set, so nothing invented one. It still shows on the calendar and the daily digest by date, and the truck is held for the whole day. Set the start time once you commit to it.`
+          : `This booking is confirmed but has no scheduled start time. It still appears on the calendar and daily digest by date, but the crew, the customer and the truck check have no hour to work from — set one.`,
         sourceEntityType: 'booking', sourceEntityId: b.id, sourceUrl: jobUrl(b.id),
         dedupeKey: key('job-no-start-time', 'booking', b.id), dueAt: null,
       })
@@ -444,26 +491,63 @@ export function evaluateCrewOverlaps(bookings: RuleBooking[], now: Date): Remind
 }
 
 // ── Cross-booking rule: truck double-booked (Moving OS Phase 1) ──────────────
-// Two live bookings assigned the SAME fleet truck with overlapping windows —
-// or unknown times on the same ET day (the pure lib's conservative rule). The
+// Two bookings HOLDING the SAME fleet truck with overlapping windows — or
+// unknown times on the same ET day (the pure lib's conservative rule). The
 // dedupeKey is truck+day, so three jobs colliding on one truck on one day
 // collapse into ONE reminder listing all of them instead of three near-dupes.
+//
+// R2-2: "holding" is TRUCK_HOLD_STATUSES (truck-conflicts.holdsTruck), not the
+// live statuses. The default `stripe_link` create assigns a truck on a
+// PENDING_PAYMENT row, so a rule that only looked at CONFIRMED/SCHEDULED/
+// IN_PROGRESS stayed silent until BOTH clashing bookings had been approved —
+// i.e. it fired after the damage instead of before it. An unpaid hold is
+// called out as such in the copy, because the owner may deliberately let two
+// unpaid holds sit on one truck expecting one to fall through.
+//
+// LOADER (R3-3): reminder-sync.performSync now loads PENDING_PAYMENT as well
+// (SCANNED_BOOKING_STATUSES in scan-lock.ts), so the unpaid holds the default
+// `stripe_link` create writes are finally evaluated here — round 2's rule was
+// correct about statuses and blind in practice, because the rows never reached
+// it. The create-time guard (truck-lock.ts) is still what PREVENTS the unpaid
+// double-booking; this rule is the detector for rows that got there another way
+// (an audited override, a truck reassignment, a hand-edited status).
+//
+// R3-3 fix 2 — THE ROW MAPPER. The shape below used to drop `requestedDate`
+// while `basisOf` coalesced only scheduledStart → confirmedDate. A
+// PENDING_PAYMENT row has NEITHER (buildBookingCreateData writes the schedule
+// columns only on a CONFIRMED create), so every pending hold was discarded at
+// the `!!basis` filter no matter which statuses the loader supplied. Both now
+// coalesce through requestedDate — the same chain scheduling.effectiveMoveDate
+// / moveDateInRange and truck-conflicts.toTruckBookingShapes use.
+
+// P0-A — THE RULE IS THE BACKSTOP, SO IT NEEDS THE SAME WINDOW. The create-time
+// guard PREVENTS a double-booking; this rule is what finds one that got there
+// another way. It inherited the flat 6h hold, so the pair P0-A is about (an
+// evening job whose real window crosses midnight) was invisible on BOTH sides:
+// nothing refused it at create time and nothing flagged it afterwards, right up
+// to move day. `estimatedHours` is already loaded — performSync reads bookings
+// with `include`, so every scalar is in hand — it just was not carried across.
 
 const toTruckShape = (b: RuleBooking) => ({
   id: b.id,
   truckId: b.truckId ?? null,
   scheduledStart: b.scheduledStart,
   scheduledEnd: b.scheduledEnd,
-  confirmedDate: b.confirmedDate ?? null,
+  // Mirrors toTruckBookingShapes: the day anchor is confirmedDate, else the
+  // requested date — never nothing when the booking has a move date at all.
+  confirmedDate: b.confirmedDate ?? b.requestedDate ?? null,
   status: b.status,
+  estimatedHours: b.estimatedHours ?? null,
 })
 
 export function evaluateTruckOverlaps(bookings: RuleBooking[], now: Date): ReminderCandidate[] {
   const out: ReminderCandidate[] = []
-  const basisOf = (b: RuleBooking) => b.scheduledStart ?? b.confirmedDate ?? null
+  const basisOf = (b: RuleBooking) => b.scheduledStart ?? b.confirmedDate ?? b.requestedDate ?? null
   // Same recency window as the crew rule: recent past + future, live statuses.
   const live = bookings.filter((b) => {
-    if (!LIVE_STATUSES.includes(b.status) || !b.truckId) return false
+    // R2-2: holdsTruck (TRUCK_HOLD_STATUSES) — live jobs AND unpaid/unapproved
+    // holds, the ONE list every truck caller uses.
+    if (!holdsTruck(b.status) || !b.truckId) return false
     const basis = basisOf(b)
     return !!basis && basis.getTime() > now.getTime() - DAY
   })
@@ -494,11 +578,22 @@ export function evaluateTruckOverlaps(bookings: RuleBooking[], now: Date): Remin
     for (const [day, bucket] of Array.from(byDay.entries())) {
       const involved = Array.from(bucket.values())
       const starts = involved.map((b) => basisOf(b)!).sort((x, y) => x.getTime() - y.getTime())
-      const names = involved.map((b) => b.customerName).join(', ')
+      // Name each booking with its hold kind, so "one of these is not paid for
+      // yet" is visible without opening both records (R2-2).
+      const names = involved
+        .map((b) => (isPendingTruckHold(b.status) ? `${b.customerName} (unpaid hold)` : b.customerName))
+        .join(', ')
+      const pending = involved.filter((b) => isPendingTruckHold(b.status)).length
+      const tail =
+        pending === involved.length
+          ? ' None of them is paid or approved yet — if one is going to fall through, release its truck now.'
+          : pending > 0
+            ? ' One of them is only an unpaid hold — release it or confirm it.'
+            : ''
       out.push({
         reminderType: 'truck-double-booked', category: 'JOBS_SCHEDULING', severity: 'CRITICAL',
         title: `Truck double-booked: ${involved.length} jobs share one truck on ${day}`,
-        description: `${names} are all assigned the same truck with overlapping (or unknown) move windows on ${day}. A truck can only be in one place — reassign a truck or reschedule a job.`,
+        description: `${names} are all assigned the same truck with overlapping (or unknown) move windows on ${day}. A truck can only be in one place — reassign a truck or reschedule a job.${tail}`,
         sourceEntityType: 'truck', sourceEntityId: truckId, sourceUrl: '/admin/trucks',
         dedupeKey: key('truck-double-booked', 'truck', truckId, day), dueAt: starts[0],
       })

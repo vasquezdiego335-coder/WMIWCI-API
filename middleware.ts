@@ -119,7 +119,31 @@ export const config = {
     '/admin/roadmap',
     '/admin/logs/:path*',
     '/admin/logs',
+    // ── Moving OS Phase 1 surfaces (2026-08-12 auth audit, fix-doc item 8) ──
+    // These pages shipped WITHOUT matcher entries, so the PROTECTED_ROUTES gate
+    // above never ran for them: middleware executes ONLY on paths listed here.
+    // The (dashboard) layout still redirects, but until these lines existed the
+    // layout was the SINGLE gate — and a page moved out of that layout (see
+    // /admin/closeout-summary below) would have had none at all. Same class of
+    // gap as /api/files/upload, which is in PROTECTED_ROUTES but deliberately
+    // absent here (customers upload with a booking token, not a session — see
+    // src/lib/__tests__/admin-route-coverage.test.ts for why that one stays out).
+    '/admin/book/:path*',
+    '/admin/book',
+    '/admin/trucks/:path*',
+    '/admin/trucks',
+    '/admin/leads/:path*',
+    '/admin/leads',
+    // Pre-existing gaps of the identical class, found by the same audit.
+    '/admin/email-marketing/:path*',
+    '/admin/email-marketing',
+    // Printable closeout summary renders OUTSIDE the (dashboard) layout on
+    // purpose (no chrome), so it never had a layout gate — only its own
+    // getSession + money.view_company_profit check. Now gated here too.
+    '/admin/closeout-summary/:path*',
     '/admin',  // protect the root /admin page
+    // Covers every /api/admin/* route including [id] instances
+    // (e.g. /api/admin/leads/abc123) — verified in admin-route-coverage.test.ts.
     '/api/admin/:path*',
     // Stage 5 crew operational surface.
     '/crew/:path*',

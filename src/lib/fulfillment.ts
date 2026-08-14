@@ -1,3 +1,4 @@
+import type { Prisma } from '@prisma/client'
 import { prisma } from './db'
 import { onBookingPaid } from './journeys'
 import { emailQueue, smsQueue, discordQueue, marketingQueue } from './queues'
@@ -5,6 +6,8 @@ import { webhookLogger } from './logger'
 import { t } from './i18n'
 import { ingestBookingToTracker } from './tracker'
 import { outboxEnabled, emitPaymentCompleted } from '../outbox/integration'
+import { smsMoveWhen } from './booking-display'
+import { isMigrationMissing, MIGRATION_MISSING_MESSAGE, readBookingWithMigrationFallback } from './migration-window'
 
 // ════════════════════════════════════════════════════════════════════════
 //  Checkout fulfillment — the single source of truth for "a $49 hold was
@@ -30,6 +33,17 @@ export type FulfillResult = {
   bookingId: string
   reason?: string
 }
+
+/** The booking row this module fans out from. */
+type PaidBooking = Prisma.BookingGetPayload<{ include: { customer: true } }>
+
+/** ITEM P0-E — the reason returned when the deposit was authorized but the
+ *  MIGRATIONS ARE NOT APPLIED, so the row cannot be read. Nothing is claimed,
+ *  nothing is consumed: the booking stays PENDING_PAYMENT and the next trigger
+ *  (webhook retry / success redirect / a manual replay) does the WHOLE
+ *  fulfillment once the SQL lands. Callers must NOT record the Stripe event as
+ *  processed on this reason — see src/lib/stripe-events.ts. */
+export const MIGRATION_NOT_APPLIED = 'migration-not-applied'
 
 // Guard a single queue.add() so a Redis stall can't hang the caller.
 // BullMQ uses maxRetriesPerRequest:null, so when Upstash drops the idle
@@ -68,6 +82,63 @@ export async function fulfillPaidCheckout(params: {
   const { bookingId, paymentIntentId, amountTotalCents, source } = params
   const log = webhookLogger.child({ bookingId, source })
 
+  // ── ITEM P0-E — READ FIRST, CLAIM SECOND ────────────────────────────────
+  //
+  // This read used to sit immediately AFTER the atomic claim, as an
+  // `include: { customer: true }` with no guard. An `include` makes Prisma ask
+  // Postgres for `$scalars` FROM THE GENERATED SCHEMA, so during the normal
+  // code-before-SQL window (migrations here are applied by hand) it raised
+  // P2022 — one statement after the claim had already flipped the booking to
+  // PENDING_APPROVAL. Nothing downstream ran: no Discord approval card, no
+  // pre-approval email, no SMS, no tracker ingest.
+  //
+  // And it was UNRECOVERABLE, because the claim IS the idempotency guard: the
+  // retry re-entered, matched 0 rows, returned `processed:false` without
+  // throwing, and the webhook was then recorded as processed. A customer who
+  // paid $49 in that window would never have been contacted, and applying the
+  // SQL later replayed nothing.
+  //
+  // So the row is read BEFORE anything is consumed. A migration-shaped failure
+  // now leaves the booking PENDING_PAYMENT — the honest state, from which the
+  // very next trigger fulfills completely. A real outage still throws, before
+  // the claim, so the queue retries it.
+  let booking: PaidBooking | null
+  let degradedRead = false
+  try {
+    const read = await readBookingWithMigrationFallback<PaidBooking>(
+      (args) => prisma.booking.findUnique({ where: { id: bookingId }, ...(args as object) }),
+      { customer: true },
+    )
+    booking = read.row
+    degradedRead = read.degraded
+  } catch (err) {
+    // A REAL failure (outage, timeout, a broken generated client) is NOT a
+    // migration window: rethrow it, before the claim, so the webhook queue
+    // retries the whole event. Downgrading an outage into "deferred" would
+    // quietly stop the retry that is the actual recovery.
+    if (!isMigrationMissing(err)) throw err
+    // Both rungs failed the same migration-shaped way. NOTHING has been claimed.
+    log.error(
+      { err: err instanceof Error ? err.message : String(err) },
+      `fulfillment cannot read the booking — ${MIGRATION_MISSING_MESSAGE}. The $49 is authorized and the booking stays PENDING_PAYMENT; re-run this event after the migration.`,
+    )
+    return { processed: false, bookingId, reason: MIGRATION_NOT_APPLIED }
+  }
+  if (!booking) {
+    log.error('Booking not found — cannot fulfill (nothing claimed)')
+    return { processed: false, bookingId, reason: 'booking-not-found' }
+  }
+  if (degradedRead) {
+    log.warn(
+      { reason: MIGRATION_MISSING_MESSAGE },
+      'fulfillment read degraded (unapplied migration) — fan-out continues without the newest columns',
+    )
+  }
+  // The status to restore if the fan-out cannot run (below). Captured from the
+  // row we just read, so a DRAFT booking is never "rolled back" into a state it
+  // was never in.
+  const statusBeforeClaim = booking.status
+
   // ── Atomic claim — the race-condition fix ───────────────────────────────
   // updateMany with a status guard compiles to ONE conditional SQL UPDATE.
   // Whoever flips PENDING_PAYMENT/DRAFT → PENDING_APPROVAL first gets count:1
@@ -87,14 +158,14 @@ export async function fulfillPaidCheckout(params: {
     return { processed: false, bookingId, reason: 'already-fulfilled-or-not-pending' }
   }
 
-  const booking = await prisma.booking.findUnique({
-    where: { id: bookingId },
-    include: { customer: true },
-  })
-  if (!booking) {
-    log.error('Booking disappeared immediately after claim — cannot fulfill')
-    return { processed: false, bookingId, reason: 'booking-not-found' }
-  }
+  // ── ITEM P0-E — the claim must never outlive the work it was taken for ───
+  // Everything from here to the end runs inside this try. Each task is already
+  // individually guarded and cannot reject, so reaching the catch means
+  // essentially nothing was queued — in which case the claim is RELEASED, so
+  // the next trigger redoes the whole fulfillment instead of short-circuiting
+  // on "already fulfilled" forever, and the error is rethrown so the webhook
+  // queue retries it.
+  try {
 
   await prisma.auditLog
     .create({
@@ -110,15 +181,14 @@ export async function fulfillPaidCheckout(params: {
   const appUrl = process.env.APP_URL ?? 'https://wmiwci-api.vercel.app'
   const portalUrl = `${appUrl}/my-booking/${booking.customerToken}`
   const locale = booking.customer.locale
-  const dateStr = booking.requestedDate
-    ? booking.requestedDate.toLocaleString(locale === 'es' ? 'es-US' : 'en-US', {
-        timeZone: 'America/New_York',
-        dateStyle: 'medium',
-        timeStyle: 'short',
-      })
-    : locale === 'es'
-    ? 'tu fecha solicitada'
-    : 'your requested date'
+  // ── ITEM R3-1: the confirmation SMS ─────────────────────────────────────
+  // `timeStyle:'short'` on a booking whose hour nobody chose formatted the
+  // 00:00 ET DAY ANCHOR and texted the customer "Jul 15, 2027, 12:00 AM".
+  // moveWhenParts is the ONE booking-aware formatter — same medium date, and
+  // the time only when a real one exists. A timed move reads exactly as before.
+  const dateStr =
+    smsMoveWhen(booking, locale === 'es' ? 'es-US' : 'en-US') ??
+    (locale === 'es' ? 'tu fecha solicitada' : 'your requested date')
 
   // ── Fan out every side-effect concurrently (each individually guarded) ──
   // Concurrent (not sequential) bounds the worst case to ~5s even if Redis is
@@ -148,7 +218,18 @@ export async function fulfillPaidCheckout(params: {
         customerEmail: booking.customer.email,
         requestedDate: booking.requestedDate?.toISOString() ?? null,
         items: booking.itemsDescription ?? undefined,
-      }).then(() => undefined)
+      })
+        .then(() => undefined)
+        // Every OTHER task here is wrapped in `enqueue`, which never rejects.
+        // This one was not: an outbox failure rejected Promise.all and threw
+        // AFTER the claim was taken, which used to make the whole fulfillment a
+        // permanent no-op. It is guarded like its siblings now.
+        .catch((err) =>
+          log.error(
+            { err: err instanceof Error ? err.message : String(err) },
+            '[outbox] PAYMENT_COMPLETED emit failed (non-fatal — booking already moved to PENDING_APPROVAL)',
+          ),
+        )
     )
   } else {
     log.info({ to: booking.customer.email }, '[messaging] queueing PRE-CONFIRMATION email')
@@ -162,6 +243,12 @@ export async function fulfillPaidCheckout(params: {
             customerName: booking.customer.name,
             displayId: booking.displayId,
             requestedDate: booking.requestedDate?.toISOString(),
+            // Item R3-1 — the legacy queue payload is the OTHER pre-approval
+            // sender, and it passed no time information at all, so the template
+            // derived "12:00 AM" from the day anchor. An arrival window the
+            // owner typed still wins; otherwise the flag suppresses the hour.
+            timeLabel: booking.arrivalWindow ?? undefined,
+            startTimeKnown: booking.startTimeKnown,
             originAddress: booking.originAddress,
             destAddress: booking.destAddress,
             estimate: booking.totalEstimate != null ? `$${Math.round(booking.totalEstimate).toLocaleString('en-US')}` : undefined,
@@ -285,6 +372,9 @@ export async function fulfillPaidCheckout(params: {
           destAddress: booking.destAddress,
           requestedDate: booking.requestedDate?.toISOString(),
           items: booking.itemsDescription ?? undefined,
+          // Item R3-1 — the crew dispatch card renders this date; without the
+          // flag it printed the day anchor's midnight as the job's start time.
+          startTimeKnown: booking.startTimeKnown,
           truckAddonDueOnMoveDay: booking.truckAddonDueOnMoveDay,
           laborEstimate: booking.baseRate,
           travelFeeDollars: booking.travelFee ? booking.travelFee / 100 : 0,
@@ -309,6 +399,22 @@ export async function fulfillPaidCheckout(params: {
   await onBookingPaid(bookingId).catch((err) =>
     log.warn({ err: err instanceof Error ? err.message : String(err) }, 'onBookingPaid cleanup failed (non-fatal)')
   )
+
+  } catch (err) {
+    await prisma.booking
+      .updateMany({ where: { id: bookingId, status: 'PENDING_APPROVAL' }, data: { status: statusBeforeClaim } })
+      .catch((rbErr) =>
+        log.error(
+          { err: rbErr instanceof Error ? rbErr.message : String(rbErr) },
+          'CRITICAL: fulfillment failed AND the claim could not be released — this booking may never fan out',
+        ),
+      )
+    log.error(
+      { err: err instanceof Error ? err.message : String(err) },
+      'fulfillment failed after the claim — claim released so the next trigger can redo it',
+    )
+    throw err
+  }
 
   log.info('Checkout fulfilled — booking → PENDING_APPROVAL, all jobs queued')
   return { processed: true, bookingId }

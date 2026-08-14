@@ -7,9 +7,15 @@ import {
   truckConflictBetween,
   findTruckConflictsIn,
   etDayKey,
+  isPendingTruckHold,
+  truckHoldHours,
+  truckOccupiedEtDays,
+  MAX_TRUCK_HOLD_HOURS,
   TRUCK_FALLBACK_HOURS,
+  TRUCK_HOLD_STATUSES,
   type TruckBookingShape,
 } from '../truck-conflicts'
+import { TRAVEL_BUFFER_HOURS } from '../travel-buffer'
 import { evaluateTruckOverlaps, evaluateAll, type RuleBooking } from '../reminder-rules'
 
 const HOUR = 3_600_000
@@ -38,6 +44,86 @@ test('overlapWindow: missing end assumes the 6h truck hold (load+drive+unload)',
   assert.equal(overlapWindow(a, null, at('2026-08-12T15:00:00-04:00'), null), false)
   // Explicit fallbackHours is honored: a 2h hold frees the truck by noon.
   assert.equal(overlapWindow(a, null, at('2026-08-12T12:00:00-04:00'), null, 2), false)
+})
+
+// ── P0-A: truckHoldHours — the derived window ────────────────────────────────
+
+test('truckHoldHours: the estimate + the house buffer, floored at the fallback', () => {
+  // The floor. A studio's 3h job + the 1h buffer is shorter than the fallback,
+  // so the hold stays 6h — max(), never "replace" (a replace would SHRINK
+  // holds that are correct today).
+  assert.equal(truckHoldHours({ estimatedHours: 3 }), TRUCK_FALLBACK_HOURS)
+  assert.equal(truckHoldHours({ estimatedHours: TRUCK_FALLBACK_HOURS - TRAVEL_BUFFER_HOURS }), TRUCK_FALLBACK_HOURS)
+  // Above the floor the job's own length wins: an 8h 4BR holds its truck for 9h.
+  assert.equal(truckHoldHours({ estimatedHours: 8 }), 8 + TRAVEL_BUFFER_HOURS)
+  assert.equal(truckHoldHours({ estimatedHours: 10 }), 10 + TRAVEL_BUFFER_HOURS)
+  // No usable estimate → the fallback, exactly as before P0-A. This is the row
+  // read by a caller whose `select` never named the column.
+  for (const junk of [null, undefined, 0, -4, NaN, Infinity]) {
+    assert.equal(truckHoldHours({ estimatedHours: junk as number | null }), TRUCK_FALLBACK_HOURS, String(junk))
+  }
+  // An explicit fallback is still honoured (a caller saying "assume 2h").
+  assert.equal(truckHoldHours({ estimatedHours: null }, 2), 2)
+  assert.equal(truckHoldHours({ estimatedHours: 8 }, 2), 8 + TRAVEL_BUFFER_HOURS)
+  // A data-error estimate is clamped, and the clamp can never pull a hold
+  // BELOW the fallback.
+  assert.equal(truckHoldHours({ estimatedHours: 9_999 }), MAX_TRUCK_HOLD_HOURS + TRAVEL_BUFFER_HOURS)
+  assert.ok(truckHoldHours({ estimatedHours: 9_999 }) >= TRUCK_FALLBACK_HOURS)
+})
+
+test('P0-A: a long job occupies the next ET day; the same job in the morning does not', () => {
+  const evening = { scheduledStart: null, scheduledEnd: null, confirmedDate: at('2026-08-13T18:00:00-04:00') }
+  // 8h + buffer = 9h → 18:00 runs to 03:00 the next day.
+  assert.deepEqual(truckOccupiedEtDays({ ...evening, estimatedHours: 8 }), ['2026-08-13', '2026-08-14'])
+  // Without the column it collapses to the flat fallback — 18:00 + 6h lands
+  // exactly on midnight, and the window is half-open, so ONE day. That is the
+  // defect, kept here as the contrast.
+  assert.deepEqual(truckOccupiedEtDays(evening), ['2026-08-13'])
+  // Morning: nowhere near midnight either way.
+  const morning = { scheduledStart: null, scheduledEnd: null, confirmedDate: at('2026-08-13T09:00:00-04:00'), estimatedHours: 8 }
+  assert.deepEqual(truckOccupiedEtDays(morning), ['2026-08-13'])
+})
+
+test('P0-A: a STORED window governs — the hold floor never widens a known end', () => {
+  // The floor answers "we do not know when this ends". A row that DOES say when
+  // it ends is not second-guessed: a 20:00 job that releases the truck at
+  // midnight occupies one ET day, and the next day is free — including for a
+  // day-level booking, which is the comparison that would otherwise silently
+  // inherit the 6h fallback.
+  const knownEnd = {
+    scheduledStart: at('2026-08-13T20:00:00-04:00'),
+    scheduledEnd: at('2026-08-14T00:00:00-04:00'),
+    confirmedDate: null,
+    estimatedHours: 3,
+  }
+  assert.deepEqual(truckOccupiedEtDays(knownEnd), ['2026-08-13'])
+  const nextDayLevel = { scheduledStart: null, scheduledEnd: null, confirmedDate: at('2026-08-14T00:00:00-04:00') }
+  assert.equal(truckConflictBetween(knownEnd, nextDayLevel), null)
+  // Strip the stored end and the derived hold takes over (3h + buffer < the 6h
+  // floor → 02:00), so the same job then does hold the next morning.
+  assert.equal(truckConflictBetween({ ...knownEnd, scheduledEnd: null }, nextDayLevel), 'same_day_unknown_times')
+})
+
+test('P0-A: each side of a comparison uses ITS OWN length', () => {
+  // Two open-ended timed rows, 8 hours apart. The long job's hold reaches the
+  // second one; the short job's does not reach back — the hold is a property of
+  // the booking, not of the comparison.
+  const long = { scheduledStart: at('2026-08-13T09:00:00-04:00'), scheduledEnd: null, confirmedDate: null, estimatedHours: 10 }
+  const later = { scheduledStart: at('2026-08-13T17:00:00-04:00'), scheduledEnd: null, confirmedDate: null, estimatedHours: 3 }
+  assert.equal(truckConflictBetween(long, later), 'time_overlap')
+  assert.equal(truckConflictBetween(later, long), 'time_overlap', 'the rule is symmetric')
+  // Drop the long job's estimate and the flat 6h fallback frees the truck at
+  // 15:00 — the pre-P0-A answer.
+  assert.equal(truckConflictBetween({ ...long, estimatedHours: null }, later), null)
+  // A STORED end always wins over the derived one: the same long job with a
+  // real 13:00 finish does not reach 17:00.
+  assert.equal(truckConflictBetween({ ...long, scheduledEnd: at('2026-08-13T13:00:00-04:00') }, later), null)
+  // overlapWindow takes the two lengths separately (and one scalar still means
+  // "both sides", the old signature).
+  const a = at('2026-08-13T09:00:00-04:00')
+  const b = at('2026-08-13T14:30:00-04:00')
+  assert.equal(overlapWindow(a, null, b, null, 4, 4), false)
+  assert.equal(overlapWindow(a, null, b, null, 9, 4), true, "the FIRST booking's length is what reaches")
 })
 
 // ── truckConflictBetween: unknown-times conservatism ─────────────────────────
@@ -95,15 +181,19 @@ test('findTruckConflictsIn: excludeBookingId skips the booking being edited', ()
   assert.equal(findTruckConflictsIn(bookings, { ...q, excludeBookingId: null }).length, 1)
 })
 
-test('findTruckConflictsIn: cancelled/completed/pending bookings never occupy a truck', () => {
-  for (const status of ['CANCELLED', 'COMPLETED', 'PENDING_APPROVAL', 'DECLINED']) {
+test('findTruckConflictsIn: finished/abandoned bookings never occupy a truck', () => {
+  for (const status of ['CANCELLED', 'COMPLETED', 'DRAFT', 'ARCHIVED', 'DECLINED']) {
     const conflicts = findTruckConflictsIn([shape({ status })], { truckId: 't1', start: at('2026-08-13T10:00:00-04:00') })
     assert.equal(conflicts.length, 0, `${status} should not conflict`)
   }
-  // Sanity: the same window against a live status DOES conflict.
-  for (const status of ['CONFIRMED', 'SCHEDULED', 'IN_PROGRESS']) {
+  // Every TRUCK_HOLD_STATUS conflicts — including the unpaid/unapproved holds
+  // the default `stripe_link` create writes (R2-2). Round 1 asserted the
+  // opposite for PENDING_APPROVAL, which is how a truck could be assigned in a
+  // status the check could not see.
+  for (const status of TRUCK_HOLD_STATUSES) {
     const conflicts = findTruckConflictsIn([shape({ status })], { truckId: 't1', start: at('2026-08-13T10:00:00-04:00') })
     assert.equal(conflicts.length, 1, `${status} should conflict`)
+    assert.equal(conflicts[0].hold, isPendingTruckHold(status) ? 'pending' : 'confirmed')
   }
 })
 
@@ -188,6 +278,38 @@ test('date-only bookings sharing a truck on the same ET day fire the rule', () =
   const out = evaluateTruckOverlaps([a, b], NOW)
   assert.equal(out.length, 1)
   assert.equal(out[0].dedupeKey, `truck-double-booked:truck:t1:${etDayKey(moveDay)}`)
+})
+
+test('truck-double-booked fires when one side is only an unpaid hold, and says so (R2-2)', () => {
+  // PENDING_APPROVAL is loaded by reminder-sync TODAY, so this pairing is live:
+  // a confirmed job and a paid-but-unapproved booking on one truck used to be
+  // invisible to this rule until BOTH were approved — i.e. after the damage.
+  const confirmed = ruleBooking({ id: 'bA', customerName: 'A', status: 'CONFIRMED' })
+  const held = ruleBooking({
+    id: 'bB', customerName: 'B', status: 'PENDING_APPROVAL',
+    scheduledStart: new Date(NOW.getTime() + DAY + 2 * HOUR),
+  })
+  const out = evaluateTruckOverlaps([confirmed, held], NOW)
+  assert.equal(out.length, 1)
+  assert.match(out[0].description, /B \(unpaid hold\)/)
+  assert.match(out[0].description, /only an unpaid hold/)
+
+  // Two unpaid holds (the shape the default stripe_link path produces) get
+  // their own line — the owner may be waiting on one to fall through.
+  const bothPending = evaluateTruckOverlaps(
+    [
+      ruleBooking({ id: 'bC', customerName: 'C', status: 'PENDING_PAYMENT' }),
+      ruleBooking({ id: 'bD', customerName: 'D', status: 'PENDING_PAYMENT', scheduledStart: new Date(NOW.getTime() + DAY + HOUR) }),
+    ],
+    NOW,
+  )
+  assert.equal(bothPending.length, 1)
+  assert.match(bothPending[0].description, /None of them is paid or approved yet/)
+
+  // A dead status on one side still keeps the rule quiet.
+  for (const dead of ['CANCELLED', 'COMPLETED', 'DRAFT', 'ARCHIVED']) {
+    assert.equal(evaluateTruckOverlaps([confirmed, ruleBooking({ id: 'bX', status: dead })], NOW).length, 0, dead)
+  }
 })
 
 test('evaluateAll carries the truck rule and stamps its fingerprint', () => {

@@ -14,6 +14,7 @@ import { ManualEventType } from '@prisma/client'
 
 import { botLogger } from '../lib/logger'
 import { prisma } from '../lib/db'
+import { moveWhenParts, smsMoveWhen } from '../lib/booking-display'
 import { etDayRange, moveDateInRange, effectiveMoveDate } from '../lib/scheduling'
 import {
   addTask,
@@ -71,7 +72,34 @@ async function respondSafely(interaction: ChatInputCommandInteraction, content: 
   }
 }
 
-const fmtDate = (d?: Date | null): string =>
+// ── TWO formatters, and they must never be merged back into one (item P0-C) ──
+//
+//  A MOVE DATE and an EVENT TIMESTAMP are different kinds of value, and the
+//  single `fmtDate` this file used to have could only be right about one of
+//  them. `requestedDate`/`confirmedDate` hold a 00:00 ET DAY ANCHOR when the
+//  owner committed to no crew hour, so `dateStyle:'medium', timeStyle:'short'`
+//  told Diego on Discord that a date-only job runs at **12:00 AM** — the last
+//  three surfaces of the R3-1 leak, missed because the gateway bot was outside
+//  that contract's file list. `ManualEvent.createdAt` (the /recent log) is a
+//  genuine instant whose hour IS the fact being reported, so it must keep it.
+//
+//  fmtMoveDate → booking DATE COLUMNS. Delegates to the shared booking-aware
+//  rule in booking-display (the same one the cards, emails, SMS, portal and
+//  admin jobs list use), so there is ONE decision, not a bot-local copy.
+//  fmtTimestamp → real event instants only.
+
+/** A booking date column, rendered with its hour only when a real one exists.
+ *
+ *  Takes the COLUMN plus the flag rather than the whole row on purpose:
+ *  `moveTimeKnown` treats any stored `scheduledStart` as proof of a crew hour,
+ *  so handing it a booking that was created day-level and later given a real
+ *  start would print "12:00 AM" in the *Requested* field — the anchor's own
+ *  hour — while claiming it as that column's time. */
+const fmtMoveDate = (d?: Date | null, startTimeKnown?: boolean | null): string =>
+  smsMoveWhen({ date: d, startTimeKnown }) ?? 'TBD'
+
+/** A real event instant (a log entry, not a move). The hour is a fact here. */
+const fmtTimestamp = (d?: Date | null): string =>
   d
     ? new Date(d).toLocaleString('en-US', { timeZone: 'America/New_York', dateStyle: 'medium', timeStyle: 'short' })
     : 'TBD'
@@ -143,8 +171,8 @@ async function handleJob(interaction: ChatInputCommandInteraction): Promise<void
     .setColor(0xff5a1f)
     .addFields(
       { name: '👤 Customer', value: `${booking.customer.name}\n${booking.customer.email}\n${booking.customer.phone}`, inline: true },
-      { name: '📅 Requested', value: fmtDate(booking.requestedDate), inline: true },
-      { name: '📅 Confirmed', value: fmtDate(booking.confirmedDate), inline: true },
+      { name: '📅 Requested', value: fmtMoveDate(booking.requestedDate, booking.startTimeKnown), inline: true },
+      { name: '📅 Confirmed', value: fmtMoveDate(booking.confirmedDate, booking.startTimeKnown), inline: true },
       { name: '📍 Route', value: `${booking.originAddress}\n→ ${booking.destAddress}`, inline: false },
       { name: '📝 Details', value: (booking.itemsDescription ?? '—').slice(0, 1024), inline: false }
     )
@@ -178,10 +206,19 @@ async function handleSchedule(interaction: ChatInputCommandInteraction): Promise
   if (jobs.length === 0) {
     embed.setDescription('No confirmed jobs in the next 48 hours. 🏖️')
   } else {
-    for (const { j, when } of jobs) {
+    for (const { j } of jobs) {
+      // Render the ROW, never the coalesced `when` above: a bare Date has
+      // thrown away `startTimeKnown`, which is precisely the defect the admin
+      // jobs-list guard already forbids. `moveWhenInstant` applies the same
+      // scheduledStart → confirmedDate → requestedDate precedence as
+      // `effectiveMoveDate`, so the instant displayed is unchanged — only the
+      // invented 12:00 AM disappears. A clock emoji would re-assert the hour
+      // the text just declined to state, so a date-only job gets 📅.
+      const printed = smsMoveWhen(j) ?? 'TBD'
+      const timed = moveWhenParts(j).time !== null
       embed.addFields({
         name: `${j.displayId} — ${j.customer.name}`,
-        value: `⏰ ${fmtDate(when)}\n📍 ${j.originAddress || 'Address TBD'}`,
+        value: `${timed ? '⏰' : '📅'} ${printed}\n📍 ${j.originAddress || 'Address TBD'}`,
         inline: false,
       })
     }
@@ -364,7 +401,9 @@ async function handleRecent(interaction: ChatInputCommandInteraction): Promise<v
           const ui = EVENT_UI[e.eventType]
           const loc = e.zip ? ` · ${e.zip}` : ''
           const note = e.notes ? ` · ${e.notes}` : ''
-          return `${ui.emoji} **${e.customerName ?? '—'}**${loc} _(${ui.label})_${note}\n⏱ ${fmtDate(e.createdAt)}`
+          // A logged event, not a move: `createdAt` is a genuine instant and its
+          // hour is the fact being reported. Deliberately NOT fmtMoveDate.
+          return `${ui.emoji} **${e.customerName ?? '—'}**${loc} _(${ui.label})_${note}\n⏱ ${fmtTimestamp(e.createdAt)}`
         })
         .join('\n')
         .slice(0, 4000)

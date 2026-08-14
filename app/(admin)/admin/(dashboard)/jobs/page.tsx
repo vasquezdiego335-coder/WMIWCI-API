@@ -1,8 +1,11 @@
 import Link from 'next/link'
+import type { Prisma } from '@prisma/client'
 import { prisma } from '@/lib/db'
+import { MIGRATION_MISSING_MESSAGE, readBookingWithMigrationFallback } from '@/lib/migration-window'
 import { fmtCents } from '@/lib/profit'
 import { customerBalance, jobProfit, jobWarnings, jobFinancialCompleteness, JOB_MONEY_PAYMENT_SELECT, JOB_MONEY_EXPENSE_SELECT } from '@/lib/job-money'
 import { completenessLabel } from '@/lib/financial-completeness'
+import { formatMoveWhen, type MoveWhenInput } from '@/lib/booking-display'
 import { PageHeader, COLORS, Empty, Badge, SoftBadge, Callout, CompletenessBadge } from '../_ui'
 
 export const dynamic = 'force-dynamic'
@@ -38,12 +41,24 @@ const MONEY_INCLUDE = {
   expenses: { select: JOB_MONEY_EXPENSE_SELECT },
 } as const
 
+type JobsBooking = Prisma.BookingGetPayload<{ include: typeof MONEY_INCLUDE }>
+
 const cityOf = (addr?: string | null) => {
   if (!addr) return '—'
   const parts = addr.split(',').map((p) => p.trim())
   return parts.length >= 2 ? parts[parts.length - 2].replace(/\d{5}(-\d{4})?/, '').trim() || parts[0] : parts[0]
 }
-const dateTime = (d?: Date | null) => (d ? new Date(d).toLocaleString('en-US', { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', timeZone: 'America/New_York' }) : 'Unscheduled')
+// ITEM R3-1 — this list is the owner's operational view of every job, and it
+// formatted the coalesced move date WITH an hour. For a booking taken without
+// a crew start time that date is a 00:00 ET DAY ANCHOR, so the whole pipeline
+// read "12:00 AM". `formatMoveWhen` is the ONE booking-aware formatter: it
+// takes the ROW (so `startTimeKnown` and a real `scheduledStart` both count)
+// and prints the date alone when no hour was ever chosen.
+const dateTime = (b: MoveWhenInput) =>
+  formatMoveWhen(b, {
+    dateFormat: { weekday: 'short', month: 'short', day: 'numeric' },
+    separator: ', ',
+  }) || 'Unscheduled'
 
 export default async function JobsPage({ searchParams }: { searchParams: { status?: string; view?: string } }) {
   const activeStatuses = STAGES.map((s) => s.status)
@@ -76,12 +91,26 @@ export default async function JobsPage({ searchParams }: { searchParams: { statu
     where.status = { in: activeStatuses }
   }
 
-  let bookings = await prisma.booking.findMany({
-    where,
-    include: MONEY_INCLUDE,
-    orderBy: [{ scheduledStart: 'asc' }, { requestedDate: 'asc' }, { createdAt: 'desc' }],
-    take: 200,
-  })
+  // ── ITEM P0-E — the Jobs list must not 500 before the SQL is applied ──────
+  // `include: MONEY_INCLUDE` asks Postgres for `$scalars` from the GENERATED
+  // schema, so during the normal code-before-SQL window (migrations are applied
+  // by hand) this read raised P2022 and the whole owner Jobs page 500'd. The
+  // fallback names every column that certainly exists; the only thing lost is
+  // `startTimeKnown`, and `formatMoveWhen` already infers a day-level move from
+  // the 00:00 ET anchor shape when the flag is unreadable — so a date-only job
+  // still shows no hour rather than "12:00 AM".
+  const jobsRead = await readBookingWithMigrationFallback<JobsBooking[]>(
+    (args) =>
+      prisma.booking.findMany({
+        where,
+        ...(args as object),
+        orderBy: [{ scheduledStart: 'asc' }, { requestedDate: 'asc' }, { createdAt: 'desc' }],
+        take: 200,
+      }),
+    MONEY_INCLUDE,
+  )
+  const migrationDegraded = jobsRead.degraded
+  let bookings: JobsBooking[] = jobsRead.row ?? []
 
   // Client-side special views that need computed money/flags.
   if (searchParams.view === 'attention') bookings = bookings.filter((b) => jobWarnings(b).length > 0)
@@ -100,6 +129,16 @@ export default async function JobsPage({ searchParams }: { searchParams: { statu
   return (
     <div>
       <PageHeader title="Jobs" subtitle={`${totalOperational} active job${totalOperational === 1 ? '' : 's'} across the pipeline`} />
+
+      {/* ITEM P0-E — say it out loud rather than rendering a quietly incomplete
+          list. The jobs below are real; the newest per-booking fields are not
+          readable until the migration runs. */}
+      {migrationDegraded && (
+        <Callout tone="warning" title="Showing these jobs without their newest fields.">
+          {MIGRATION_MISSING_MESSAGE}. Everything listed here is real, but the truck assignment, crew plan and
+          day-level start-time flag cannot be read until that SQL is applied.
+        </Callout>
+      )}
 
       {incompleteCount > 0 && (
         <Callout tone="warning" title={`${incompleteCount} move${incompleteCount === 1 ? '' : 's'} in this view ${incompleteCount === 1 ? 'has' : 'have'} incomplete financial data.`}>
@@ -170,7 +209,7 @@ export default async function JobsPage({ searchParams }: { searchParams: { statu
                       )}
                     </div>
                     <div style={{ fontSize: '12px', color: COLORS.muted }}>
-                      {dateTime(b.scheduledStart ?? b.confirmedDate ?? b.requestedDate)}
+                      {dateTime(b)}
                       {' · '}{cityOf(b.originAddress)} → {cityOf(b.destAddress)}
                     </div>
                     <div style={{ fontSize: '12px', color: COLORS.faint, marginTop: '2px' }}>

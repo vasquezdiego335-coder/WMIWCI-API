@@ -16,7 +16,7 @@ import { approveBooking, declineBooking } from "@/lib/booking-approval";
 import { onBookingConfirmed } from "@/lib/journeys";
 import { offerRescheduleToCustomer } from "@/lib/reschedule";
 import { t } from "@/lib/i18n";
-import { formatEastern } from "@/lib/scheduling";
+import { formatEastern, formatMoveWhen } from "@/lib/scheduling";
 import { authorizeOwnerAction, type DiscordActor } from "@/lib/discord-auth";
 import { accessSections } from "@/lib/booking-access";
 import {
@@ -73,6 +73,11 @@ type CardBooking = {
   displayId: string;
   requestedDate: Date | null;
   confirmedDate: Date | null;
+  /** Item R3-1 — carried so the Approved card can tell a real crew hour from a
+   *  00:00 ET day anchor. Optional: a caller that could not read the column
+   *  still gets the anchor detected by shape. */
+  scheduledStart?: Date | null;
+  startTimeKnown?: boolean | null;
   depositAmount: number;
   customer?: { name: string } | null;
 };
@@ -86,8 +91,11 @@ function confirmedCard(
   capturedCents?: number,
   receiptUrl?: string | null,
 ) {
-  const when = booking.confirmedDate ?? booking.requestedDate;
-  const dateStr = when ? formatEastern(when) : "—";
+  // Item R3-1: the card the owner sees AT THE MOMENT OF APPROVAL used to run
+  // the day anchor through formatEastern and announce a 12:00 AM move. The
+  // shared booking-aware formatter prints the DATE for a day-level booking and
+  // the real hour for a timed one.
+  const dateStr = formatMoveWhen(booking) || "—";
   const cents = capturedCents ?? booking.depositAmount ?? 4900;
   const components = receiptUrl
     ? [{ type: 1, components: [{ type: 2, style: 5, label: "🧾 Customer Receipt", url: receiptUrl }] }]
@@ -413,9 +421,14 @@ async function handleViewFullBooking(bookingId: string | undefined, messageId: s
     `Customer ID: \`${s(c?.id)}\``,
   ], true);
 
+  // Item R3-1: `requestedDate`/`confirmedDate` are DAY ANCHORS on a day-level
+  // booking — printing their hour invents one. `scheduledStart`/`scheduledEnd`
+  // only ever hold real instants, so they keep the full timestamp.
+  const moveDt = (v: Date | null | undefined): string =>
+    (v ? formatMoveWhen(v, booking.startTimeKnown) : "") || DASH;
   add("📅 Schedule", [
-    `Requested: ${dt(booking.requestedDate)}`,
-    `Confirmed: ${dt(booking.confirmedDate)}`,
+    `Requested: ${moveDt(booking.requestedDate)}`,
+    `Confirmed: ${moveDt(booking.confirmedDate)}`,
     `Window: ${dt(booking.scheduledStart)} → ${dt(booking.scheduledEnd)}`,
     booking.rescheduleCount ? `Reschedules: ${booking.rescheduleCount}` : null,
   ], true);
@@ -587,6 +600,8 @@ async function renderJobCard(booking: JobBooking) {
     customerPhone: booking.customer?.phone,
     serviceType: serviceLabelFromDescription(items) ?? undefined,
     moveDate: booking.confirmedDate ?? booking.requestedDate,
+    // Item R3-1 — the crew card shows a DATE for a day-level job, not 12:00 AM.
+    startTimeKnown: booking.startTimeKnown,
     originAddress: booking.originAddress,
     destAddress: booking.destAddress,
     truckOptionLabel: booking.truckAddonDueOnMoveDay

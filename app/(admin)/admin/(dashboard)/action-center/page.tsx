@@ -8,6 +8,7 @@ import {
   REMINDER_STATUS_LABELS, REMINDER_STATUS_COLORS, REMINDER_CATEGORY_LABELS, OWNER_LABELS,
 } from '../_labels'
 import ReminderActions, { RescanButton } from './ReminderActions'
+import { formatMoveWhen } from '@/lib/booking-display'
 
 export const dynamic = 'force-dynamic'
 
@@ -17,6 +18,16 @@ export const dynamic = 'force-dynamic'
 // when nothing changed), and "Rescan now" forces one.
 
 const dateTime = (d: Date) => new Date(d).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', timeZone: 'America/New_York' })
+
+// ITEM R3-1 — a reminder's `dueAt` is copied straight off the booking's move
+// date (reminder-rules `dueAt: start`), so for a day-level job it is the 00:00
+// ET DAY ANCHOR and the row read "due Jul 15, 12:00 AM". A Reminder row carries
+// no `startTimeKnown`, so this is exactly the case the shared formatter's
+// fail-soft half exists for: an anchor is recognised by its SHAPE and rendered
+// as a date, while every real timestamp (a scan time, a snooze, a crew start)
+// keeps its hour.
+const anchorAware = (d: Date) =>
+  formatMoveWhen({ date: d }, { dateFormat: { month: 'short', day: 'numeric' }, separator: ', ' }) || '—'
 const sevRank = (s: string) => { const i = REMINDER_SEVERITY_ORDER.indexOf(s); return i === -1 ? 99 : i }
 
 type Search = { status?: string; severity?: string; category?: string; owner?: string; q?: string; group?: string }
@@ -182,7 +193,7 @@ export default async function ActionCenterPage({ searchParams }: { searchParams:
                         <p style={{ fontSize: '13px', color: COLORS.ink, margin: '0 0 6px', lineHeight: 1.5 }}>{r.description}</p>
                         <div style={{ fontSize: '11px', color: COLORS.faint, display: 'flex', gap: '10px', flexWrap: 'wrap' }}>
                           <span>{REMINDER_CATEGORY_LABELS[r.category] ?? r.category}</span>
-                          {r.dueAt && <span>· due {dateTime(r.dueAt)}</span>}
+                          {r.dueAt && <span>· due {anchorAware(r.dueAt)}</span>}
                           {r.assignedOwner && <span>· assigned to {OWNER_LABELS[r.assignedOwner]}</span>}
                           {r.status === 'SNOOZED' && r.snoozedUntil && <span>· snoozed until {dateTime(r.snoozedUntil)}</span>}
                           {r.resolutionNote && ['RESOLVED', 'DISMISSED'].includes(r.status) && <span>· {r.resolutionNote}</span>}

@@ -19,6 +19,7 @@ import {
   FONT,
   P,
 } from './_ui'
+import { moveWhenParts } from '../lib/booking-display'
 
 // ════════════════════════════════════════════════════════════════════════
 //  MOVE REMINDER  ("Your move is almost here")
@@ -29,8 +30,14 @@ import {
 
 interface Props {
   customerName?: string
+  /** The move's instant — a real crew start when one exists, otherwise the
+   *  booking's ET DAY ANCHOR. Item R3-1: the worker used to pass
+   *  `booking.scheduledStart` alone, which is NULL for a day-level move, so
+   *  the reminder printed no date at all ("Your move is coming up soon"). */
   scheduledStart?: string
   timeLabel?: string
+  /** Booking.startTimeKnown. FALSE ⇒ show the DATE and no hour. */
+  startTimeKnown?: boolean | null
   leadLabel?: string
   originAddress?: string
   displayId?: string
@@ -50,6 +57,7 @@ export default function JobReminderEmail({
   customerName = 'there',
   scheduledStart,
   timeLabel,
+  startTimeKnown,
   leadLabel,
   originAddress,
   displayId,
@@ -65,17 +73,29 @@ export default function JobReminderEmail({
 }: Props) {
   const es = (locale ?? 'en').toLowerCase().startsWith('es')
   const locStr = es ? 'es-US' : 'en-US'
-  const dateStr = scheduledStart
-    ? new Date(scheduledStart).toLocaleDateString(locStr, { weekday: 'long', month: 'long', day: 'numeric', timeZone: 'America/New_York' })
-    : es ? 'muy pronto' : 'coming up soon'
-  const timeStr = timeLabel || (scheduledStart ? new Date(scheduledStart).toLocaleTimeString(locStr, { hour: 'numeric', minute: '2-digit', timeZone: 'America/New_York' }) : undefined)
+  // ITEM R3-1 — the ONE booking-aware formatter. Losing the HOUR of a day-level
+  // move is correct; losing the DATE is not, and that is what this reminder did
+  // once the worker stopped passing a promoted midnight. The date always
+  // renders; the hour renders only when a real one exists.
+  const when = moveWhenParts(
+    { date: scheduledStart, startTimeKnown },
+    { locale: locStr, dateFormat: { weekday: 'long', month: 'long', day: 'numeric' } },
+  )
+  const dateStr = when.date ?? (es ? 'muy pronto' : 'coming up soon')
+  // The WHEN band carries whatever we honestly have — a real hour, an arrival
+  // window the owner typed, or "Time to be confirmed" for a day-level move.
+  const timeStr = timeLabel || when.time || undefined
+  // The opening sentence reads "…arrives tomorrow — Thursday, July 15 at 9:30
+  // AM", so it may only take a label that is genuinely a TIME. Feeding it the
+  // day-level placeholder produced "at Time to be confirmed".
+  const subTime = when.timeKnown ? timeStr : undefined
 
   const t = es
     ? {
         preview: `Tu mudanza es ${leadLabel || dateStr}. Aquí tienes cómo prepararte.`,
         pill: leadLabel || 'Próxima mudanza',
         h1: 'Tu mudanza ya casi llega.',
-        sub: `Hola ${customerName}, tu equipo llega ${leadLabel ? leadLabel + ' — ' : ''}${dateStr}${timeStr ? ` a las ${timeStr}` : ''}. Prepárate y lo hacemos rápido.`,
+        sub: `Hola ${customerName}, tu equipo llega ${leadLabel ? leadLabel + ' — ' : ''}${dateStr}${subTime ? ` a las ${subTime}` : ''}. Prepárate y lo hacemos rápido.`,
         whenLabel: 'Tu mudanza está programada para',
         prepTitle: 'Antes de que llegue el equipo',
         prep: [
@@ -95,7 +115,7 @@ export default function JobReminderEmail({
         preview: `Your move is ${leadLabel || dateStr}. Here's how to get ready.`,
         pill: leadLabel || 'Upcoming move',
         h1: 'Your move is almost here.',
-        sub: `Hi ${customerName}, your crew arrives ${leadLabel ? leadLabel + ' — ' : ''}${dateStr}${timeStr ? ` at ${timeStr}` : ''}. A little prep keeps everything fast.`,
+        sub: `Hi ${customerName}, your crew arrives ${leadLabel ? leadLabel + ' — ' : ''}${dateStr}${subTime ? ` at ${subTime}` : ''}. A little prep keeps everything fast.`,
         whenLabel: 'Your move is scheduled for',
         prepTitle: 'Before the crew arrives',
         prep: [

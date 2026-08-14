@@ -13,6 +13,11 @@ import {
   type DepositMode,
   type ServiceMode,
 } from '@/lib/admin-booking'
+// The SERVER's wording for every scan ending, imported rather than retyped.
+// scan-lock.ts is a pure module with no imports of its own (DB-free by design),
+// so a client island can carry it. See SCAN_KICK_FALLBACKS below for why this
+// is not a style preference.
+import { SCAN_KICK_MESSAGES } from '@/lib/scan-lock'
 
 // ════════════════════════════════════════════════════════════════════════
 //  BookMoveForm — the Book Move client island (Moving OS Phase 1).
@@ -25,6 +30,15 @@ import {
 
 export type BookPrefill = {
   leadId?: string
+  /** An existing Customer matched from the lead's email. Prefilled so
+   *  converting a repeat customer's lead updates their record instead of
+   *  creating a second one (correctness pass item 3). */
+  customerId?: string
+  customerBookings?: number
+  /** That customer's STORED email language (R2-7.1). Without it the language
+   *  select showed English for a Spanish-speaking repeat customer, and the
+   *  booking wrote that English back over their real preference. */
+  customerLocale?: string
   name?: string
   email?: string
   phone?: string
@@ -56,7 +70,10 @@ type TruckOpt = {
   status: string
   active: boolean
   busy: boolean
-  bookings: Array<{ displayId: string; status: string; customerName?: string }>
+  /** R2-2: how many of that day's assignments are unpaid/unapproved HOLDS
+   *  rather than confirmed jobs — the same distinction the create's 409 makes. */
+  pendingHolds?: number
+  bookings: Array<{ displayId: string; status: string; customerName?: string; hold?: 'confirmed' | 'pending' }>
 }
 type CustomerHit = { id: string; name: string; email: string | null; phone: string | null; locale: string; bookings: number }
 type InvLine = {
@@ -78,6 +95,47 @@ type SuccessPayload = {
   stripeUrl: string | null
   leadConverted: boolean
   warnings: string[]
+  /** Item 2 — what the server actually scheduled. */
+  scheduling?: 'timed' | 'day_level'
+  crewStartTime?: string | null
+  scheduledStart?: string | null
+  /** Item 3 — which customer record this booking landed on. */
+  customerId?: string
+  customerMode?: 'use' | 'update' | 'create'
+  /** Item 7 — what the Action Center kick ACTUALLY did. Absent (an older
+   *  response) means "not reported", which the panel says nothing about
+   *  rather than claiming a scan ran. */
+  actionCenterScan?: 'completed' | 'skipped_cooldown' | 'failed'
+  actionCenterScanReason?: string
+  actionCenterScanMessage?: string
+}
+
+/** Wording for a response that reports a scan ending but carries no message —
+ *  version skew (a new client bundle answered by an older server), since
+ *  today's route always sends all three fields.
+ *
+ *  P0-B — WHY THIS IS A MAP AND NOT FOUR STRING LITERALS. Round 3 deleted the
+ *  sentence "Action Center rescanned — this booking is included" from the
+ *  server copy because it claims coverage the code cannot prove; the client
+ *  kept its own hand-typed copy of it, UNCONDITIONAL, under a branch
+ *  (`actionCenterScan === 'completed'`) that covers BOTH server endings — so
+ *  it printed a coverage claim for exactly the ending where the server
+ *  deliberately says "this booking may not be on the list". Every fallback now
+ *  comes from the same constants the server maps its endings onto, so no copy
+ *  of the copy exists to drift again.
+ *
+ *  `SCAN_KICK_MESSAGES.ran_included` is deliberately ABSENT and must stay
+ *  absent: coverage depends on the COMMITTED status and on the loader's own
+ *  `isInternalTest` filter (scan-lock.scanCoversBooking), which only the server
+ *  can evaluate. Re-deriving that predicate here would be the same drift in a
+ *  new place. `ran` is the claimless wording for a scan that ran, and an
+ *  ending this build does not recognize falls through to `failed`, which
+ *  promises nothing at all. */
+const SCAN_KICK_FALLBACKS: Record<string, string> = {
+  ran: SCAN_KICK_MESSAGES.ran,
+  cooldown: SCAN_KICK_MESSAGES.cooldown,
+  already_running: SCAN_KICK_MESSAGES.already_running,
+  timeout: SCAN_KICK_MESSAGES.timeout,
 }
 
 const DIFFICULTY_COLORS: Record<string, string> = { standard: '#10B981', elevated: '#F59E0B', high: '#EF4444' }
@@ -85,6 +143,19 @@ const DEPOSIT_LABELS: Record<DepositMode, [string, string]> = {
   stripe_link: ['$49 hold link', 'Creates the Stripe hold link for YOU to send (text or email it yourself — nothing is sent automatically).'],
   collect_on_day: ['Collect on move day', 'Book now as CONFIRMED; the deposit is a move-day matter.'],
   waived: ['Waived', 'Owner decision — recorded in the audit log.'],
+}
+
+/** ISO instant → "8:00 AM" in America/New_York (the only timezone this business
+ *  schedules in). Null in, null out — a day-level booking has no time to show. */
+function formatEtTime(iso?: string | null): string | null {
+  if (!iso) return null
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return null
+  return new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/New_York',
+    hour: 'numeric',
+    minute: '2-digit',
+  }).format(d)
 }
 
 const num = (s: string): number | undefined => {
@@ -99,14 +170,33 @@ export default function BookMoveForm({ prefill }: { prefill?: BookPrefill }) {
   // ── Customer ──
   const [custSearch, setCustSearch] = useState('')
   const [custHits, setCustHits] = useState<CustomerHit[]>([])
+  // The PICKED customer record. While this is set, the POST updates that exact
+  // CRM row (correctness pass item 3) instead of matching on the typed email —
+  // which is what used to create a second record for a repeat customer.
+  const [customerId, setCustomerId] = useState(prefill?.customerId ?? '')
+  const [linkedLabel, setLinkedLabel] = useState(
+    prefill?.customerId
+      ? `${prefill.name ?? 'Existing customer'}${typeof prefill.customerBookings === 'number' ? ` · ${prefill.customerBookings} booking${prefill.customerBookings === 1 ? '' : 's'}` : ''}`
+      : '',
+  )
   const [name, setName] = useState(prefill?.name ?? '')
   const [email, setEmail] = useState(prefill?.email ?? '')
   const [phone, setPhone] = useState(prefill?.phone ?? '')
-  const [locale, setLocale] = useState<'en' | 'es'>('en')
+  // The customer's email language. Two pieces of state, deliberately (R2-7.1):
+  // `locale` is what the select SHOWS (seeded from the linked customer's stored
+  // value so the owner sees the truth), and `localeTouched` records whether the
+  // owner actually chose it. Only a touched value is submitted — an untouched
+  // select must never write 'en' over a Spanish speaker's preference just
+  // because English is what a fresh form shows.
+  const [locale, setLocale] = useState<'en' | 'es'>(prefill?.customerLocale === 'es' ? 'es' : 'en')
+  const [localeTouched, setLocaleTouched] = useState(false)
 
   // ── Move details ──
   const [serviceType, setServiceType] = useState(prefill?.serviceType || '2br')
   const [moveDate, setMoveDate] = useState(prefill?.moveDate ?? '')
+  // The REAL crew start time (ET). Blank is a first-class answer: the booking
+  // is then scheduled at day level and nothing invents an hour (item 2).
+  const [startTime, setStartTime] = useState('')
   const [arrivalWindow, setArrivalWindow] = useState('')
   const [oStreet, setOStreet] = useState('')
   const [oCity, setOCity] = useState(prefill?.originCity ?? '')
@@ -301,12 +391,24 @@ export default function BookMoveForm({ prefill }: { prefill?: BookPrefill }) {
   const truckBusy = !!selectedTruck?.busy
 
   function pickCustomer(c: CustomerHit) {
+    // The id is the whole point: the booking now updates THIS record, so a
+    // corrected email or a newly added phone never forks their history.
+    setCustomerId(c.id)
+    setLinkedLabel(`${c.name} · ${c.bookings} booking${c.bookings === 1 ? '' : 's'}`)
     setName(c.name)
     setEmail(c.email ?? '')
     setPhone(c.phone ?? '')
-    if (c.locale === 'es') setLocale('es')
+    // Show THEIR language; picking a customer is not the owner choosing one,
+    // so this does not mark the field touched (R2-7.1).
+    setLocale(c.locale === 'es' ? 'es' : 'en')
+    setLocaleTouched(false)
     setCustHits([])
     setCustSearch('')
+  }
+
+  function unlinkCustomer() {
+    setCustomerId('')
+    setLinkedLabel('')
   }
 
   function addCatalogItem(item: CatalogItem) {
@@ -361,14 +463,20 @@ export default function BookMoveForm({ prefill }: { prefill?: BookPrefill }) {
     try {
       const body = {
         customer: {
+          id: customerId || undefined,
           name: name.trim(),
           email: email.trim() || undefined,
           phone: phone.trim() || undefined,
-          locale,
+          // Sent ONLY when the owner actually chose a language (R2-7.1) — the
+          // same "never blank / never overwrite what we were not told" rule the
+          // email and phone fields follow. Omitted means "no language stated":
+          // an existing customer keeps theirs, a new one is created 'en'.
+          locale: localeTouched ? locale : undefined,
         },
         move: {
           serviceType,
           moveDate,
+          startTime: startTime || undefined,
           arrivalWindow: arrivalWindow.trim() || undefined,
           originAddress: { street: oStreet.trim(), city: oCity.trim(), state: oState.trim() || 'NJ', zip: oZip },
           destAddress: { street: dStreet.trim(), city: dCity.trim(), state: dState.trim() || 'NJ', zip: dZip },
@@ -412,6 +520,12 @@ export default function BookMoveForm({ prefill }: { prefill?: BookPrefill }) {
         body: JSON.stringify(body),
       })
       const d = await res.json().catch(() => ({}))
+      if (res.status === 409 && d.conflictingCustomerId) {
+        // The typed email belongs to a DIFFERENT customer — the owner decides
+        // (book under that customer, or clear the email). Never a silent merge.
+        setError(d.error ?? 'That email already belongs to another customer.')
+        return
+      }
       if (res.status === 409) {
         setConflictInfo(d.error ?? 'Truck is already booked in this window.')
         return
@@ -431,10 +545,48 @@ export default function BookMoveForm({ prefill }: { prefill?: BookPrefill }) {
     const cascade: string[] = [
       `Booking ${success.bookingReference} created (${success.status === 'CONFIRMED' ? 'confirmed' : 'awaiting the $49 hold'})`,
     ]
+    // Item 3 — say which CRM record this landed on, so a repeat customer is
+    // visibly NOT duplicated.
+    if (success.customerMode === 'create') cascade.push('New customer record created')
+    else if (success.customerMode === 'update') cascade.push('Existing customer record updated (no duplicate created)')
+    else if (success.customerMode === 'use') cascade.push('Booked under the existing customer record (nothing to change)')
+    // Item 2 — the real schedule, or the honest absence of one.
+    const startLabel = formatEtTime(success.scheduledStart) ?? success.crewStartTime ?? ''
+    cascade.push(
+      success.scheduling === 'day_level'
+        ? 'Day-level scheduling — no crew start time was set, so truck conflicts are checked by day. It stays that way through approval: nothing invents an hour later'
+        : success.status === 'CONFIRMED'
+          ? `Crew start time ${startLabel} ET is on the schedule`
+          : `Crew start time ${startLabel} ET captured — it lands on the schedule when the $49 hold is paid`,
+    )
     if (success.jobId) cascade.push('Job scheduled + staffing requirement auto-created from the recommendation')
     if (success.leadConverted) cascade.push('Lead converted to BOOKED')
     if (success.stripeUrl) cascade.push('Stripe $49 hold link created — send it to the customer yourself')
-    cascade.push('Action Center scan kicked')
+    // Item 7 / R2-6 / R3-3 / P0-B — the REAL scan outcome, in the SERVER's
+    // words. Phase 1 claimed "Action Center scan kicked" no matter what
+    // happened, so a silent failure read as success; round 1 then claimed a
+    // SKIPPED scan meant "the list is already current", which is false for the
+    // booking that just committed; round 3 removed the last coverage claim
+    // from the server copy — and this panel kept a hand-typed copy of it.
+    //
+    // The server wording is authoritative. The fallbacks below exist only for
+    // a response that somehow carries no message, they are keyed on the REAL
+    // ending rather than on the coarse state (the old code answered
+    // 'skipped_cooldown' with the cooldown sentence even when the true reason
+    // was already_running), and they come from SCAN_KICK_FALLBACKS so no
+    // literal here can drift away from the server again.
+    const scanTimedOut = success.actionCenterScanReason === 'timeout'
+    const scanLine =
+      success.actionCenterScanMessage ??
+      SCAN_KICK_FALLBACKS[success.actionCenterScanReason ?? ''] ??
+      SCAN_KICK_MESSAGES.failed
+    // A slow scan is not a broken one — it stays in the cascade rather than in
+    // the red banner, because a red "failed" on every healthy-but-slow scan is
+    // what trains an owner to ignore the red banner.
+    if (success.actionCenterScan === 'completed' || success.actionCenterScan === 'skipped_cooldown' || scanTimedOut) {
+      cascade.push(scanLine)
+    }
+    const scanFailed = success.actionCenterScan === 'failed' && !scanTimedOut
     return (
       <div style={panel}>
         <h2 style={{ fontSize: '18px', fontWeight: 800, color: '#0A1628', margin: '0 0 4px' }}>
@@ -453,6 +605,19 @@ export default function BookMoveForm({ prefill }: { prefill?: BookPrefill }) {
             {success.warnings.map((w) => (
               <p key={w} style={{ fontSize: '12px', color: '#B45309', margin: '2px 0' }}>⚠ {w}</p>
             ))}
+          </div>
+        )}
+        {scanFailed && (
+          <div style={{ background: '#FEF2F2', border: '1px solid #FECACA', borderRadius: '10px', padding: '10px 12px', marginBottom: '14px' }}>
+            <p style={{ fontSize: '12px', color: '#B91C1C', margin: '0 0 6px' }}>
+              ⚠ {scanLine}
+            </p>
+            <p style={{ fontSize: '12px', color: '#7F1D1D', margin: '0 0 6px' }}>
+              The booking itself is saved — only the alert refresh did not confirm.
+            </p>
+            <Link href="/admin/action-center" style={{ fontSize: '12px', fontWeight: 700, color: '#B91C1C' }}>
+              Open the Action Center →
+            </Link>
           </div>
         )}
         <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap', alignItems: 'center' }}>
@@ -488,6 +653,17 @@ export default function BookMoveForm({ prefill }: { prefill?: BookPrefill }) {
             ))}
           </div>
         )}
+        {customerId && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: '10px', background: '#F0FDF4', border: '1px solid #BBF7D0', borderRadius: '8px', padding: '8px 12px', margin: '6px 0 10px' }}>
+            <span style={{ fontSize: '12px', color: '#166534' }}>
+              🔗 Booking under the existing customer record{linkedLabel ? ` — ${linkedLabel}` : ''}. Edits below update
+              that record; a blank field never erases what is stored.
+            </span>
+            <button type="button" onClick={unlinkCustomer} style={{ ...ghostBtn, padding: '5px 10px', fontSize: '12px' }}>
+              Unlink
+            </button>
+          </div>
+        )}
         <div style={row}>
           <label style={{ ...field, flex: 2 }}>
             <span style={labelCss}>Name *</span>
@@ -503,10 +679,22 @@ export default function BookMoveForm({ prefill }: { prefill?: BookPrefill }) {
           </label>
           <label style={field}>
             <span style={labelCss}>Language</span>
-            <select value={locale} onChange={(e) => setLocale(e.target.value as 'en' | 'es')} style={input}>
+            <select
+              value={locale}
+              onChange={(e) => {
+                setLocale(e.target.value as 'en' | 'es')
+                setLocaleTouched(true)
+              }}
+              style={input}
+            >
               <option value="en">English</option>
               <option value="es">Español</option>
             </select>
+            {customerId && !localeTouched && (
+              <span style={{ fontSize: '11px', color: '#6B7280' }}>
+                Their saved language — left alone unless you change it here
+              </span>
+            )}
           </label>
         </div>
         <p style={hint}>No email? Phone is enough — the system stores a never-deliverable placeholder and will not pretend to email them.</p>
@@ -529,6 +717,10 @@ export default function BookMoveForm({ prefill }: { prefill?: BookPrefill }) {
             <input type="date" value={moveDate} onChange={(e) => setMoveDate(e.target.value)} style={input} />
           </label>
           <label style={field}>
+            <span style={labelCss}>Crew start time (ET)</span>
+            <input type="time" value={startTime} onChange={(e) => setStartTime(e.target.value)} style={{ ...input, width: '120px' }} />
+          </label>
+          <label style={field}>
             <span style={labelCss}>Arrival window</span>
             <input value={arrivalWindow} onChange={(e) => setArrivalWindow(e.target.value)} placeholder="8:00–10:00 AM" style={input} maxLength={60} />
           </label>
@@ -537,6 +729,11 @@ export default function BookMoveForm({ prefill }: { prefill?: BookPrefill }) {
             <input type="number" min={0} max={10} value={stops} onChange={(e) => setStops(e.target.value)} style={{ ...input, width: '70px' }} />
           </label>
         </div>
+        <p style={hint}>
+          {startTime
+            ? 'The crew start time is what the Calendar, staffing times and truck conflicts key off — it is the time you are promising.'
+            : 'No crew start time yet? Leave it blank — the booking is scheduled by DAY and no hour is invented, now or at approval. Truck conflicts stay checked by the whole day, the calendar and digest list it by date with the time as TBD, and the customer is told the time is still to be confirmed. The arrival window is free text and is never turned into a start time.'}
+        </p>
         <AddressBlock
           title="Pickup" street={oStreet} city={oCity} state={oState} zip={oZip} prop={oProp}
           setStreet={setOStreet} setCity={setOCity} setState={setOState} setZip={setOZip} setProp={setOProp}
@@ -698,8 +895,12 @@ export default function BookMoveForm({ prefill }: { prefill?: BookPrefill }) {
             {truckBusy && (
               <div style={{ background: '#FEF2F2', border: '1px solid #FECACA', borderRadius: '10px', padding: '10px 12px', marginTop: '8px' }}>
                 <p style={{ fontSize: '12px', color: '#B91C1C', margin: '0 0 6px', fontWeight: 700 }}>
-                  ⚠ {selectedTruck!.name} already has {selectedTruck!.bookings.length} job{selectedTruck!.bookings.length === 1 ? '' : 's'} this day:{' '}
-                  {selectedTruck!.bookings.map((b) => b.displayId).join(', ')}
+                  ⚠ {selectedTruck!.name} is already taken on this day by {selectedTruck!.bookings.length} booking{selectedTruck!.bookings.length === 1 ? '' : 's'}:{' '}
+                  {/* R2-2: an unpaid hold counts — the create refuses it either
+                      way — but say which it is, because breaking a hold that
+                      nobody has paid for is a different call from breaking a
+                      confirmed job. */}
+                  {selectedTruck!.bookings.map((b) => `${b.displayId}${b.hold === 'pending' ? ' (unpaid hold)' : ''}`).join(', ')}
                 </p>
                 <label style={{ ...check, color: '#B91C1C' }}>
                   <input type="checkbox" checked={truckOverride} onChange={(e) => setTruckOverride(e.target.checked)} />
@@ -784,7 +985,7 @@ export default function BookMoveForm({ prefill }: { prefill?: BookPrefill }) {
         {busy ? 'Booking…' : '📞 BOOK MOVE'}
       </button>
       <p style={{ ...hint, marginTop: '8px' }}>
-        Booking creates the customer, the booking, the job + staffing requirement (when confirmed), converts the lead, and kicks the Action Center — no customer emails are sent.
+        Booking creates the customer, the booking, the job + staffing requirement (when confirmed), converts the lead, and asks the Action Center to rescan — the panel afterwards reports what that scan actually did. No customer emails are sent.
       </p>
     </div>
   )

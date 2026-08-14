@@ -5,7 +5,7 @@ import { apiLogger } from '@/lib/logger'
 import { TruckSource, TruckStatus } from '@prisma/client'
 import { can, type Role } from '@/lib/permissions'
 import { etDateTimeToInstant, etDayRange, moveDateInRange } from '@/lib/scheduling'
-import { TRUCK_CONFLICT_STATUSES } from '@/lib/truck-conflicts'
+import { TRUCK_HOLD_STATUSES, isPendingTruckHold, toTruckBookingShapes, truckOccupiedEtDays } from '@/lib/truck-conflicts'
 import { z } from 'zod'
 
 // Moving OS Phase 1 — fleet trucks (owner spec 2026-08-11).
@@ -49,30 +49,54 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
   try {
     const trucks = await prisma.truck.findMany({ orderBy: [{ active: 'desc' }, { name: 'asc' }] })
 
-    // ?date= → that ET day's live assignments per truck (busy state).
-    type DayBooking = { id: string; displayId: string; customerName: string; scheduledStart: Date | null; scheduledEnd: Date | null; status: string }
+    // ?date= → that ET day's assignments per truck (busy state).
+    //
+    // R2-2: the statuses are TRUCK_HOLD_STATUSES — the SAME list the booking
+    // create's conflict check uses. Round 1 listed only CONFIRMED/SCHEDULED/
+    // IN_PROGRESS, so a truck assigned to an unpaid PENDING_PAYMENT booking
+    // (what the default `stripe_link` create makes) showed as FREE here while
+    // the create refused it: the workspace and the guard disagreed about the
+    // same truck. `hold` says which kind each assignment is.
+    type DayBooking = { id: string; displayId: string; customerName: string; scheduledStart: Date | null; scheduledEnd: Date | null; status: string; hold: 'confirmed' | 'pending' }
     const byTruck = new Map<string, DayBooking[]>()
     if (dateParam) {
       // Noon anchor: etDayRange derives the exact ET day bounds DST-safely.
       const noon = etDateTimeToInstant(dateParam, '12:00')
       if (!noon) return NextResponse.json({ error: 'Invalid date' }, { status: 422 })
       const { start, end } = etDayRange(0, noon)
+      // P0-A: a job whose window runs past midnight OCCUPIES the next ET day
+      // too. Bucketing strictly by move date inside one day made this indicator
+      // disagree with the guard the create actually applies — the workspace
+      // showed a free truck for a day the create refuses. Load the day ±1 and
+      // decide membership with `truckOccupiedEtDays`, the SAME derivation
+      // (estimate + travel buffer, floored at the fallback) the conflict check
+      // and the advisory lock use.
+      const DAY_MS = 86_400_000
       const dayBookings = await prisma.booking.findMany({
         where: {
           truckId: { not: null },
           isInternalTest: false,
-          status: { in: [...TRUCK_CONFLICT_STATUSES] },
-          ...moveDateInRange(start, end),
+          status: { in: [...TRUCK_HOLD_STATUSES] },
+          ...moveDateInRange(new Date(start.getTime() - DAY_MS), new Date(end.getTime() + DAY_MS)),
         },
         select: {
           id: true, displayId: true, truckId: true, scheduledStart: true, scheduledEnd: true, status: true,
+          confirmedDate: true, requestedDate: true, estimatedHours: true,
           customer: { select: { name: true } },
         },
         orderBy: { scheduledStart: 'asc' },
       })
+      const occupiesThisDay = new Map(
+        toTruckBookingShapes(dayBookings).map((s) => [s.id, truckOccupiedEtDays(s).includes(dateParam)]),
+      )
       for (const b of dayBookings) {
+        if (!occupiesThisDay.get(b.id)) continue
         const list = byTruck.get(b.truckId!) ?? []
-        list.push({ id: b.id, displayId: b.displayId, customerName: b.customer.name, scheduledStart: b.scheduledStart, scheduledEnd: b.scheduledEnd, status: b.status })
+        list.push({
+          id: b.id, displayId: b.displayId, customerName: b.customer.name,
+          scheduledStart: b.scheduledStart, scheduledEnd: b.scheduledEnd, status: b.status,
+          hold: isPendingTruckHold(b.status) ? 'pending' : 'confirmed',
+        })
         byTruck.set(b.truckId!, list)
       }
     }
@@ -81,7 +105,17 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
       date: dateParam ?? null,
       trucks: trucks.map((t) => {
         const bookings = byTruck.get(t.id) ?? []
-        return { ...t, bookings, busy: bookings.length > 0 }
+        // `busy` keeps its meaning (something holds this truck that day) so the
+        // existing workspace copy stays correct; the split says whether it is a
+        // confirmed job or only an unpaid hold the owner might choose to break.
+        const pendingHolds = bookings.filter((b) => b.hold === 'pending').length
+        return {
+          ...t,
+          bookings,
+          busy: bookings.length > 0,
+          pendingHolds,
+          confirmedJobs: bookings.length - pendingHolds,
+        }
       }),
     })
   } catch (err) {

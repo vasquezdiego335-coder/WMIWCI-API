@@ -6,7 +6,16 @@ import { apiLogger } from '@/lib/logger'
 import { onBookingCompleted } from '@/lib/followups'
 import { onBookingCancelled, onBookingConfirmed, onBookingCompletedBalance } from '@/lib/journeys'
 import { confirmationScheduleData } from '@/lib/scheduling'
-import { approveBooking, declineBooking } from '@/lib/booking-approval'
+import {
+  approveBooking,
+  declineBooking,
+  isMigrationMissing,
+  loadApprovableBooking,
+  STATUS_ROUTE_BOOKING_SELECT,
+  STATUS_ROUTE_EXTRA_COLUMNS,
+  type StatusRouteBooking,
+} from '@/lib/booking-approval'
+import { ensureJobForBooking } from '@/lib/labor-service'
 import { z } from 'zod'
 
 const VALID_TRANSITIONS: Record<string, string[]> = {
@@ -33,14 +42,69 @@ function withDeadline<T>(p: Promise<T>, ms = 5000): Promise<T> {
   ])
 }
 
+// ── ITEM R3-2 — the response read must not 500 a transition that SUCCEEDED ──
+// The gate read above uses an explicit select, but this one returns the whole
+// row to the caller, and an unqualified findUnique asks for every column the
+// GENERATED client knows about — P2022 during the code-before-SQL window. The
+// approval (and its capture) has already happened by the time we get here, so a
+// throw would report a false failure and invite a double-approve. Try the full
+// row, degrade to the columns that certainly exist.
+async function readBookingResponse(id: string): Promise<unknown> {
+  try {
+    return await prisma.booking.findUnique({ where: { id } })
+  } catch (err) {
+    if (!isMigrationMissing(err)) throw err
+    const { booking } = await loadApprovableBooking<StatusRouteBooking>(
+      (select) => prisma.booking.findUnique({ where: { id }, select }),
+      STATUS_ROUTE_EXTRA_COLUMNS,
+    )
+    return booking
+  }
+}
+
+// ── ITEM R3-2 — the same hole on the WRITE's returned row ────────────────────
+// `prisma.booking.update` returns `$scalars` from the GENERATED client exactly
+// like an unqualified findUnique does, so during the code-before-SQL window the
+// generic transition below (CONFIRMED → SCHEDULED — the item R3-5 staffing
+// repair trigger — IN_PROGRESS, COMPLETED, CANCELLED) raised P2022 on the way
+// out and 500'd a status change the owner had every right to make.
+//
+// Retrying is safe: Postgres fails the UPDATE ... RETURNING statement as a unit,
+// so nothing was written on the first attempt, and the data is the same literal
+// either way. The fallback names its columns explicitly, so it cannot break
+// again the next time a column is added.
+async function updateBookingStatusRow(id: string, data: Record<string, unknown>): Promise<unknown> {
+  try {
+    return await prisma.booking.update({ where: { id }, data })
+  } catch (err) {
+    if (!isMigrationMissing(err)) throw err
+    apiLogger.warn({ bookingId: id }, 'booking status write returned a degraded row (unapplied migration) — the status change stands')
+    return prisma.booking.update({ where: { id }, data, select: STATUS_ROUTE_BOOKING_SELECT })
+  }
+}
+
 export async function POST(req: NextRequest, { params }: { params: { id: string } }): Promise<NextResponse> {
   const session = await getSession()
   if (!session || !['OWNER', 'MANAGER'].includes(session.role)) {
     return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
   }
 
-  const booking = await prisma.booking.findUnique({ where: { id: params.id }, include: { customer: true } })
+  // ── ITEM R3-2 — the admin surface died one step BEFORE approveBooking did.
+  //    This read was `include: { customer: true }`, which makes Prisma select
+  //    `$scalars` from the GENERATED schema — `startTimeKnown` and
+  //    `staffingPlan` included. In the normal code-before-SQL deploy window it
+  //    raised P2022, so every admin approval 500'd here and no $49 was ever
+  //    captured. Explicit columns + the same degraded ladder the approval path
+  //    uses: the only thing a missing column costs is the day-level flag, which
+  //    scheduling.moveIsDayLevel then infers from the 00:00 ET anchor. ──
+  const { booking, degraded, reason } = await loadApprovableBooking<StatusRouteBooking>(
+    (select) => prisma.booking.findUnique({ where: { id: params.id }, select }),
+    STATUS_ROUTE_EXTRA_COLUMNS,
+  )
   if (!booking) return NextResponse.json({ error: 'Not found' }, { status: 404 })
+  if (degraded) {
+    apiLogger.warn({ bookingId: params.id, reason }, 'booking status read degraded (unapplied migration) — continuing')
+  }
 
   const body = await req.json()
   const parsed = StatusSchema.safeParse(body)
@@ -65,7 +129,15 @@ export async function POST(req: NextRequest, { params }: { params: { id: string 
       source: 'admin',
     })
     if (!result.ok) {
-      const status = result.code === 'forbidden' ? 403 : result.code === 'capture_failed' ? 502 : 409
+      // ITEM P0-E — 'migration_missing' is a REFUSAL BEFORE the capture: no
+      // claim taken, no money moved, and the message names the migration. 503
+      // (not 409) so the workspace shows it as "the server can't do this yet"
+      // rather than "somebody else already handled it".
+      const status =
+        result.code === 'forbidden' ? 403
+          : result.code === 'capture_failed' ? 502
+            : result.code === 'migration_missing' ? 503
+              : 409
       return NextResponse.json({ error: result.message }, { status })
     }
     // Move date is now confirmed → (re-)anchor the 72h/24h pre-move reminders.
@@ -74,7 +146,7 @@ export async function POST(req: NextRequest, { params }: { params: { id: string 
     await onBookingConfirmed(params.id).catch((err) =>
       apiLogger.error({ err: err instanceof Error ? err.message : String(err), bookingId: params.id }, 'onBookingConfirmed failed (non-fatal)')
     )
-    const updated = await prisma.booking.findUnique({ where: { id: params.id } })
+    const updated = await readBookingResponse(params.id)
     return NextResponse.json(updated)
   }
 
@@ -93,7 +165,7 @@ export async function POST(req: NextRequest, { params }: { params: { id: string 
       const status = result.code === 'forbidden' ? 403 : 409
       return NextResponse.json({ error: result.message }, { status })
     }
-    const updated = await prisma.booking.findUnique({ where: { id: params.id } })
+    const updated = await readBookingResponse(params.id)
     return NextResponse.json(updated)
   }
 
@@ -113,6 +185,25 @@ export async function POST(req: NextRequest, { params }: { params: { id: string 
     })
   }
 
+  // ── ITEM R3-5 — CONFIRMED → SCHEDULED is THE reachable staffing repair ──
+  //    "Mark scheduled" is one of only two buttons the admin UI offers on a
+  //    confirmed booking, and it means "this move is on the schedule" — so it
+  //    is exactly where a job that came out of approval WITHOUT a staffing
+  //    requirement (a transient DB error, or the unapplied-migration window)
+  //    must get one. `ensureJobForBooking` resolves-or-creates the Job and then
+  //    runs the create-if-missing staffing ensure, so an owner-tuned
+  //    requirement is never touched and running it twice changes nothing.
+  //    Fail-soft: the status change is the owner's action and must stand even
+  //    if staffing cannot be written.
+  if (booking.status === 'CONFIRMED' && newStatus === 'SCHEDULED') {
+    await ensureJobForBooking(params.id, { source: 'status_scheduled', userId: session.userId }).catch((err) =>
+      apiLogger.error(
+        { err: err instanceof Error ? err.message : String(err), bookingId: params.id },
+        'staffing repair on CONFIRMED→SCHEDULED failed (non-fatal)',
+      ),
+    )
+  }
+
   // Set timestamps on the linked Job record if it exists
   if (newStatus === 'IN_PROGRESS') {
     await prisma.job.updateMany({
@@ -127,7 +218,7 @@ export async function POST(req: NextRequest, { params }: { params: { id: string 
     })
   }
 
-  const updated = await prisma.booking.update({ where: { id: params.id }, data })
+  const updated = await updateBookingStatusRow(params.id, data)
 
   await prisma.auditLog.create({
     data: {

@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { z } from 'zod'
+import type { Prisma } from '@prisma/client'
 import { prisma } from '@/lib/db'
 import { BOOKING_FEE_CENTS, createBookingCheckout } from '@/lib/stripe'
 import { apiLogger } from '@/lib/logger'
@@ -22,6 +23,7 @@ import { TRUCK_PICKUP_RETURN, DISCOUNT_POLICY } from '@/lib/pricing-config'
 import { BookingSchema } from '@/lib/booking-schema'
 import { CONSENT_VERSION } from '@/lib/consent'
 import { buildReviewReasons } from '@/lib/booking-review'
+import { checkBookingCreateReady, MIGRATION_CUSTOMER_MESSAGE } from '@/lib/migration-window'
 
 /** The truck pickup & return ADD-ON. Distinct from BOOKING_FEE_CENTS — the two
  *  are both $49 and must never be merged or deduplicated by amount. */
@@ -205,6 +207,40 @@ async function handleBooking(req: NextRequest): Promise<NextResponse> {
   }
 
   const data = parsed.data
+
+  // ── CREATE PREFLIGHT (H1) — fail BEFORE anything is written or consumed ────
+  //    Migrations here are applied BY HAND, so "code deployed, SQL not yet run"
+  //    is a normal state that lasts hours. `prisma.booking.create` returns the
+  //    row, so its INSERT ... RETURNING asks Postgres for `$scalars` from the
+  //    GENERATED schema — a column the database does not have yet raises P2022
+  //    at that statement. By then this route had ALREADY:
+  //      • upserted a Customer (a real CRM row, outside any transaction), and
+  //      • drawn a WMIC-#### reference from `nextBookingReference()`, a
+  //        `SELECT nextval(...)` Postgres never rolls back.
+  //    So every failed submission in the window left a customer record behind
+  //    and permanently burned a public booking number — on the path EVERY
+  //    customer booking takes.
+  //
+  //    This is a pure READ of exactly the at-risk columns (the SAME shared
+  //    helper the admin create uses, so the two paths cannot drift). It runs
+  //    here — after validation, before the first database statement, before
+  //    address verification spends a provider call — so a refusal costs the
+  //    customer nothing and leaves nothing behind. A real outage is rethrown by
+  //    the helper and surfaces as the normal 500; only a migration-shaped
+  //    failure refuses. The ORDER is pinned by
+  //    src/lib/__tests__/migration-window.test.ts § 6.
+  const preflight = await checkBookingCreateReady({
+    booking: (select) => prisma.booking.findFirst({ select: select as Prisma.BookingSelect }),
+  })
+  if (!preflight.ready) {
+    // The reason names migrations and columns: that is for the OWNER, in the
+    // server log. The customer gets a sentence they can act on and no schema.
+    apiLogger.error(
+      { ip, reason: preflight.reason },
+      'Public booking refused before any write: Moving OS migrations not applied (no Customer row, no booking reference consumed)',
+    )
+    return NextResponse.json({ error: MIGRATION_CUSTOMER_MESSAGE }, { status: 503 })
+  }
 
   // ── Service-area evaluation — SERVER-SIDE source of truth. Any travel fee the
   //    browser may have shown is ignored; the zone + fee are recomputed here and
@@ -511,12 +547,20 @@ async function handleBooking(req: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ error: 'Failed to initialize payment' }, { status: 500 })
   }
 
+  // `select` on a write whose result is discarded (the same P0-E fix the admin
+  // create carries). Without it Prisma's UPDATE ... RETURNING asks for every
+  // generated column, so this statement — which runs AFTER the Stripe session
+  // exists — would be the one to discover a missing column, and the customer
+  // would get an opaque 500 for a booking that was created and a checkout they
+  // never saw. The preflight above is the real guard; this closes the window
+  // between it and here.
   await prisma.booking.update({
     where: { id: booking.id },
     data: {
       status: 'PENDING_PAYMENT',
       stripeCheckoutId: checkoutSession.id,
     },
+    select: { id: true },
   })
 
   // ── Attach uploaded job photos as File rows (non-fatal) ──

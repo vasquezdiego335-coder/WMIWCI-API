@@ -28,7 +28,7 @@ import type { PaymentStatus } from '@prisma/client'
 import { constructWebhookEvent } from './stripe'
 import { prisma } from './db'
 import { discordQueue, webhookRetryQueue } from './queues'
-import { fulfillPaidCheckout } from './fulfillment'
+import { fulfillPaidCheckout, MIGRATION_NOT_APPLIED } from './fulfillment'
 import { webhookLogger } from './logger'
 import { refundPatch, disputeOutcome, disputeIsAlertable } from './payment-events'
 
@@ -190,12 +190,25 @@ export async function handleStripeEvent(event: Stripe.Event): Promise<void> {
         )
         return
       }
-      await fulfillPaidCheckout({
+      const fulfillment = await fulfillPaidCheckout({
         bookingId,
         paymentIntentId: (session.payment_intent as string) ?? null,
         amountTotalCents: session.amount_total,
         source: 'webhook',
       })
+      // ── ITEM P0-E — do NOT record this event as processed when nothing was
+      //    done. `MIGRATION_NOT_APPLIED` means the deposit is authorized but
+      //    the booking could not be read (code deployed, SQL not yet run), so
+      //    the booking is deliberately still PENDING_PAYMENT and NOTHING has
+      //    been sent. Marking the webhookLog 'processed' here would be a false
+      //    record AND would end the only retry that can still fulfill it.
+      //    Throwing keeps the log honest ('failed') and hands the event back to
+      //    the webhook-retry queue.
+      if (!fulfillment.processed && fulfillment.reason === MIGRATION_NOT_APPLIED) {
+        throw new Error(
+          `Checkout fulfillment deferred for booking ${bookingId}: migrations not applied. The $49 is authorized, the booking is still PENDING_PAYMENT and no customer message was sent — apply the migration and replay this event.`,
+        )
+      }
       break
     }
 

@@ -1,8 +1,15 @@
 import { prisma } from './db'
+import { moveTimeKnown, moveWhenInstant, type MoveWhenInput } from './booking-display'
+import { TRAVEL_BUFFER_MINUTES } from './travel-buffer'
 
 const TZ = process.env.TIMEZONE ?? 'America/New_York'
 const MAX_JOBS = parseInt(process.env.MAX_JOBS_PER_DAY ?? '3', 10)
-const BUFFER_MINS = parseInt(process.env.TRAVEL_BUFFER_MINUTES ?? '60', 10)
+// THE house travel buffer, from the one module that owns it (P0-A). The truck
+// hold math (truck-conflicts.truckHoldHours) adds the SAME constant when it
+// derives a window for a booking with no stored scheduledEnd — that equality is
+// what makes an unpaid hold occupy the same window its confirmed twin does, so
+// the two must never be separate copies.
+const BUFFER_MINS = TRAVEL_BUFFER_MINUTES
 // Default job length (hours) when a booking carries no explicit estimate. Used
 // only to derive scheduledEnd — the schedule keys off scheduledStart.
 const DEFAULT_JOB_HOURS = parseFloat(process.env.DEFAULT_JOB_HOURS ?? '3')
@@ -86,6 +93,14 @@ function etYmd(instant: Date): [number, number, number] {
  * that America/New_York wall-clock time. Replaces `new Date("...T...")`, which
  * silently interpreted the string in the SERVER's timezone. Returns null on a
  * malformed date so callers can fall back.
+ *
+ * PRE-EXISTING, DELIBERATELY LEFT ALONE (docs/moving-os-phase1-fixes-round2.md,
+ * the R2-1 note): a missing `timeStr` defaults to 07:00, and the PUBLIC booking
+ * route passes `time ?? '07:00'` (app/api/bookings/route.ts). That default is
+ * UNREACHABLE from the admin path — admin-booking.resolveMoveSchedule passes an
+ * explicit '00:00' day anchor when the owner gave no time, and records the
+ * absence on `Booking.startTimeKnown` instead. Changing the public default is
+ * out of scope for R2-1; it would silently re-time every public booking.
  */
 export function etDateTimeToInstant(dateStr?: string | null, timeStr?: string | null): Date | null {
   if (!dateStr) return null
@@ -151,11 +166,73 @@ export function moveDateInRange(start: Date, end: Date) {
 }
 
 /**
+ * ── ITEM R3-2 — the day-level determination that survives an UNREADABLE flag ──
+ *
+ * The WRITE-side twin of `booking-display.moveTimeKnown`, and deliberately not a
+ * second implementation of it: this is the same decision the display surfaces
+ * make, so it delegates to the one rule rather than keeping a copy that can
+ * drift.
+ *
+ * WHY IT MATTERS HERE: `startTimeKnown` is unreadable during the normal
+ * code-before-SQL deploy window (migration 20260812010000 not applied yet), and
+ * the degraded read that keeps approvals alive (item R3-2, booking-approval.ts)
+ * returns it as `undefined`. Round 2 treated ONLY an explicit `false` as
+ * day-level, so in exactly that window the 00:00 ET anchor was promoted into
+ * `scheduledStart` again — fail-soft in the direction of the defect. With the
+ * shared rule, the ANCHOR'S OWN SHAPE decides when the flag cannot be read: a
+ * date-only move is stored as midnight ET and nothing in this system schedules
+ * a crew at 00:00:00.000 (the public route writes `time ?? '07:00'`, the admin
+ * form writes a real hour). That is conservative in the SAFE direction — a
+ * day-level booking holds the WHOLE ET day for truck conflicts, where the
+ * promoted-midnight bug held only 00:00–06:00.
+ *
+ * A stored `scheduledStart` still wins over everything, so a real 9 AM job can
+ * never be mis-read as day-level.
+ */
+export function moveIsDayLevel(b: {
+  startTimeKnown?: boolean | null
+  scheduledStart?: Date | null
+  confirmedDate?: Date | null
+  requestedDate?: Date | null
+}): boolean {
+  return !moveTimeKnown(b)
+}
+
+/** What a booking transitioning to CONFIRMED writes to its schedule columns.
+ *  `scheduledStart`/`scheduledEnd` are NULLABLE: a day-level booking is
+ *  confirmed for a DATE, and no hour is invented for it (item R2-1). */
+export type ConfirmationScheduleData = {
+  confirmedDate: Date
+  scheduledStart: Date | null
+  scheduledEnd: Date | null
+}
+
+/**
  * The schedule fields to persist when a booking transitions to CONFIRMED so it
- * appears in every schedule view. `scheduledStart` is the field the whole app
- * queries and renders — without it an approved booking is invisible to the daily
- * digest, the admin dashboard, and `/schedule`. Existing (admin-tuned) values
- * are preserved. Returns null when there is no date to schedule from.
+ * appears in every schedule view. Existing (admin-tuned) values are preserved.
+ * Returns null when there is no date to schedule from.
+ *
+ * ── ITEM R2-1: NO INVENTED START ────────────────────────────────────────────
+ * This function used to do `start = scheduledStart ?? confirmedDate ??
+ * requestedDate`. For a DAY-LEVEL booking (admin Book Move with no crew start
+ * time) `requestedDate` is the 00:00 ET day anchor, so approval PROMOTED
+ * midnight into `scheduledStart` and the job landed at 12:00 AM ET. That was
+ * not just cosmetic: `truck-conflicts.truckConflictBetween` compares two KNOWN
+ * start times as an interval, so the promoted booking held only 00:00–06:00 ET
+ * and the conservative "same ET day + unknown time ⇒ conflict" rule — the
+ * double-booking guard — silently stopped applying.
+ *
+ * `startTimeKnown === false` now means exactly one thing here: keep
+ * `confirmedDate` as the day anchor, and leave start/end NULL. Every consumer
+ * treats a null start as "date only, time to be confirmed".
+ *
+ * `startTimeKnown` is OPTIONAL. `true` keeps the legacy behavior outright, and
+ * `undefined` — a caller that did not select the column, or a DB where
+ * migration 20260812010000_start_time_known is not applied yet — falls back to
+ * the anchor's own shape (item R3-2, see `moveIsDayLevel`): a 00:00 ET anchor
+ * is day-level, anything with a real time of day is not. A stored
+ * `scheduledStart` always wins, so a real 9 AM job can never be mis-read as
+ * day-level.
  */
 export function confirmationScheduleData(b: {
   requestedDate?: Date | null
@@ -163,13 +240,24 @@ export function confirmationScheduleData(b: {
   scheduledStart?: Date | null
   scheduledEnd?: Date | null
   estimatedHours?: number | null
-}): { confirmedDate: Date; scheduledStart: Date; scheduledEnd: Date } | null {
+  /** Booking.startTimeKnown. FALSE = day-level; never fabricate an hour. */
+  startTimeKnown?: boolean | null
+}): ConfirmationScheduleData | null {
   const move = b.confirmedDate ?? b.requestedDate ?? b.scheduledStart ?? null
   if (!move) return null
+  const confirmedDate = b.confirmedDate ?? move
+
+  // Day-level: confirm the DATE, invent no hour. A start that somehow already
+  // exists (an admin who set one later) still wins — the flag says "the owner
+  // never gave one", and a real stored time is proof they since did.
+  if (moveIsDayLevel(b)) {
+    return { confirmedDate, scheduledStart: null, scheduledEnd: null }
+  }
+
   const start = b.scheduledStart ?? move
   const hours = b.estimatedHours && b.estimatedHours > 0 ? b.estimatedHours : DEFAULT_JOB_HOURS
   return {
-    confirmedDate: b.confirmedDate ?? move,
+    confirmedDate,
     scheduledStart: start,
     scheduledEnd: b.scheduledEnd ?? calculateEndTime(start, hours),
   }
@@ -270,6 +358,51 @@ export function formatEastern(date: Date): string {
     hour: 'numeric',
     minute: '2-digit',
   }).format(date)
+}
+
+/**
+ * `formatEastern` WITHOUT the hour — for a booking whose start time nobody has
+ * committed to (item R2-1). Its date instant is a 00:00 ET DAY ANCHOR, so
+ * `formatEastern` would render a confident "12:00 AM" that is not a fact about
+ * the job. Same wording, same timezone, no invented hour.
+ */
+export function formatEasternDate(date: Date): string {
+  return new Intl.DateTimeFormat('en-US', {
+    timeZone: TZ,
+    weekday: 'long',
+    year: 'numeric',
+    month: 'long',
+    day: 'numeric',
+  }).format(date)
+}
+
+/**
+ * THE display rule for a move's "when", in the long ET form used by the
+ * approval notification and the Discord "Approved" card: the full timestamp
+ * when a real crew hour exists, the DATE ALONE when it does not.
+ *
+ * Accepts either a bare instant (+ the flag) or a whole booking row — the row
+ * form is preferred, because it lets `moveTimeKnown` see `scheduledStart` (a
+ * stored start is proof of a real hour) as well as the flag.
+ *
+ * The decision itself lives in ONE place, `booking-display.moveTimeKnown`
+ * (item R3-1), which every other surface calls too. It is fail-soft: an
+ * absent/unreadable `startTimeKnown` still recognises a 00:00 ET day anchor by
+ * its shape, and a real 9 AM instant can never be mistaken for one.
+ *
+ * Returns '' when there is no date signal at all — callers word that case
+ * themselves ("your move date", "—").
+ */
+export function formatMoveWhen(input: Date | MoveWhenInput, startTimeKnown?: boolean | null): string {
+  const b: MoveWhenInput =
+    input instanceof Date
+      ? { date: input, startTimeKnown }
+      : startTimeKnown === undefined
+        ? input
+        : { ...input, startTimeKnown }
+  const date = moveWhenInstant(b)
+  if (!date) return ''
+  return moveTimeKnown(b) ? formatEastern(date) : formatEasternDate(date)
 }
 
 // ── Calculate end time given start + estimated hours ──────────

@@ -632,6 +632,21 @@ export async function onBookingPaid(bookingId: string, deps: JourneyDeps = defau
  * Reminders in the PAST are skipped rather than fired immediately: a booking
  * made 12 hours before the move should not instantly receive a "72 hours to go"
  * email. Idempotent, so a reschedule re-anchors cleanly.
+ *
+ * DAY-LEVEL BOOKINGS (item R2-1): `moveDate` here is `effectiveMoveDate`, which
+ * for a booking with no committed crew hour is the 00:00 ET DAY ANCHOR. The
+ * offsets are therefore measured from the START of the move day, so both
+ * reminders fire EARLY relative to the crew's real (still unchosen) hour —
+ * never late. That is deliberate: the alternative is inventing an hour to
+ * subtract from, which is precisely the defect R2-1 removed.
+ *
+ * CORRECTED (item R3-1): this comment used to claim the reminder EMAIL renders
+ * the date alone for these bookings because the worker passes
+ * `booking.scheduledStart`. It did not. That column is NULL for a day-level
+ * move, and `job-reminder.tsx` fell all the way back to "Your move is coming up
+ * soon" — the customer lost the DATE as well as the hour, three days out.
+ * `scheduled.worker.ts` now sends the EFFECTIVE move date plus
+ * `startTimeKnown`, so the email prints the date and omits only the hour.
  */
 export async function onMoveDateSet(
   bookingId: string,

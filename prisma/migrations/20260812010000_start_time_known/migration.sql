@@ -1,0 +1,35 @@
+-- Moving OS Phase 1 correctness pass, ROUND 2 — Booking.start_time_known
+-- (owner spec 2026-08-12, item R2-1).
+--
+-- WHY: the admin Book Move form makes the crew start time OPTIONAL. A booking
+-- taken without one stores requested_date = 00:00 ET — a DAY ANCHOR, not an
+-- hour anybody promised. At approval, confirmationScheduleData() did
+--     start = scheduled_start ?? confirmed_date ?? requested_date
+-- so that anchor was PROMOTED into scheduled_start and the job landed at
+-- 12:00 AM ET. Downstream that midnight became: the Calendar/digest time, the
+-- staffing requirement's estimated_start_at, "12:00 AM" in the approval
+-- notification, and the anchor for the pre-move reminders.
+--
+-- Worse, it was a NEW silent double-booking path: truck-conflicts.ts compares
+-- two KNOWN start times as an interval, so a day-level job promoted to 00:00
+-- holds only 00:00–06:00 ET and an 8 AM job on the same truck the same day
+-- passed the check. The conservative "same ET day + unknown time ⇒ conflict"
+-- rule evaporated the moment the hold was approved.
+--
+-- This column is the fact the code was missing: does a real crew hour exist?
+-- FALSE ⇒ never invent one; every surface degrades to date-only.
+--
+-- ADDITIVE ONLY. One boolean column on "bookings", NOT NULL with DEFAULT true
+-- so existing rows and the public booking path (which always supplies a time)
+-- keep exactly today's behavior — this can never re-interpret a real 9 AM job
+-- as day-level. Nothing is dropped, altered in place, or backfilled.
+--
+-- LOCK NOTE: adding a NOT NULL column WITH a constant DEFAULT is a metadata-only
+-- change on PostgreSQL 11+ (no table rewrite), so this is safe on a live
+-- database. The brief ACCESS EXCLUSIVE lock is held only for the catalog update.
+--
+-- ROLLBACK RISK: none. Dropping the column restores the prior state; no
+-- financial or schedule data is touched. The deployed app keeps working if
+-- this lands before the code does (the column simply goes unread).
+
+ALTER TABLE "bookings" ADD COLUMN IF NOT EXISTS "start_time_known" BOOLEAN NOT NULL DEFAULT true;

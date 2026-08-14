@@ -151,8 +151,54 @@ export async function recalcJobAssignments(jobId: string): Promise<void> {
   for (const r of rows) await recalcAssignment(r.id, prisma, policy)
 }
 
+// ── ITEM R3-5 — the staffing repair, on a path the owner actually walks ──────
+//
+// `ensureStaffingRequirement` is CREATE-IF-MISSING, which makes running it again
+// a repair: a job whose approval-time staffing write failed (a transient DB
+// error, or the code-before-SQL window where the new columns are unreadable)
+// finally gets its requirement, and a requirement the owner hand-tuned through
+// PATCH /api/admin/jobs/[id]/staffing is never touched.
+//
+// Round 2 wired that repair to the already-confirmed approval REPLAY only, and
+// NO production surface can reach a replay: the admin status route has no
+// CONFIRMED→CONFIRMED edge, the admin UI offers only Mark-scheduled and Cancel,
+// Discord's /approve refuses a non-PENDING_APPROVAL booking, and the Approve
+// button is removed after success. An unstaffed job stayed unstaffed forever.
+//
+// So the repair rides the two things the owner already does with a live job:
+//   • CONFIRMED → SCHEDULED  (the admin status route calls this function)
+//   • assigning crew         (POST /api/admin/jobs/[id]/crew calls this function)
+// Putting it HERE covers both without either caller having to remember.
+//
+// NEVER FATAL, and never load-bearing for the caller's own work: the owner's
+// action (marking a move scheduled, adding a mover) must succeed even if
+// staffing cannot be written. `tryEnsureStaffingForBooking` swallows + logs.
+//
+// The import is DYNAMIC on purpose: booking-approval pulls in Stripe, BullMQ and
+// the outbox graph, and the labor modules (crew clock-in, closeout) have no
+// business loading those to add one row. It also makes an import cycle
+// impossible if booking-approval ever needs a labor helper.
+async function repairStaffingForJob(
+  bookingId: string,
+  jobId: string,
+  audit?: { source: string; userId?: string | null },
+): Promise<void> {
+  const { tryEnsureStaffingForBooking } = await import('./booking-approval')
+  await tryEnsureStaffingForBooking({
+    bookingId,
+    jobId,
+    createdById: audit?.userId ?? null,
+    trigger: audit?.source ?? 'ensure_job_for_booking',
+  })
+}
+
 /** Resolve (or create) the `Job` row for a booking — crew attach to the Job, and
- *  a booking that has not been approved yet has none. */
+ *  a booking that has not been approved yet has none.
+ *
+ *  ITEM R3-5: this also guarantees the job has its ONE staffing requirement.
+ *  Create-if-missing and fail-soft (see `repairStaffingForJob`), so calling it on
+ *  a job that is already staffed changes nothing and calling it on a job whose
+ *  approval-time ensure failed heals the gap. */
 export async function ensureJobForBooking(
   bookingId: string,
   audit?: { source: string; userId?: string | null },
@@ -162,7 +208,12 @@ export async function ensureJobForBooking(
   // audit entry is written exactly once — an upsert that found an existing row
   // must not log a second creation.
   const existing = await prisma.job.findUnique({ where: { bookingId }, select: { id: true } })
-  if (existing) return existing.id
+  if (existing) {
+    // The repair matters MOST here: an existing job is one approval already
+    // created, so it is the one that can be missing its requirement.
+    await repairStaffingForJob(bookingId, existing.id, audit)
+    return existing.id
+  }
 
   const job = await prisma.job.upsert({
     where: { bookingId },
@@ -191,6 +242,9 @@ export async function ensureJobForBooking(
       },
     }).catch(() => { /* an audit failure must never block the assignment */ })
   }
+  // ITEM R3-5 — a job created here (crew assigned before approval) needs its
+  // requirement too; approval's own ensure will later report 'unchanged'.
+  await repairStaffingForJob(bookingId, job.id, audit)
   return job.id
 }
 

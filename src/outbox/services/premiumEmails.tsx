@@ -1,6 +1,8 @@
 import * as React from 'react'
+import type { Prisma } from '@prisma/client'
 import { render } from '@react-email/render'
 import { prisma } from '../../lib/db'
+import { readBookingWithMigrationFallback } from '../../lib/migration-window'
 import { emailSubject } from '../../lib/i18n'
 import PreApprovalEmail from '../../emails/pre-approval'
 import FinalConfirmationEmail from '../../emails/final-confirmation'
@@ -112,13 +114,42 @@ interface Fallback {
   locale?: string
 }
 
-/** Shared booking → template-props mapping (customer-safe fields only). */
-async function loadBooking(bookingId: string) {
-  return prisma.booking.findUnique({
-    where: { id: bookingId },
-    include: { customer: true },
-  })
+const EMAIL_INCLUDE = { customer: true } as const
+type EmailBooking = Prisma.BookingGetPayload<{ include: typeof EMAIL_INCLUDE }>
+
+/** Shared booking → template-props mapping (customer-safe fields only).
+ *
+ *  ITEM P0-E — this was a bare `include:`, which asks Postgres for `$scalars`
+ *  FROM THE GENERATED SCHEMA. Migrations are hand-applied, so during the normal
+ *  code-before-SQL window it raised P2022 in EVERY renderer below. Under
+ *  OUTBOX_ENABLED the worker caught that and called markJobFailed, which
+ *  retries with exponential backoff up to 5 attempts — so a window longer than
+ *  about a minute burned the attempts and the customer's first email went
+ *  terminally 'failed', with the row's last_error as the only record.
+ *
+ *  The fallback names every column that certainly exists (see
+ *  src/lib/migration-window.ts). The renderers already tolerate a null/partial
+ *  booking (every field is `b?.`), so the degraded row costs at most the newest
+ *  flags — `startTimeKnown`, whose absence `moveTimeLabel`/`moveTimeKnown`
+ *  already handle by falling back to the 00:00 ET anchor shape. */
+async function loadBooking(bookingId: string): Promise<EmailBooking | null> {
+  const { row } = await readBookingWithMigrationFallback<EmailBooking>(
+    (args) => prisma.booking.findUnique({ where: { id: bookingId }, ...(args as object) }),
+    EMAIL_INCLUDE,
+  )
+  return row
 }
+
+/**
+ * The `timeLabel` a move email should carry (item R2-1).
+ *
+ * MOVED in item R3-1 to `src/lib/booking-display.ts` — the pure module that now
+ * owns the whole day-level display rule — so the reminder worker can reach it
+ * without pulling the render layer in. Re-exported here because this is where
+ * it was published and where its callers (and its tests) import it from.
+ */
+import { moveTimeLabel } from '../../lib/booking-display'
+export { moveTimeLabel }
 
 /** PAYMENT_COMPLETED → the premium "we've received your request" email. */
 export async function renderPreApproval(
@@ -137,6 +168,12 @@ export async function renderPreApproval(
       customerName: b?.customer.name ?? opts.customerName,
       displayId: b?.displayId,
       requestedDate: (b?.requestedDate ?? (opts.requestedDate ? new Date(opts.requestedDate) : null))?.toISOString(),
+      // Item R3-1: NEITHER sender passed a timeLabel, so the template derived an
+      // hour out of the 00:00 ET day anchor and the customer's very first email
+      // said their move was at 12:00 AM. Both facts now travel: the honest
+      // label, and the flag the template needs to suppress the hour by itself.
+      timeLabel: moveTimeLabel(b, locale),
+      startTimeKnown: b?.startTimeKnown ?? null,
       service: serviceLabel(b?.itemsDescription),
       estimate: b?.totalEstimate != null ? `$${Math.round(b.totalEstimate).toLocaleString('en-US')}` : undefined,
       truckLabel: truckLabel(b?.truckProvider, b?.truckSize),
@@ -177,7 +214,7 @@ export async function renderFinalConfirmation(
       customerName: b?.customer.name ?? opts.customerName,
       displayId: b?.displayId,
       date: moveDate?.toISOString(),
-      timeLabel: b?.arrivalWindow ?? undefined,
+      timeLabel: moveTimeLabel(b, locale),
       service: serviceLabel(b?.itemsDescription),
       truckLabel: truckLabel(b?.truckProvider, b?.truckSize),
       estimate: b?.totalEstimate != null ? `$${Math.round(b.totalEstimate).toLocaleString('en-US')}` : undefined,
@@ -227,6 +264,9 @@ export async function renderBookingUpdated(
       displayId: b?.displayId,
       changedLabel: locale.startsWith('es') ? 'la fecha' : 'date',
       date: moveDate?.toISOString(),
+      // Item R2-1: `opts.newDate` is a real instant the customer picked, so it
+      // keeps its hour. Falling back to the booking's own day anchor does not.
+      timeLabel: moveTimeLabel(b, locale, !!opts.newDate),
       service: serviceLabel(b?.itemsDescription),
       originAddress: b?.originAddress,
       destAddress: b?.destAddress,

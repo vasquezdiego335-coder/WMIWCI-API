@@ -5,7 +5,7 @@
 // + access conditions → a recommendation the owner can interrogate, with a
 // human-readable reason for every adjustment.
 //
-// THREE HARD RULES (mirrors pricing-intelligence.ts):
+// FOUR HARD RULES (1-3 mirror pricing-intelligence.ts):
 //  1. ADVISORY ONLY. This module NEVER prices anything and has no write path
 //     to a customer price. The quote shown next to it comes from
 //     computeEstimate (estimate.ts); the owner types the final number.
@@ -16,9 +16,21 @@
 //     size labels from MOVE_SIZES (estimate.ts) — never hardcoded guesses.
 //     When the size is unconfirmed the recommendation says so instead of
 //     inventing confidence.
+//  4. An item's own mover requirement is a FLOOR, never an input to an
+//     average (fix pass 2026-08-12, item 5). The package band describes the
+//     JOB; `recommendedMovers` describes ONE object that physically cannot be
+//     carried by fewer people. A 4-mover piano in a studio move is a 4-mover
+//     job — see itemCrewFloor / the crew-floor block in recommendEstimate.
+//     ROUND 2 (R2-7.2): the floor also fires on a HAND-TYPED line. A custom
+//     "Piano" line has no catalog row, so it carried no recommendedMovers and
+//     a piano job booked with 2-3 movers while the booking's own hasPiano
+//     column said otherwise. The name match now reaches the same floor, and
+//     the number still comes from the house catalog (rule 3) rather than a
+//     second opinion invented here.
 // ============================================================================
 
 import { MOVE_SIZES } from './estimate'
+import { DEFAULT_INVENTORY_CATALOG } from './inventory-catalog'
 import { assignTruck } from './pricing-config'
 
 export type EstimateDifficulty = 'standard' | 'elevated' | 'high'
@@ -93,6 +105,93 @@ export const HOURS_MIN = 2
 export const HOURS_MAX = 12
 
 const clamp = (n: number, lo: number, hi: number): number => Math.min(hi, Math.max(lo, n))
+
+// ── Specialty crew floor by NAME (fix pass round 2, R2-7.2) ─────────────────
+//
+// The Book Move picker lets the owner type a line that is not in the catalog.
+// A typed "Piano" therefore arrives with recommendedMovers = null, so the item
+// floor above never fired and the recommendation came back at the package base
+// — a 2-3 mover piano job, on a booking whose own hasPiano column said there
+// was a piano. The booking-review derivation reads the NAME (admin-booking's
+// PIANO_RE / SAFE_RE / POOL_TABLE_RE); the crew floor now reads it too, so the
+// two can no longer disagree about the same line.
+//
+// The MOVER COUNTS are not invented here: they are read out of
+// DEFAULT_INVENTORY_CATALOG, the house's own rating for those items (piano 4,
+// safe 3, pool table 3 at the time of writing). If a rating is ever changed
+// there, this follows it; if a row is removed entirely, no floor is claimed
+// for that kind rather than a number being made up.
+//
+// The name match is deliberately BROAD (a "piano bench" line reaches the piano
+// floor). The recommendation is advisory — the owner reads it back on the
+// phone and can lower it — and of the two ways to be wrong, sending too few
+// people to a piano is the one that hurts somebody.
+
+type SpecialtyPattern = { kind: string; re: RegExp }
+
+/** The three specialty kinds a NAME alone identifies — the same three the
+ *  booking's hasPiano / hasSafe / hasPoolTable columns track. */
+const SPECIALTY_NAME_PATTERNS: SpecialtyPattern[] = [
+  { kind: 'piano', re: /\bpianos?\b/i },
+  { kind: 'safe', re: /\bsafes?\b/i },
+  { kind: 'pool table', re: /\b(pool\s*table|billiards?)\b/i },
+]
+
+/** kind → the movers the house catalog rates that kind of item for. Built
+ *  ONCE at module load from the real catalog rows (no /g flags, so `.test` is
+ *  stateless and this stays pure). */
+const SPECIALTY_FLOORS: Array<{ kind: string; re: RegExp; movers: number }> = (() => {
+  const out: Array<{ kind: string; re: RegExp; movers: number }> = []
+  for (const pattern of SPECIALTY_NAME_PATTERNS) {
+    let movers = 0
+    for (const row of DEFAULT_INVENTORY_CATALOG) {
+      if (!pattern.re.test(row.name)) continue
+      const rated = Math.floor(Number(row.recommendedMovers ?? 0))
+      if (Number.isFinite(rated) && rated > movers) movers = rated
+    }
+    // No catalog row rates this kind → claim no floor for it.
+    if (movers > 0) out.push({ kind: pattern.kind, re: pattern.re, movers })
+  }
+  return out
+})()
+
+/**
+ * The crew floor a line's NAME alone justifies, or null. Exported so the rule
+ * is readable and testable on its own — and so a caller can tell a
+ * catalog-rated floor from a name-derived one.
+ */
+export function specialtyCrewFloor(name: string): { movers: number; kind: string } | null {
+  const s = (name ?? '').trim()
+  if (!s) return null
+  let best: { movers: number; kind: string } | null = null
+  for (const floor of SPECIALTY_FLOORS) {
+    if (!floor.re.test(s)) continue
+    if (!best || floor.movers > best.movers) best = { movers: floor.movers, kind: floor.kind }
+  }
+  return best
+}
+
+/** The item that needs the most movers, and how many. Null when nothing in the
+ *  inventory carries a usable `recommendedMovers` value AND no line names a
+ *  specialty item. Pure + exported so the floor rule can be tested (and read)
+ *  on its own. */
+export function itemCrewFloor(
+  inventory: AssistantInventoryItem[]
+): { movers: number; name: string } | null {
+  let best: { movers: number; name: string } | null = null
+  for (const item of inventory ?? []) {
+    const raw = Number(item?.recommendedMovers ?? 0)
+    // null / NaN / Infinity from bad catalog data contributes nothing, but the
+    // NAME on that same line still can.
+    const rated = Number.isFinite(raw) ? Math.floor(raw) : 0
+    const named = specialtyCrewFloor(item?.name ?? '')
+    const movers = Math.max(rated, named ? named.movers : 0)
+    if (movers < 1) continue
+    // First item wins a tie, so the reason string is stable for the same input.
+    if (!best || movers > best.movers) best = { movers, name: item.name }
+  }
+  return best
+}
 
 /** Map a bare bedroom count onto the live package keys (1 → '1br' … 5+ → '5br'). */
 function packageKeyFromBedrooms(bedrooms: number): string | null {
@@ -231,11 +330,36 @@ export function recommendEstimate(input: EstimateAssistantInput): EstimateRecomm
   const stops = Math.max(0, Math.floor(input.additionalStops ?? 0))
   if (stops > 0) reasons.push(`${stops} additional stop${stops === 1 ? '' : 's'} — extra drive time between locations`)
 
+  // ── Item crew FLOOR — never averaged away (fix pass item 5) ───────────────
+  // Everything above adjusts the crew for the JOB (package band, heavy count,
+  // a single +1 for a big-crew item). None of that may talk an item BELOW the
+  // number of people it takes to carry it: a piano rated for 4 movers stays a
+  // 4-mover item even inside a studio package whose base is 2. So the floor is
+  // a max(), applied AFTER every adjustment and BEFORE the cap, and it names
+  // the item whenever the floor is what decided the number.
+  const crewFloor = itemCrewFloor(inventory)
+  const adjustedCrew = crewSize
+  if (crewFloor && crewFloor.movers > adjustedCrew) crewSize = crewFloor.movers
+
   // ── Caps: crew 2..5, hours 2..12, bounds ordered ──────────────────────────
   crewSize = clamp(crewSize, CREW_MIN, CREW_MAX)
   hoursMin = clamp(hoursMin, HOURS_MIN, HOURS_MAX)
   hoursMax = clamp(hoursMax, HOURS_MIN, HOURS_MAX)
   if (hoursMax < hoursMin) hoursMax = hoursMin
+
+  // The floor's reason is written AFTER the cap so it describes what the owner
+  // actually sees. Over the cap: the number stands (we never promise a crew we
+  // cannot field) but the shortfall is said out loud instead of being swallowed
+  // by the clamp — advisory only, possibleTrips stays a footage/heavy signal.
+  if (crewFloor && crewFloor.movers > CREW_MAX) {
+    reasons.push(
+      `${crewFloor.name} requires ${crewFloor.movers} movers — crew capped at ${CREW_MAX}; plan a second trip or outside help for this item`
+    )
+  } else if (crewFloor && crewFloor.movers > adjustedCrew) {
+    reasons.push(
+      `${crewFloor.name} requires ${crewFloor.movers} movers — crew raised to ${crewFloor.movers}`
+    )
+  }
 
   return {
     jobSizeLabel,

@@ -856,6 +856,27 @@ model Booking {
   confirmedDate  DateTime? @map("confirmed_date")
   scheduledStart DateTime? @map("scheduled_start")
   scheduledEnd   DateTime? @map("scheduled_end")
+  /// Is there a REAL crew start hour behind this booking's schedule, or is it
+  /// scheduled at DAY level? (correctness pass round 2, item R2-1.)
+  ///
+  /// The admin Book Move form makes the start time OPTIONAL: with no time the
+  /// booking stores `requestedDate` = 00:00 ET — a DAY ANCHOR, not a promised
+  /// hour. `confirmationScheduleData` used to promote that anchor into
+  /// `scheduledStart` at approval, so the job landed at 12:00 AM ET: Calendar,
+  /// staffing `estimatedStartAt`, the approval notification and the pre-move
+  /// reminders all keyed off midnight, AND `truck-conflicts` switched from its
+  /// conservative "same day, unknown times ⇒ conflict" rule to an interval
+  /// compare — a silent truck double-booking path.
+  ///
+  /// FALSE means: the owner has not committed to an hour. Nothing may invent
+  /// one, and every surface that would print a time says "date only / time to
+  /// be confirmed" instead. Set FALSE only by the admin create when no start
+  /// time was captured.
+  ///
+  /// DEFAULT TRUE so every existing row and the public booking path (which
+  /// always supplies a time) keep exactly today's behavior — this column can
+  /// never retroactively re-interpret a real 9 AM job as day-level.
+  startTimeKnown Boolean   @default(true) @map("start_time_known")
 
   // Reschedule tracking — the $49 hold stays attached across reschedules.
   previousRequestedDate DateTime? @map("previous_requested_date")
@@ -1114,6 +1135,16 @@ model Booking {
   destPropertyType    String?  @map("dest_property_type")
   serviceMode         String?  @map("service_mode") // full_service|labor_only|loading_only|unloading_only
   coiRequired         Boolean  @default(false) @map("coi_required")
+  /// The owner's crew/truck/hours plan captured AT BOOKING TIME (correctness
+  /// pass 2026-08-12, item 1). Shape + the only writer: src/lib/staffing-plan.ts
+  /// (crewSize, truckSize, estimatedHoursMin/Max, difficulty, the flags used to
+  /// build the JobStaffingRequirement, `source`, and the recommendation
+  /// `reasons`). It exists so the DEFAULT stripe_link path — which creates the
+  /// booking PENDING_PAYMENT with no Job — can still hand approveBooking the
+  /// exact plan the owner priced on the phone. Null on legacy/public bookings:
+  /// staffing-plan.derivePlanFromBooking() then derives an honest plan from the
+  /// booking's own inventory + access columns.
+  staffingPlan        Json?    @map("staffing_plan")
 
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")

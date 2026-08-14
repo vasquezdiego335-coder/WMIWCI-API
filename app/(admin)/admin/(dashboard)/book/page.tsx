@@ -32,8 +32,30 @@ export default async function BookMovePage({ searchParams }: { searchParams: { l
       })
       if (lead && !lead.convertedBookingId) {
         const moveSize = (lead.moveSize ?? '').trim().toLowerCase()
+        // If this lead is a customer we already have, LINK the booking to that
+        // record up front (correctness pass item 3). Converting a repeat
+        // customer's lead used to match on email at write time, so a corrected
+        // address forked their CRM history into a second row.
+        // `locale` rides along (R2-7.1): the lead carries no language, so the
+        // form used to show its own English default for a Spanish-speaking
+        // repeat customer — and the booking then wrote that English back over
+        // their real preference. The select now shows what we actually have.
+        let existing: { id: string; locale: string | null; _count: { bookings: number } } | null = null
+        if (lead.email) {
+          try {
+            existing = await prisma.customer.findUnique({
+              where: { email: lead.email.trim().toLowerCase() },
+              select: { id: true, locale: true, _count: { select: { bookings: true } } },
+            })
+          } catch {
+            // A lookup failure only costs the convenience link — never the booking.
+          }
+        }
         prefill = {
           leadId: lead.id,
+          customerId: existing?.id,
+          customerBookings: existing?._count.bookings,
+          customerLocale: existing?.locale ?? undefined,
           name: lead.name === 'Website lead' || lead.name === 'Booking lead' ? '' : lead.name,
           email: lead.email ?? '',
           phone: lead.phone ?? '',

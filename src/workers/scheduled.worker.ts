@@ -8,6 +8,7 @@ import { runFollowup, type FollowupType } from '../lib/followups'
 import { leadNurtureBlockReason, quoteFollowupBlockReason } from '../lib/journeys'
 import { isSafeUrl } from '../emails/validation'
 import { etDayRange, moveDateInRange, effectiveMoveDate } from '../lib/scheduling'
+import { moveTimeKnown, moveTimeLabel } from '../lib/booking-display'
 import { bookingMarketingBlockReason } from '../lib/email-eligibility'
 import { hasEverBooked, markStaleLeadsAbandoned, purgeAbandonedLeads } from '../lib/leads'
 import { dayOfMoveSms } from '../lib/waiting-time'
@@ -25,6 +26,9 @@ type DigestBooking = {
   scheduledStart: Date | null
   confirmedDate: Date | null
   requestedDate: Date | null
+  /** Booking.startTimeKnown (item R2-1) — optional so a fixture without it
+   *  keeps the legacy rendering. */
+  startTimeKnown?: boolean | null
   customer: { name: string }
 }
 
@@ -32,6 +36,12 @@ type DigestBooking = {
 // timed off — their effective move date (scheduledStart ?? confirmedDate ??
 // requestedDate) so a booking is never dropped or mistimed because one date
 // field was blank. All times render in America/New_York.
+//
+// ITEM R2-1: a day-level booking's effective date is the 00:00 ET DAY ANCHOR.
+// Sorting by it is right (it is the move day); printing its hour is not — the
+// owner's morning digest read "12:00 AM" for a job whose time nobody had
+// chosen. Those rows now show 'TBD', the same as a booking with no date signal
+// at all, because that is the truth in both cases.
 function formatDigestJobs(bookings: DigestBooking[]) {
   return bookings
     .map((b) => ({ b, when: effectiveMoveDate(b) }))
@@ -40,13 +50,16 @@ function formatDigestJobs(bookings: DigestBooking[]) {
       displayId: b.displayId,
       customerName: b.customer.name,
       serviceType: b.itemsDescription?.split('\n')[0]?.replace('Service: ', '') ?? 'Unknown',
-      scheduledTime: when
-        ? when.toLocaleTimeString('en-US', {
-            hour: 'numeric',
-            minute: '2-digit',
-            timeZone: 'America/New_York',
-          })
-        : 'TBD',
+      // Item R3-1: the same `moveTimeKnown` rule every other surface uses, so
+      // the digest cannot drift from the cards, the emails and the portal.
+      scheduledTime:
+        when && moveTimeKnown(b)
+          ? when.toLocaleTimeString('en-US', {
+              hour: 'numeric',
+              minute: '2-digit',
+              timeZone: 'America/New_York',
+            })
+          : 'TBD',
       originAddress: b.originAddress,
     }))
 }
@@ -128,6 +141,15 @@ async function processScheduledJob(job: Job<ScheduledJobData>): Promise<void> {
       if (!booking || !['CONFIRMED', 'SCHEDULED'].includes(booking.status)) break
       if (booking.isInternalTest) break
       const es = booking.customer.locale === 'es'
+      // ── ITEM R3-1 ────────────────────────────────────────────────
+      // This used to send `booking.scheduledStart` and nothing else. That
+      // column is NULL for a day-level move (R2-1 stopped promoting the
+      // anchor into it), so the 72h/24h reminder lost the DATE too and told
+      // the customer only that their move was "coming up soon" — three days
+      // before it. Send the EFFECTIVE move date (the anchor is still the
+      // right day) plus the flag, so the email prints the date and drops
+      // only the hour nobody chose.
+      const moveWhen = effectiveMoveDate(booking)
       await emailQueue.add('job-reminder', {
         template: 'job-reminder',
         to: booking.customer.email,
@@ -135,8 +157,13 @@ async function processScheduledJob(job: Job<ScheduledJobData>): Promise<void> {
         payload: {
           customerName: booking.customer.name,
           displayId: booking.displayId,
-          scheduledStart: booking.scheduledStart?.toISOString(),
-          timeLabel: booking.arrivalWindow ?? undefined,
+          scheduledStart: moveWhen?.toISOString(),
+          startTimeKnown: moveTimeKnown(booking),
+          // `job-reminder` declares timeLabel REQUIRED (emails/validation.ts),
+          // so a day-level booking used to be refused OUTRIGHT by the send
+          // guard — no date, no hour, no email. moveTimeLabel gives the honest
+          // "Time to be confirmed" (an owner-typed arrival window still wins).
+          timeLabel: moveTimeLabel(booking, booking.customer.locale ?? 'en'),
           leadLabel: is24h ? (es ? 'mañana' : 'tomorrow') : es ? 'en 3 días' : 'in 3 days',
           originAddress: booking.originAddress,
           portalUrl: `${process.env.APP_URL}/my-booking/${booking.customerToken}`,
