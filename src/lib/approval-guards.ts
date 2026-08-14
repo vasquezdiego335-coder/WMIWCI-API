@@ -64,7 +64,18 @@ export type ApprovalGuardInput = ScopeInput & {
   acknowledged?: boolean | null
   /** An owner explicitly approved the current price. */
   priceChangeApprovedAt?: Date | string | null
-  /** True when the price differs from what the customer last agreed to. */
+  /** When the move size was corrected — which changes the flat rate. */
+  moveSizeChangedAt?: Date | string | null
+  /**
+   * Force the "price moved" verdict. Normally left unset: it is DERIVED below
+   * from `moveSizeChangedAt` vs `priceChangeApprovedAt`, because a caller that
+   * has to remember to pass a flag is a caller that will forget.
+   *
+   * ⚠ SCOPE NOTE: this tracks OWNER approval of a price change. Recording the
+   * CUSTOMER's acceptance of a new price is a separate mechanism that does not
+   * exist yet — it needs a portal action, a token and an audit row. Do not read
+   * this field as "the customer agreed"; it means "an owner signed off".
+   */
   priceChangedSinceCustomerAgreed?: boolean | null
 }
 
@@ -252,8 +263,14 @@ export function evaluateApproval(b: ApprovalGuardInput): ApprovalVerdict {
     })
   }
 
-  // ── A price change the customer has not been re-quoted ───────────────────
-  if (b.priceChangedSinceCustomerAgreed && !b.priceChangeApprovedAt) {
+  // ── A price change nobody signed off ─────────────────────────────────────
+  //    DERIVED, not passed in: a corrected move size changes the flat rate, so
+  //    a booking whose size moved without a matching price approval has a
+  //    total nobody agreed to. The /scope route gates its own writes, but the
+  //    generic admin PATCH and any future writer are covered here too.
+  const priceMoved =
+    b.priceChangedSinceCustomerAgreed ?? (b.moveSizeChangedAt != null && b.priceChangeApprovedAt == null)
+  if (priceMoved && !b.priceChangeApprovedAt) {
     checks.push({
       id: 'price_change_approved',
       label: 'Price change approved by an owner',

@@ -533,3 +533,38 @@ test('a price change the customer has not agreed to blocks confirmation outright
   const approved = evaluateApproval({ ...APPROVAL_INPUT, priceChangedSinceCustomerAgreed: true, priceChangeApprovedAt: new Date() })
   assert.equal(approved.canApprove, true)
 })
+
+// ══════════════════════════════════════════════════════════════════════
+//  9. THE THREE GAPS FOUND IN THE PRE-PUSH AUDIT (2026-08-14)
+// ══════════════════════════════════════════════════════════════════════
+
+test('a corrected size with no price sign-off blocks approval, without being told to', () => {
+  // DERIVED, not passed in. The size moved, so the flat rate moved; nothing
+  // recorded an owner agreeing to the new total. A caller that has to remember
+  // to pass a flag is a caller that will forget.
+  const v = evaluateApproval({
+    ...APPROVAL_INPUT,
+    acknowledged: true,
+    moveSizeKey: '2br',
+    moveSizeChangedAt: new Date('2026-08-14T10:00:00Z'),
+    priceChangeApprovedAt: null,
+  })
+  assert.equal(v.canApprove, false)
+  assert.ok(v.blocked.some((c) => c.id === 'price_change_approved'))
+})
+
+test('the same booking approves once the new price is signed off', () => {
+  const v = evaluateApproval({
+    ...APPROVAL_INPUT,
+    acknowledged: true,
+    moveSizeKey: '2br',
+    moveSizeChangedAt: new Date('2026-08-14T10:00:00Z'),
+    priceChangeApprovedAt: new Date('2026-08-14T10:01:00Z'),
+  })
+  assert.equal(v.canApprove, true)
+})
+
+test('a booking whose size was never touched is not accused of a price change', () => {
+  const v = evaluateApproval({ ...APPROVAL_INPUT, acknowledged: true })
+  assert.ok(!v.checks.some((c) => c.id === 'price_change_approved'))
+})

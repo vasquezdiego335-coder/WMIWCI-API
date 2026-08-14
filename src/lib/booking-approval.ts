@@ -168,6 +168,7 @@ export type ApprovableBooking = {
   originUnit?: string | null
   destUnit?: string | null
   priceChangeApprovedAt?: Date | null
+  moveSizeChangedAt?: Date | null
 }
 
 // ── Injectable dependencies (real impls in defaultApprovalDeps) ───────────────

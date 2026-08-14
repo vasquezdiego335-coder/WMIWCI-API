@@ -38,7 +38,12 @@ export async function PATCH(req: NextRequest, { params }: { params: { id: string
     return NextResponse.json({ error: 'Invalid JSON' }, { status: 400 })
   }
 
-  const allowed = ['internalNotes', 'confirmedDate', 'scheduledStart', 'scheduledEnd', 'estimatedHours', 'baseRate']
+  // `baseRate` was REMOVED from this allowlist on 2026-08-14. It is the flat
+  // labor price, so writing it here changed what the customer owes with no
+  // reason recorded, no audit of the old and new totals, and no owner sign-off
+  // — straight past the price gate that PATCH /api/admin/bookings/[id]/scope
+  // exists to enforce. Price now moves through that route only.
+  const allowed = ['internalNotes', 'confirmedDate', 'scheduledStart', 'scheduledEnd', 'estimatedHours']
   const data: Record<string, unknown> = {}
   for (const key of allowed) {
     if (key in (body as Record<string, unknown>)) data[key] = (body as Record<string, unknown>)[key]

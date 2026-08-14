@@ -68,6 +68,11 @@ export default function ScopePanel(p: ScopePanelProps) {
   const [coiDest, setCoiDest] = useState(p.coiRequiredDest ?? 'unknown')
   const [originUnit, setOriginUnit] = useState(p.originUnit ?? '')
   const [destUnit, setDestUnit] = useState(p.destUnit ?? '')
+  // "The size is genuinely right, I checked." The other half of the inventory
+  // warning: changing the size clears it implicitly, but an owner who decides
+  // the customer's selection was correct all along needs a way to say so —
+  // otherwise the banner is permanent and starts being ignored.
+  const [clearInventoryReview, setClearInventoryReview] = useState(false)
 
   const sizeChanged = moveSizeKey !== (p.moveSizeKey ?? '')
 
@@ -91,6 +96,7 @@ export default function ScopePanel(p: ScopePanelProps) {
           coiRequiredDest: coiDest,
           originUnit: originUnit.trim(),
           destUnit: destUnit.trim(),
+          ...(clearInventoryReview && !sizeChanged ? { clearInventoryReview: true, reason: reason.trim() || 'Owner confirmed the selected size is correct' } : {}),
           ...(approvePriceChange ? { approvePriceChange: true } : {}),
         }),
       })
@@ -138,8 +144,23 @@ export default function ScopePanel(p: ScopePanelProps) {
         </select>
       </Field>
 
-      {sizeChanged && (
-        <Field label="Why is the size changing?">
+      {/* The inventory warning has exactly two honest exits: change the size,
+          or state that the selection was right. Both are recorded. */}
+      {p.inventoryReviewRequired && !sizeChanged && (
+        <label style={{ display: 'flex', gap: '8px', alignItems: 'flex-start', fontSize: '13px', color: '#374151' }}>
+          <input type="checkbox" checked={clearInventoryReview} onChange={(e) => setClearInventoryReview(e.target.checked)} style={{ marginTop: '3px' }} />
+          <span>
+            <strong>The selected size is correct — clear the inventory warning.</strong>
+            <br />
+            <span style={{ color: '#9CA3AF', fontSize: '12px' }}>
+              Recorded against your name. Use this only when you have checked the inventory yourself.
+            </span>
+          </span>
+        </label>
+      )}
+
+      {(sizeChanged || clearInventoryReview) && (
+        <Field label={sizeChanged ? 'Why is the size changing?' : 'Why is the selected size correct?'}>
           <input
             value={reason}
             onChange={(e) => setReason(e.target.value)}

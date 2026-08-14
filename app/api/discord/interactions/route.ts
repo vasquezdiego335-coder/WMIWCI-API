@@ -44,6 +44,9 @@ const RES_PONG = 1;
 const RES_REPLY = 4; // CHANNEL_MESSAGE_WITH_SOURCE
 const RES_UPDATE_MESSAGE = 7; // edit the component message in place
 const FLAG_EPHEMERAL = 64;
+// Discord button styles (message component `style`).
+const BTN_SECONDARY = 2;
+const BTN_DANGER = 4;
 
 // ── Ed25519 signature verification (tweetnacl; replaces discord-interactions) ─
 function verifyDiscordSignature(
@@ -68,6 +71,27 @@ function verifyDiscordSignature(
 
 const ephemeral = (content: string) =>
   NextResponse.json({ type: RES_REPLY, data: { content, flags: FLAG_EPHEMERAL } });
+
+/**
+ * An ephemeral message that carries buttons — used for the "these are
+ * unresolved, confirm anyway?" prompt.
+ *
+ * WHY THIS EXISTS: the pre-approval scope checklist (owner spec 2026-08-14)
+ * can return `needs_acknowledgement`. Without a button to say yes, a Discord
+ * owner would be told the booking has open questions and given no way to
+ * proceed — and because `coi_required_*` is NULL on every booking taken before
+ * that spec, that would have blocked approvals for the entire existing book of
+ * business from Discord. Discord IS the dashboard for this owner; a dead end
+ * there is not a smaller problem than a dead end in the admin portal.
+ *
+ * Discord truncates message content at 2000 characters, and the prompt
+ * concatenates one paragraph per unresolved item, so it is clamped here.
+ */
+const ephemeralWithButtons = (content: string, components: unknown[]) =>
+  NextResponse.json({
+    type: RES_REPLY,
+    data: { content: content.length > 1900 ? `${content.slice(0, 1897)}…` : content, components, flags: FLAG_EPHEMERAL },
+  });
 
 type CardBooking = {
   displayId: string;
@@ -161,7 +185,12 @@ function offeredCard(
 // ── approve_booking:<id> → capture the $49 hold → CONFIRMED → notify ───────
 // Delegates to the ONE shared approval service (src/lib/booking-approval.ts) so
 // Discord and the admin portal capture + confirm through byte-identical logic.
-async function handleApprove(bookingId: string | undefined, messageId: string | undefined, actor: DiscordActor) {
+async function handleApprove(
+  bookingId: string | undefined,
+  messageId: string | undefined,
+  actor: DiscordActor,
+  acknowledgeWarnings = false,
+) {
   const approverName = actor.username;
   const result = await approveBooking({
     bookingId,
@@ -169,12 +198,33 @@ async function handleApprove(bookingId: string | undefined, messageId: string | 
     // discord-auth already gated this interaction to owners.
     actor: { name: approverName, discordUserId: actor.userId, role: "OWNER" },
     source: "discord",
+    acknowledgeWarnings,
   });
 
   if (!result.ok) {
     if (result.code === "raced") {
       return ephemeral("⏳ This booking was just handled by another owner — no action taken.");
     }
+    // ── The scope checklist stopped this, and it is resolvable ────────────
+    //    Nothing has been captured and the booking is still PENDING_APPROVAL.
+    //    Offer the deliberate second press rather than a dead end. The id is
+    //    carried in the button so the follow-up lands on the same booking even
+    //    though this is a NEW ephemeral message with no card behind it.
+    if (result.code === "needs_acknowledgement") {
+      const id = result.booking?.id ?? bookingId;
+      if (!id) return ephemeral(`⚠️ ${result.message}`);
+      return ephemeralWithButtons(`⚠️ ${result.message}`, [
+        {
+          type: 1,
+          components: [
+            { type: 2, style: BTN_DANGER, label: "✅ Confirm anyway", custom_id: `approve_booking_ack:${id}` },
+            { type: 2, style: BTN_SECONDARY, label: "✖ Not yet", custom_id: `dismiss_ack:${id}` },
+          ],
+        },
+      ]);
+    }
+    // 'scope_blocked' lands here and stays a refusal: a booking we cannot
+    // honestly price or dispatch has no "confirm anyway".
     return ephemeral(`⚠️ ${result.message}`);
   }
 
@@ -1030,6 +1080,11 @@ export async function POST(req: Request) {
     // never leak which IDs/roles are allowed.
     const OWNER_ACTIONS = new Set([
       "approve_booking",
+      // The deliberate second press after the scope checklist listed what is
+      // unresolved. Owner-gated exactly like the first press — it captures
+      // money, so it can never be a lighter-weight action than approve.
+      "approve_booking_ack",
+      "dismiss_ack",
       "deny_booking",
       "offer_reschedule",
       "view_full_booking",
@@ -1052,6 +1107,15 @@ export async function POST(req: Request) {
 
       if (action === "approve_booking") {
         return handleApprove(id, messageId, actor);
+      }
+      if (action === "approve_booking_ack") {
+        // The ephemeral prompt is a NEW message, so `messageId` points at it
+        // rather than the approval card — the booking id in the custom_id is
+        // the only reliable selector here.
+        return handleApprove(id, undefined, actor, true);
+      }
+      if (action === "dismiss_ack") {
+        return ephemeral("👍 Nothing was confirmed. Resolve the items above and press Approve again.");
       }
       if (action === "deny_booking") {
         return handleDeny(id, messageId, actor);
