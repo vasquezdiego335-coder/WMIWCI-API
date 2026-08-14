@@ -334,15 +334,62 @@ test('approval card: shows BOTH addresses as their own fields (the dropped-addre
   assert.equal(fields.find((f) => f.name === '📍 Dropoff')?.value, '45 Oak Ave, Montclair, NJ 07042')
 })
 
-test('approval card: full pricing breakdown (base, travel, truck add-on, discount, deposit, total, balance)', () => {
+// ── THE DISCOUNT IS APPLIED, NOT ANNOUNCED (owner spec 2026-08-14) ─────────
+//  This test used to assert "Move total: $749" and "Balance after job: $700"
+//  on a fixture carrying a 10% discount. Both were wrong, and both were the
+//  bug the owner reported on WMIC-1019: the card printed the discount as a
+//  note and then a total that ignored it, then subtracted the deposit from
+//  that wrong total. The corrected arithmetic, from booking-quote.ts:
+//
+//      quote                       $749.00
+//      + truck pickup & return     $ 50.00
+//      − 10% discount              −$79.90
+//      = FINAL TOTAL               $719.10
+//      − $49 deposit on capture    $670.10 remaining
+test('approval card: the discount is applied to the final total, not just displayed', () => {
   const pricing = approvalFields(approvalCardDataFromBooking(APPROVAL_BOOKING)).find((f) => f.name === '💰 Pricing')?.value ?? ''
   assert.match(pricing, /Base labor: \$699/)
   assert.match(pricing, /Travel fee: \$50/)
-  assert.match(pricing, /Truck add-on: \$50/)
-  assert.match(pricing, /10% off/)
-  assert.match(pricing, /Deposit: \$49 held/)
-  assert.match(pricing, /Move total: \$749/)
-  assert.match(pricing, /Balance after job: \$700/)
+  assert.match(pricing, /Truck pickup & return: \$50/)
+  assert.match(pricing, /10% off.*−\$79\.90/)
+  assert.match(pricing, /Final total: \$719\.10/)
+  // The deposit is APPLIED, never added: it comes off the FINAL total.
+  assert.match(pricing, /Deposit authorized: \$49 — captured on approval/)
+  assert.match(pricing, /Amount captured so far: \$0/)
+  assert.match(pricing, /Remaining after capture: \$670\.10/)
+  // The three numbers that must never come back.
+  assert.ok(!/Move total/.test(pricing), 'the undiscounted "Move total" line is gone')
+  assert.ok(!/\$749\.00/.test(pricing), 'the undiscounted total must not appear as the total')
+  assert.ok(!/\$700\.00/.test(pricing), 'total − deposit on an undiscounted total must not appear')
+})
+
+test('approval card: the service, the size and the truck are three separate lines', () => {
+  // WMIC-1019: a customer-provided truck on a "1 Bedroom" selection is a
+  // LABOR ONLY job of 1-bedroom size — not a bedroom package with a footnote.
+  const card = approvalCardDataFromBooking({
+    ...APPROVAL_BOOKING,
+    truckAddonDueOnMoveDay: false,
+    truckAddonAmount: 0,
+    itemsDescription: 'Service: 1 Bedroom\nTruck: Customer provides truck ($0)',
+    baseRate: 550,
+    totalEstimate: 550,
+    travelFee: 0,
+    discountPercent: 10,
+    discountType: 'FIRST_TIME_AUTO',
+  })
+  const move = approvalFields(card).find((f) => f.name === '📅 Move')?.value ?? ''
+  assert.match(move, /LABOR ONLY/)
+  assert.match(move, /Move size: 1 Bedroom/)
+  assert.match(move, /Truck: Customer/)
+
+  // $550 − $55 = $495, and $495 − $49 = $446. Never $550, never $501.
+  assert.equal(card.moveTotal, 495)
+  assert.equal(card.balanceAfterJob, 446)
+  const pricing = approvalFields(card).find((f) => f.name === '💰 Pricing')?.value ?? ''
+  assert.match(pricing, /Discount: 10% off.*−\$55/)
+  assert.match(pricing, /Final total: \$495\b/)
+  assert.match(pricing, /Remaining after capture: \$446\b/)
+  assert.ok(!/\$501/.test(pricing), '$501 is neither the quote, the total, nor the balance')
 })
 
 test('approval card: Stripe references shown (PI + checkout session short refs)', () => {
@@ -404,8 +451,12 @@ test('approvalCardDataFromBooking: cents→dollars conversion + balance math', (
   const data = approvalCardDataFromBooking(APPROVAL_BOOKING)
   assert.equal(data.travelFeeDollars, 50)
   assert.equal(data.depositDollars, 49)
-  assert.equal(data.moveTotal, 749)
-  assert.equal(data.balanceAfterJob, 700)
+  // The FINAL total — $749 quote + $50 add-on − 10% — which is what the admin
+  // page has always shown. The card now agrees with it instead of printing the
+  // pre-discount $749 and a $700 "balance" derived from it.
+  assert.equal(data.moveTotal, 719.1)
+  assert.equal(data.discountDollars, 79.9)
+  assert.equal(data.balanceAfterJob, 670.1)
 })
 
 // ════════════════════════════════════════════════════════════════════════

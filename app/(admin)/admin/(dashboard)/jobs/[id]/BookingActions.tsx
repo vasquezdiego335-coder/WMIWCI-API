@@ -32,8 +32,8 @@ export default function BookingActions({ bookingId, status }: { bookingId: strin
   const actions = TRANSITIONS[status] ?? []
   if (actions.length === 0) return null
 
-  async function transition(next: string) {
-    if (!confirm(`Move booking to ${next.replace(/_/g, ' ')}?`)) return
+  async function transition(next: string, acknowledgeWarnings = false) {
+    if (!acknowledgeWarnings && !confirm(`Move booking to ${next.replace(/_/g, ' ')}?`)) return
     setLoading(true)
     setError('')
 
@@ -42,11 +42,26 @@ export default function BookingActions({ bookingId, status }: { bookingId: strin
       const res = await fetch(`/api/admin/bookings/${bookingId}/status`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...(csrf ? { 'X-CSRF-Token': decodeURIComponent(csrf) } : {}) },
-        body: JSON.stringify({ status: next }),
+        body: JSON.stringify({ status: next, ...(acknowledgeWarnings ? { acknowledgeWarnings: true } : {}) }),
       })
 
       if (!res.ok) {
         const d = await res.json()
+        // ── THE APPROVAL GUARD (owner spec 2026-08-14) ───────────────────
+        //    Unresolved scope questions — oversized inventory, unknown
+        //    assembly, an unreviewed COI — are shown BEFORE the confirmation
+        //    goes through, and the admin has to say yes to them by name.
+        //    A hard block ('scope_blocked') has no second prompt: nothing the
+        //    admin clicks here can price an unpriceable booking.
+        if (d.canAcknowledge && !acknowledgeWarnings) {
+          setLoading(false)
+          if (confirm(d.error)) {
+            await transition(next, true)
+            return
+          }
+          setError('Not confirmed — resolve the items above, or confirm again to accept them.')
+          return
+        }
         setError(d.error ?? 'Failed to update status')
         return
       }

@@ -19,6 +19,12 @@ const VALID_TRANSITIONS: Record<string, string[]> = {
 
 const StatusSchema = z.object({
   status: z.string(),
+  /**
+   * The admin was shown the unresolved-scope warnings and chose to confirm
+   * anyway (owner spec 2026-08-14). Blocks — an unpriced job, a truck charge
+   * on a labor-only move, a missing address — are never overridable this way.
+   */
+  acknowledgeWarnings: z.boolean().optional(),
 })
 
 // Deadline guard for queue enqueues (same idiom as notify.ts/journeys.ts):
@@ -63,10 +69,21 @@ export async function POST(req: NextRequest, { params }: { params: { id: string 
       bookingId: params.id,
       actor: { name: session.name, userId: session.userId, role: session.role },
       source: 'admin',
+      acknowledgeWarnings: parsed.data.acknowledgeWarnings,
     })
     if (!result.ok) {
       const status = result.code === 'forbidden' ? 403 : result.code === 'capture_failed' ? 502 : 409
-      return NextResponse.json({ error: result.message }, { status })
+      // The two scope outcomes carry a code the UI acts on: 'scope_blocked'
+      // is final; 'needs_acknowledgement' means show the message and offer to
+      // re-send with acknowledgeWarnings. Nothing has been captured either way.
+      return NextResponse.json(
+        {
+          error: result.message,
+          code: result.code,
+          canAcknowledge: result.code === 'needs_acknowledgement',
+        },
+        { status },
+      )
     }
     // Move date is now confirmed → (re-)anchor the 72h/24h pre-move reminders.
     // Non-fatal: the reminder journey is a convenience over the authoritative

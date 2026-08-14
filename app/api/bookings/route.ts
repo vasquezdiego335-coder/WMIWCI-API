@@ -22,6 +22,10 @@ import { TRUCK_PICKUP_RETURN, DISCOUNT_POLICY } from '@/lib/pricing-config'
 import { BookingSchema } from '@/lib/booking-schema'
 import { CONSENT_VERSION } from '@/lib/consent'
 import { buildReviewReasons } from '@/lib/booking-review'
+import { resolveServiceShape } from '@/lib/service-shape'
+import { assessInventory, describeInventory, mergeInventory, parseInventoryText, toInventory } from '@/lib/inventory'
+import { resolveDiscount } from '@/lib/discount-rules'
+import { normalizeAddressAndUnit } from '@/lib/address'
 
 /** The truck pickup & return ADD-ON. Distinct from BOOKING_FEE_CENTS — the two
  *  are both $49 and must never be merged or deduplicated by amount. */
@@ -108,14 +112,33 @@ function buildDescription(
   jobDetails?: string,
   access?: AccessFlags,
   estimate?: { total?: number; addons?: number },
+  shape?: { serviceTypeLabel: string; moveSizeLabel: string | null; truckProviderLabel: string; serviceType: string },
+  inventoryLine?: string,
 ): string {
   const svc = SERVICE_MAP[serviceType]
   const lines: string[] = []
+  // ── THREE FACTS, THREE LINES (owner spec 2026-08-14) ────────────────────
+  //    This blob reaches the crew, the admin and the customer's email
+  //    verbatim. It used to open "Service: 1 Bedroom" / "Truck:
+  //    Customer-provided", which reads as a bedroom package that mentions a
+  //    truck in passing. It is a LABOR ONLY job of 1-bedroom size on the
+  //    customer's truck, and those are three answers.
+  if (shape) {
+    lines.push(`Service Type: ${shape.serviceTypeLabel}`)
+    lines.push(`Move Size: ${shape.moveSizeLabel ?? (svc ? svc.label : serviceType)}`)
+    lines.push(`Truck Provider: ${shape.truckProviderLabel}`)
+    if (shape.serviceType === 'labor_only') {
+      lines.push('Labor only — the customer supplies the truck. No company truck, fuel, mileage or rental is billed on this job.')
+    }
+  }
+  // The legacy "Service:" / "Truck:" lines stay: every historical row has them,
+  // and the parsers that read them still run against those rows.
   lines.push(`Service: ${svc ? svc.label : serviceType}`)
   if (truckOption) lines.push(`Truck: ${TRUCK_LABELS[truckOption] ?? truckOption}`)
   if (truckOption === 'truck-pickup-return') {
-    lines.push(`Truck add-on due on move day: $${TRUCK_PICKUP_RETURN.amount} (not charged in Stripe)`)
+    lines.push(`Truck pickup & return due on move day: $${TRUCK_PICKUP_RETURN.amount} — crew labor to collect and return YOUR rental (not charged in Stripe)`)
   }
+  if (inventoryLine) lines.push(`Inventory: ${inventoryLine}`)
   // Access conditions — always human-readable (these lines reach the Discord
   // cards, admin portal, and customer emails verbatim).
   const accessLines: string[] = []
@@ -291,13 +314,20 @@ async function handleBooking(req: NextRequest): Promise<NextResponse> {
   // longer opens a pending 30% path; first-time customers keep the 10% rate,
   // which is the cap. The Prisma DiscountType enum values are retained so
   // historical bookings still read correctly.
-  let discountType: string | undefined
-  let discountPercent: number | undefined
-
-  if (!existingCustomer) {
-    discountType = 'FIRST_TIME_AUTO'
-    discountPercent = DISCOUNT_POLICY.maxPublicPercent
-  }
+  //
+  // ── DISCOUNTS DO NOT STACK (owner spec 2026-08-14) ─────────────────────
+  //    DISCOUNT_POLICY.allowStacking has been `false` since it was written,
+  //    and nothing enforced it. A first-time customer got FIRST_TIME_AUTO at
+  //    10% automatically AND could type MOVE10 — the same 10% welcome offer
+  //    wearing a coupon code — for 20% off one promotion. resolveDiscount
+  //    keeps the single best entitlement and records why the others lost, so
+  //    the customer hears "already applied", not "no".
+  const discountDecision = resolveDiscount({
+    isFirstTimeCustomer: !existingCustomer,
+    requestedCode: data.discountCode,
+  })
+  const discountType = discountDecision.appliedType ?? undefined
+  const discountPercent = discountDecision.percent > 0 ? discountDecision.percent : undefined
 
   const requestedDate = buildRequestedDate(data.date, data.time)
   const truckAddonDueOnMoveDay = data.truckOption === 'truck-pickup-return'
@@ -332,6 +362,59 @@ async function handleBooking(req: NextRequest): Promise<NextResponse> {
   })
   const totalEstimateValue = svc ? est.estimatedTotal : est.estimatedTotal > 0 ? est.estimatedTotal : null
 
+  // ── THE THREE SEPARATE FACTS (owner spec 2026-08-14) ────────────────────
+  //    What we are selling, how big the job is, and whose truck moves it. The
+  //    form's own answer wins; otherwise the shape is derived from the truck
+  //    provider and the truck option, so a customer-supplied truck is recorded
+  //    as LABOR ONLY rather than a bedroom package with a company truck.
+  const truckProviderValue =
+    data.truckProvider ?? (data.truckOption === 'own-truck' ? 'customer' : undefined)
+  const shape = resolveServiceShape({
+    serviceTypeKey: data.serviceTypeKey ?? (data.laborService || data.laborHours != null ? 'labor_only' : null),
+    moveSizeKey: data.serviceType,
+    truckProvider: truckProviderValue,
+    truckAddonDueOnMoveDay,
+    baseRate: svc?.price ?? null,
+  })
+
+  // ── DISCLOSED INVENTORY vs THE SELECTED PACKAGE ─────────────────────────
+  //    The selection is a request, not a measurement. When the disclosed load
+  //    does not fit it, the booking goes to review — never auto-approved at
+  //    the smaller price, and never silently re-priced at the larger one.
+  const inventory = mergeInventory(
+    toInventory({
+      ...(data.inventory ?? {}),
+      // The customer ticking "assembly or disassembly needed" is the same
+      // control as the two structured booleans.
+      assembly: data.inventory?.assembly ?? data.needsAssembly ?? data.needsDisassembly,
+    }),
+    parseInventoryText(data.jobDetails),
+  )
+  const inventoryVerdict = assessInventory(inventory, shape.moveSizeKey)
+
+  // ── ASSEMBLY SCOPE ──────────────────────────────────────────────────────
+  const assemblyRequested = !!(data.needsAssembly || data.needsDisassembly || inventory.assembly)
+  const assemblyItems = (data.assemblyItems ?? '').trim()
+  const disassemblyItems = (data.disassemblyItems ?? '').trim()
+  const assemblyScopeKnown = !assemblyRequested || !!(assemblyItems || disassemblyItems)
+
+  // ── COI ─────────────────────────────────────────────────────────────────
+  const coiOrigin = data.coiRequiredOrigin ?? null
+  const coiDest = data.coiRequiredDest ?? null
+  const coiRequired = coiOrigin === 'yes' || coiDest === 'yes'
+  const coiUnknown = !coiRequired && (coiOrigin == null || coiDest == null || coiOrigin === 'unknown' || coiDest === 'unknown')
+
+  // ── UNITS OUT OF THE STREET STRING ──────────────────────────────────────
+  //    "1000 Executive Dr apt 443a" arrived with the unit inside the address
+  //    and the Apartment/Unit column empty. Split it once, at intake, so no
+  //    surface has to guess and the two fields cannot drift apart.
+  const originParsed = normalizeAddressAndUnit(originDisplay, data.originUnit)
+  const destParsed = normalizeAddressAndUnit(destDisplay, data.destUnit)
+  originDisplay = originParsed.address || originDisplay
+  destDisplay = destParsed.address || destDisplay
+
+  const photoCount = data.photos?.length ?? 0
+
   // ── Manual review: ONE verdict, with reasons the owner can read. ──
   //    est.requiresReview was computed and thrown away before this; the access
   //    flags never reached the server at all.
@@ -344,6 +427,14 @@ async function handleBooking(req: NextRequest): Promise<NextResponse> {
     difficultElevatorDropoff: data.difficultElevatorDropoff,
     difficultBuildingPickup: data.difficultBuildingPickup,
     difficultBuildingDropoff: data.difficultBuildingDropoff,
+    inventory: inventoryVerdict,
+    hasPhotos: photoCount > 0,
+    assemblyScopeUnknown: assemblyRequested && !assemblyScopeKnown,
+    coiRequired,
+    coiUnknown,
+    // Only when we INFERRED it — an explicit labor-only selection is not a
+    // question, it is an answer.
+    laborOnlyInferred: shape.serviceType === 'labor_only' && !shape.explicit,
   })
   const needsManualReview = reviewReasons.length > 0
 
@@ -360,6 +451,8 @@ async function handleBooking(req: NextRequest): Promise<NextResponse> {
       buildingYear: data.buildingYear,
     },
     { total: est.estimatedTotal, addons: est.accessAddons },
+    shape,
+    inventory.empty ? undefined : describeInventory(inventory),
   )
     + (data.source ? `\nSource: ${data.source}` : '')
     + (data.photos?.length ? `\n📷 ${data.photos.length} job photo(s) attached — view in admin/portal` : '')
@@ -393,10 +486,12 @@ async function handleBooking(req: NextRequest): Promise<NextResponse> {
       // ── Structured access details (nullable; older rows stay null). Access
       //    CODES persist ONLY here, never in itemsDescription → never in emails
       //    or the customer summary. Pickup/drop-off kept separate. ──
-      originUnit: data.originUnit,
-      destUnit: data.destUnit,
-      originFloor: data.originFloor,
-      destFloor: data.destFloor,
+      // The unit the customer typed into the Apartment/Unit field, or the one
+      // recovered from the street string — never both, never a duplicate.
+      originUnit: originParsed.unit ?? undefined,
+      destUnit: destParsed.unit ?? undefined,
+      originFloor: data.originFloor ?? originParsed.floor ?? undefined,
+      destFloor: data.destFloor ?? destParsed.floor ?? undefined,
       originHasElevator: data.originHasElevator,
       destHasElevator: data.destHasElevator,
       originStairCount: data.originStairCount,
@@ -405,7 +500,9 @@ async function handleBooking(req: NextRequest): Promise<NextResponse> {
       destAccessNotes: data.destAccessNotes,
       originAccessCode: data.originAccessCode,
       destAccessCode: data.destAccessCode,
-      truckProvider: data.truckProvider,
+      // truckProvider is written once, below, with the "own-truck" fallback —
+      // a customer who picked "I have my own truck" and typed no brand name
+      // still supplies the truck, and this column is what says so.
       truckSize: data.truckSize,
       truckReservationStatus: data.truckReservationStatus,
       truckPickupLocation: data.truckPickupLocation,
@@ -448,6 +545,44 @@ async function handleBooking(req: NextRequest): Promise<NextResponse> {
       discountCode: data.discountCode,
       discountType: discountType as any,
       discountPercent,
+      // Codes the customer asked for that did NOT apply, with the reason. Kept
+      // so the answer to "but I had MOVE10" is on the booking rather than in
+      // an argument on move day.
+      discountRejected: discountDecision.rejected.length ? (discountDecision.rejected as any) : undefined,
+
+      // ── The three separate facts ──
+      serviceTypeKey: shape.serviceType,
+      moveSizeKey: shape.moveSizeKey ?? undefined,
+      truckProvider: truckProviderValue,
+
+      // ── Disclosed inventory + the size verdict. Advisory: it sets a review
+      //    flag and suggests a size. It NEVER re-prices the booking. ──
+      inventoryDetail: inventory.empty ? undefined : (inventory as any),
+      inventorySuggestedSize: inventoryVerdict.suggestedKey ?? undefined,
+      inventoryReviewRequired: inventoryVerdict.exceedsSelected,
+      numBoxes: inventory.boxes > 0 ? inventory.boxes : undefined,
+      hasPiano: inventory.piano || undefined,
+      hasSafe: inventory.safe || undefined,
+      hasAppliances: inventory.appliances > 0 || undefined,
+
+      // ── Assembly / disassembly as a real scope ──
+      needsAssembly: data.needsAssembly ?? (inventory.assembly ? true : undefined),
+      needsDisassembly: data.needsDisassembly ?? (inventory.assembly ? true : undefined),
+      assemblyItems: assemblyItems || undefined,
+      disassemblyItems: disassemblyItems || undefined,
+      assemblyScopeKnown: assemblyRequested ? assemblyScopeKnown : undefined,
+      // An assembly job whose scope nobody knows cannot be finalized by anyone
+      // except an owner who has asked the customer what it is.
+      assemblyApprovalRequired: assemblyRequested && !assemblyScopeKnown,
+
+      // ── COI ──
+      coiRequiredOrigin: coiOrigin ?? undefined,
+      coiRequiredDest: coiDest ?? undefined,
+      coiNotes: data.coiNotes,
+
+      // Photos are RECOMMENDED, never required — this flags the admin, it does
+      // not block the customer.
+      photosReviewRequired: inventoryVerdict.photosRecommended && photoCount === 0,
       ipAddress: ip,
       userAgent: ua,
       // Attribution columns (Phase 2) — also kept in itemsDescription text above

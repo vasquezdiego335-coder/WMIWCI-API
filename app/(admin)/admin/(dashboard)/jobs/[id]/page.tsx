@@ -16,7 +16,10 @@ import {
   WAITING_RESCHEDULE_THRESHOLD_MINUTES,
 } from '@/lib/waiting-time'
 import { crewPayOwedCents } from '@/lib/profit'
-import { jobProfit, jobFinancialCompleteness, jobLabor, customerBalance, JOB_MONEY_CREW_SELECT } from '@/lib/job-money'
+import { jobProfit, jobFinancialCompleteness, jobLabor, customerBalance, additionalChargeCents, JOB_MONEY_CREW_SELECT } from '@/lib/job-money'
+import { resolveBookingScope, type ScopeInput } from '@/lib/booking-scope'
+import ScopePanel from './ScopePanel'
+import { describeInventory } from '@/lib/inventory'
 import { completenessLabel, LABOR_STATE_LABELS } from '@/lib/financial-completeness'
 import { computeLaborPay, paidCentsOf } from '@/lib/labor-calc'
 import { isOnBreak } from '@/lib/labor-time'
@@ -109,6 +112,20 @@ export default async function JobDetail({ params }: { params: { id: string } }) 
   // KPI, the closeout and the Action Center. Never re-sum fee columns here:
   // that is what made this page report "$100 due" on a move owing $460.
   const balance = customerBalance(booking as never)
+
+  // ── WHAT IS STILL UNRESOLVED (owner spec 2026-08-14, booking WMIC-1019) ──
+  //    Service shape, inventory verdict, assembly scope, COI, units and the
+  //    canonical total, from the SAME function the Discord approval card and
+  //    the Confirm button use — so the card, this page and the guard cannot
+  //    describe one booking three different ways.
+  const scope = resolveBookingScope({
+    ...(booking as unknown as ScopeInput),
+    additionalCents: additionalChargeCents(booking as never),
+    collectedCents: balance.collectedCents,
+    authorizedNotCapturedCents: balance.authorizedNotCapturedCents,
+    photoCount: booking.files.filter((f) => f.type === 'PHOTO_BEFORE').length,
+    crewNames: booking.job?.crew.map((c) => c.user.name).filter(Boolean) ?? [],
+  })
   // Per-job profit (recorded money): NET collected revenue (captured − refunds
   // − chargebacks) − crew pay − eligible expenses − Stripe fees. Shares the
   // exact math with the Jobs list + dashboard via src/lib/money-rules.ts.
@@ -248,20 +265,82 @@ export default async function JobDetail({ params }: { params: { id: string } }) 
         </div>
       </div>
 
+      {/* ─── THE SCOPE BLOCK (owner spec 2026-08-14, booking WMIC-1019) ──
+           This page used to open with "1 Bedroom — $550", which was confident
+           and wrong four times over: the customer supplied the truck, the
+           disclosed inventory was a two-bedroom load, assembly was requested
+           with no furniture named, and no building had been asked about a
+           COI. A settled headline over four open questions invites an
+           approval, so the open questions come FIRST now. ─────────────── */}
+      {scope.alertParagraph && (
+        <Callout tone={scope.hasOpenQuestions ? 'warning' : 'info'} title={scope.alertParagraph} />
+      )}
+      {scope.flags.map((f) => (
+        <Callout
+          key={f.code}
+          tone={f.severity === 'block' ? 'danger' : f.severity === 'review' ? 'warning' : 'info'}
+          title={f.cleared ? `${f.banner} — cleared by owner` : f.banner}
+        >
+          <span style={{ fontSize: '13px', lineHeight: 1.5 }}>{f.detail}</span>
+        </Callout>
+      ))}
+
+      <Card
+        title={scope.headline}
+        icon={scope.shape.serviceType === 'labor_only' ? '💪' : '🚛'}
+        wide
+        action={
+          <ScopePanel
+            bookingId={booking.id}
+            moveSizeKey={scope.shape.moveSizeKey}
+            suggestedSizeKey={scope.inventory.suggestedKey}
+            serviceTypeKey={scope.shape.serviceType}
+            disassemblyItems={booking.disassemblyItems}
+            assemblyItems={booking.assemblyItems}
+            coiRequiredOrigin={booking.coiRequiredOrigin}
+            coiRequiredDest={booking.coiRequiredDest}
+            originUnit={scope.addresses.origin.unit}
+            destUnit={scope.addresses.dest.unit}
+            inventoryReviewRequired={scope.inventory.exceedsSelected}
+          />
+        }
+      >
+        <div style={summaryGrid}>
+          {scope.summary.map((s) => (
+            <div key={s.label}>
+              <div style={{ fontSize: '11px', color: '#9CA3AF', marginBottom: '2px' }}>{s.label}</div>
+              <div style={{ fontSize: '14px', fontWeight: 600, color: s.alert ? '#B45309' : '#0A1628' }}>{s.value}</div>
+            </div>
+          ))}
+        </div>
+        {!scope.inventory.inventory.empty && (
+          <div style={{ marginTop: '14px', paddingTop: '12px', borderTop: '1px solid #F3F4F6' }}>
+            <div style={{ fontSize: '11px', color: '#9CA3AF', marginBottom: '3px' }}>
+              Disclosed inventory · about {scope.inventory.cubicFeet} cu ft
+            </div>
+            <div style={{ fontSize: '13px', color: '#374151' }}>{describeInventory(scope.inventory.inventory)}</div>
+          </div>
+        )}
+      </Card>
+
       {/* ─── Section 1: Booking Summary ──────────────────────── */}
       <Card title="Booking Summary" icon="📋" wide>
         <div style={summaryGrid}>
           <Stat label="Move date" value={dateOnly(booking.confirmedDate ?? booking.requestedDate)} />
           <Stat label="Arrival window" value={booking.arrivalWindow ?? '—'} />
           <Stat label="Est. duration" value={booking.estimatedHours != null ? `${booking.estimatedHours}h` : '—'} />
-          <Stat label="Service type" value={items.find((i) => i.label === 'Service')?.value ?? '—'} />
-          <Stat label="Estimated total" value={money(booking.totalEstimate) ?? '—'} />
+          {/* Service type and move size are two answers, not one. */}
+          <Stat label="Service type" value={scope.shape.serviceTypeLabel} />
+          <Stat label="Move size" value={scope.shape.moveSizeLabel ?? '—'} />
+          {/* THE final total — quote + add-ons − discount — not the raw
+              estimate, which ignored the discount and disagreed with Discord. */}
+          <Stat label="Final total" value={cents(balance.finalBilledCents) ?? '—'} />
           <Stat label="Source" value={[booking.foundUs, booking.source].filter(Boolean).join(' · ') || '—'} />
           <Stat label="Customer type" value={c.isFirstTime ? 'First-time' : 'Returning'} />
           <Stat label="Language" value={c.locale === 'es' ? 'Spanish' : 'English'} />
           <Stat label="Dispatcher" value={booking.assignedDispatcher ?? '—'} />
           <Stat label="Crew" value={booking.job?.crew.length ? booking.job.crew.map((x) => x.user.name).join(', ') : '—'} />
-          <Stat label="Truck" value={booking.truckProvider ?? (booking.truckAddonDueOnMoveDay ? 'WMIWCI pickup/return' : '—')} />
+          <Stat label="Truck provider" value={scope.shape.truckProviderDetail ? `${scope.shape.truckProviderLabel} (${scope.shape.truckProviderDetail})` : scope.shape.truckProviderLabel} />
           <Stat label="Last updated" value={dateTime(booking.updatedAt)} />
         </div>
       </Card>

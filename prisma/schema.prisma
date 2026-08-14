@@ -111,6 +111,17 @@ enum AuditAction {
   DISCOUNT_APPLIED
   DISCOUNT_APPROVED
   DISCOUNT_DENIED
+  // ── Labor-only booking shape (owner spec 2026-08-14) ──
+  /// An owner corrected the move size (1 Bedroom → 2 Bedroom) in place, without
+  /// making the customer rebook. Records who, when and why.
+  MOVE_SIZE_CHANGED
+  /// An owner explicitly approved a change to what the customer will pay.
+  /// Pricing never moves without one of these.
+  PRICE_CHANGE_APPROVED
+  /// An owner looked at an oversized-inventory flag and accepted the booking.
+  INVENTORY_REVIEW_CLEARED
+  /// Labor-only vs full-service was corrected on an existing booking.
+  SERVICE_TYPE_CORRECTED
   /// A Job row was auto-created for a booking (D5, Stage 4). Distinct from
   /// JOB_STARTED, which means the crew actually began work.
   JOB_CREATED
@@ -994,6 +1005,66 @@ model Booking {
   hasPoolTable       Boolean? @map("has_pool_table")
   hasAppliances      Boolean? @map("has_appliances")
   specialtyItems     String?  @map("specialty_items")
+
+  // ── THE THREE SEPARATE FACTS (owner spec 2026-08-14, booking WMIC-1019) ──
+  //    "1 Bedroom" used to mean the labor size, the price tier AND an implicit
+  //    company truck, all at once. A customer who rented their own U-Haul was
+  //    therefore recorded as a full-service move and became eligible for every
+  //    truck-shaped cost on a job where we never touched a truck.
+  //
+  //    They are three independent columns now. All nullable: a historical row
+  //    reads NULL and src/lib/service-shape.ts DERIVES the answer from what it
+  //    does carry (truck_provider, the "Truck:" line in items_description), so
+  //    nothing needs back-filling and no existing booking changes price.
+  serviceTypeKey       String?   @map("service_type_key") // labor_only | full_service
+  moveSizeKey          String?   @map("move_size_key") // package key: 1br, 2br, …
+  //    An owner may correct the size WITHOUT the customer rebooking. The change
+  //    is attributed and reasoned; the price it implies is a separate, explicit
+  //    approval (see price_change_approved_*).
+  moveSizeChangedAt    DateTime? @map("move_size_changed_at")
+  moveSizeChangedById  String?   @map("move_size_changed_by_id")
+  moveSizeChangeReason String?   @map("move_size_change_reason")
+
+  // ── Disclosed inventory (owner spec 2026-08-14) ──────────────────────────
+  //    The booking form has collected counts for a while; there was nowhere to
+  //    put them, so the browser folded them into the notes text. This column is
+  //    that structure, kept as JSON because the item list is a product decision
+  //    that should not need a migration each time it changes.
+  //    inventory_review_required is set when the disclosed load does not fit the
+  //    selected package — see src/lib/inventory.ts. It never re-prices anything.
+  inventoryDetail         Json?   @map("inventory_detail")
+  inventorySuggestedSize  String? @map("inventory_suggested_size")
+  inventoryReviewRequired Boolean @default(false) @map("inventory_review_required")
+
+  // ── Assembly / disassembly as a real scope, not a sentence in the notes ──
+  //    needsAssembly / needsDisassembly above are the yes/no; these are WHAT.
+  //    assembly_scope_known = false means the customer asked for assembly but
+  //    never said on which furniture — the quote is not finishable until they do.
+  //    The MONEY lives in the existing assembly_fee / disassembly_fee columns.
+  assemblyItems            String?  @map("assembly_items")
+  disassemblyItems         String?  @map("disassembly_items")
+  assemblyScopeKnown       Boolean? @map("assembly_scope_known")
+  assemblyApprovalRequired Boolean  @default(false) @map("assembly_approval_required")
+
+  // ── Certificate of insurance (owner spec 2026-08-14) ────────────────────
+  //    Tri-state TEXT ('yes' | 'no' | 'unknown'), not a boolean: a building we
+  //    have not asked about is not a building that said no, and a COI discovered
+  //    on move day is a crew turned away at the loading dock.
+  coiRequiredOrigin String? @map("coi_required_origin")
+  coiRequiredDest   String? @map("coi_required_dest")
+  coiNotes          String? @map("coi_notes")
+
+  // ── Review gates recorded at intake, so the admin page never re-derives them ──
+  photosReviewRequired Boolean @default(false) @map("photos_review_required")
+  //    Discounts that were REQUESTED and did not apply, with the reason. A
+  //    customer who was told "use MOVE10" must find out why it did not stack
+  //    from the record, not from an argument on move day.
+  discountRejected Json? @map("discount_rejected")
+
+  //    A price change is never silent: an owner approves the new amount, and we
+  //    record who and when. See src/lib/approval-guards.ts.
+  priceChangeApprovedAt   DateTime? @map("price_change_approved_at")
+  priceChangeApprovedById String?   @map("price_change_approved_by_id")
 
   // ── Truck operations (extends the customer-provided truck fields above) ──
   truckReservationNumber String? @map("truck_reservation_number")

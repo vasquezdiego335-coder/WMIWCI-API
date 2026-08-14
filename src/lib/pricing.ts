@@ -25,6 +25,8 @@
 //  waiting fees, itemized charges, discounts, refunds and chargebacks.
 // ════════════════════════════════════════════════════════════════════════
 
+import { computeQuote } from './booking-quote'
+
 export const centsToDollars = (cents: number): number => cents / 100
 
 /** "$409.00" — money with cents. Use for every displayed dollar amount. */
@@ -52,6 +54,15 @@ export type PricingInput = {
   depositAmount?: number | null // CENTS (default 4900 = $49)
   depositPaid?: boolean | null
   payments?: PaymentLike[] // CENTS amounts
+  /**
+   * Whole percent off (10 = 10%).
+   *
+   * ADDED 2026-08-14. Its absence is what let the Discord approval card print
+   * "Discount: MOVE10 10% off" on one line and "Move total: $550" on the next
+   * — the discount was displayed and never applied. Every total below now
+   * comes from computeQuote(), which applies it.
+   */
+  discountPercent?: number | null
 }
 
 export type PricingBreakdown = {
@@ -64,7 +75,25 @@ export type PricingBreakdown = {
   /** CAPTURED only (COMPLETED payments) — never counts an un-captured hold. */
   collectedDollars: number
   refundedDollars: number
+  /**
+   * THE final total the customer owes: quote + add-ons − discount.
+   *
+   * Was the raw `totalEstimate`, which ignored the discount entirely. On
+   * WMIC-1019 that printed $550 next to a "10% off" line, while the admin
+   * page — which did apply the discount — printed $495 for the same booking.
+   */
   moveTotalDollars: number | null
+  /** DOLLARS. The accepted quote BEFORE add-ons and discount (base + travel). */
+  quotedDollars: number
+  /** DOLLARS. The discount actually taken off. 0 when there is none. */
+  discountDollars: number
+  /**
+   * What is left once the $49 authorization is captured.
+   *
+   * Was `totalEstimate − deposit`, i.e. $550 − $49 = $501 on WMIC-1019 — a
+   * number that is neither the quote, the total, nor the balance. It is now
+   * FINAL total − deposit = $495 − $49 = $446.
+   */
   balanceAfterJobDollars: number | null
   /**
    * The customer's FULL remaining balance — base labor included. Stripe only
@@ -97,13 +126,27 @@ export function bookingPricing(b: PricingInput): PricingBreakdown {
   const refundedCents = payments.filter((p) => p.status === 'REFUNDED' && !p.isInternalTest).reduce((s, p) => s + p.amount, 0)
   const depositCaptured = !!b.depositPaid || collectedCents > 0
 
-  const moveTotalDollars = typeof b.totalEstimate === 'number' ? round2(b.totalEstimate) : null
-
-  // The quote (base + access add-ons + travel) plus the truck add-on, which
-  // estimate.ts deliberately leaves OUT of estimatedTotal. Travel is already
-  // inside the quote and must not be added again.
-  const finalBilledDollars = round2((moveTotalDollars ?? round2(b.baseRate ?? 0) + travelFeeDollars) + truckAddonDollars)
-  const outstandingDollars = Math.max(0, round2(finalBilledDollars - round2(centsToDollars(collectedCents))))
+  // ── THE ONE CALCULATION ────────────────────────────────────────────────
+  //  Delegated to booking-quote.computeQuote, which job-money.customerBalance
+  //  also calls. Two modules formatting one arithmetic cannot disagree; two
+  //  modules each doing their own arithmetic did, for months, on every card.
+  //
+  //  The truck add-on is passed as an ADDITIONAL charge because estimate.ts
+  //  deliberately leaves it out of estimatedTotal. Travel is already inside
+  //  the quote and must not be added again.
+  const authorizedNotCapturedCents = payments
+    .filter((p) => p.status === 'PENDING' && !p.isInternalTest)
+    .reduce((s, p) => s + p.amount, 0)
+  const q = computeQuote({
+    totalEstimate: b.totalEstimate,
+    baseRate: b.baseRate,
+    travelFeeCents: b.travelFee,
+    additionalCents: Math.round(truckAddonDollars * 100),
+    discountPercent: b.discountPercent,
+    depositCents: b.depositAmount,
+    collectedCents,
+    authorizedNotCapturedCents,
+  })
 
   return {
     baseDollars: typeof b.baseRate === 'number' ? round2(b.baseRate) : null,
@@ -114,9 +157,12 @@ export function bookingPricing(b: PricingInput): PricingBreakdown {
     depositCaptured,
     collectedDollars: round2(centsToDollars(collectedCents)),
     refundedDollars: round2(centsToDollars(refundedCents)),
-    moveTotalDollars,
-    balanceAfterJobDollars: moveTotalDollars != null ? round2(moveTotalDollars - depositDollars) : null,
-    dueOnMoveDayDollars: outstandingDollars,
+    // Null ONLY when there is genuinely nothing to price — never a silent 0.
+    moveTotalDollars: q.quoteMissing && q.finalTotalCents === 0 ? null : q.finalTotalDollars,
+    quotedDollars: round2(centsToDollars(q.quotedCents)),
+    discountDollars: q.discountDollars,
+    balanceAfterJobDollars: q.quoteMissing && q.finalTotalCents === 0 ? null : q.remainingAfterDepositDollars,
+    dueOnMoveDayDollars: q.remainingDollars,
     moveDayFeesDollars: truckAddonDollars,
   }
 }
@@ -138,11 +184,14 @@ export function pricingConsistencyIssues(b: PricingInput): string[] {
     issues.push(`baseRate ${p.baseDollars} looks like cents stored as a dollar value (would misprice the move)`)
   }
 
-  // Move total should equal base labor + travel fee (the server computes it that way).
-  if (p.moveTotalDollars != null && p.baseDollars != null) {
+  // The stored QUOTE should equal base labor + travel fee (the server computes
+  // it that way). Compared against `quotedDollars`, not the final total — the
+  // final total legitimately differs once a discount or an add-on applies, and
+  // checking it here would report every discounted booking as inconsistent.
+  if (p.baseDollars != null && (b.totalEstimate != null || p.quotedDollars > 0)) {
     const expected = round2(p.baseDollars + p.travelFeeDollars)
-    if (Math.abs(expected - p.moveTotalDollars) > 0.01) {
-      issues.push(`totalEstimate ${p.moveTotalDollars} != base ${p.baseDollars} + travel ${p.travelFeeDollars}`)
+    if (Math.abs(expected - p.quotedDollars) > 0.01) {
+      issues.push(`totalEstimate ${p.quotedDollars} != base ${p.baseDollars} + travel ${p.travelFeeDollars}`)
     }
   }
 

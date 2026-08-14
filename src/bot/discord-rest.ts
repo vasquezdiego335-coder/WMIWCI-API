@@ -115,7 +115,10 @@ export async function postBookingApprovalCard(
       where: { id: bookingId },
       include: {
         customer: true,
-        payments: { where: { status: 'COMPLETED' }, orderBy: { createdAt: 'desc' }, take: 1 },
+        // PENDING is loaded alongside COMPLETED so the card can tell an
+        // authorized $49 hold apart from a captured one — they mean different
+        // things to the balance, and only one of them is money.
+        payments: { where: { status: { in: ['COMPLETED', 'PENDING'] } }, orderBy: { createdAt: 'desc' } },
       },
     })
     .catch((err) => {
@@ -144,8 +147,8 @@ export async function postBookingApprovalCard(
         photoCount: photos.length,
         adminUrl,
         rescheduled,
-        stripeChargeId: booking.payments[0]?.stripeChargeId ?? null,
-        receiptUrl: booking.payments[0]?.receiptUrl ?? null,
+        stripeChargeId: booking.payments.find((p) => p.status === 'COMPLETED')?.stripeChargeId ?? null,
+        receiptUrl: booking.payments.find((p) => p.status === 'COMPLETED')?.receiptUrl ?? null,
         warnings: completenessLines(booking),
       })
     : {
