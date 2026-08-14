@@ -26,6 +26,7 @@ import { resolveServiceShape } from '@/lib/service-shape'
 import { assessInventory, describeInventory, mergeInventory, parseInventoryText, toInventory } from '@/lib/inventory'
 import { resolveDiscount } from '@/lib/discount-rules'
 import { normalizeAddressAndUnit } from '@/lib/address'
+import { checkIntake, hoursToMinutes, laborOnlyEstimateCents } from '@/lib/product-catalog'
 
 /** The truck pickup & return ADD-ON. Distinct from BOOKING_FEE_CENTS — the two
  *  are both $49 and must never be merged or deduplicated by amount. */
@@ -333,6 +334,45 @@ async function handleBooking(req: NextRequest): Promise<NextResponse> {
   const truckAddonDueOnMoveDay = data.truckOption === 'truck-pickup-return'
   const svc = SERVICE_MAP[data.serviceType]
 
+  // ── THE PRODUCT GATE (repair audit 2026-08-14, P0-01 / P0-02 / P0-04) ───
+  //    FIRST, before the estimate and long before Stripe, because everything
+  //    below assumes we are allowed to sell what was asked for.
+  //
+  //    The browser is not trusted with any of these decisions. A stale tab, a
+  //    cached form or a hand-built POST is exactly how a full-service booking
+  //    would be taken while we are not licensed to carry, or how a retired
+  //    $379 studio rate would be honoured a month after it was withdrawn.
+  const product: 'labor_only' | 'full_service' =
+    data.serviceTypeKey === 'labor_only' || data.serviceTypeKey === 'full_service'
+      ? data.serviceTypeKey
+      : data.laborService || data.laborHours != null || data.serviceType === 'labor-only'
+        ? 'labor_only'
+        : 'full_service'
+
+  const laborMinutes = data.laborHours != null ? hoursToMinutes(data.laborHours) : null
+  const intakeErrors = checkIntake({
+    product,
+    packageKey: product === 'full_service' ? data.serviceType : null,
+    laborMinutes,
+    laborService: data.laborService ?? null,
+    // A company truck on a labor-only job is a contradiction, not a preference.
+    hasCompanyTruckFields: product === 'labor_only' && !!data.truckSizeUpgradeRequested,
+  })
+  if (intakeErrors.length) {
+    const fieldErrors: Record<string, string[]> = {}
+    for (const e of intakeErrors) (fieldErrors[e.field] ??= []).push(e.message)
+    apiLogger.warn({ ip, product, codes: intakeErrors.map((e) => e.code) }, 'booking refused at the product gate')
+    return NextResponse.json(
+      { error: intakeErrors[0].message, code: intakeErrors[0].code, details: { fieldErrors } },
+      { status: 422 },
+    )
+  }
+
+  // THE authoritative labor-only price. $150/hour for two movers with a
+  // two-hour minimum — the rate the booking form has been advertising while
+  // the server quietly priced a flat bedroom package instead.
+  const labor = product === 'labor_only' ? laborOnlyEstimateCents(laborMinutes ?? 0) : null
+
   // ── SERVER-COMPUTED estimate (source of truth). The client-submitted
   //    estimateTotal/estimateAddons are IGNORED for pricing — recomputed here
   //    from validated inputs so the form headline, DB, admin, Discord, emails,
@@ -360,7 +400,17 @@ async function handleBooking(req: NextRequest): Promise<NextResponse> {
     travelFeeCents,
     truckAddonDueOnMoveDay,
   })
-  const totalEstimateValue = svc ? est.estimatedTotal : est.estimatedTotal > 0 ? est.estimatedTotal : null
+  // The stored quote. For LABOR-ONLY the base is the hourly labor subtotal,
+  // not a package price — access add-ons and travel still apply on top, and
+  // they are already inside est.estimatedTotal (which carries a zero base for
+  // labor-only, since 'labor-only' is not a package key).
+  const totalEstimateValue = labor
+    ? Math.round(labor.subtotalCents + est.estimatedTotal * 100) / 100
+    : svc
+      ? est.estimatedTotal
+      : est.estimatedTotal > 0
+        ? est.estimatedTotal
+        : null
 
   // ── THE THREE SEPARATE FACTS (owner spec 2026-08-14) ────────────────────
   //    What we are selling, how big the job is, and whose truck moves it. The
@@ -551,9 +601,26 @@ async function handleBooking(req: NextRequest): Promise<NextResponse> {
       discountRejected: discountDecision.rejected.length ? (discountDecision.rejected as any) : undefined,
 
       // ── The three separate facts ──
-      serviceTypeKey: shape.serviceType,
+      serviceTypeKey: product,
       moveSizeKey: shape.moveSizeKey ?? undefined,
       truckProvider: truckProviderValue,
+
+      // ── THE LABOR-ONLY HOURLY QUOTE (repair audit P0-02) ──
+      //    Rate and crew size are SNAPSHOTS: a future price change must never
+      //    silently re-price a quote this customer already accepted. Requested
+      //    and billable minutes are stored separately so the two-hour minimum
+      //    reads as a minimum, not as a rewrite of what they asked for.
+      laborService: (data.laborService as string | undefined) ?? undefined,
+      laborRequestedMinutes: labor?.requestedMinutes,
+      laborBillableMinutes: labor?.billableMinutes,
+      laborMinimumApplied: labor?.minimumApplied,
+      laborRateCents: labor?.hourlyRateCents,
+      laborWorkers: labor?.workers,
+      laborSubtotalCents: labor?.subtotalCents,
+      // baseRate is DOLLARS by the unit contract. For labor-only it is the
+      // hourly subtotal, so every existing consumer that reads baseRate as
+      // "the labor price" stays correct without knowing about hourly billing.
+      ...(labor ? { baseRate: labor.subtotalCents / 100 } : {}),
 
       // ── Disclosed inventory + the size verdict. Advisory: it sets a review
       //    flag and suggests a size. It NEVER re-prices the booking. ──

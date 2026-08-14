@@ -1018,6 +1018,25 @@ model Booking {
   //    nothing needs back-filling and no existing booking changes price.
   serviceTypeKey       String?   @map("service_type_key") // labor_only | full_service
   moveSizeKey          String?   @map("move_size_key") // package key: 1br, 2br, …
+
+  // ── LABOR-ONLY HOURLY QUOTE (repair audit 2026-08-14, P0-02) ────────────
+  //    The authoritative price for a labor-only job: $150/hour for two movers
+  //    with a two-hour minimum, computed server-side in product-catalog.ts.
+  //    The form had been advertising this rate while the server priced a flat
+  //    bedroom package, so the customer read one number and the booking stored
+  //    another.
+  //
+  //    requested vs billable are SEPARATE on purpose: the minimum must be
+  //    visible as a minimum, never as a rewrite of what the customer asked for.
+  //    rate/workers are SNAPSHOTS so a future price change cannot re-price an
+  //    already-accepted quote. All amounts are INTEGER CENTS.
+  laborService          String?  @map("labor_service") // loading_only | unloading_only | load_and_unload
+  laborRequestedMinutes Int?     @map("labor_requested_minutes")
+  laborBillableMinutes  Int?     @map("labor_billable_minutes")
+  laborMinimumApplied   Boolean? @map("labor_minimum_applied")
+  laborRateCents        Int?     @map("labor_rate_cents")
+  laborWorkers          Int?     @map("labor_workers")
+  laborSubtotalCents    Int?     @map("labor_subtotal_cents")
   //    An owner may correct the size WITHOUT the customer rebooking. The change
   //    is attributed and reasoned; the price it implies is a separate, explicit
   //    approval (see price_change_approved_*).

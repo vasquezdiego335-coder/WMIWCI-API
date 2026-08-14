@@ -218,6 +218,10 @@ export const BookingSchema = z.object({
   laborHours: z.coerce.number().min(0).max(24).optional(),
   /** Whether the customer's rental truck is booked yet. */
   customerTruckStatus: z.string().transform(sanitizeText).pipe(z.string().max(40)).optional(),
+  /** FULL-SERVICE only: the customer asked for a larger COMPANY truck. Its
+   *  presence on a labor-only payload is a contradiction the product gate
+   *  rejects — we supply no truck on those jobs. */
+  truckSizeUpgradeRequested: z.coerce.boolean().optional(),
 
   // ── DISCLOSED INVENTORY (owner spec 2026-08-14) ─────────────────────────
   //    Counted items and the declared flags. Until now the browser folded

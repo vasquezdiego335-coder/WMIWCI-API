@@ -1,0 +1,15 @@
+{
+  "root": true,
+  "extends": ["next/core-web-vitals"],
+  "ignorePatterns": [
+    "node_modules/",
+    ".next/",
+    "email-previews/",
+    "email-marketing-html/",
+    "public/",
+    "*.review.txt"
+  ],
+  "rules": {
+    "@next/next/no-html-link-for-pages": "off"
+  }
+}
