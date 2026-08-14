@@ -19,17 +19,19 @@
 import { useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { csrfHeader } from '../../_client'
+import { ACTIVE_PACKAGE_KEYS } from '@/lib/product-catalog'
+import { PACKAGES } from '@/lib/pricing-config'
 
-const SIZES: { key: string; label: string }[] = [
-  { key: 'little-studio', label: 'Small Studio' },
-  { key: 'half-studio', label: 'Standard Studio' },
-  { key: 'full-studio', label: 'Large Studio' },
-  { key: '1br', label: '1 Bedroom' },
-  { key: '2br', label: '2 Bedrooms' },
-  { key: '3br', label: '3 Bedrooms' },
-  { key: '4br', label: '4 Bedrooms' },
-  { key: '5br', label: '5 Bedrooms' },
-]
+// Selectable sizes come from the product catalogue, not a hand-written list.
+// The three studio tiers ($379/$439/$549) were withdrawn in July 2026 and were
+// still offered here — so an admin could put a live booking back onto a retired
+// rate months after it stopped being sold. A booking that ALREADY holds a
+// retired size still shows it (see `retainedKey` below); it just cannot be
+// chosen afresh. See src/lib/product-catalog.ts (P0-04).
+const SIZES: { key: string; label: string }[] = ACTIVE_PACKAGE_KEYS.map((key) => ({
+  key,
+  label: PACKAGES[key].label,
+}))
 
 const COI = [
   { key: 'unknown', label: 'Unknown' },
@@ -135,6 +137,15 @@ export default function ScopePanel(p: ScopePanelProps) {
       <Field label="Move size">
         <select value={moveSizeKey} onChange={(e) => setMoveSizeKey(e.target.value)} style={input}>
           <option value="">Not selected</option>
+          {/* A booking already on a withdrawn size keeps showing it, so opening
+              this panel cannot silently re-price the customer by resetting the
+              dropdown to something else. It is marked, and once changed it
+              cannot be chosen again. */}
+          {p.moveSizeKey && !SIZES.some((s) => s.key === p.moveSizeKey) && (
+            <option value={p.moveSizeKey}>
+              {PACKAGES[p.moveSizeKey as keyof typeof PACKAGES]?.label ?? p.moveSizeKey} — retired rate (current booking)
+            </option>
+          )}
           {SIZES.map((s) => (
             <option key={s.key} value={s.key}>
               {s.label}
