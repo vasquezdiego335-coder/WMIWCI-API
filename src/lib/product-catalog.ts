@@ -26,7 +26,18 @@
 //  carrier booking would otherwise be taken.
 // ════════════════════════════════════════════════════════════════════════
 
-import { PACKAGES, type PackageKey } from './pricing-config'
+import {
+  PACKAGES,
+  LABOR_ONLY,
+  LABOR_SERVICE_KEYS,
+  LABOR_SERVICES,
+  LEGACY_PACKAGE_KEYS,
+  SERVICE_TYPES,
+  laborOnlyQuoteCents,
+  normalizeLaborService,
+  type LaborServiceKey,
+  type PackageKey,
+} from './pricing-config'
 
 // ── LABOR-ONLY PRICING — the single source, mirrored to the browser ───────
 //
@@ -36,27 +47,37 @@ import { PACKAGES, type PackageKey } from './pricing-config'
 // the browser mirror is GENERATED from here (scripts/gen-pricing-config.ts).
 // Never hand-edit the mirror.
 
+// ── DELEGATED, NOT REDECLARED (2026-08-15 consolidation) ─────────────────
+//  These were literals here and literals again in the price book — two
+//  authorities for one number, which is the whole failure mode this repair
+//  exists to end. pricing-config.ts is the price book; this file is the POLICY
+//  layer (what may be sold, to whom, under what constraint) and now reads its
+//  numbers from there.
 /** $150.00 per hour, covering BOTH movers together — not per person. */
-export const LABOR_ONLY_RATE_CENTS = 15_000
+export const LABOR_ONLY_RATE_CENTS = LABOR_ONLY.hourlyRateCents
 /** Two hours. The established minimum charge; not a rounding rule. */
-export const LABOR_ONLY_MINIMUM_MINUTES = 120
+export const LABOR_ONLY_MINIMUM_MINUTES = LABOR_ONLY.minimumMinutes
 /** Both workers are included in the hourly rate. */
-export const LABOR_ONLY_WORKERS = 2
+export const LABOR_ONLY_WORKERS = LABOR_ONLY.includedWorkers
 /** Upper bound on a single-day booking. Beyond this an owner must plan it. */
 export const LABOR_ONLY_MAX_MINUTES = 12 * 60
 
-/** The labor services a customer may buy. */
-export const LABOR_SERVICES = ['loading_only', 'unloading_only', 'load_and_unload'] as const
-export type LaborService = (typeof LABOR_SERVICES)[number]
-
-export const LABOR_SERVICE_LABELS: Record<LaborService, { en: string; es: string }> = {
-  loading_only: { en: 'Loading only', es: 'Solo carga' },
-  unloading_only: { en: 'Unloading only', es: 'Solo descarga' },
-  load_and_unload: { en: 'Loading and unloading', es: 'Carga y descarga' },
-}
-
-export const isLaborService = (v: unknown): v is LaborService =>
-  typeof v === 'string' && (LABOR_SERVICES as readonly string[]).includes(v)
+// The labor services live in the price book: SIX keys, and the live booking
+// form builds its grid from LABOR_SERVICE_KEYS (booking-form.html:3217). This
+// file previously declared THREE, one of them spelled `load_and_unload` — a
+// shorter list here would have silently dropped half the products the form
+// offers. Re-exported so existing call sites keep working.
+export {
+  LABOR_SERVICES,
+  LABOR_SERVICE_KEYS,
+  LEGACY_LABOR_SERVICE_ALIASES,
+  isLaborService,
+  normalizeLaborService,
+  laborServiceUsesTwoAddresses,
+  type LaborServiceKey,
+} from './pricing-config'
+/** @deprecated Use LaborServiceKey. Alias kept for existing call sites. */
+export type LaborService = LaborServiceKey
 
 export type LaborEstimate = {
   /** What the customer asked for, exactly as given. Never silently rounded. */
@@ -114,11 +135,7 @@ export const hoursToMinutes = (hours: number): number =>
 // they stay in PACKAGES and are excluded here instead.
 
 /** Withdrawn 2026-07-25. Readable on historical bookings; never sellable. */
-export const RETIRED_PACKAGE_KEYS: ReadonlySet<string> = new Set([
-  'little-studio', // $379
-  'half-studio',   // $439
-  'full-studio',   // $549
-])
+export const RETIRED_PACKAGE_KEYS: ReadonlySet<string> = new Set(LEGACY_PACKAGE_KEYS)
 
 /** Packages a NEW booking may select. Order is the order customers see. */
 export const ACTIVE_PACKAGE_KEYS: readonly PackageKey[] = (
@@ -239,7 +256,7 @@ export type ServiceCatalogEntry = {
     minimumMinutes: number
     workers: number
     maxMinutes: number
-    services: { key: LaborService; label: string; label_es: string }[]
+    services: { key: LaborServiceKey; label: string; label_es: string; twoAddresses: boolean }[]
   }
 }
 
@@ -251,8 +268,8 @@ export function serviceCatalog(): ServiceCatalogEntry[] {
   return [
     {
       key: 'full_service',
-      label: 'Full-Service Moving',
-      label_es: 'Mudanza de Servicio Completo',
+      label: SERVICE_TYPES.full_service.label,
+      label_es: SERVICE_TYPES.full_service.label_es,
       description: 'Our crew and our truck. One flat price for your move size.',
       description_es: 'Nuestro equipo y nuestro camión. Un precio fijo según el tamaño de su mudanza.',
       pricingModel: 'flat_package',
@@ -270,8 +287,8 @@ export function serviceCatalog(): ServiceCatalogEntry[] {
     },
     {
       key: 'labor_only',
-      label: 'Labor-Only Moving Help',
-      label_es: 'Ayuda de Mudanza Solo con Mano de Obra',
+      label: SERVICE_TYPES.labor_only.label,
+      label_es: SERVICE_TYPES.labor_only.label_es,
       description: 'You provide the truck or container. Two movers at $150/hour, two-hour minimum.',
       description_es: 'Usted pone el camión o contenedor. Dos trabajadores a $150 por hora, mínimo dos horas.',
       pricingModel: 'hourly',
@@ -283,10 +300,12 @@ export function serviceCatalog(): ServiceCatalogEntry[] {
         minimumMinutes: LABOR_ONLY_MINIMUM_MINUTES,
         workers: LABOR_ONLY_WORKERS,
         maxMinutes: LABOR_ONLY_MAX_MINUTES,
-        services: LABOR_SERVICES.map((key) => ({
+        // Six services, from the price book, in the order the form shows them.
+        services: LABOR_SERVICE_KEYS.map((key) => ({
           key,
-          label: LABOR_SERVICE_LABELS[key].en,
-          label_es: LABOR_SERVICE_LABELS[key].es,
+          label: LABOR_SERVICES[key].label,
+          label_es: LABOR_SERVICES[key].label_es,
+          twoAddresses: LABOR_SERVICES[key].twoAddresses,
         })),
       },
     },
@@ -439,7 +458,7 @@ export function checkIntake(i: IntakeCheckInput): IntakeRejection[] {
   }
   if (i.laborService == null) {
     out.push({ code: 'labor_service_missing', field: 'laborService', message: 'Choose loading, unloading, or both.' })
-  } else if (!isLaborService(i.laborService)) {
+  } else if (normalizeLaborService(i.laborService) === null) {
     out.push({ code: 'contradictory_product', field: 'laborService', message: 'Choose loading, unloading, or both.' })
   }
   // A full-service PACKAGE on a labor-only booking would attach a flat truck-

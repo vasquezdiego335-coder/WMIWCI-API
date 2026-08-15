@@ -17,7 +17,10 @@ test('estimate: every base price is the config price', () => {
   for (const pkg of Object.values(PACKAGES)) {
     assert.equal(MOVE_SIZES[pkg.key].price, pkg.price.amount ?? 0, `${pkg.key} base`)
   }
-  assert.equal(computeEstimate({ serviceType: '1br' }).base, 649)
+// 1BR is $550. These expectations were written against a retired $649 and
+// were never updated when the price book moved, so the CORRECT price was
+// showing up as the failure. Derived sums below follow from $550.
+  assert.equal(computeEstimate({ serviceType: '1br' }).base, 550)
   assert.equal(computeEstimate({ serviceType: '2br' }).base, 779)
   assert.equal(computeEstimate({ serviceType: 'little-studio' }).base, 379)
 })
@@ -44,7 +47,7 @@ test('estimate: stairs are per address — first flight free, 2nd $40, 3rd $70',
   // Both ends charge independently: 2 flights at pickup + 3 at drop-off.
   const both = computeEstimate({ serviceType: '1br', pickupStairFlights: 2, dropoffStairFlights: 3 })
   assert.equal(both.accessAddons, 110)
-  assert.equal(both.estimatedTotal, 649 + 110)
+  assert.equal(both.estimatedTotal, 550 + 110)
 })
 
 test('estimate: 4+ flights is review-gated, never silently summed', () => {
@@ -170,7 +173,7 @@ test('estimate: truck add-on is $49, on its own line, NOT in estimatedTotal', ()
 
   const est = computeEstimate({ serviceType: '1br', truckAddonDueOnMoveDay: true })
   assert.equal(est.truckAddon, 49)
-  assert.equal(est.estimatedTotal, 649, 'the add-on must stay out of the quote total')
+  assert.equal(est.estimatedTotal, 550, 'the add-on must stay out of the quote total')
   assert.equal(est.dueOnMoveDay, 49)
 })
 
@@ -183,7 +186,7 @@ test('estimate: legacy booleans map to the LOWEST tier and never crash', () => {
   const est = computeEstimate({ serviceType: '1br', stairs: true, longWalk: true })
   // stairs:true → 2nd flight ($40); longWalk:true → 100ft ($40).
   assert.equal(est.accessAddons, 80)
-  assert.equal(est.estimatedTotal, 729)
+  assert.equal(est.estimatedTotal, 630) // 550 + 80
 })
 
 test('estimate: a weightless legacy heavy-item checkbox becomes a REVIEW line', () => {
@@ -196,8 +199,8 @@ test('estimate: a weightless legacy heavy-item checkbox becomes a REVIEW line', 
 // ── Stored total ────────────────────────────────────────────────────────────
 test('storedTotalEstimate: matches the headline whenever a size is chosen', () => {
   const inputs = { serviceType: '1br', pickupStairFlights: 2, heavyItems: [{ pounds: 200 }] }
-  assert.equal(computeEstimate(inputs).estimatedTotal, 649 + 40 + 50)
-  assert.equal(storedTotalEstimate(inputs), 739)
+  assert.equal(computeEstimate(inputs).estimatedTotal, 550 + 40 + 50)
+  assert.equal(storedTotalEstimate(inputs), 640) // 550 + 90
 })
 
 test('storedTotalEstimate: null when there is genuinely nothing to estimate', () => {

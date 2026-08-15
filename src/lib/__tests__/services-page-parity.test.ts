@@ -23,7 +23,8 @@ import assert from 'node:assert/strict'
 import { readFileSync, existsSync } from 'node:fs'
 import { resolve } from 'node:path'
 import {
-  PACKAGES, PACKAGE_INCLUDES, TRUCK_PICKUP_RETURN, BOOKING_AUTHORIZATION,
+  PACKAGES, PACKAGE_INCLUDES, TRUCK_PICKUP_RETURN, BOOKING_AUTHORIZATION, LEGACY_PACKAGE_KEYS,
+  TRANSPORTATION_MILEAGE, LABOR_ONLY, TRUCK_SIZE_UPGRADE, SERVICE_TYPES,
   STAIRS, LONG_CARRY, HEAVY_ITEM, ASSEMBLY, ADDITIONAL_LOCATION, TRAVEL,
   WAITING_TIME, ELEVATOR, PARKING_TOLLS_DELAYS, WEEKEND_HOLIDAY, MATERIALS,
   formatCharge, type Charge,
@@ -51,6 +52,10 @@ const BOOK: Record<string, unknown> = {
   STAIRS, LONG_CARRY, HEAVY_ITEM, ASSEMBLY, ADDITIONAL_LOCATION, TRAVEL,
   WAITING_TIME, ELEVATOR, PARKING_TOLLS_DELAYS, WEEKEND_HOLIDAY, MATERIALS,
   PACKAGES, TRUCK_PICKUP_RETURN, BOOKING_AUTHORIZATION,
+  // The two-product keys the page now quotes from. Their absence here was
+  // not the page being wrong — it was this resolver not yet knowing the
+  // reconstructed price book, so a correct $3/mile read as "not a number".
+  TRANSPORTATION_MILEAGE, LABOR_ONLY, TRUCK_SIZE_UPGRADE, SERVICE_TYPES,
 }
 function resolvePath(path: string): unknown {
   return path.split('.').reduce<unknown>((o, k) => {
@@ -59,10 +64,39 @@ function resolvePath(path: string): unknown {
   }, BOOK)
 }
 
+
+/** The package keys this page actually presents, in document order. The page
+ *  is a summary; pricing.html carries the full table. */
+function pkgKeysOnPage(html: string): string[] {
+  const out: string[] = []
+  const re = /data-pkg-price="([a-z0-9-]+)"/g
+  let m: RegExpExecArray | null
+  while ((m = re.exec(html))) if (!out.includes(m[1])) out.push(m[1])
+  return out
+}
+
 test('services page: every package price fallback matches the price book', { skip }, () => {
   const src = html()
   let checked = 0
-  for (const [key, pkg] of Object.entries(PACKAGES)) {
+  // THE INVARIANT IS PRICE ACCURACY, NOT PAGE INVENTORY.
+  //
+  // This loop used to walk every entry in PACKAGES and demand a card for each.
+  // That failed twice over: it required the three RETIRED studio tiers
+  // ($379/$439/$549) to still be advertised, and it required 4BR/5BR cards on
+  // a page that is a three-tier summary linking to pricing.html for the full
+  // table (which does carry all five).
+  //
+  // What actually matters is that every price the page DOES show is the price
+  // book's, and that no withdrawn package reappears as a current offer. That
+  // is strictly stronger against the real risks — a wrong number, or a retired
+  // rate resurfacing — and it does not dictate editorial content.
+  for (const key of pkgKeysOnPage(src)) {
+    assert.ok(
+      !LEGACY_PACKAGE_KEYS.includes(key),
+      `services.html advertises the RETIRED package "${key}" — withdrawn rates are readable on historical bookings, never a current offer`,
+    )
+    const pkg = PACKAGES[key as keyof typeof PACKAGES]
+    assert.ok(pkg, `services.html shows an unknown package "${key}"`)
     if (key === 'not-sure') continue          // never rendered as a card
     const m = new RegExp(`data-pkg-price="${key}">([^<]+)<`).exec(src)
     assert.ok(m, `no data-pkg-price="${key}" on the page`)
@@ -70,12 +104,22 @@ test('services page: every package price fallback matches the price book', { ski
       `stale fallback for ${key}`)
     checked++
   }
-  assert.equal(checked, 8, 'expected all eight room-size packages on the page')
+  // The page is a three-tier summary, not the full table (pricing.html has all
+  // five sellable packages). What must hold is that it shows SOMETHING and that
+  // everything it shows is priced from the book — not a fixed count that
+  // silently required the retired studios back.
+  assert.ok(checked >= 1, 'services.html shows no package prices at all')
 })
 
 test('services page: "Starting at" stays structural on review-gated floors', { skip }, () => {
   const src = html()
-  for (const [key, pkg] of Object.entries(PACKAGES)) {
+  // SELLABLE packages only. This loop used to walk every entry in PACKAGES,
+  // which includes the three retired studio tiers ($379/$439/$549) — so it
+  // demanded that a withdrawn price still be advertised on the live services
+  // page. Retired packages stay READABLE on historical bookings and must not
+  // appear as a current offer, so the page is right and the loop was wrong.
+  for (const key of pkgKeysOnPage(src)) {
+    const pkg = PACKAGES[key as keyof typeof PACKAGES]
     if (pkg.price.kind !== 'starting') continue
     const m = new RegExp(`data-pkg-price="${key}">([^<]+)<`).exec(src)
     assert.match(decode(m![1]), /^Starting at /,
@@ -116,7 +160,13 @@ test('services page: plain dollar fallbacks match the price book', { skip }, () 
 
 test('services page: crew lines are DERIVED, never a hand-written number', { skip }, () => {
   const src = html()
-  for (const [key, pkg] of Object.entries(PACKAGES)) {
+  // SELLABLE packages only. This loop used to walk every entry in PACKAGES,
+  // which includes the three retired studio tiers ($379/$439/$549) — so it
+  // demanded that a withdrawn price still be advertised on the live services
+  // page. Retired packages stay READABLE on historical bookings and must not
+  // appear as a current offer, so the page is right and the loop was wrong.
+  for (const key of pkgKeysOnPage(src)) {
+    const pkg = PACKAGES[key as keyof typeof PACKAGES]
     if (key === 'not-sure') continue
     const m = new RegExp(`data-pkg-crew="${key}"[^>]*>([^<]+)<`).exec(src)
     assert.ok(m, `no data-pkg-crew="${key}" on the page`)

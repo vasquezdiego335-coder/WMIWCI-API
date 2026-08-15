@@ -139,8 +139,20 @@ test('the catalogue returns both services with everything the SITE needs', () =>
   assert.equal(lo.hourly!.rateCents, 15_000)
   assert.equal(lo.hourly!.minimumMinutes, 120)
   assert.equal(lo.hourly!.workers, 2)
-  assert.equal(lo.hourly!.services.length, 3)
+  // SIX services, from the price book — the live form builds its grid from
+  // this list, so a shorter one here would silently drop half the products.
+  assert.equal(lo.hourly!.services.length, 6)
+  assert.deepEqual(lo.hourly!.services.map((s) => s.key), [
+    'loading_only', 'unloading_only', 'loading_and_unloading',
+    'in_home_furniture', 'storage_unit_help', 'moving_container_help',
+  ])
   for (const s of lo.hourly!.services) assert.ok(s.label && s.label_es)
+  // Only loading AND unloading spans two addresses, which is what makes the
+  // crew's time between them billable.
+  assert.deepEqual(
+    lo.hourly!.services.filter((s) => s.twoAddresses).map((s) => s.key),
+    ['loading_and_unloading'],
+  )
 })
 
 test('a valid full-service intake succeeds', () => {
