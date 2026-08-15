@@ -770,6 +770,19 @@ export function scopeOverageForCrew(crew: number): Charge {
 //  promises. Every surface must use THESE — not a local paraphrase.
 // ════════════════════════════════════════════════════════════════════════
 export const COPY = {
+  /** Shown when a route genuinely could not be measured. It promises a REVIEW,
+   *  never a price — quoting $0 for an unmeasurable trip is the failure this
+   *  wording exists to avoid. */
+  /** Advisory wording for the live form: the figure is real but re-measured
+   *  server-side at submission, so it can move if an address changes. */
+  route_may_change: {
+    en: 'Estimated from the addresses entered. We re-check the route when you submit, so this can change if an address or stop changes.',
+    es: 'Estimado a partir de las direcciones ingresadas. Verificamos la ruta nuevamente al enviar, por lo que puede cambiar si cambia una dirección o parada.',
+  },
+  route_failed: {
+    en: 'We could not measure the driving route for these addresses automatically. Your transportation charge will be confirmed during review, before anything is approved.',
+    es: 'No pudimos medir automáticamente la ruta de conducción para estas direcciones. Su cargo de transporte se confirmará durante la revisión, antes de aprobar cualquier cosa.',
+  },
   /** Replaces "no hidden fees" / "guaranteed flat rate regardless of changes". */
   scope_promise: {
     en: 'Your approved flat rate covers the inventory, locations, services, and access conditions submitted during booking. Any potential additional charges will be explained and approved before extra work is performed.',

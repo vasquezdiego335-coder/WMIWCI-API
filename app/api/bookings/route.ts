@@ -27,6 +27,8 @@ import { assessInventory, describeInventory, mergeInventory, parseInventoryText,
 import { resolveDiscount } from '@/lib/discount-rules'
 import { normalizeAddressAndUnit } from '@/lib/address'
 import { checkIntake, hoursToMinutes, laborOnlyEstimateCents } from '@/lib/product-catalog'
+import { computeRouteDistance, summarize as summarizeRoute } from '@/lib/route-distance'
+import { mileageChargeForMiles, TRANSPORTATION_MILEAGE, assertNoDoubleTravelCharge } from '@/lib/pricing-config'
 
 /** The truck pickup & return ADD-ON. Distinct from BOOKING_FEE_CENTS — the two
  *  are both $49 and must never be merged or deduplicated by amount. */
@@ -318,8 +320,14 @@ async function handleBooking(req: NextRequest): Promise<NextResponse> {
         : null
   if (saPickups.length === 0 && data.addressFrom) saPickups.push({ raw: data.addressFrom })
   const sa = saDest ? checkServiceArea(saPickups, saDest) : null
-  const travelFeeCents = sa?.travelFeeCents ?? 0 // null (pending NY review) -> stored 0
-  const travelFeeUsd = travelFeeCents / 100
+  // ── TRAVEL: MILEAGE IN, BAND OUT ────────────────────────────────────────
+  //  checkServiceArea no longer returns a band fee for a new evaluation (it was
+  //  retired 2026-07-31 and replaced by $3-per-routed-mile transportation).
+  //  This stays 0 for every new booking; a historical row keeps whatever it was
+  //  approved with, read from its stored column and never recalculated.
+  //  assertNoDoubleTravelCharge below makes charging both impossible.
+  const travelFeeCents = 0
+  const travelFeeUsd = 0
   let originDisplay = data.pickupAddresses?.length
     ? formatAddr(data.pickupAddresses[0])
     : data.addressFrom?.trim() ?? ''
@@ -439,12 +447,57 @@ async function handleBooking(req: NextRequest): Promise<NextResponse> {
   // not a package price — access add-ons and travel still apply on top, and
   // they are already inside est.estimatedTotal (which carries a zero base for
   // labor-only, since 'labor-only' is not a package key).
+  // ── SERVER-AUTHORITATIVE TRANSPORTATION ($3 per routed mile) ────────────
+  //  Measured HERE, not taken from the browser. /api/route-estimate exists so
+  //  the form can DISPLAY a live figure; this is the number that is stored and
+  //  billed, and the two are computed by the same module.
+  //
+  //  LABOR-ONLY NEVER ROUTES. The customer supplies the truck, so there is no
+  //  transportation to price and no address is sent to a routing provider at
+  //  all — not as an optimisation, as a rule.
+  //
+  //  A route we cannot measure is REVIEW, never a free trip: routeManualReview
+  //  is set and no amount is stored, so nothing downstream can sum a null as 0.
+  let transportation: {
+    routedMiles: number | null
+    billableMiles: number | null
+    rateCents: number | null
+    amountCents: number | null
+    status: string
+    manualReview: boolean
+    summary: Record<string, unknown> | null
+  } | null = null
+
+  if (product === 'full_service') {
+    const stops = (data.pickupAddresses ?? []).slice(1).map(formatAddr).filter(Boolean)
+    const route = await computeRouteDistance({
+      origin: originDisplay,
+      destination: destDisplay,
+      stops,
+    }).catch(() => null)
+
+    const charge = mileageChargeForMiles(route?.miles ?? null)
+    const measured = charge.billableMiles != null
+    transportation = {
+      routedMiles: route?.miles ?? null,
+      billableMiles: charge.billableMiles,
+      rateCents: measured ? TRANSPORTATION_MILEAGE.ratePerMileCents : null,
+      amountCents: measured ? charge.amountCents ?? null : null,
+      status: route?.status ?? 'skipped',
+      manualReview: !measured,
+      summary: route ? (summarizeRoute(route) as Record<string, unknown>) : null,
+    }
+  }
+
+  //  Full-service: package + access add-ons + TRANSPORTATION.
+  //  Labor-only:   hourly labor + access add-ons. Never transportation.
+  const transportationDollars = (transportation?.amountCents ?? 0) / 100
   const totalEstimateValue = labor
     ? Math.round(labor.subtotalCents + est.estimatedTotal * 100) / 100
     : svc
-      ? est.estimatedTotal
-      : est.estimatedTotal > 0
-        ? est.estimatedTotal
+      ? Math.round((est.estimatedTotal + transportationDollars) * 100) / 100
+      : est.estimatedTotal + transportationDollars > 0
+        ? Math.round((est.estimatedTotal + transportationDollars) * 100) / 100
         : null
 
   // ── THE THREE SEPARATE FACTS (owner spec 2026-08-14) ────────────────────
@@ -616,10 +669,22 @@ async function handleBooking(req: NextRequest): Promise<NextResponse> {
       // to be dropped here, which is what made the email/DB read $599 while the
       // form showed $699.
       totalEstimate: totalEstimateValue,
-      // ── Service area (server-computed; travel fee is due on move day, not in Stripe) ──
+      // ── Service area. The ZONE still decides serviceability, the customer
+      //    message and New York review; the FEE is retired. ──
       serviceAreaZone: (sa?.zone ?? null) as any,
-      travelFee: travelFeeCents,
-      travelFeeDueOnMoveDay: travelFeeCents > 0,
+      travelFee: 0,
+      travelFeeDueOnMoveDay: false,
+      // ── FULL-SERVICE TRANSPORTATION ($3 per routed mile, fuel included) ──
+      //    Server-measured, never taken from the browser. Labor-only stores
+      //    NOTHING here: the customer supplies the truck, so there is no
+      //    transportation to bill and no address is ever sent to a router.
+      routedMiles: transportation?.routedMiles ?? undefined,
+      billableMiles: transportation?.billableMiles ?? undefined,
+      mileageRateCents: transportation?.rateCents ?? undefined,
+      transportationCharge: transportation?.amountCents ?? undefined,
+      routeStatus: transportation?.status ?? undefined,
+      routeManualReview: transportation?.manualReview ?? false,
+      routeSummary: (transportation?.summary ?? undefined) as never,
       // Derived from buildReviewReasons() so the flag and the reasons can never
       // disagree. Previously this read only the service-area/address verdicts,
       // so an unpriced piano booked as if it were a settled job.

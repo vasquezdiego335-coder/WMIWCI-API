@@ -1037,6 +1037,30 @@ model Booking {
   laborRateCents        Int?     @map("labor_rate_cents")
   laborWorkers          Int?     @map("labor_workers")
   laborSubtotalCents    Int?     @map("labor_subtotal_cents")
+
+  // ── FULL-SERVICE TRANSPORTATION (owner rule 2026-08-15) ─────────────────
+  //    $3 per ROUTED mile, fuel included, measured SERVER-SIDE from the first
+  //    pickup through every requested stop to the final drop-off, with the
+  //    whole route rounded UP to the next whole mile. A browser-supplied
+  //    distance or dollar amount is never trusted.
+  //
+  //    LABOR-ONLY LEAVES ALL OF THESE NULL. The customer supplies the truck,
+  //    so there is no transportation to bill and no address is ever sent to a
+  //    routing provider.
+  //
+  //    These REPLACE the retired travel-band fee (travel_fee), which stays on
+  //    the row for historical bookings and is never recalculated. A booking
+  //    may carry one or the other — never both.
+  routedMiles          Float?   @map("routed_miles")
+  billableMiles        Int?     @map("billable_miles")
+  mileageRateCents     Int?     @map("mileage_rate_cents")
+  transportationCharge Int?     @map("transportation_charge")
+  /// measured | skipped | failed — why we do or do not have a distance.
+  routeStatus          String?  @map("route_status")
+  /// Route could not be measured: an owner prices it before approval.
+  routeManualReview    Boolean  @default(false) @map("route_manual_review")
+  /// Distances and status WITHOUT the address strings (privacy).
+  routeSummary         Json?    @map("route_summary")
   //    An owner may correct the size WITHOUT the customer rebooking. The change
   //    is attributed and reasoned; the price it implies is a separate, explicit
   //    approval (see price_change_approved_*).
