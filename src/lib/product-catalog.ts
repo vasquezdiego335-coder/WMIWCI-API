@@ -179,65 +179,162 @@ export const RETIRED_TRUCK_OPTION_MESSAGE =
 export type ProductKey = 'labor_only' | 'full_service'
 
 /**
- * Is full-service intake open?
- *
- * FAIL-CLOSED BY CONSTRUCTION: this returns true only for the exact string
- * 'true'. An unset variable, a typo, a missing deployment config, or an
- * env-var that failed to load all yield FALSE — the legally safe answer.
- * Never invert this to an opt-out.
- *
- * Read at call time rather than module load so a test (and a deployment that
- * changes the variable) does not need a process restart to take effect.
+ * Bumped whenever any published amount in this catalogue changes. Stamped onto
+ * every booking so a historical quote can always be read back against the
+ * price book it was actually sold under, and never silently re-priced by a
+ * later change.
  */
-export function isFullServiceIntakeEnabled(): boolean {
-  return process.env.FULL_SERVICE_INTAKE_ENABLED === 'true'
-}
-
-export type AvailabilityVerdict =
-  | { available: true }
-  | { available: false; code: 'product_unavailable'; message: string; message_es: string }
+export const PRICING_VERSION = '2026-08-14'
 
 /**
- * May this product be sold RIGHT NOW?
+ * BOTH PRODUCTS ARE ACTIVE (owner decision 2026-08-14).
  *
- * The message is deliberately honest and non-committal: it says we are not
- * currently offering it and offers the product we CAN legally sell. It does
- * not claim a licence application is in progress, give a date, or make any
- * statement about our regulatory status — none of which we can substantiate.
+ * An earlier revision of the repair audit asserted the company was unlicensed
+ * and required full-service intake to fail closed behind
+ * FULL_SERVICE_INTAKE_ENABLED. The owner has since confirmed that is wrong:
+ * Move It Clear It sells two products and both are bookable. That gate — and
+ * the 422 it produced — is removed.
+ *
+ * This is deliberately a plain constant rather than an environment flag. A
+ * product being sellable is a business fact, not deployment configuration, and
+ * the previous flag defaulted to "off" in every environment that had not been
+ * told otherwise — which is exactly how a live product disappeared.
  */
-export function checkProductAvailability(product: ProductKey): AvailabilityVerdict {
-  if (product === 'labor_only') return { available: true }
-  if (isFullServiceIntakeEnabled()) return { available: true }
-  return {
-    available: false,
-    code: 'product_unavailable',
-    message:
-      'We are not currently taking full-service moving bookings where we supply the truck. ' +
-      'We do offer labor-only moving help — two movers at $150/hour with a two-hour minimum — ' +
-      'for a truck you rent. Please choose labor-only, or contact us and we will help.',
-    message_es:
-      'Por el momento no estamos aceptando reservas de mudanza de servicio completo con nuestro camión. ' +
-      'Sí ofrecemos ayuda de mudanza solo con mano de obra: dos trabajadores a $150 por hora con un mínimo de dos horas, ' +
-      'para un camión que usted rente. Elija la opción de solo mano de obra o contáctenos y le ayudamos.',
+export const ACTIVE_PRODUCTS: readonly ProductKey[] = ['full_service', 'labor_only']
+
+export const isProductActive = (p: ProductKey): boolean => ACTIVE_PRODUCTS.includes(p)
+
+// ── THE SERVICE CATALOGUE — one server-side source for the SITE ───────────
+//
+// The booking form, the services page and the generated browser pricing mirror
+// must all originate here (GET /api/services). Hand-maintained copies of these
+// numbers on the SITE are what let the form advertise $150/hour while the
+// server priced a flat package.
+
+export type ServicePackage = {
+  key: PackageKey
+  label: string
+  label_es: string
+  /** INTEGER CENTS. null for "Need a Quote", which has no published price. */
+  priceCents: number | null
+  requiresReview: boolean
+}
+
+export type ServiceCatalogEntry = {
+  key: ProductKey
+  label: string
+  label_es: string
+  description: string
+  description_es: string
+  pricingModel: 'flat_package' | 'hourly'
+  /** Who supplies transportation. THE structural difference between them. */
+  truckResponsibility: 'company' | 'customer'
+  active: boolean
+  pricingVersion: string
+  /** flat_package only: the packages a NEW booking may select. */
+  packages?: ServicePackage[]
+  /** hourly only: the published rate and its minimum. */
+  hourly?: {
+    rateCents: number
+    minimumMinutes: number
+    workers: number
+    maxMinutes: number
+    services: { key: LaborService; label: string; label_es: string }[]
   }
 }
 
-/** Products a customer may currently choose. Drives the SITE mirror. */
-export function activeProducts(): ProductKey[] {
-  return isFullServiceIntakeEnabled() ? ['labor_only', 'full_service'] : ['labor_only']
+/**
+ * THE canonical service catalogue. Pure and dependency-free so the API route,
+ * the mirror generator and the tests all read the identical structure.
+ */
+export function serviceCatalog(): ServiceCatalogEntry[] {
+  return [
+    {
+      key: 'full_service',
+      label: 'Full-Service Moving',
+      label_es: 'Mudanza de Servicio Completo',
+      description: 'Our crew and our truck. One flat price for your move size.',
+      description_es: 'Nuestro equipo y nuestro camión. Un precio fijo según el tamaño de su mudanza.',
+      pricingModel: 'flat_package',
+      truckResponsibility: 'company',
+      active: isProductActive('full_service'),
+      pricingVersion: PRICING_VERSION,
+      packages: ACTIVE_PACKAGE_KEYS.map((key) => ({
+        key,
+        label: PACKAGES[key].label,
+        label_es: PACKAGES[key].label_es,
+        // The price book is in DOLLARS; the wire contract is integer CENTS.
+        priceCents: PACKAGES[key].price.amount != null ? Math.round(PACKAGES[key].price.amount! * 100) : null,
+        requiresReview: PACKAGES[key].requiresReview,
+      })),
+    },
+    {
+      key: 'labor_only',
+      label: 'Labor-Only Moving Help',
+      label_es: 'Ayuda de Mudanza Solo con Mano de Obra',
+      description: 'You provide the truck or container. Two movers at $150/hour, two-hour minimum.',
+      description_es: 'Usted pone el camión o contenedor. Dos trabajadores a $150 por hora, mínimo dos horas.',
+      pricingModel: 'hourly',
+      truckResponsibility: 'customer',
+      active: isProductActive('labor_only'),
+      pricingVersion: PRICING_VERSION,
+      hourly: {
+        rateCents: LABOR_ONLY_RATE_CENTS,
+        minimumMinutes: LABOR_ONLY_MINIMUM_MINUTES,
+        workers: LABOR_ONLY_WORKERS,
+        maxMinutes: LABOR_ONLY_MAX_MINUTES,
+        services: LABOR_SERVICES.map((key) => ({
+          key,
+          label: LABOR_SERVICE_LABELS[key].en,
+          label_es: LABOR_SERVICE_LABELS[key].es,
+        })),
+      },
+    },
+  ]
 }
+
+/** The two customer-facing one-liners every downstream surface must use, so
+ *  admin, Discord, email, portal and receipt describe a job identically. */
+export const SERVICE_DESCRIPTORS: Record<ProductKey, { en: string; es: string }> = {
+  full_service: {
+    en: 'Full-Service Moving — crew and truck included',
+    es: 'Mudanza de Servicio Completo — equipo y camión incluidos',
+  },
+  labor_only: {
+    en: 'Labor-Only Moving — customer provides transportation',
+    es: 'Mudanza Solo con Mano de Obra — el cliente pone el transporte',
+  },
+}
+
+export const describeService = (p: ProductKey, locale: 'en' | 'es' = 'en'): string =>
+  SERVICE_DESCRIPTORS[p][locale]
 
 // ── INTAKE VALIDATION ─────────────────────────────────────────────────────
 
 export type IntakeRejection = {
-  code: 'product_unavailable' | 'package_retired' | 'package_unknown' | 'labor_below_minimum' | 'labor_too_long' | 'contradictory_product' | 'service_retired'
+  code:
+    | 'service_type_missing'
+    | 'package_retired'
+    | 'package_unknown'
+    | 'package_missing'
+    | 'labor_below_minimum'
+    | 'labor_too_long'
+    | 'labor_hours_missing'
+    | 'labor_service_missing'
+    | 'contradictory_product'
+    | 'service_retired'
   /** Which submitted field is at fault, for a field-mapped 422. */
   field: string
   message: string
 }
 
 export type IntakeCheckInput = {
-  product: ProductKey
+  /**
+   * REQUIRED. Never inferred from the package, the truck provider, the notes,
+   * or a legacy field — inference is what produced bookings whose product
+   * nobody could state with confidence.
+   */
+  product?: string | null
   /** Full-service only: the selected package key. */
   packageKey?: string | null
   /** Labor-only only: requested duration in MINUTES. */
@@ -248,6 +345,9 @@ export type IntakeCheckInput = {
   /** The raw `truckOption` as submitted, in any historical spelling. */
   truckOption?: string | null
 }
+
+export const isProductKey = (v: unknown): v is ProductKey =>
+  v === 'full_service' || v === 'labor_only'
 
 /**
  * THE new-intake gate. Every rejection is a sentence a customer can act on;
@@ -261,72 +361,102 @@ export function checkIntake(i: IntakeCheckInput): IntakeRejection[] {
   // A withdrawn service is refused FIRST and outright. It is never dropped
   // silently (the crew would not turn up for the truck the customer is
   // expecting) and never substituted (that is a sale they did not agree to).
+  //
+  // ⚠ Truck Pickup & Return is NOT full-service. It was a separate add-on in
+  // which we fetched a truck the CUSTOMER rented. Full-service includes our
+  // own truck in the package price and is fully active.
   if (isRetiredTruckOption(i.truckOption)) {
     out.push({ code: 'service_retired', field: 'truckOption', message: RETIRED_TRUCK_OPTION_MESSAGE })
     return out
   }
 
-  const availability = checkProductAvailability(i.product)
-  if (!availability.available) {
-    out.push({ code: 'product_unavailable', field: 'serviceTypeKey', message: availability.message })
-    // No point validating the details of a product we cannot sell at all.
+  // ── THE DISCRIMINANT ────────────────────────────────────────────────────
+  //    Required, never inferred. Inference from the package / truck provider /
+  //    notes is how a booking ended up with a product nobody could state with
+  //    confidence, and how a customer's own U-Haul job was dispatched as a
+  //    company-truck move.
+  if (!isProductKey(i.product)) {
+    out.push({
+      code: 'service_type_missing',
+      field: 'serviceTypeKey',
+      message: 'Choose a service: Full-Service Moving (our crew and truck) or Labor-Only Moving Help (you provide the truck).',
+    })
     return out
   }
 
   if (i.product === 'full_service') {
-    if (!isKnownPackage(i.packageKey)) {
-      out.push({ code: 'package_unknown', field: 'serviceType', message: 'Choose a move size from the list.' })
+    // Requires an ACTIVE package…
+    if (!i.packageKey) {
+      out.push({ code: 'package_missing', field: 'moveSizeKey', message: 'Choose your move size.' })
+    } else if (!isKnownPackage(i.packageKey)) {
+      out.push({ code: 'package_unknown', field: 'moveSizeKey', message: 'Choose a move size from the list.' })
     } else if (isRetiredPackage(i.packageKey)) {
       out.push({
         code: 'package_retired',
-        field: 'serviceType',
+        field: 'moveSizeKey',
         message:
           `${PACKAGES[i.packageKey].label} is no longer offered at that rate. ` +
           'Please refresh the page and choose from the current sizes.',
       })
     }
+    // …and rejects every labor-only field. A full-service price is the flat
+    // package; hours on it would mean two pricing models on one booking.
     if (i.laborMinutes != null || i.laborService != null) {
       out.push({
         code: 'contradictory_product',
         field: 'laborHours',
-        message: 'This booking mixes full-service and labor-only details. Please refresh the page and submit again.',
+        message: 'Full-service moving is priced by move size, not by the hour. Please refresh the page and submit again.',
       })
     }
     return out
   }
 
-  // ── labor-only ──
-  const minutes = i.laborMinutes ?? 0
-  if (minutes > 0 && minutes < LABOR_ONLY_MINIMUM_MINUTES) {
+  // ── labor_only ──────────────────────────────────────────────────────────
+  //    Requires a labor service and an estimate; rejects every full-service
+  //    field. The truck is the customer's, so no package price and no
+  //    company-truck charge can attach.
+  if (i.laborMinutes == null) {
     out.push({
-      code: 'labor_below_minimum',
+      code: 'labor_hours_missing',
       field: 'laborHours',
-      message: `Labor-only moving help has a ${LABOR_ONLY_MINIMUM_MINUTES / 60}-hour minimum. Please choose ${LABOR_ONLY_MINIMUM_MINUTES / 60} hours or more.`,
+      message: `About how many hours do you need? There is a ${LABOR_ONLY_MINIMUM_MINUTES / 60}-hour minimum.`,
     })
+  } else {
+    if (i.laborMinutes < LABOR_ONLY_MINIMUM_MINUTES) {
+      out.push({
+        code: 'labor_below_minimum',
+        field: 'laborHours',
+        message: `Labor-only moving help has a ${LABOR_ONLY_MINIMUM_MINUTES / 60}-hour minimum. Please choose ${LABOR_ONLY_MINIMUM_MINUTES / 60} hours or more.`,
+      })
+    }
+    if (i.laborMinutes > LABOR_ONLY_MAX_MINUTES) {
+      out.push({
+        code: 'labor_too_long',
+        field: 'laborHours',
+        message: `For jobs over ${LABOR_ONLY_MAX_MINUTES / 60} hours, please contact us so we can plan the crew properly.`,
+      })
+    }
   }
-  if (minutes > LABOR_ONLY_MAX_MINUTES) {
-    out.push({
-      code: 'labor_too_long',
-      field: 'laborHours',
-      message: `For jobs over ${LABOR_ONLY_MAX_MINUTES / 60} hours, please contact us so we can plan the crew properly.`,
-    })
-  }
-  if (i.laborService != null && !isLaborService(i.laborService)) {
+  if (i.laborService == null) {
+    out.push({ code: 'labor_service_missing', field: 'laborService', message: 'Choose loading, unloading, or both.' })
+  } else if (!isLaborService(i.laborService)) {
     out.push({ code: 'contradictory_product', field: 'laborService', message: 'Choose loading, unloading, or both.' })
   }
-  // A labor-only job runs on the CUSTOMER's truck. Company-truck fields on it
-  // are a contradiction, not a preference — see service-shape.ts.
+  // A full-service PACKAGE on a labor-only booking would attach a flat truck-
+  // inclusive price to a job where the customer supplies the truck.
+  if (i.packageKey) {
+    out.push({
+      code: 'contradictory_product',
+      field: 'moveSizeKey',
+      message: 'Labor-only help is priced by the hour, not by move size. Please refresh the page and submit again.',
+    })
+  }
   if (i.hasCompanyTruckFields) {
     out.push({
       code: 'contradictory_product',
       field: 'serviceTypeKey',
       message: 'Labor-only help does not include a truck from us. Please refresh the page and submit again.',
     })
-  }
-  if (i.packageKey && isKnownPackage(i.packageKey)) {
-    // A move SIZE is fine on a labor-only job (it scopes the crew); a
-    // full-service PACKAGE PRICE is not. Nothing to reject here — the price
-    // comes from laborOnlyEstimateCents, never from the package.
   }
   return out
 }

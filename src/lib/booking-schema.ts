@@ -41,7 +41,12 @@ export const BookingSchema = z.object({
   fullName: cleanString(2, 100),
   phone: cleanString(7, 25),
   email: z.string().transform((v) => sanitizeText(v).toLowerCase()).pipe(z.string().email()),
-  serviceType: cleanString(1, 60),
+  /** @deprecated LEGACY. This field meant BOTH the product and the bedroom
+   *  package, which is the overload the two-product contract exists to end.
+   *  New payloads send `serviceTypeKey` (the product) and `moveSizeKey` (the
+   *  package). Kept OPTIONAL so a browser tab opened before the cutover still
+   *  parses; the route reads it only as a fallback for `moveSizeKey`. */
+  serviceType: z.string().transform(sanitizeText).pipe(z.string().max(60)).optional(),
   date: z.string().transform(sanitizeText).optional(),
   time: z.string().transform(sanitizeText).optional(),
   truckOption: z.string().transform(normalizeTruckOption).optional(),
@@ -207,12 +212,21 @@ export const BookingSchema = z.object({
   //
   //    serviceType (the PACKAGE) stays separate on purpose: a labor-only job
   //    still has a size, and the size is not a claim about whose truck it is.
+  //  REQUIRED. The discriminant for the whole booking contract. It is not
+  //  optional and it is never inferred: guessing the product from the package,
+  //  the truck provider or the notes is how a job on the customer's own U-Haul
+  //  was recorded as a company-truck move. A browser tab opened before this
+  //  cutover fails validation with a field-mapped message telling the customer
+  //  to choose a service, which is the honest outcome.
   serviceTypeKey: z
-    .string()
+    .string({ required_error: 'Choose a service: Full-Service Moving or Labor-Only Moving Help.' })
     .transform((v) => sanitizeText(v).toLowerCase().replace(/[\s-]+/g, '_'))
-    .pipe(z.enum(['labor_only', 'full_service']))
-    .optional()
-    .catch(undefined),
+    .pipe(z.enum(['labor_only', 'full_service'], {
+      errorMap: () => ({ message: 'Choose a service: Full-Service Moving or Labor-Only Moving Help.' }),
+    })),
+  /** FULL-SERVICE only: which flat package. Replaces the overloaded
+   *  `serviceType`, which meant both the product and the bedroom size. */
+  moveSizeKey: z.string().transform(sanitizeText).pipe(z.string().max(40)).optional(),
   /** Which labor product ("loading_only", "unloading_only", "load_and_unload"). */
   laborService: z.string().transform(sanitizeText).pipe(z.string().max(40)).optional(),
   laborHours: z.coerce.number().min(0).max(24).optional(),

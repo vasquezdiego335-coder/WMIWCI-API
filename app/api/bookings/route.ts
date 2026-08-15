@@ -260,21 +260,26 @@ async function handleBooking(req: NextRequest): Promise<NextResponse> {
   //  DO NOT MOVE THIS DOWN. If a check needs data computed further down, the
   //  check is wrong, not the position.
   // ══════════════════════════════════════════════════════════════════════
-  const product: 'labor_only' | 'full_service' =
-    data.serviceTypeKey === 'labor_only' || data.serviceTypeKey === 'full_service'
-      ? data.serviceTypeKey
-      : data.laborService || data.laborHours != null || data.serviceType === 'labor-only'
-        ? 'labor_only'
-        : 'full_service'
-
+  //  THE DISCRIMINANT IS REQUIRED AND NEVER INFERRED (owner decision
+  //  2026-08-14). It used to be guessed from the package, the truck provider
+  //  or the notes when absent, which is how a job on the customer's own U-Haul
+  //  was recorded — and dispatched — as a company-truck move. If the customer
+  //  did not say which product they are buying, we ask; we do not decide.
+  //
+  //  `moveSizeKey` is read for full-service, falling back to the legacy
+  //  `serviceType` field that older form versions used for the same value.
+  //  `serviceType` is no longer overloaded to mean the product.
+  const product = data.serviceTypeKey ?? null
+  const submittedPackage = product === 'full_service' ? data.moveSizeKey ?? data.serviceType ?? null : data.moveSizeKey ?? null
   const laborMinutes = data.laborHours != null ? hoursToMinutes(data.laborHours) : null
+
   const intakeErrors = checkIntake({
     product,
-    packageKey: product === 'full_service' ? data.serviceType : null,
+    packageKey: submittedPackage,
     laborMinutes,
     laborService: data.laborService ?? null,
     // A company truck on a labor-only job is a contradiction, not a preference.
-    hasCompanyTruckFields: product === 'labor_only' && !!data.truckSizeUpgradeRequested,
+    hasCompanyTruckFields: !!data.truckSizeUpgradeRequested,
     // The raw value, before the schema's alias normalisation, so every
     // historical spelling is caught rather than just the canonical one.
     truckOption: rawTruckOption(body),
@@ -295,6 +300,9 @@ async function handleBooking(req: NextRequest): Promise<NextResponse> {
   // THE authoritative labor-only price. $150/hour for two movers with a
   // two-hour minimum — the rate the booking form advertises.
   const labor = product === 'labor_only' ? laborOnlyEstimateCents(laborMinutes ?? 0) : null
+  // Full-service keeps the flat package model, unchanged: 1BR $550, 2BR $779,
+  // 3BR $1,049, 4BR $1,449, 5BR $1,799, truck included in the package.
+  const packageKey = product === 'full_service' ? submittedPackage : null
 
   // ── Service-area evaluation — SERVER-SIDE source of truth. Any travel fee the
   //    browser may have shown is ignored; the zone + fee are recomputed here and
@@ -398,7 +406,7 @@ async function handleBooking(req: NextRequest): Promise<NextResponse> {
 
   const requestedDate = buildRequestedDate(data.date, data.time)
   const truckAddonDueOnMoveDay = data.truckOption === 'truck-pickup-return'
-  const svc = SERVICE_MAP[data.serviceType]
+  const svc = packageKey ? SERVICE_MAP[packageKey] : undefined
 
   // ── SERVER-COMPUTED estimate (source of truth). The client-submitted
   //    estimateTotal/estimateAddons are IGNORED for pricing — recomputed here
@@ -411,7 +419,7 @@ async function handleBooking(req: NextRequest): Promise<NextResponse> {
   //    and elevator/parking distance are review-gated, not automatic. They are
   //    still collected and stored for the crew; they just don't bill.
   const est = computeEstimate({
-    serviceType: data.serviceType,
+    serviceType: packageKey ?? undefined,
     pickupStairFlights: data.pickupStairFlights ?? undefined,
     dropoffStairFlights: data.dropoffStairFlights ?? undefined,
     pickupCarryFeet: data.pickupCarryFeet ?? undefined,
@@ -516,7 +524,7 @@ async function handleBooking(req: NextRequest): Promise<NextResponse> {
   const needsManualReview = reviewReasons.length > 0
 
   const itemsDescription = buildDescription(
-    data.serviceType,
+    packageKey ?? data.serviceType ?? '',
     data.truckOption,
     data.jobDetails,
     {

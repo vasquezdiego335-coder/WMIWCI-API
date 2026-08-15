@@ -41,7 +41,15 @@ const base = () => ({
   fullName: 'Sam Ortiz',
   phone: '9735551234',
   email: 'sam@example.com',
-  serviceType: '1br',
+  // ── THE PRODUCT IS NOW REQUIRED (owner decision 2026-08-14) ────────────
+  //    Move It Clear It sells two products, and a booking must say which one
+  //    it is. The server no longer infers it from the package, the truck
+  //    provider or the notes — that inference is how a job on the customer's
+  //    own truck was recorded as a company-truck move. These fixtures book
+  //    FULL-SERVICE, so they carry the product and its flat package.
+  serviceTypeKey: 'full_service' as const,
+  moveSizeKey: '1br',
+  serviceType: '1br', // legacy alias for moveSizeKey; still accepted
   agreementAccepted: true as const,
   agreementName: 'Sam Ortiz',
   inventoryAccuracyConfirmed: true as const,

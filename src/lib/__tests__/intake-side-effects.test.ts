@@ -112,17 +112,17 @@ test('the retirement is checked FIRST — before product, package or hours', () 
 
 test('below two hours is refused, and the refusal names the minimum', () => {
   for (const hours of [0.5, 1, 1.5, 1.75]) {
-    const errs = checkIntake({ product: 'labor_only', laborMinutes: hoursToMinutes(hours) })
+    const errs = checkIntake({ product: 'labor_only', laborService: 'load_and_unload', laborMinutes: hoursToMinutes(hours) })
     assert.equal(errs.length, 1, `${hours}h`)
     assert.equal(errs[0].code, 'labor_below_minimum', `${hours}h`)
     assert.equal(errs[0].field, 'laborHours', `${hours}h`)
   }
   // Exactly two hours is fine.
-  assert.deepEqual(checkIntake({ product: 'labor_only', laborMinutes: 120 }), [])
+  assert.deepEqual(checkIntake({ product: 'labor_only', laborService: 'load_and_unload', laborMinutes: 120 }), [])
 })
 
 test('one hour is never silently billed as two — it is refused outright', () => {
-  const errs = checkIntake({ product: 'labor_only', laborMinutes: 60 })
+  const errs = checkIntake({ product: 'labor_only', laborService: 'load_and_unload', laborMinutes: 60 })
   assert.equal(errs[0].code, 'labor_below_minimum')
   // The message tells them what to choose; it does not announce a substitution.
   assert.ok(!/we will bill|billed at|charged for two/i.test(errs[0].message))
