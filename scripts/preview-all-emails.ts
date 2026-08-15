@@ -24,6 +24,12 @@ import FinalInvoice from '../src/emails/final-invoice'
 import ReferralReward from '../src/emails/referral-reward'
 import QuoteFollowup from '../src/emails/quote-followup'
 import LeadNurture from '../src/emails/lead-nurture'
+// quote-request-received was ABSENT from this hand-maintained list, so the
+// generator never emitted its preview — while email-lifecycle.test.ts reads
+// that exact file to assert the support block's layout. The test therefore
+// passed only where a stale artifact survived and failed on a clean checkout
+// (and in CI). Emitting it is the fix; weakening the test is not.
+import QuoteRequestReceived from '../src/emails/quote-request-received'
 
 const OUT = resolve('email-previews')
 mkdirSync(OUT, { recursive: true })
@@ -58,6 +64,7 @@ const templates: Array<[string, React.ReactElement]> = [
   // ── Non-quote lead nurture (2026-08-06). Marketing context is supplied so
   //    the preview shows the compliance footer the real send is blocked
   //    without: unsubscribe link + postal address + the reason they got it.
+  ['quote-request-received', React.createElement(QuoteRequestReceived, { firstName: 'Diego (TEST)', estimatedPrice: '$1,049', moveDate: 'Saturday, September 5', moveSize: '3 Bedrooms' })],
   ['lead-nurture-1', React.createElement(LeadNurture, { ...common, stage: 1, quoteUrl: 'https://www.moveitclearit.com/quote.html', unsubscribeUrl: 'https://moveitclearit.com/api/email/unsubscribe?token=SAMPLE', postalAddress: '123 Sample Street, Newark NJ 07103' })],
   ['lead-nurture-2', React.createElement(LeadNurture, { ...common, stage: 2, quoteUrl: 'https://www.moveitclearit.com/quote.html', unsubscribeUrl: 'https://moveitclearit.com/api/email/unsubscribe?token=SAMPLE', postalAddress: '123 Sample Street, Newark NJ 07103' })],
   ['lead-nurture-final', React.createElement(LeadNurture, { ...common, stage: 3, quoteUrl: 'https://www.moveitclearit.com/quote.html', unsubscribeUrl: 'https://moveitclearit.com/api/email/unsubscribe?token=SAMPLE', postalAddress: '123 Sample Street, Newark NJ 07103' })],
