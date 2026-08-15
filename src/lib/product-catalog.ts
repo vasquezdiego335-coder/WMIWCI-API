@@ -137,6 +137,43 @@ export const isKnownPackage = (key?: string | null): key is PackageKey =>
 export const isRetiredPackage = (key?: string | null): boolean =>
   !!key && RETIRED_PACKAGE_KEYS.has(key)
 
+// ── TRUCK PICKUP & RETURN — RETIRED COMPLETELY (owner decision 2026-08-14) ─
+//
+// We no longer collect and return a customer's rental truck, at $49, $50, or
+// any price. This is a WITHDRAWN SERVICE, not a repriced one.
+//
+// THE RULE THAT MATTERS: a submission asking for it is REFUSED, never
+// converted. Silently dropping the option and booking the job without it would
+// send a crew to a customer who is expecting us to fetch their U-Haul; silently
+// substituting something else would charge for a service nobody chose. Both are
+// worse than an honest refusal that tells them to re-book.
+//
+// HISTORY IS PRESERVED. Bookings that genuinely bought this keep their stored
+// label and amount forever — see `isRetiredTruckOption` used only for READ
+// paths. Nothing back-fills, deletes or rewrites an old record.
+export const RETIRED_TRUCK_OPTION_ALIASES: ReadonlySet<string> = new Set([
+  'truck-pickup-return',
+  'full-148', // pre-2026 alias, normalised into truck-pickup-return by the form
+  'reserve-99', // ditto
+  'truck_pickup_return',
+  'truckPickupReturn',
+])
+
+export const RETIRED_TRUCK_OPTION_LABEL = 'Truck Pickup & Return (retired)'
+
+/** True for any spelling of the withdrawn truck-fetching service. */
+export const isRetiredTruckOption = (value?: string | null): boolean => {
+  const v = (value ?? '').trim()
+  return !!v && RETIRED_TRUCK_OPTION_ALIASES.has(v)
+}
+
+/** The message a customer sees. It does not offer a substitute, because there
+ *  isn't one — and inventing one would be a sale they never agreed to. */
+export const RETIRED_TRUCK_OPTION_MESSAGE =
+  'We no longer offer the Truck Pickup & Return add-on, where we collect and return your rental truck. ' +
+  'Please arrange to have your rental truck at the address yourself, then submit your booking again. ' +
+  'Everything else about your move is unchanged.'
+
 // ── PRODUCT AVAILABILITY (P0-01) ──────────────────────────────────────────
 
 export type ProductKey = 'labor_only' | 'full_service'
@@ -193,7 +230,7 @@ export function activeProducts(): ProductKey[] {
 // ── INTAKE VALIDATION ─────────────────────────────────────────────────────
 
 export type IntakeRejection = {
-  code: 'product_unavailable' | 'package_retired' | 'package_unknown' | 'labor_below_minimum' | 'labor_too_long' | 'contradictory_product'
+  code: 'product_unavailable' | 'package_retired' | 'package_unknown' | 'labor_below_minimum' | 'labor_too_long' | 'contradictory_product' | 'service_retired'
   /** Which submitted field is at fault, for a field-mapped 422. */
   field: string
   message: string
@@ -208,6 +245,8 @@ export type IntakeCheckInput = {
   laborService?: string | null
   /** Fields that only make sense for a company truck. */
   hasCompanyTruckFields?: boolean
+  /** The raw `truckOption` as submitted, in any historical spelling. */
+  truckOption?: string | null
 }
 
 /**
@@ -218,6 +257,14 @@ export type IntakeCheckInput = {
  */
 export function checkIntake(i: IntakeCheckInput): IntakeRejection[] {
   const out: IntakeRejection[] = []
+
+  // A withdrawn service is refused FIRST and outright. It is never dropped
+  // silently (the crew would not turn up for the truck the customer is
+  // expecting) and never substituted (that is a sale they did not agree to).
+  if (isRetiredTruckOption(i.truckOption)) {
+    out.push({ code: 'service_retired', field: 'truckOption', message: RETIRED_TRUCK_OPTION_MESSAGE })
+    return out
+  }
 
   const availability = checkProductAvailability(i.product)
   if (!availability.available) {

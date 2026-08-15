@@ -178,8 +178,16 @@ export const BOOKING_AUTHORIZATION = {
   note_es: 'Se coloca una autorización de $49 cuando envía su reserva. Se cobra solo después de aprobar su mudanza y se aplica a su total.',
 } as const
 
-/** Crew labor add-on to collect and return a truck the CUSTOMER reserved.
- *  Due on move day, never charged in Stripe, always manually approved. */
+/** ⚠ RETIRED 2026-08-14 (owner decision). We no longer collect and return a
+ *  customer's rental truck, at $49, $50, or any price.
+ *
+ *  The constant STAYS so historical bookings that genuinely bought this render
+ *  their original label and amount — deleting it would blank the line item on
+ *  every past invoice. It must not appear on any NEW-booking surface:
+ *  `product-catalog.isRetiredTruckOption()` refuses every alias at intake,
+ *  before a Customer, Booking or Stripe object exists.
+ *
+ *  DO NOT reintroduce this as an active add-on without an owner decision. */
 // ── Truck-size upgrade (owner decision, reconciled 2026-08-04) ───────────────
 //  NOT the same thing as TRUCK_PICKUP_RETURN below, which is crew time to fetch
 //  a truck the CUSTOMER rented. This is the truck WE bring: every package ships

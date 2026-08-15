@@ -88,6 +88,21 @@ const TRUCK_LABELS: Record<string, string> = {
   'truck-pickup-return': `Truck Pickup & Return (+$${TRUCK_PICKUP_RETURN.amount} due on move day)`,
 }
 
+/**
+ * The `truckOption` EXACTLY as the browser sent it, before Zod runs.
+ *
+ * booking-schema's `normalizeTruckOption` folds the legacy aliases `full-148`
+ * and `reserve-99` into `truck-pickup-return`, which is correct for reading
+ * historical payloads — but it means the parsed value can no longer tell us
+ * which spelling arrived. Since Truck Pickup & Return is now RETIRED and every
+ * alias must be refused, the gate reads the raw body instead of the normalised
+ * one. Anything non-string is ignored; the schema has already rejected those.
+ */
+function rawTruckOption(body: unknown): string | null {
+  const v = (body as { truckOption?: unknown } | null)?.truckOption
+  return typeof v === 'string' ? v.trim() : null
+}
+
 function buildRequestedDate(date?: string, time?: string): Date {
   if (!date) return new Date()
   // Interpret the customer's picked date/time as America/New_York wall-clock,
@@ -230,6 +245,57 @@ async function handleBooking(req: NextRequest): Promise<NextResponse> {
 
   const data = parsed.data
 
+  // ══════════════════════════════════════════════════════════════════════
+  //  THE PRODUCT GATE — BEFORE ANY SIDE EFFECT WHATSOEVER
+  //  (repair audit 2026-08-14: P0-01 / P0-02 / P0-04 + the retired add-on)
+  //
+  //  IT SITS HERE, DIRECTLY AFTER PARSING, ON PURPOSE. It used to run further
+  //  down, after `prisma.customer.upsert` — so a refused one-hour request had
+  //  ALREADY created a Customer row before it was told no. That is a real
+  //  write, on a real person, for a booking that was never allowed to exist.
+  //  Everything below this block writes something, calls a paid API, or both:
+  //  address verification, the customer upsert, the booking insert, Stripe.
+  //  Nothing may run until we know we are allowed to sell what was asked for.
+  //
+  //  DO NOT MOVE THIS DOWN. If a check needs data computed further down, the
+  //  check is wrong, not the position.
+  // ══════════════════════════════════════════════════════════════════════
+  const product: 'labor_only' | 'full_service' =
+    data.serviceTypeKey === 'labor_only' || data.serviceTypeKey === 'full_service'
+      ? data.serviceTypeKey
+      : data.laborService || data.laborHours != null || data.serviceType === 'labor-only'
+        ? 'labor_only'
+        : 'full_service'
+
+  const laborMinutes = data.laborHours != null ? hoursToMinutes(data.laborHours) : null
+  const intakeErrors = checkIntake({
+    product,
+    packageKey: product === 'full_service' ? data.serviceType : null,
+    laborMinutes,
+    laborService: data.laborService ?? null,
+    // A company truck on a labor-only job is a contradiction, not a preference.
+    hasCompanyTruckFields: product === 'labor_only' && !!data.truckSizeUpgradeRequested,
+    // The raw value, before the schema's alias normalisation, so every
+    // historical spelling is caught rather than just the canonical one.
+    truckOption: rawTruckOption(body),
+  })
+  if (intakeErrors.length) {
+    const fieldErrors: Record<string, string[]> = {}
+    for (const e of intakeErrors) (fieldErrors[e.field] ??= []).push(e.message)
+    apiLogger.warn(
+      { ip, product, codes: intakeErrors.map((e) => e.code) },
+      'booking refused at the product gate — no customer, booking, or Stripe object created',
+    )
+    return NextResponse.json(
+      { error: intakeErrors[0].message, code: intakeErrors[0].code, details: { fieldErrors } },
+      { status: 422 },
+    )
+  }
+
+  // THE authoritative labor-only price. $150/hour for two movers with a
+  // two-hour minimum — the rate the booking form advertises.
+  const labor = product === 'labor_only' ? laborOnlyEstimateCents(laborMinutes ?? 0) : null
+
   // ── Service-area evaluation — SERVER-SIDE source of truth. Any travel fee the
   //    browser may have shown is ignored; the zone + fee are recomputed here and
   //    stored on the booking. The fee is a MOVE-DAY amount (like the truck add-on)
@@ -333,45 +399,6 @@ async function handleBooking(req: NextRequest): Promise<NextResponse> {
   const requestedDate = buildRequestedDate(data.date, data.time)
   const truckAddonDueOnMoveDay = data.truckOption === 'truck-pickup-return'
   const svc = SERVICE_MAP[data.serviceType]
-
-  // ── THE PRODUCT GATE (repair audit 2026-08-14, P0-01 / P0-02 / P0-04) ───
-  //    FIRST, before the estimate and long before Stripe, because everything
-  //    below assumes we are allowed to sell what was asked for.
-  //
-  //    The browser is not trusted with any of these decisions. A stale tab, a
-  //    cached form or a hand-built POST is exactly how a full-service booking
-  //    would be taken while we are not licensed to carry, or how a retired
-  //    $379 studio rate would be honoured a month after it was withdrawn.
-  const product: 'labor_only' | 'full_service' =
-    data.serviceTypeKey === 'labor_only' || data.serviceTypeKey === 'full_service'
-      ? data.serviceTypeKey
-      : data.laborService || data.laborHours != null || data.serviceType === 'labor-only'
-        ? 'labor_only'
-        : 'full_service'
-
-  const laborMinutes = data.laborHours != null ? hoursToMinutes(data.laborHours) : null
-  const intakeErrors = checkIntake({
-    product,
-    packageKey: product === 'full_service' ? data.serviceType : null,
-    laborMinutes,
-    laborService: data.laborService ?? null,
-    // A company truck on a labor-only job is a contradiction, not a preference.
-    hasCompanyTruckFields: product === 'labor_only' && !!data.truckSizeUpgradeRequested,
-  })
-  if (intakeErrors.length) {
-    const fieldErrors: Record<string, string[]> = {}
-    for (const e of intakeErrors) (fieldErrors[e.field] ??= []).push(e.message)
-    apiLogger.warn({ ip, product, codes: intakeErrors.map((e) => e.code) }, 'booking refused at the product gate')
-    return NextResponse.json(
-      { error: intakeErrors[0].message, code: intakeErrors[0].code, details: { fieldErrors } },
-      { status: 422 },
-    )
-  }
-
-  // THE authoritative labor-only price. $150/hour for two movers with a
-  // two-hour minimum — the rate the booking form has been advertising while
-  // the server quietly priced a flat bedroom package instead.
-  const labor = product === 'labor_only' ? laborOnlyEstimateCents(laborMinutes ?? 0) : null
 
   // ── SERVER-COMPUTED estimate (source of truth). The client-submitted
   //    estimateTotal/estimateAddons are IGNORED for pricing — recomputed here
