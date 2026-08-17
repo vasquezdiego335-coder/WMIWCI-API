@@ -280,6 +280,7 @@ async function handleBooking(req: NextRequest): Promise<NextResponse> {
     packageKey: submittedPackage,
     laborMinutes,
     laborService: data.laborService ?? null,
+    laborWorkers: data.laborWorkers ?? null,
     // A company truck on a labor-only job is a contradiction, not a preference.
     hasCompanyTruckFields: !!data.truckSizeUpgradeRequested,
     // The raw value, before the schema's alias normalisation, so every
@@ -299,9 +300,11 @@ async function handleBooking(req: NextRequest): Promise<NextResponse> {
     )
   }
 
-  // THE authoritative labor-only price. $150/hour for two movers with a
-  // two-hour minimum — the rate the booking form advertises.
-  const labor = product === 'labor_only' ? laborOnlyEstimateCents(laborMinutes ?? 0) : null
+  // THE authoritative labor-only price. $75/worker/hour with a two-hour
+  // minimum: the form's two-mover product is $150/hour, a requested 3-worker
+  // crew is $225, 4 workers $300. The rate is SNAPSHOTTED onto the booking so
+  // a future ladder change can never re-price an accepted quote.
+  const labor = product === 'labor_only' ? laborOnlyEstimateCents(laborMinutes ?? 0, data.laborWorkers) : null
   // Full-service keeps the flat package model, unchanged: 1BR $550, 2BR $779,
   // 3BR $1,049, 4BR $1,449, 5BR $1,799, truck included in the package.
   const packageKey = product === 'full_service' ? submittedPackage : null
@@ -509,7 +512,11 @@ async function handleBooking(req: NextRequest): Promise<NextResponse> {
     data.truckProvider ?? (data.truckOption === 'own-truck' ? 'customer' : undefined)
   const shape = resolveServiceShape({
     serviceTypeKey: data.serviceTypeKey ?? (data.laborService || data.laborHours != null ? 'labor_only' : null),
-    moveSizeKey: data.serviceType,
+    // The explicit two-product field first; the legacy `serviceType` package
+    // spelling as the fallback. Reading ONLY the legacy field made the
+    // oversized-inventory check depend on a field a future form may stop
+    // sending — and shape.moveSizeKey is what assessInventory sizes against.
+    moveSizeKey: data.moveSizeKey ?? data.serviceType,
     truckProvider: truckProviderValue,
     truckAddonDueOnMoveDay,
     baseRate: svc?.price ?? null,
@@ -867,7 +874,7 @@ async function handleBooking(req: NextRequest): Promise<NextResponse> {
   //    fired on a converted person. Ingesting first means this submission
   //    either merges into the Step-1 partial lead or creates the lead that is
   //    then immediately converted. One lead, correctly closed.
-  if (data.serviceType === 'not-sure') {
+  if ((data.moveSizeKey ?? data.serviceType) === 'not-sure') {
     await ingestLeadSafe(
       {
         name: data.fullName,
