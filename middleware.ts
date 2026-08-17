@@ -105,6 +105,10 @@ export const config = {
     '/admin/payments',
     '/admin/discounts/:path*',
     '/admin/discounts',
+    // Deposit links mint payable URLs — the matcher must cover them, because
+    // `/admin` alone matches only the exact path, not its children.
+    '/admin/deposit-links/:path*',
+    '/admin/deposit-links',
     '/admin/expenses/:path*',
     '/admin/expenses',
     '/admin/owner-money/:path*',

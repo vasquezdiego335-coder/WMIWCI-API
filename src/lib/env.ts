@@ -35,6 +35,20 @@ const REQUIRED_DISCORD: EnvVar[] = [
   { key: 'DISCORD_CHANNEL_ALERTS', required: false },
   { key: 'DISCORD_OWNER_USER_IDS', required: false, note: 'comma-list of owner user IDs (or use the role below / legacy staff IDs)' },
   { key: 'DISCORD_OWNER_ROLE_ID', required: false, note: 'role that grants owner powers' },
+  // ── Deposit-link payment notifications (owner spec 2026-08-15) ──
+  // NOT required: a missing Discord destination must never stop a customer
+  // paying. It IS reported, because "configured" and "working" are different
+  // claims and the admin page states which one is true.
+  {
+    key: 'DISCORD_PAYMENTS_WEBHOOK_URL',
+    required: false,
+    note: 'SECRET. Incoming webhook created INSIDE the payments channel. Preferred transport; falls back to the bot token.',
+  },
+  {
+    key: 'DISCORD_PAYMENTS_CHANNEL_ID',
+    required: false,
+    note: 'destination for confirmed deposit payments (defaults to 1524853745064869990). Used by the BOT transport; with a webhook the URL selects the channel.',
+  },
 ]
 
 // ── EMAIL (audit E-01, 2026-07-26) ──────────────────────────────────────

@@ -141,6 +141,11 @@ export type Action =
   | 'booking.approve' // approve a PENDING_APPROVAL booking (captures the $49 hold)
   | 'booking.decline' // decline/deny before capture (releases the hold)
   | 'booking.test_payment' // create a controlled internal test booking (staging only)
+  // ── Deposit links (owner spec 2026-08-15) ──
+  | 'deposit.view' // see the deposit-link list and its money figures
+  | 'deposit.create' // mint a payment link for an exact amount
+  | 'deposit.cancel' // kill an unpaid link
+  | 'deposit.notify_test' // send a TEST Discord card (creates no payment)
   // System
   | 'audit.view'
 
@@ -241,6 +246,15 @@ const OWNER_ONLY: Action[] = [
   // Waiving a scheduling warning is a documented judgement call — owner only,
   // like overriding a closeout blocker.
   'schedule.override_conflicts',
+  // ── Deposit links (owner spec 2026-08-15) ──
+  // Minting a link is ASKING A CUSTOMER FOR MONEY at an amount the person
+  // typing chooses. That is the same authority line already drawn by
+  // booking.approve (which captures the $49 hold), so it sits on the same side
+  // of it. Viewing the list is left to OWNER + MANAGER: it is operational
+  // ("did Natalia pay yet?") and exposes no profit figure.
+  'deposit.create',
+  'deposit.cancel',
+  'deposit.notify_test',
 ]
 
 // Everything not owner-only is available to OWNER + MANAGER. CREW is limited to

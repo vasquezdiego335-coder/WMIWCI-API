@@ -162,6 +162,66 @@ export async function processStripeEventJob(event: Stripe.Event): Promise<void> 
   }
 }
 
+// ════════════════════════════════════════════════════════════════════════
+//  DEPOSIT LINK — the confirmed-payment path (owner spec 2026-08-15)
+//  ----------------------------------------------------------------------
+//  ORDER OF OPERATIONS, and why it is this order:
+//    1. refuse anything Stripe has not called PAID
+//    2. record the money + mark the link paid + queue the notification, in ONE
+//       transaction (markDepositPaid)
+//    3. enqueue the Discord job
+//  Discord is LAST and is fully guarded. A Discord outage, a missing webhook
+//  URL, a rate limit — none of them can throw here, because throwing would fail
+//  the webhook job, make Stripe retry, and put a completed payment back into an
+//  "unprocessed" state over a chat message.
+// ════════════════════════════════════════════════════════════════════════
+async function handleDepositSession(event: Stripe.Event, session: Stripe.Checkout.Session): Promise<void> {
+  const depositRequestId = session.metadata?.depositRequestId as string
+  const log = webhookLogger.child({ depositRequestId, sessionId: session.id, eventId: event.id })
+
+  // THE gate, and it is a pure function so the rule is unit-tested rather than
+  // inferred from this call site. `checkout.session.completed` fires for delayed
+  // payment methods BEFORE the money is confirmed — only 'paid' with a real
+  // amount_total may touch the ledger or notify anyone.
+  const { isConfirmedDepositSession } = await import('./deposit-links')
+  const gate = isConfirmedDepositSession(session)
+  if (!gate.confirmed) {
+    log.info({ reason: gate.reason }, 'deposit session is NOT a confirmed payment — no ledger write, no notification')
+    return
+  }
+  const amountPaidCents = gate.amountCents
+
+  const { markDepositPaid } = await import('./deposit-service')
+  const result = await markDepositPaid({
+    depositRequestId,
+    checkoutSessionId: session.id,
+    paymentIntentId: typeof session.payment_intent === 'string' ? session.payment_intent : session.payment_intent?.id ?? null,
+    stripeEventId: event.id,
+    amountPaidCents,
+    livemode: event.livemode,
+    currency: session.currency ?? 'usd',
+  })
+
+  if (!result.applied) {
+    // The common case here is a duplicate delivery of the same event, or the
+    // async_payment_succeeded twin of a completed session. Both are correct
+    // no-ops — and critically, NO second Discord message is produced.
+    log.info({ reason: result.reason }, 'deposit payment not applied (already recorded)')
+    return
+  }
+
+  // Fire-and-forget by design: the money is already recorded and the row
+  // carries discordStatus=PENDING, so a failure here is recoverable from the
+  // admin list rather than lost.
+  const { queueDepositNotification } = await import('./discord-payments')
+  await queueDepositNotification(depositRequestId).catch((err) =>
+    log.error(
+      { err: err instanceof Error ? err.message : String(err) },
+      'deposit Discord notification could not be queued (payment is recorded; retry from the admin list)'
+    )
+  )
+}
+
 /** Locate a Payment by its Stripe intent id (preferred) or charge id. */
 async function findPaymentByStripeIds(intentId: string | null, chargeId: string | null) {
   if (intentId) {
@@ -182,6 +242,19 @@ export async function handleStripeEvent(event: Stripe.Event): Promise<void> {
   switch (event.type) {
     case 'checkout.session.completed': {
       const session = event.data.object as Stripe.Checkout.Session
+
+      // ── DEPOSIT LINK first, and it RETURNS ────────────────────────────────
+      // A deposit session also carries metadata.bookingId (so the Stripe
+      // dashboard shows which move it belongs to). Falling through to
+      // fulfillPaidCheckout would flip a still-unpaid booking to
+      // PENDING_APPROVAL off a deposit that has nothing to do with the $49
+      // authorization. The kind of payment decides the handler, not the
+      // presence of a booking id.
+      if (session.metadata?.depositRequestId) {
+        await handleDepositSession(event, session)
+        return
+      }
+
       const bookingId = session.metadata?.bookingId
       if (!bookingId) {
         webhookLogger.warn(
@@ -196,6 +269,28 @@ export async function handleStripeEvent(event: Stripe.Event): Promise<void> {
         amountTotalCents: session.amount_total,
         source: 'webhook',
       })
+      break
+    }
+
+    // Delayed payment methods (ACH, some wallets) complete the session as
+    // `unpaid`/`processing` and confirm LATER with this event. Without it a
+    // customer who paid by a delayed method would never be credited.
+    case 'checkout.session.async_payment_succeeded': {
+      const session = event.data.object as Stripe.Checkout.Session
+      if (session.metadata?.depositRequestId) {
+        await handleDepositSession(event, session)
+        return
+      }
+      break
+    }
+
+    case 'checkout.session.async_payment_failed': {
+      const session = event.data.object as Stripe.Checkout.Session
+      const depositRequestId = session.metadata?.depositRequestId
+      if (!depositRequestId) break
+      // Nothing to reverse — a failed async payment never marked anything paid.
+      // The link stays ACTIVE so the customer can simply try again.
+      webhookLogger.warn({ depositRequestId, sessionId: session.id }, 'deposit async payment failed — link left active')
       break
     }
 

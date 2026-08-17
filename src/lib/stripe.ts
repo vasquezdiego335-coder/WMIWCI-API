@@ -121,6 +121,97 @@ export async function createBookingCheckout(params: {
   })
 }
 
+// ════════════════════════════════════════════════════════════════════════
+//  ADMIN DEPOSIT LINK checkout (owner spec 2026-08-15)
+//  ----------------------------------------------------------------------
+//  Deliberately NOT createBookingCheckout with different arguments. The two
+//  are different products and conflating them would be a money bug:
+//
+//    createBookingCheckout  → capture_method 'manual'. An AUTHORIZATION. The
+//                             $49 is held and only captured if an owner
+//                             approves the booking.
+//    createDepositCheckout  → automatic capture. A CHARGE. The customer paid a
+//                             deposit the owner already agreed with them, and
+//                             it is applied to the balance immediately.
+//
+//  The amount comes from the DepositRequest row and nowhere else. There is no
+//  amount parameter reachable from a browser, and no processing fee is added —
+//  the customer is charged the deposit and nothing but the deposit.
+// ════════════════════════════════════════════════════════════════════════
+export async function createDepositCheckout(params: {
+  depositRequestId: string
+  /** THE authoritative amount, read from the database by the caller. */
+  amountCents: number
+  publicToken: string
+  customerEmail?: string | null
+  customerName?: string | null
+  bookingId?: string | null
+  bookingReference?: string | null
+  serviceSummary?: string | null
+  successUrl: string
+  cancelUrl: string
+  /** Collapses retries of the SAME attempt into one session at Stripe's end. */
+  idempotencyKey?: string
+}): Promise<Stripe.Checkout.Session> {
+  if (!Number.isInteger(params.amountCents) || params.amountCents < 100) {
+    // A non-integer or sub-$1 amount reaching Stripe means a caller bypassed
+    // parseAmountToCents. Fail loudly rather than charge something odd.
+    throw new Error('createDepositCheckout: amountCents must be an integer of at least 100')
+  }
+
+  // Mirrored onto BOTH the Session and the PaymentIntent: the webhook reads the
+  // session, but a human in the Stripe dashboard usually opens the payment.
+  const metadata: Record<string, string> = {
+    depositRequestId: params.depositRequestId,
+    depositToken: params.publicToken,
+    paymentKind: 'move_deposit',
+    ...(params.bookingId ? { bookingId: params.bookingId } : {}),
+    ...(params.bookingReference ? { bookingReference: params.bookingReference } : {}),
+  }
+
+  return getStripeClient().checkout.sessions.create(
+    {
+      mode: 'payment',
+      // The internal deposit-request id, so a Stripe-side reconciliation can
+      // always name the row this session belongs to without parsing metadata.
+      client_reference_id: params.depositRequestId,
+      // Prefill only when we actually know it; an empty string is a Stripe error.
+      ...(params.customerEmail ? { customer_email: params.customerEmail } : {}),
+      payment_intent_data: {
+        description: `Move deposit${params.bookingReference ? ` — ${params.bookingReference}` : ''}`,
+        metadata,
+      },
+      line_items: [
+        {
+          quantity: 1,
+          price_data: {
+            currency: 'usd',
+            unit_amount: params.amountCents,
+            // Inline price data — no Product/Price object is created per deposit,
+            // so the Stripe product catalogue does not fill up with one-offs.
+            product_data: {
+              name: 'Move It Clear It — Move Deposit',
+              description: params.serviceSummary
+                ? `Deposit applied toward your moving balance — ${params.serviceSummary}`.slice(0, 200)
+                : 'Deposit applied toward your moving balance',
+            },
+          },
+        },
+      ],
+      metadata,
+      // A day is long enough for someone to read a text and pay; a session that
+      // never expires is a payable page loose on the internet forever.
+      expires_at: Math.floor(Date.now() / 1000) + 24 * 60 * 60,
+      success_url: params.successUrl,
+      cancel_url: params.cancelUrl,
+      allow_promotion_codes: false,
+      billing_address_collection: 'auto',
+      phone_number_collection: { enabled: false },
+    },
+    params.idempotencyKey ? { idempotencyKey: params.idempotencyKey } : undefined
+  )
+}
+
 // Capture the held $49 (used when a booking is APPROVED).
 //
 // The optional idempotencyKey is a second line of defense against a

@@ -256,6 +256,12 @@ enum AuditAction {
   EMAIL_CAMPAIGN_RUN_CANCELLED
   EMAIL_CAMPAIGN_RETRY_INITIATED
   EMAIL_LEAD_QUOTED
+  // ── Admin deposit links (owner spec 2026-08-15) ──
+  // A deposit link is a way to take money, so every step of its life leaves a
+  // trace: who minted it, who killed it, and the Stripe event that paid it.
+  DEPOSIT_LINK_CREATED
+  DEPOSIT_LINK_CANCELED
+  DEPOSIT_LINK_PAID
 }
 
 // ── Hardening enums (increment 2.1) ──────────────────────────────────────────
@@ -1104,6 +1110,7 @@ model Booking {
   followUps     FollowUpLedger[]
   expenses      Expense[] // job-linked expenses (admin OS) — reduce this job's profit
   closeout      MoveCloseout? // Phase 2 financial closeout
+  depositRequests DepositRequest[] // admin-issued deposit links (owner spec 2026-08-15)
 
   @@index([status])
   @@index([customerId])
@@ -3751,4 +3758,124 @@ model EmailAgentModelCall {
   @@index([environment, createdAt])
   @@index([incidentId])
   @@map("email_agent_model_calls")
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+//  ADMIN DEPOSIT LINKS (owner spec 2026-08-15)
+//  ------------------------------------------------------------------------
+//  Diego quotes people in Messenger/text from his phone. This model is the
+//  authoritative record of "I asked THIS person for THIS exact amount": the
+//  amount lives here, on the server, and the customer's browser never gets to
+//  propose one. The public token is the ONLY thing in the URL.
+//
+//  Deliberately SEPARATE from Booking.depositAmount / the $49 booking hold:
+//    · the $49 booking flow is a manual-capture AUTHORIZATION (held, released
+//      or captured at approval). A deposit link is an immediate CHARGE.
+//    · a deposit link may exist with no booking at all (a phone quote that has
+//      not become a booking yet), which a Booking column cannot express.
+//  When a link IS tied to a booking, the confirmed payment writes an ordinary
+//  COMPLETED Payment row, so `customerBalance()` — the one balance formula —
+//  picks it up with no new arithmetic anywhere.
+// ════════════════════════════════════════════════════════════════════════════
+
+enum DepositRequestStatus {
+  ACTIVE
+  PAID
+  EXPIRED
+  CANCELED
+}
+
+/// Delivery state of the owner's Discord notification for a PAID deposit.
+/// NOT_APPLICABLE is used only while the deposit is unpaid — there is nothing
+/// to announce yet, and showing "Pending" for a link nobody has paid would read
+/// as a stuck notification.
+enum DepositNotifyStatus {
+  NOT_APPLICABLE
+  PENDING
+  SENDING
+  SENT
+  FAILED
+}
+
+model DepositRequest {
+  id          String @id @default(cuid())
+  /// Public, non-sequential, 12-char Crockford-base32 token (~60 bits). This is
+  /// the ONLY identifier that ever appears in a customer-visible URL — never the
+  /// cuid, never a booking number, never an email.
+  publicToken String @unique @map("public_token")
+
+  /// Optional links. A standalone deposit has neither.
+  bookingId String? @map("booking_id")
+  leadId    String? @map("lead_id")
+
+  /// Customer detail is captured for the owner's own records and for the
+  /// greeting on the page. Only the FIRST NAME is ever rendered publicly.
+  customerName  String? @map("customer_name")
+  customerEmail String? @map("customer_email")
+  customerPhone String? @map("customer_phone")
+
+  /// The accepted quote total, in cents, when it is known. Display only —
+  /// nothing recalculates a quote from it.
+  quoteTotalCents Int? @map("quote_total_cents")
+  /// The unpaid balance at the moment the link was created, in cents. This is
+  /// what "remaining balance after payment" is derived from, so the page cannot
+  /// drift as other payments land. Null when it is genuinely unknown, in which
+  /// case the page HIDES the balance rather than showing a wrong one.
+  balanceBeforeCents Int? @map("balance_before_cents")
+
+  /// THE authoritative amount. Integer cents, server-side, immutable.
+  amountCents Int    @map("amount_cents")
+  currency    String @default("usd")
+
+  serviceSummary String?   @map("service_summary")
+  moveDate       DateTime? @map("move_date")
+
+  status    DepositRequestStatus @default(ACTIVE)
+  expiresAt DateTime?            @map("expires_at")
+
+  /// Reused while still valid so a rapid double-tap cannot mint two payable
+  /// sessions for one deposit.
+  stripeCheckoutSessionId  String?   @unique @map("stripe_checkout_session_id")
+  stripeCheckoutUrl        String?   @map("stripe_checkout_url")
+  checkoutSessionExpiresAt DateTime? @map("checkout_session_expires_at")
+  checkoutAttempts         Int       @default(0) @map("checkout_attempts")
+
+  /// Set ONLY by a signature-verified Stripe event that reported the session as
+  /// paid. The success redirect never writes any of these.
+  stripePaymentIntentId String?   @unique @map("stripe_payment_intent_id")
+  stripeEventId         String?   @map("stripe_event_id")
+  amountPaidCents       Int?      @map("amount_paid_cents")
+  paidAt                DateTime? @map("paid_at")
+  /// The Payment row this deposit created (booking-linked deposits only).
+  paymentId             String?   @map("payment_id")
+  /// False when the paying Stripe event came from test mode. Drives the
+  /// "🧪 TEST" prefix on the Discord card so a rehearsal is never mistaken for
+  /// real money.
+  livemode              Boolean?
+
+  createdById   String? @map("created_by_id")
+  createdByName String? @map("created_by_name")
+
+  discordStatus      DepositNotifyStatus @default(NOT_APPLICABLE) @map("discord_status")
+  discordNotifiedAt  DateTime?           @map("discord_notified_at")
+  discordRetryCount  Int                 @default(0) @map("discord_retry_count")
+  /// Claim stamp for the exactly-once delivery lock. A SENDING row older than
+  /// the stale window can be re-claimed, so a crashed worker cannot wedge a
+  /// notification forever.
+  discordClaimedAt   DateTime?           @map("discord_claimed_at")
+  discordMessageId   String?             @map("discord_message_id")
+  /// Last failure reason, for the admin list. Never contains a webhook URL,
+  /// a token or any Stripe secret.
+  discordError       String?             @map("discord_error")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  booking Booking? @relation(fields: [bookingId], references: [id])
+
+  @@index([bookingId])
+  @@index([status])
+  @@index([createdAt])
+  @@index([discordStatus])
+  @@map("deposit_requests")
 }
