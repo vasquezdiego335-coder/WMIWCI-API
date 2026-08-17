@@ -89,7 +89,7 @@ test('browser mirror: formatCharge renders identically, EN and ES', { skip }, ()
   }
   // The headline guarantee, spelled out.
   assert.equal(P.formatCharge(PACKAGES['3br'].price, 'en'), 'Starting at $1,049')
-  assert.equal(P.formatCharge(PACKAGES['1br'].price, 'en'), '$649')
+  assert.equal(P.formatCharge(PACKAGES['1br'].price, 'en'), '$550')
 })
 
 test('browser mirror: isAutoApplicable agrees — review lines never auto-apply', { skip }, () => {

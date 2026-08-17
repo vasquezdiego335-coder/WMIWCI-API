@@ -120,6 +120,19 @@ export type MovePackage = {
   rooms: number | null
   /** Owner review required before the booking can be confirmed. */
   requiresReview: boolean
+  // ── Truck assignment (recovered 2026-08-15) ──────────────────────────
+  //  Full-service includes a truck IN the flat price. `includedTruck` is that
+  //  truck; `upgradeTruck` is the ONE larger size this package may move up to,
+  //  at most once and only when reviewed inventory requires it.
+  //  3BR and larger already include the 26ft — the biggest we run — so their
+  //  `upgradeTruck` is null and a bigger job becomes a manual plan, not a
+  //  surcharge. Studios and 'not-sure' carry no truck assignment at all.
+  includedTruck?: TruckSizeKey | null
+  upgradeTruck?: TruckSizeKey | null
+  /** The product this package belongs to. Labor-only has no package. */
+  serviceType?: ServiceTypeKey
+  /** Crew size is confirmed after inventory review rather than published. */
+  crewConfirmedAfterReview?: boolean
 }
 
 /** PUBLIC NAMES vs INTERNAL KEYS (owner decision 2026-07-25)
@@ -130,19 +143,19 @@ export type MovePackage = {
  *  `label` / `label_es` to change what customers read; never the key.
  */
 export const PACKAGES: Record<PackageKey, MovePackage> = {
-  'little-studio': { key: 'little-studio', label: 'Small Studio',    label_es: 'Estudio Pequeño',  rooms: 1, requiresReview: false, price: c({ kind: 'fixed', amount: 379, label: 'Small Studio' }) },
-  'half-studio':   { key: 'half-studio',   label: 'Standard Studio', label_es: 'Estudio Estándar', rooms: 1, requiresReview: false, price: c({ kind: 'fixed', amount: 439, label: 'Standard Studio' }) },
-  'full-studio':   { key: 'full-studio',   label: 'Large Studio',    label_es: 'Estudio Grande',   rooms: 1, requiresReview: false, price: c({ kind: 'fixed', amount: 549, label: 'Large Studio' }) },
-  '1br':           { key: '1br',           label: '1 Bedroom',     label_es: '1 Recámara',       rooms: 2, requiresReview: false, price: c({ kind: 'fixed', amount: 550, label: '1 Bedroom' }) },
-  '2br':           { key: '2br',           label: '2 Bedrooms',    label_es: '2 Recámaras',      rooms: 3, requiresReview: false, price: c({ kind: 'fixed', amount: 779, label: '2 Bedrooms' }) },
+  'little-studio': { key: 'little-studio', label: 'Small Studio',    label_es: 'Estudio Pequeño',  rooms: 1, requiresReview: false, includedTruck: null, upgradeTruck: null, serviceType: 'full_service', crewConfirmedAfterReview: false, price: c({ kind: 'fixed', amount: 379, label: 'Small Studio' }) },
+  'half-studio':   { key: 'half-studio',   label: 'Standard Studio', label_es: 'Estudio Estándar', rooms: 1, requiresReview: false, includedTruck: null, upgradeTruck: null, serviceType: 'full_service', crewConfirmedAfterReview: false, price: c({ kind: 'fixed', amount: 439, label: 'Standard Studio' }) },
+  'full-studio':   { key: 'full-studio',   label: 'Large Studio',    label_es: 'Estudio Grande',   rooms: 1, requiresReview: false, includedTruck: null, upgradeTruck: null, serviceType: 'full_service', crewConfirmedAfterReview: false, price: c({ kind: 'fixed', amount: 549, label: 'Large Studio' }) },
+  '1br':           { key: '1br',           label: '1 Bedroom',     label_es: '1 Recámara',       rooms: 2, requiresReview: false, includedTruck: '10ft', upgradeTruck: '15ft', serviceType: 'full_service', crewConfirmedAfterReview: false, price: c({ kind: 'fixed', amount: 550, label: '1 Bedroom' }) },
+  '2br':           { key: '2br',           label: '2 Bedrooms',    label_es: '2 Recámaras',      rooms: 3, requiresReview: false, includedTruck: '15ft', upgradeTruck: '26ft', serviceType: 'full_service', crewConfirmedAfterReview: false, price: c({ kind: 'fixed', amount: 779, label: '2 Bedrooms' }) },
 
   // ── Review-gated floors. `kind: 'starting'` makes "Starting at" structural:
   //    formatCharge() cannot render these without the prefix. ──
-  '3br': { key: '3br', label: '3 Bedrooms', label_es: '3 Recámaras', rooms: 4, requiresReview: true, price: c({ kind: 'starting', amount: 1049, requiresReview: true, label: '3 Bedrooms', note: 'Final price confirmed after we review your inventory and access details.' }) },
-  '4br': { key: '4br', label: '4 Bedrooms', label_es: '4 Recámaras', rooms: 5, requiresReview: true, price: c({ kind: 'starting', amount: 1449, requiresReview: true, label: '4 Bedrooms', note: 'Final price confirmed after we review your inventory and access details.' }) },
-  '5br': { key: '5br', label: '5 Bedrooms', label_es: '5 Recámaras', rooms: 6, requiresReview: true, price: c({ kind: 'starting', amount: 1799, requiresReview: true, label: '5 Bedrooms', note: 'Final price confirmed after we review your inventory and access details.' }) },
+  '3br': { key: '3br', label: '3 Bedrooms', label_es: '3 Recámaras', rooms: 4, requiresReview: true, includedTruck: '26ft', upgradeTruck: null, serviceType: 'full_service', crewConfirmedAfterReview: true, price: c({ kind: 'starting', amount: 1049, requiresReview: true, label: '3 Bedrooms', note: 'Final price confirmed after we review your inventory and access details.' }) },
+  '4br': { key: '4br', label: '4 Bedrooms', label_es: '4 Recámaras', rooms: 5, requiresReview: true, includedTruck: '26ft', upgradeTruck: null, serviceType: 'full_service', crewConfirmedAfterReview: true, price: c({ kind: 'starting', amount: 1449, requiresReview: true, label: '4 Bedrooms', note: 'Final price confirmed after we review your inventory and access details.' }) },
+  '5br': { key: '5br', label: '5 Bedrooms', label_es: '5 Recámaras', rooms: 6, requiresReview: true, includedTruck: '26ft', upgradeTruck: null, serviceType: 'full_service', crewConfirmedAfterReview: true, price: c({ kind: 'starting', amount: 1799, requiresReview: true, label: '5 Bedrooms', note: 'Final price confirmed after we review your inventory and access details.' }) },
 
-  'not-sure': { key: 'not-sure', label: 'Need a Quote', label_es: 'Necesito Cotización', rooms: null, requiresReview: true, price: c({ kind: 'manual_quote', requiresReview: true, label: 'Need a Quote' }) },
+  'not-sure': { key: 'not-sure', label: 'Need a Quote', label_es: 'Necesito Cotización', rooms: null, requiresReview: true, includedTruck: null, upgradeTruck: null, serviceType: 'full_service', crewConfirmedAfterReview: true, price: c({ kind: 'manual_quote', requiresReview: true, label: 'Need a Quote' }) },
 }
 
 /**
@@ -150,7 +163,13 @@ export const PACKAGES: Record<PackageKey, MovePackage> = {
  * access-bounded — no "all your stuff", no "unlimited", no "all day".
  */
 export const PACKAGE_INCLUDES: { en: string; es: string }[] = [
-  { en: 'Two professional labor workers', es: 'Dos trabajadores profesionales' },
+  // FULL-SERVICE crew wording. This said "Two professional labor workers" —
+  // the LABOR-ONLY description — from the era when there was one product. On a
+  // full-service package we bring a crew AND a truck, and the crew size for the
+  // larger packages is confirmed after review rather than published as two.
+  // Labor-only has its own list: LABOR_ONLY_INCLUDES, whose first line is
+  // "Two professional workers".
+  { en: 'Professional moving crew', es: 'Equipo profesional de mudanza' },
   { en: 'One loading location and one unloading location', es: 'Un lugar de carga y un lugar de descarga' },
   { en: 'Loading and unloading labor', es: 'Mano de obra de carga y descarga' },
   { en: 'Furniture placement in the room you choose', es: 'Colocación de muebles en el cuarto que elija' },
@@ -178,8 +197,16 @@ export const BOOKING_AUTHORIZATION = {
   note_es: 'Se coloca una autorización de $49 cuando envía su reserva. Se cobra solo después de aprobar su mudanza y se aplica a su total.',
 } as const
 
-/** Crew labor add-on to collect and return a truck the CUSTOMER reserved.
- *  Due on move day, never charged in Stripe, always manually approved. */
+/** ⚠ RETIRED 2026-08-14 (owner decision). We no longer collect and return a
+ *  customer's rental truck, at $49, $50, or any price.
+ *
+ *  The constant STAYS so historical bookings that genuinely bought this render
+ *  their original label and amount — deleting it would blank the line item on
+ *  every past invoice. It must not appear on any NEW-booking surface:
+ *  `product-catalog.isRetiredTruckOption()` refuses every alias at intake,
+ *  before a Customer, Booking or Stripe object exists.
+ *
+ *  DO NOT reintroduce this as an active add-on without an owner decision. */
 // ── Truck-size upgrade (owner decision, reconciled 2026-08-04) ───────────────
 //  NOT the same thing as TRUCK_PICKUP_RETURN below, which is crew time to fetch
 //  a truck the CUSTOMER rented. This is the truck WE bring: every package ships
@@ -743,6 +770,19 @@ export function scopeOverageForCrew(crew: number): Charge {
 //  promises. Every surface must use THESE — not a local paraphrase.
 // ════════════════════════════════════════════════════════════════════════
 export const COPY = {
+  /** Shown when a route genuinely could not be measured. It promises a REVIEW,
+   *  never a price — quoting $0 for an unmeasurable trip is the failure this
+   *  wording exists to avoid. */
+  /** Advisory wording for the live form: the figure is real but re-measured
+   *  server-side at submission, so it can move if an address changes. */
+  route_may_change: {
+    en: 'Estimated from the addresses entered. We re-check the route when you submit, so this can change if an address or stop changes.',
+    es: 'Estimado a partir de las direcciones ingresadas. Verificamos la ruta nuevamente al enviar, por lo que puede cambiar si cambia una dirección o parada.',
+  },
+  route_failed: {
+    en: 'We could not measure the driving route for these addresses automatically. Your transportation charge will be confirmed during review, before anything is approved.',
+    es: 'No pudimos medir automáticamente la ruta de conducción para estas direcciones. Su cargo de transporte se confirmará durante la revisión, antes de aprobar cualquier cosa.',
+  },
   /** Replaces "no hidden fees" / "guaranteed flat rate regardless of changes". */
   scope_promise: {
     en: 'Your approved flat rate covers the inventory, locations, services, and access conditions submitted during booking. Any potential additional charges will be explained and approved before extra work is performed.',
@@ -801,4 +841,689 @@ export const BANNED_PHRASES: RegExp[] = [
 /** Returns the banned phrases present in `text`. Empty = clean. */
 export function checkBannedPhrases(text: string): string[] {
   return BANNED_PHRASES.filter((re) => re.test(text)).map((re) => re.source)
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+//  THE TWO-PRODUCT PRICE BOOK  (reconstructed 2026-08-15)
+//
+//  RECOVERY NOTE — read before editing.
+//  These exports were generated into WMIWCI-SITE/public/js/pricing-config.js
+//  on 2026-08-05 from a version of THIS file that no longer exists in any
+//  branch or stash. The browser mirror was the only surviving copy. Every
+//  literal below was recovered from it verbatim; the TYPES, the invariants
+//  and the two behavioural corrections marked OWNER RULE are authored here.
+//
+//  This section is LOAD-BEARING FOR THE SITE, not documentation: the live
+//  booking form builds its labor-service grid from PRICING.LABOR_SERVICE_KEYS
+//  (booking-form.html:3217) and its rate copy from LABOR_ONLY.
+// ══════════════════════════════════════════════════════════════════════════
+
+export type ServiceTypeKey = 'full_service' | 'labor_only'
+/** 20ft is deliberately ABSENT — retired 2026-08-02. An unsupported size must
+ *  be REJECTED, never silently charged as if it were something else. */
+export type TruckSizeKey = '10ft' | '15ft' | '26ft'
+export type LaborServiceKey =
+  | 'loading_only' | 'unloading_only' | 'loading_and_unloading'
+  | 'in_home_furniture' | 'storage_unit_help' | 'moving_container_help'
+type Bilingual = { en: string; es: string }
+
+/**
+ * THE STRUCTURAL OPPOSITION between the two products. These four booleans are
+ * the cross-contamination guard: a labor-only job that ever reads
+ * chargesMileage or includesTruck as true is billing for a truck we never
+ * brought, and a full-service job reading hourly:true is not the flat rate we
+ * published.
+ */
+export const SERVICE_TYPES = {
+  "full_service": {
+    "key": "full_service",
+    "label": "Full-Service Moving",
+    "label_es": "Mudanza de servicio completo",
+    "description": "We provide the professional moving crew, moving truck, equipment, loading, transportation, and unloading.",
+    "description_es": "Nosotros proporcionamos el equipo profesional de mudanza, el camión, el equipo, la carga, el transporte y la descarga.",
+    "pricingMethod": "Flat-rate package plus transportation mileage and any approved adjustments.",
+    "pricingMethod_es": "Paquete de tarifa fija más el millaje de transporte y cualquier ajuste aprobado.",
+    "includesTruck": true,
+    "chargesMileage": true,
+    "includesTransportation": true,
+    "hourly": false
+  },
+  "labor_only": {
+    "key": "labor_only",
+    "label": "Labor-Only Moving Help",
+    "label_es": "Ayuda de mudanza solo con mano de obra",
+    "description": "You provide the truck or container. We provide two professional workers for loading, unloading, or both.",
+    "description_es": "Usted proporciona el camión o contenedor. Nosotros proporcionamos dos trabajadores profesionales para carga, descarga o ambas.",
+    "pricingMethod": "$150 per hour for two workers, based on actual billable time.",
+    "pricingMethod_es": "$150 por hora por dos trabajadores, según el tiempo real facturable.",
+    "includesTruck": false,
+    "chargesMileage": false,
+    "includesTransportation": false,
+    "hourly": true
+  }
+} as const
+
+export const TRUCK_SIZES = {
+  "10ft": {
+    "key": "10ft",
+    "label": "10-foot truck",
+    "label_es": "Camión de 10 pies",
+    "feet": 10
+  },
+  "15ft": {
+    "key": "15ft",
+    "label": "15-foot truck",
+    "label_es": "Camión de 15 pies",
+    "feet": 15
+  },
+  "26ft": {
+    "key": "26ft",
+    "label": "26-foot truck",
+    "label_es": "Camión de 26 pies",
+    "feet": 26
+  }
+} as const
+
+/**
+ * Labor-only: two workers on one clock, $150 per hour.
+ *
+ * OWNER RULE 2026-08-15 — `minimumHours` was `null` in the recovered mirror.
+ * The published minimum is TWO HOURS, and an estimate below it is REFUSED at
+ * intake rather than silently billed up: see `laborOnlyQuoteCents` (refuses)
+ * versus `laborOnlyBillingCents` (applies the minimum CHARGE to actual worked
+ * time, which is what a minimum means once a crew has turned up).
+ *
+ * `billingIncrementMinutes` stays null on purpose. No rounding policy beyond
+ * the published minimum was invented, because inventing one silently raises
+ * every price.
+ */
+export const LABOR_ONLY = {
+  "id": "labor_only_two_workers",
+  "label": "Labor-Only Moving Help",
+  "label_es": "Ayuda de mudanza solo con mano de obra",
+  "hourlyRate": 150,
+  "hourlyRateCents": 15000,
+  "includedWorkers": 2,
+  "truckIncluded": false,
+  "transportationIncluded": false,
+  "rateLabel": "Two-worker labor rate: $150 per hour",
+  "rateLabel_es": "Tarifa de mano de obra por dos trabajadores: $150 por hora",
+  "minimumHours": 2,
+  "billingIncrementMinutes": null,
+  "timing": {
+    "startsWhen": "Billable time begins when both workers arrive at the first scheduled service address and are ready to begin.",
+    "startsWhen_es": "El tiempo facturable comienza cuando ambos trabajadores llegan a la primera dirección de servicio programada y están listos para comenzar.",
+    "endsWhen": "Billable time ends when the approved labor work is completed.",
+    "endsWhen_es": "El tiempo facturable termina cuando se completa el trabajo aprobado.",
+    "betweenCustomerAddressesIsBillable": true,
+    "betweenAddressesNote": "When loading and unloading are requested at different addresses, time traveling between your pickup and drop-off locations counts as billable labor time because the crew remains assigned to your job.",
+    "betweenAddressesNote_es": "Cuando se solicita carga y descarga en direcciones diferentes, el tiempo de viaje entre sus lugares de recogida y entrega cuenta como tiempo facturable porque el equipo permanece asignado a su trabajo.",
+    "baseToFirstAddressIsBillable": false,
+    "returnToBaseIsBillable": false,
+    "baseTravelNote": "Travel from our base to your first address, and our return afterward, are not part of your hourly labor calculation.",
+    "baseTravelNote_es": "El viaje desde nuestra base hasta su primera dirección, y nuestro regreso posterior, no forman parte de su cálculo de mano de obra por hora.",
+    "customerCausedWaitingIsBillable": true,
+    "crewCausedPausesAreBillable": false,
+    "pauseNote": "Waiting time caused by the customer during the active job may count as billable time when documented. Pauses caused by our crew are not billed.",
+    "pauseNote_es": "El tiempo de espera causado por el cliente durante el trabajo activo puede contar como tiempo facturable cuando está documentado. Las pausas causadas por nuestro equipo no se cobran."
+  },
+  "minimumMinutes": 120
+} as const
+
+export const LABOR_SERVICES = {
+  "loading_only": {
+    "key": "loading_only",
+    "label": "Loading only",
+    "label_es": "Solo carga",
+    "twoAddresses": false
+  },
+  "unloading_only": {
+    "key": "unloading_only",
+    "label": "Unloading only",
+    "label_es": "Solo descarga",
+    "twoAddresses": false
+  },
+  "loading_and_unloading": {
+    "key": "loading_and_unloading",
+    "label": "Loading and unloading",
+    "label_es": "Carga y descarga",
+    "twoAddresses": true
+  },
+  "in_home_furniture": {
+    "key": "in_home_furniture",
+    "label": "In-home furniture moving",
+    "label_es": "Movimiento de muebles en casa",
+    "twoAddresses": false
+  },
+  "storage_unit_help": {
+    "key": "storage_unit_help",
+    "label": "Storage-unit help",
+    "label_es": "Ayuda con unidad de almacenamiento",
+    "twoAddresses": false
+  },
+  "moving_container_help": {
+    "key": "moving_container_help",
+    "label": "Moving-container help",
+    "label_es": "Ayuda con contenedor de mudanza",
+    "twoAddresses": false
+  }
+} as const
+
+/** Display order for the form grid. */
+export const LABOR_SERVICE_KEYS = [
+  "loading_only",
+  "unloading_only",
+  "loading_and_unloading",
+  "in_home_furniture",
+  "storage_unit_help",
+  "moving_container_help"
+] as readonly LaborServiceKey[]
+
+/**
+ * The 2026-08-14 product catalogue shipped three labor keys, one spelled
+ * `load_and_unload`, and `Booking.laborService` is a free-text column that may
+ * already hold it. Reads normalise through this map; nothing is renamed in the
+ * database, because renaming stored values to match new code is how history
+ * stops matching the invoice it produced.
+ */
+export const LEGACY_LABOR_SERVICE_ALIASES: Readonly<Record<string, LaborServiceKey>> = {
+  load_and_unload: 'loading_and_unloading',
+}
+
+export const LABOR_ONLY_INCLUDES: readonly Bilingual[] = [
+  {
+    "en": "Two professional workers",
+    "es": "Dos trabajadores profesionales"
+  },
+  {
+    "en": "Loading, unloading, or both",
+    "es": "Carga, descarga o ambas"
+  },
+  {
+    "en": "Furniture carrying and placement",
+    "es": "Acarreo y colocación de muebles"
+  },
+  {
+    "en": "Moving blankets, dollies, and standard labor equipment when appropriate",
+    "es": "Cobijas de mudanza, carretillas y equipo de trabajo estándar cuando sea apropiado"
+  },
+  {
+    "en": "Basic disassembly and reassembly included in the approved scope",
+    "es": "Desarmado y rearmado básico incluido en el alcance aprobado"
+  }
+]
+export const LABOR_ONLY_EXCLUDES: readonly Bilingual[] = [
+  {
+    "en": "Moving truck",
+    "es": "Camión de mudanza"
+  },
+  {
+    "en": "Truck rental",
+    "es": "Alquiler de camión"
+  },
+  {
+    "en": "Transportation of your belongings",
+    "es": "Transporte de sus pertenencias"
+  },
+  {
+    "en": "Fuel",
+    "es": "Combustible"
+  },
+  {
+    "en": "Mileage charge",
+    "es": "Cargo por millaje"
+  },
+  {
+    "en": "Truck pickup or return",
+    "es": "Recogida o devolución del camión"
+  },
+  {
+    "en": "Driving your rental truck unless separately approved",
+    "es": "Conducir su camión de alquiler a menos que se apruebe por separado"
+  }
+]
+export const LABOR_ONLY_EXAMPLES = [
+  {
+    "hours": 2,
+    "total": 300
+  },
+  {
+    "hours": 3,
+    "total": 450
+  },
+  {
+    "hours": 4.5,
+    "total": 675
+  }
+] as const
+
+/**
+ * FULL-SERVICE TRANSPORTATION — $3 per ROUTED mile, fuel included.
+ * `appliesTo` is load-bearing: labor-only must never reach this charge.
+ */
+export const TRANSPORTATION_MILEAGE = {
+  "id": "transportation_mileage",
+  "ratePerMile": 3,
+  "ratePerMileCents": 300,
+  "fuelIncluded": true,
+  "appliesTo": "full_service",
+  "label": "Transportation mileage",
+  "label_es": "Millaje de transporte",
+  "rounding": "up_to_whole_mile",
+  "note": "Transportation is charged at $3 per routed mile from the first pickup address to the final drop-off address. Fuel is included in the mileage charge.",
+  "note_es": "El transporte se cobra a $3 por milla de ruta desde la primera dirección de recogida hasta la dirección final de entrega. El combustible está incluido en el cargo por millaje.",
+  "routeRules": [
+    "Begin at the first customer pickup address.",
+    "End at the final customer drop-off address.",
+    "Include all customer-requested stops in route order.",
+    "Use driving mileage, never straight-line distance.",
+    "Round the complete route up to the nearest whole mile.",
+    "Recalculate when any address or stop changes.",
+    "Require manual review when an address cannot be matched reliably.",
+    "Never calculate from county or ZIP-code center points.",
+    "Tolls and paid parking are shown separately when they apply.",
+    "Additional trucks and second trips require manual review."
+  ]
+} as const
+
+/**
+ * RETIRED — the old distance-band / drive-time travel fee.
+ *
+ * `exists: false` is what stops a NEW booking receiving it. Historical
+ * bookings keep the fee they approved, READ FROM THE STORED ROW and never
+ * recalculated. Charging this alongside TRANSPORTATION_MILEAGE would bill one
+ * journey twice, which is why `assertNoDoubleTravelCharge` exists.
+ */
+export const LEGACY_TRAVEL = {
+  "exists": false,
+  "retiredOn": "2026-07-31",
+  "replacedBy": "TRANSPORTATION_MILEAGE ($3 per routed mile, fuel included)",
+  "retiredBands": [
+    "Within 25 driving miles of West Orange — included",
+    "26–40 driving miles — $25",
+    "41–60 driving miles — $50",
+    "Drive-time ladder: 21–40 min $50 / 41–60 min $100 / 61–90 min $150"
+  ],
+  "historicalNote": "Bookings approved before 2026-07-31 keep the travel fee they approved. It is read from the stored booking, never recalculated."
+} as const
+
+export const SERVICE_AREA = {
+  "base": "West Orange, NJ",
+  "publicNote": "Serving West Orange and surrounding New Jersey communities. Full-service transportation is calculated from the first pickup address to the final drop-off address. Longer-distance and out-of-state moves are reviewed individually.",
+  "publicNote_es": "Prestamos servicio en West Orange y las comunidades cercanas de Nueva Jersey. El transporte de servicio completo se calcula desde la primera dirección de recogida hasta la dirección final de entrega. Las mudanzas de larga distancia y fuera del estado se revisan individualmente.",
+  "countyTooltip": "Availability subject to route review",
+  "countyTooltip_es": "Disponibilidad sujeta a revisión de ruta",
+  "chargesTravelFee": false
+} as const
+
+export const ANALYTICS_IDS = {
+  "serviceType": {
+    "full_service": "full_service",
+    "labor_only": "labor_only"
+  },
+  "package": {
+    "1br": "one_bedroom",
+    "2br": "two_bedrooms",
+    "3br": "three_bedrooms",
+    "4br": "four_bedrooms",
+    "5br": "five_bedrooms",
+    "little-studio": "legacy_small_studio",
+    "half-studio": "legacy_standard_studio",
+    "full-studio": "legacy_large_studio",
+    "not-sure": "need_a_quote"
+  },
+  "laborService": {
+    "loading_only": "loading_only",
+    "unloading_only": "unloading_only",
+    "loading_and_unloading": "loading_and_unloading",
+    "in_home_furniture": "in_home_furniture",
+    "storage_unit_help": "storage_unit_help",
+    "moving_container_help": "moving_container_help"
+  },
+  "events": [
+    "service_type_selected",
+    "full_service_package_selected",
+    "labor_only_service_selected",
+    "labor_hours_estimated",
+    "mileage_calculation_succeeded",
+    "mileage_calculation_failed",
+    "truck_size_question_answered",
+    "quote_form_started",
+    "booking_step_completed",
+    "quote_form_completed",
+    "phone_click",
+    "text_click"
+  ],
+  "forbiddenFields": [
+    "name",
+    "fullName",
+    "firstName",
+    "lastName",
+    "phone",
+    "email",
+    "address",
+    "addressFrom",
+    "addressTo",
+    "street",
+    "zip",
+    "inventory",
+    "itemsDescription",
+    "jobDetails",
+    "notes",
+    "filename",
+    "photoName",
+    "smsBody",
+    "messageContent"
+  ]
+} as const
+
+/**
+ * Packages with a published price that a NEW booking may select (5).
+ * Deliberately distinct from `product-catalog.ACTIVE_PACKAGE_KEYS`, which is
+ * the INTAKE-VALID set and also admits `not-sure` (a quote request, which has
+ * no price). Two questions, two names.
+ */
+export const PRICED_PACKAGE_KEYS = [
+  "1br",
+  "2br",
+  "3br",
+  "4br",
+  "5br"
+] as readonly string[]
+
+/** Withdrawn studio tiers — readable forever, sellable never. */
+export const LEGACY_PACKAGE_KEYS = [
+  "little-studio",
+  "half-studio",
+  "full-studio"
+] as readonly string[]
+
+// ── HELPERS ───────────────────────────────────────────────────────────────
+//  Authored, not recovered. The mirror's JavaScript versions are the reference
+//  for BEHAVIOUR, but two of them encoded pre-owner-rule semantics and are
+//  deliberately different here. Each difference is marked OWNER RULE.
+
+export const isServiceTypeKey = (v: unknown): v is ServiceTypeKey =>
+  v === 'full_service' || v === 'labor_only'
+
+export const isTruckSizeKey = (v: unknown): v is TruckSizeKey =>
+  v === '10ft' || v === '15ft' || v === '26ft'
+
+/** A stored labor-service value, normalised through the legacy alias map.
+ *  Returns null for anything unrecognised — never a guess. */
+export function normalizeLaborService(v?: string | null): LaborServiceKey | null {
+  const s = (v ?? '').trim()
+  if (!s) return null
+  if (Object.prototype.hasOwnProperty.call(LABOR_SERVICES, s)) return s as LaborServiceKey
+  return LEGACY_LABOR_SERVICE_ALIASES[s] ?? null
+}
+
+export const isLaborService = (v: unknown): v is LaborServiceKey =>
+  typeof v === 'string' && normalizeLaborService(v) !== null
+
+/** True when this labor service inherently spans two addresses, so the crew's
+ *  time between them is billable (see LABOR_ONLY.timing). */
+export const laborServiceUsesTwoAddresses = (v?: string | null): boolean => {
+  const k = normalizeLaborService(v)
+  return k ? LABOR_SERVICES[k].twoAddresses : false
+}
+
+/** A package a NEW full-service booking may select. */
+export const isSelectablePackage = (key?: string | null): boolean =>
+  !!key && PRICED_PACKAGE_KEYS.includes(key)
+
+/** The truck included in a package's flat price. Null when it has none (a
+ *  quote request), which is NOT the same as "the smallest one". */
+export function includedTruckForPackage(key?: string | null): TruckSizeKey | null {
+  const pkg = key ? (PACKAGES as Record<string, { includedTruck?: string | null }>)[key] : null
+  const t = pkg?.includedTruck
+  return isTruckSizeKey(t) ? t : null
+}
+
+export type TruckUpgrade = {
+  available: boolean
+  from: TruckSizeKey | null
+  to: TruckSizeKey | null
+  /** DOLLARS. Null when there is no upgrade to price. */
+  amount: number | null
+  amountCents: number | null
+  /** The largest truck we run is already included — a bigger job needs a plan,
+   *  not a surcharge. */
+  requiresCustomQuote: boolean
+  /** Never auto-applied: an owner confirms the reviewed inventory needs it. */
+  requiresReview: boolean
+}
+
+/**
+ * The ONE larger-truck upgrade a package may take, at most once.
+ *
+ * 1BR 10ft to 15ft (+$100); 2BR 15ft to 26ft (+$150). 3BR and up already
+ * include the 26ft, so they cannot upgrade — they need a custom plan.
+ *
+ * Note the hasOwnProperty + ?? rather than ||: the 10ft upgrade amount is a
+ * legitimate ZERO, and || would read it as missing and report a real size as
+ * unsupported. That falsy-zero trap is why this is spelled out.
+ */
+export function truckUpgradeForPackage(key?: string | null): TruckUpgrade {
+  const none: TruckUpgrade = {
+    available: false, from: null, to: null, amount: null, amountCents: null,
+    requiresCustomQuote: false, requiresReview: false,
+  }
+  const included = includedTruckForPackage(key)
+  if (!included) return none
+
+  const pkg = (PACKAGES as Record<string, { upgradeTruck?: string | null }>)[key as string]
+  const to = pkg?.upgradeTruck
+  if (!isTruckSizeKey(to)) {
+    return { ...none, from: included, requiresCustomQuote: true }
+  }
+
+  const table = TRUCK_SIZE_UPGRADE.amountByTruck as Record<string, number>
+  if (!Object.prototype.hasOwnProperty.call(table, to)) {
+    return { ...none, from: included, requiresCustomQuote: true }
+  }
+  const amount = table[to] ?? 0
+  return {
+    available: true,
+    from: included,
+    to,
+    amount,
+    amountCents: Math.round(amount * 100),
+    requiresCustomQuote: false,
+    requiresReview: true,
+  }
+}
+
+// ── LABOR-ONLY MONEY ──────────────────────────────────────────────────────
+//
+// OWNER RULE 2026-08-15. The recovered mirror had ONE function that CLAMPED a
+// short request up to the minimum and quoted it. That is exactly what must not
+// happen: someone asking for one hour would be quoted two without being told.
+// It is split in two, because the minimum means different things before and
+// after the crew turns up.
+
+export type LaborQuote =
+  | {
+      ok: true
+      requestedMinutes: number
+      billableMinutes: number
+      workers: number
+      hourlyRateCents: number
+      subtotalCents: number
+    }
+  | {
+      ok: false
+      code: 'labor_below_minimum' | 'labor_hours_missing'
+      requestedMinutes: number
+      minimumMinutes: number
+    }
+
+/**
+ * INTAKE. What we may quote before any work happens.
+ * Below the published minimum this REFUSES — it never silently bills the
+ * minimum, and it never quotes the short amount either.
+ */
+export function laborOnlyQuoteCents(requestedMinutes: number | null | undefined): LaborQuote {
+  const min = LABOR_ONLY.minimumMinutes
+  if (requestedMinutes == null || !Number.isFinite(requestedMinutes) || requestedMinutes <= 0) {
+    return { ok: false, code: 'labor_hours_missing', requestedMinutes: 0, minimumMinutes: min }
+  }
+  const requested = Math.round(requestedMinutes)
+  if (requested < min) {
+    return { ok: false, code: 'labor_below_minimum', requestedMinutes: requested, minimumMinutes: min }
+  }
+  return {
+    ok: true,
+    requestedMinutes: requested,
+    billableMinutes: requested,
+    workers: LABOR_ONLY.includedWorkers,
+    hourlyRateCents: LABOR_ONLY.hourlyRateCents,
+    // Cents first, divide last: (180 x 15000) / 60 = 45000 exactly.
+    subtotalCents: Math.round((requested * LABOR_ONLY.hourlyRateCents) / 60),
+  }
+}
+
+export type LaborBilling = {
+  actualMinutes: number
+  billableMinutes: number
+  minimumApplied: boolean
+  workers: number
+  hourlyRateCents: number
+  subtotalCents: number
+}
+
+/**
+ * POST-JOB CLOSEOUT. What we may charge for work already done.
+ * Here the minimum DOES apply: the crew arrived, and a two-hour minimum that
+ * evaporates when a job runs short is not a minimum. Actual minutes are kept
+ * beside it so an owner can always see the difference.
+ */
+export function laborOnlyBillingCents(actualMinutes: number | null | undefined): LaborBilling {
+  const actual = Number.isFinite(actualMinutes as number)
+    ? Math.max(0, Math.round(actualMinutes as number))
+    : 0
+  const billable = Math.max(actual, LABOR_ONLY.minimumMinutes)
+  return {
+    actualMinutes: actual,
+    billableMinutes: billable,
+    minimumApplied: billable > actual,
+    workers: LABOR_ONLY.includedWorkers,
+    hourlyRateCents: LABOR_ONLY.hourlyRateCents,
+    subtotalCents: Math.round((billable * LABOR_ONLY.hourlyRateCents) / 60),
+  }
+}
+
+/**
+ * The BROWSER adapter the mirror ships, called with HOURS by booking-form.html.
+ *
+ * Below the minimum it returns a ZERO subtotal plus belowMinimum:true — it must
+ * not quote $150 (the short amount) and must not quote $300 (the clamped
+ * amount). The form shows the minimum message and blocks submit; the server
+ * refuses independently, because a form is a courtesy and not a control.
+ */
+export function laborOnlyEstimate(hours: number): {
+  hours: number
+  workers: number
+  hourlyRate: number
+  subtotal: number
+  subtotalCents: number
+  belowMinimum: boolean
+  minimumHours: number
+} {
+  const raw = Number.isFinite(hours) ? Math.max(0, hours) : 0
+  const below = raw > 0 && raw < LABOR_ONLY.minimumHours
+  const q = below ? null : laborOnlyQuoteCents(Math.round(raw * 60))
+  const cents = q && q.ok ? q.subtotalCents : 0
+  return {
+    hours: raw,
+    workers: LABOR_ONLY.includedWorkers,
+    hourlyRate: LABOR_ONLY.hourlyRate,
+    subtotal: cents / 100,
+    subtotalCents: cents,
+    belowMinimum: below,
+    minimumHours: LABOR_ONLY.minimumHours,
+  }
+}
+
+// ── FULL-SERVICE TRANSPORTATION ───────────────────────────────────────────
+
+export type MileageCharge = Charge & {
+  /** The WHOLE route, rounded up. Null when it could not be measured. */
+  billableMiles: number | null
+  amountCents?: number
+}
+
+/**
+ * $3 per routed mile, fuel included, rounded UP over the WHOLE route.
+ *
+ * An unmeasurable route is pending_review with NO amount — so nothing can sum
+ * it as $0 and quietly ship a free trip. That absence is load-bearing.
+ */
+export function mileageChargeForMiles(miles: number | null | undefined): MileageCharge {
+  if (miles == null || !Number.isFinite(miles) || miles < 0) {
+    return {
+      kind: 'pending_review',
+      per: 'job',
+      requiresReview: true,
+      label: TRANSPORTATION_MILEAGE.label,
+      note: TRANSPORTATION_MILEAGE.note,
+      billableMiles: null,
+    }
+  }
+  // Round the COMPLETE route up — even a tenth of a mile is a billable mile.
+  const billableMiles = Math.ceil(miles)
+  const amountCents = billableMiles * TRANSPORTATION_MILEAGE.ratePerMileCents
+  return {
+    kind: 'fixed',
+    per: 'job',
+    requiresReview: false,
+    label: TRANSPORTATION_MILEAGE.label,
+    note: TRANSPORTATION_MILEAGE.note,
+    amount: amountCents / 100,
+    amountCents,
+    billableMiles,
+  }
+}
+
+/** Transportation applies to full-service ONLY. */
+export const chargesMileage = (serviceTypeKey?: string | null): boolean =>
+  serviceTypeKey === TRANSPORTATION_MILEAGE.appliesTo
+
+/**
+ * THE DOUBLE-TRAVEL GUARD.
+ *
+ * One journey, one charge. A booking may carry a historical travel-band fee OR
+ * a routed-mileage charge, never both — and a NEW booking may only carry
+ * mileage, because LEGACY_TRAVEL.exists is false. Returns the problems; empty
+ * means the booking is coherent.
+ */
+export function assertNoDoubleTravelCharge(b: {
+  serviceTypeKey?: string | null
+  /** CENTS. The historical band fee, read from the stored row. */
+  travelFeeCents?: number | null
+  /** CENTS. The routed-mileage charge. */
+  transportationCents?: number | null
+  /** True for a booking created before the bands were retired. */
+  isHistorical?: boolean
+}): string[] {
+  const issues: string[] = []
+  const band = b.travelFeeCents ?? 0
+  const mileage = b.transportationCents ?? 0
+
+  if (band > 0 && mileage > 0) {
+    issues.push(
+      `This booking carries both a $${(band / 100).toFixed(2)} travel-band fee and a ` +
+        `$${(mileage / 100).toFixed(2)} routed-mileage charge. One journey may only be billed once.`,
+    )
+  }
+  if (band > 0 && !b.isHistorical && !LEGACY_TRAVEL.exists) {
+    issues.push(
+      `The travel-band fee was retired on ${LEGACY_TRAVEL.retiredOn} and must not apply to a new ` +
+        `booking. Full-service transportation is $${TRANSPORTATION_MILEAGE.ratePerMile} per routed mile.`,
+    )
+  }
+  if (mileage > 0 && !chargesMileage(b.serviceTypeKey)) {
+    issues.push('Routed mileage is a full-service charge; this booking is not full-service.')
+  }
+  return issues
 }

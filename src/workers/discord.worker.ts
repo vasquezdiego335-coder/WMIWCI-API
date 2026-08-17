@@ -60,6 +60,26 @@ async function processDiscordJob(job: Job<DiscordJobData>): Promise<void> {
       // Re-post a fresh approval card after a customer picks a new date.
       await postBookingApprovalCard(bookingId!, payload)
       break
+    case 'deposit-paid': {
+      // Confirmed deposit-link payment. The money is ALREADY recorded — this
+      // job only tells the owner. Throwing hands the retry to BullMQ (5
+      // attempts, exponential backoff); the exactly-once claim inside
+      // deliverDepositNotification means a retry can never double-post.
+      const depositRequestId = typeof payload.depositRequestId === 'string' ? payload.depositRequestId : null
+      if (!depositRequestId) {
+        log.error('deposit-paid job without depositRequestId — dropping')
+        break
+      }
+      const { deliverDepositNotification } = await import('../lib/discord-payments')
+      const outcome = await deliverDepositNotification(depositRequestId)
+      if (!outcome.delivered && !outcome.skipped) {
+        // A real delivery failure (not "already sent"). Surface it so the queue
+        // retries; the row is already marked FAILED for the admin list.
+        throw new Error(`deposit notification failed: ${outcome.error ?? 'unknown'}`)
+      }
+      if (outcome.skipped) log.info({ depositRequestId, skipped: outcome.skipped }, 'deposit notification skipped')
+      break
+    }
     default:
       log.warn({ type }, 'Unknown discord job type')
   }

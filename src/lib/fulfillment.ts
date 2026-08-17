@@ -5,6 +5,7 @@ import { webhookLogger } from './logger'
 import { t } from './i18n'
 import { ingestBookingToTracker } from './tracker'
 import { outboxEnabled, emitPaymentCompleted } from '../outbox/integration'
+import { computeQuote } from './booking-quote'
 
 // ════════════════════════════════════════════════════════════════════════
 //  Checkout fulfillment — the single source of truth for "a $49 hold was
@@ -107,6 +108,25 @@ export async function fulfillPaidCheckout(params: {
     .catch((err) => log.warn({ err: err instanceof Error ? err.message : String(err) }, 'audit log write failed (non-fatal)'))
 
   const amountPaid = ((amountTotalCents ?? 4900) / 100).toFixed(2)
+
+  // ── THE final total, once, for every message this function fans out ─────
+  //    The customer email used to send raw `totalEstimate` as "your estimate",
+  //    and the Discord payload sent `totalEstimate` and `totalEstimate − 49`.
+  //    On a discounted booking all three were wrong in the same direction:
+  //    WMIC-1019 was told $550 by email and $501 by Discord on a $495 job.
+  //    At this point the $49 is AUTHORIZED, not captured, so nothing is
+  //    collected yet — which is exactly what the customer should be told.
+  const quote = computeQuote({
+    totalEstimate: booking.totalEstimate,
+    baseRate: booking.baseRate,
+    travelFeeCents: booking.travelFee,
+    additionalCents: booking.truckAddonDueOnMoveDay ? booking.truckAddonAmount ?? 0 : 0,
+    discountPercent: booking.discountPercent,
+    depositCents: booking.depositAmount,
+    collectedCents: 0,
+    authorizedNotCapturedCents: amountTotalCents ?? booking.depositAmount ?? 4900,
+  })
+
   const appUrl = process.env.APP_URL ?? 'https://wmiwci-api.vercel.app'
   const portalUrl = `${appUrl}/my-booking/${booking.customerToken}`
   const locale = booking.customer.locale
@@ -164,7 +184,11 @@ export async function fulfillPaidCheckout(params: {
             requestedDate: booking.requestedDate?.toISOString(),
             originAddress: booking.originAddress,
             destAddress: booking.destAddress,
-            estimate: booking.totalEstimate != null ? `$${Math.round(booking.totalEstimate).toLocaleString('en-US')}` : undefined,
+            // The FINAL total — discount applied. Was `totalEstimate`, which
+            // quoted the customer a price we were not going to charge them.
+            estimate: quote.finalTotalCents > 0
+              ? `$${quote.finalTotalDollars.toLocaleString('en-US', { minimumFractionDigits: Number.isInteger(quote.finalTotalDollars) ? 0 : 2, maximumFractionDigits: 2 })}`
+              : undefined,
             amountHold: String(Math.round(Number(amountPaid))),
             portalUrl,
             serviceAreaZone: booking.serviceAreaZone ?? undefined,
@@ -216,8 +240,11 @@ export async function fulfillPaidCheckout(params: {
           items: booking.itemsDescription,
           amountPaid,
           // ── Payment / balance breakdown (shown on the card) ──
-          moveTotal: booking.totalEstimate,
-          balanceAfterJob: booking.totalEstimate != null ? booking.totalEstimate - 49 : null,
+          //    Only a FALLBACK: discord-rest reloads the booking and rebuilds
+          //    the card from it. These are the canonical figures so the
+          //    degraded path cannot print a different total from the live one.
+          moveTotal: quote.finalTotalDollars,
+          balanceAfterJob: quote.remainingAfterDepositDollars,
           truckAddonDueOnMoveDay: booking.truckAddonDueOnMoveDay,
           truckAddonAmount: booking.truckAddonAmount,
           // ── Moving Service Agreement status (shown on the card) ──

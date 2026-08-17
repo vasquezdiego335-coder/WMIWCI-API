@@ -214,6 +214,9 @@ export type DiscordJobData = {
     | 'contact-message'    // a new contact-form submission (alerts the team)
     | 'reschedule-offer'   // re-post an approval card after a customer picks a new date
     | 'lead-created'       // quick-quote lead card; link buttons only
+    // A CONFIRMED deposit-link payment. Queued only by the Stripe webhook path,
+    // only after Stripe reported the session paid. payload: { depositRequestId }
+    | 'deposit-paid'
   bookingId?: string
   payload: Record<string, unknown>
 }

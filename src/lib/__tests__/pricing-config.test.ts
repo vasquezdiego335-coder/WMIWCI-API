@@ -33,7 +33,11 @@ const APPROVED_PACKAGE_PRICES: Record<string, { amount: number; starting: boolea
   'little-studio': { amount: 379, starting: false },
   'half-studio': { amount: 439, starting: false },
   'full-studio': { amount: 549, starting: false },
-  '1br': { amount: 649, starting: false },
+  // 1BR is $550. This table said $649 — a price the book itself stopped using,
+  // and which the owner's 2026-08-15 rules confirm is retired. A pinning test
+  // that pins the wrong number is worse than none: it makes the correct price
+  // look like the regression.
+  '1br': { amount: 550, starting: false },
   '2br': { amount: 779, starting: false },
   '3br': { amount: 1049, starting: true },
   '4br': { amount: 1449, starting: true },
@@ -64,7 +68,7 @@ test('packages: "Starting at" is structural — formatCharge cannot drop it', ()
   assert.equal(formatCharge(PACKAGES['5br'].price), 'Starting at $1,799')
   assert.equal(formatCharge(PACKAGES['5br'].price, 'es'), 'Desde $1,799')
   // A fixed package renders bare — no accidental "Starting at".
-  assert.equal(formatCharge(PACKAGES['1br'].price), '$649')
+  assert.equal(formatCharge(PACKAGES['1br'].price), '$550')
 })
 
 test('packages: the small packages did NOT keep their old prices', () => {
@@ -79,7 +83,14 @@ test('packages: inclusions are inventory-bounded, never unlimited', () => {
   const text = PACKAGE_INCLUDES.map((i) => i.en).join(' ')
   assert.deepEqual(checkBannedPhrases(text), [])
   assert.ok(/inventory you disclosed/i.test(text), 'must scope to disclosed inventory')
-  assert.ok(/two professional labor workers/i.test(text))
+  // Full-service brings a CREW and a truck. "Two professional labor workers"
+  // is the labor-only wording and now lives in LABOR_ONLY_INCLUDES; asserting
+  // it here would re-merge the two products in the customer-facing copy.
+  assert.ok(/professional moving crew/i.test(text))
+  assert.ok(
+    !/labor workers/i.test(text),
+    'full-service inclusions must not describe themselves as labor-only',
+  )
   assert.ok(/one loading location and one unloading location/i.test(text))
 })
 

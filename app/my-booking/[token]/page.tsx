@@ -90,6 +90,8 @@ type CustomerBookingView = {
   notes: string | null // customer's own words, capped — never internal notes
   estimate: string | null // "$X" move estimate (labor), advisory
   estimateTotal: number | null // raw dollars for the payment breakdown
+  /** THE final total the customer owes: quote + add-ons − discount. Dollars. */
+  finalTotal: number | null
   /** Approved charges that sit OUTSIDE the quote (truck add-on). Dollars. */
   moveDayAddonTotal: number | null
   /** Discount actually applied to this booking, in dollars. */
@@ -271,6 +273,7 @@ function buildCustomerView(booking: BookingRecord): CustomerBookingView {
     notes: items.notes,
     estimate,
     estimateTotal,
+    finalTotal: balance.quoteMissing && balance.finalBilledCents === 0 ? null : balance.finalBilledCents / 100,
     moveDayAddonTotal: balance.additionalChargeCents > 0 ? balance.additionalChargeCents / 100 : null,
     discountTotal: balance.discountCents > 0 ? balance.discountCents / 100 : null,
     // Never quote a balance we cannot vouch for: a booking with no stored
@@ -708,6 +711,15 @@ export default async function BookingStatusPage({ params }: { params: { token: s
                   <div className="bk-payline">
                     <dt className="bk-payline__k">Discount applied</dt>
                     <dd className="bk-payline__v">−{money(v.discountTotal)}</dd>
+                  </div>
+                )}
+                {/* THE final total. The lines above are how it was reached;
+                    this is the number the customer owes, and it is the same
+                    figure the admin, the Discord card and their email show. */}
+                {v.finalTotal != null && (
+                  <div className="bk-payline bk-payline--accent">
+                    <dt className="bk-payline__k">Final total</dt>
+                    <dd className="bk-payline__v">{money(v.finalTotal)}</dd>
                   </div>
                 )}
                 <div className="bk-payline bk-payline--accent">

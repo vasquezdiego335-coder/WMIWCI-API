@@ -92,7 +92,6 @@ function loadFileCommands(): void {
   for (const file of files) {
     const filePath = path.join(dir, file)
     try {
-      // eslint-disable-next-line @typescript-eslint/no-var-requires
       const mod = require(filePath) as CommandModule
       const name = mod?.data?.name ?? mod?.name
       if (name && typeof mod.execute === 'function') {

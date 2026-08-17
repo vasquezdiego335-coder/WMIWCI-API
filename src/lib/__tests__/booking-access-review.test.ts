@@ -26,6 +26,7 @@ import { readFileSync, existsSync } from 'node:fs'
 import path from 'node:path'
 
 import { BookingSchema } from '../booking-schema'
+import { PRICED_PACKAGE_KEYS, LEGACY_PACKAGE_KEYS } from '../pricing-config'
 import { buildReviewReasons } from '../booking-review'
 import { computeEstimate } from '../estimate'
 
@@ -41,7 +42,15 @@ const base = () => ({
   fullName: 'Sam Ortiz',
   phone: '9735551234',
   email: 'sam@example.com',
-  serviceType: '1br',
+  // ── THE PRODUCT IS NOW REQUIRED (owner decision 2026-08-14) ────────────
+  //    Move It Clear It sells two products, and a booking must say which one
+  //    it is. The server no longer infers it from the package, the truck
+  //    provider or the notes — that inference is how a job on the customer's
+  //    own truck was recorded as a company-truck move. These fixtures book
+  //    FULL-SERVICE, so they carry the product and its flat package.
+  serviceTypeKey: 'full_service' as const,
+  moveSizeKey: '1br',
+  serviceType: '1br', // legacy alias for moveSizeKey; still accepted
   agreementAccepted: true as const,
   agreementName: 'Sam Ortiz',
   inventoryAccuracyConfirmed: true as const,
@@ -424,8 +433,19 @@ test('the quote CTA does not claim an availability check it never performs', ski
 
 test('pricing package cards preselect their package', skipSite, () => {
   const src = site('pricing.html')
-  for (const key of ['little-studio', 'half-studio', 'full-studio', '1br', '2br', '3br', '4br', '5br']) {
+  // SELLABLE packages only. This list was hand-written and included the three
+  // retired studio tiers, so it required a withdrawn rate to keep a live
+  // "book this" link — the opposite of retiring it. Driven from the price book
+  // now, so retiring a package removes its requirement automatically.
+  for (const key of PRICED_PACKAGE_KEYS) {
     assert.ok(src.includes(`booking-form.html?size=${key}`), `package card missing preselect: ${key}`)
+  }
+  // And a retired package must NOT be bookable from the pricing page.
+  for (const key of LEGACY_PACKAGE_KEYS) {
+    assert.ok(
+      !src.includes(`booking-form.html?size=${key}`),
+      `pricing.html still offers a booking link for the RETIRED package "${key}"`,
+    )
   }
 })
 

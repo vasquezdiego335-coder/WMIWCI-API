@@ -5,6 +5,7 @@
 
 import { effectiveWaitingFeeCents } from './waiting-time'
 import { summarizeRevenue } from './money-rules'
+import { computeQuote } from './booking-quote'
 import { computeJobProfit, isStripePayment, type JobProfit } from './profit'
 import { evaluateFinancialCompleteness, type FinancialCompleteness } from './financial-completeness'
 import { rollupLabor, paidCentsOf, type RollupAssignment, type LaborRollup } from './labor-calc'
@@ -280,34 +281,37 @@ export interface CustomerBalance {
  * must originate it here rather than re-summing fee columns.
  */
 export function customerBalance(b: BookingMoneyShape): CustomerBalance {
-  // totalEstimate is DOLLARS (pricing.ts unit contract); everything else CENTS.
-  const quoteMissing = b.totalEstimate == null
-  const quotedCents = quoteMissing
-    // Legacy / "need a quote" rows: rebuild the quote from its parts so the
-    // base labor is still billed rather than silently dropped.
-    ? Math.round((b.baseRate ?? 0) * 100) + (b.travelFee ?? 0)
-    : Math.round((b.totalEstimate ?? 0) * 100)
-
   const additional = additionalChargeCents(b)
-  const pct = b.discountPercent ?? 0
-  const discountCents = pct > 0 ? Math.round(((quotedCents + additional) * pct) / 100) : 0
-  const finalBilledCents = Math.max(0, quotedCents + additional - discountCents)
-
   const revenue = summarizeRevenue(b.payments as never)
-  const outstandingCents = Math.max(0, finalBilledCents - revenue.netCollectedCents)
+
+  // ── THE ONE CALCULATION ────────────────────────────────────────────────
+  //  Moved into booking-quote.computeQuote (2026-08-14) so pricing.ts — which
+  //  feeds the Discord cards and the emails in dollars — can call the same
+  //  function instead of doing its own arithmetic. The formula is unchanged:
+  //    quote + additional − discount = final billed; − collected = outstanding.
+  const q = computeQuote({
+    totalEstimate: b.totalEstimate,
+    baseRate: b.baseRate,
+    travelFeeCents: b.travelFee,
+    additionalCents: additional,
+    discountPercent: b.discountPercent,
+    depositCents: b.depositAmount,
+    collectedCents: revenue.netCollectedCents,
+    authorizedNotCapturedCents: revenue.authorizedNotCapturedCents,
+  })
 
   return {
-    quotedCents,
+    quotedCents: q.quotedCents,
     additionalChargeCents: additional,
-    discountCents,
-    finalBilledCents,
+    discountCents: q.discountCents,
+    finalBilledCents: q.finalTotalCents,
     collectedCents: revenue.netCollectedCents,
     refundedCents: revenue.refundedCents,
     authorizedNotCapturedCents: revenue.authorizedNotCapturedCents,
-    outstandingCents,
-    dueOnMoveDayCents: outstandingCents,
-    moveDayFeeCents: Math.min(additional, outstandingCents),
-    quoteMissing,
+    outstandingCents: q.remainingCents,
+    dueOnMoveDayCents: q.remainingCents,
+    moveDayFeeCents: Math.min(additional, q.remainingCents),
+    quoteMissing: q.quoteMissing,
   }
 }
 

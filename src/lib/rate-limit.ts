@@ -71,6 +71,16 @@ export const LIMITS = {
   coupon: { name: 'coupon', limit: 6, windowSec: 10 * 60, failMode: 'open' } as RateLimitConfig,
   // Server-to-server (already token-gated) — a generous ceiling against runaway loops.
   notifyLead: { name: 'notify-lead', limit: 60, windowSec: 60, failMode: 'open' } as RateLimitConfig,
+  // ── Deposit links (owner spec 2026-08-15) ──
+  // Creating a Stripe Checkout Session from a public token. Tight enough that a
+  // link cannot be hammered into hundreds of sessions, generous enough for a
+  // customer who taps twice, gives up, comes back and pays. failMode 'closed':
+  // unlike a lead form, a limiter outage here must not open a money endpoint.
+  depositCheckout: { name: 'deposit-checkout', limit: 10, windowSec: 60, failMode: 'closed' } as RateLimitConfig,
+  // The success-page poll: one every 2s for 30s, plus refreshes. Fail OPEN —
+  // a limiter blip must never leave a customer who HAS paid staring at
+  // "confirming" forever.
+  depositStatus: { name: 'deposit-status', limit: 60, windowSec: 60, failMode: 'open' } as RateLimitConfig,
 } as const
 
 // ── Pure in-memory bucket (fixed window). Exported for offline tests. ─────────

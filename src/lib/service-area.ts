@@ -219,8 +219,25 @@ export function checkServiceArea(
   )
 
   const manualReviewRequired = zone === 'new_york' || zone === 'unsupported' || zone === 'manual_review'
-  const travelFeeCents =
-    zone === 'primary' ? 0 : zone === 'extended_nj' ? TRAVEL_FEE_CENTS : null
+
+  // ── THE TRAVEL BAND IS RETIRED (owner decision, LEGACY_TRAVEL.exists=false) ──
+  //
+  //  This returned TRAVEL_FEE_CENTS ($50) for `extended_nj`, and the booking
+  //  route stored it — so every new extended-NJ booking was still receiving a
+  //  fee that was withdrawn on 2026-07-31 and replaced by $3-per-routed-mile
+  //  transportation. Charging both would bill one journey twice.
+  //
+  //  A NEW evaluation therefore carries NO fee. What survives is the ZONE,
+  //  which is still load-bearing: it decides serviceability, drives the
+  //  customer-facing message, and routes New York to manual review.
+  //
+  //  `null` still means "pending review" — a genuinely unknown amount, which
+  //  is not the same as zero, and callers distinguish the two.
+  //
+  //  TRAVEL_FEE_CENTS stays exported for READ paths only: a booking approved
+  //  before the retirement keeps the fee it agreed to, read from its stored
+  //  row and never recalculated.
+  const travelFeeCents = manualReviewRequired && zone !== 'unsupported' ? null : 0
 
   return {
     serviceable: zone !== 'unsupported',

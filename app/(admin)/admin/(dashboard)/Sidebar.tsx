@@ -38,6 +38,7 @@ const GROUPS: Group[] = [
     items: [
       { label: 'Financial Overview', icon: '📊', soon: true },
       { href: '/admin/payments', label: 'Revenue', icon: '💳' },
+      { href: '/admin/deposit-links', label: 'Deposit Links', icon: '🔗' },
       { href: '/admin/expenses', label: 'Expenses', icon: '🧾' },
       { href: '/admin/owner-money', label: 'Owner Money', icon: '🏦' },
       { label: 'Payroll', icon: '💵', soon: true },
