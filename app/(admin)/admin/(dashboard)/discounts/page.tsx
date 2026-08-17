@@ -49,7 +49,7 @@ export default async function AdminDiscounts() {
                 </p>
                 {b.customerNotes && (
                   <p style={{ fontSize: '12px', color: '#374151', backgroundColor: '#F9FAFB', padding: '8px', borderRadius: '6px', margin: '0', fontStyle: 'italic' }}>
-                    "{b.customerNotes}"
+                    &ldquo;{b.customerNotes}&rdquo;
                   </p>
                 )}
                 <p style={{ fontSize: '11px', color: '#9CA3AF', margin: '8px 0 0' }}>

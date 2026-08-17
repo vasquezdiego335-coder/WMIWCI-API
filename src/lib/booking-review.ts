@@ -29,6 +29,15 @@ export function buildReviewReasons(input: {
   difficultElevatorDropoff?: boolean
   difficultBuildingPickup?: boolean
   difficultBuildingDropoff?: boolean
+  // ── Scope questions raised at intake (owner spec 2026-08-14) ───────────
+  //    Each one changes what the job costs, so each one belongs in the same
+  //    list the owner already reads before approving.
+  inventory?: { exceedsSelected: boolean; selectedLabel: string | null; suggestedLabel: string | null; photosRecommended: boolean } | null
+  hasPhotos?: boolean
+  assemblyScopeUnknown?: boolean
+  coiRequired?: boolean
+  coiUnknown?: boolean
+  laborOnlyInferred?: boolean
 }): string[] {
   const reasons: string[] = []
 
@@ -53,6 +62,28 @@ export function buildReviewReasons(input: {
     reasons.push(`Address entered manually — ${input.manualEntryReason}`)
   } else if (input.addressNeedsReview) {
     reasons.push('Address could not be verified — confirm it with the customer before dispatch')
+  }
+
+  // 5. Scope questions. A booking whose disclosed inventory does not fit the
+  //    package it selected has NOT been priced, whatever the total says.
+  if (input.inventory?.exceedsSelected) {
+    reasons.push(
+      `Inventory exceeds the selected move size — customer chose ${input.inventory.selectedLabel ?? 'a package'}, the disclosed items look like ${input.inventory.suggestedLabel ?? 'a larger move'}. Manual review required before approval.`
+    )
+  }
+  if (input.assemblyScopeUnknown) {
+    reasons.push('Assembly/disassembly requested but no furniture was identified — scope unknown, quote not final')
+  }
+  if (input.coiRequired) {
+    reasons.push('Certificate of insurance required by a building — review before approval')
+  } else if (input.coiUnknown) {
+    reasons.push('COI requirement not confirmed with either building')
+  }
+  if (input.inventory?.photosRecommended && input.hasPhotos === false) {
+    reasons.push('Photos recommended before approval — large or fragile items disclosed with no photos attached')
+  }
+  if (input.laborOnlyInferred) {
+    reasons.push('Labor only — the customer supplies the truck. Confirm no truck, fuel or mileage charge applies.')
   }
 
   // Stable order, no duplicates (the estimator and the service area can both

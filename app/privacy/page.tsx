@@ -50,7 +50,7 @@ export default function PrivacyPage() {
         <Section title="3. Information Sharing">
           <p>We share your information only with:</p>
           <ul>
-            <li><strong>Stripe</strong> — payment processing. Subject to <a href="https://stripe.com/privacy" target="_blank" rel="noreferrer" style={{ color: '#FF5A1F' }}>Stripe's privacy policy</a>.</li>
+            <li><strong>Stripe</strong> — payment processing. Subject to <a href="https://stripe.com/privacy" target="_blank" rel="noreferrer" style={{ color: '#FF5A1F' }}>Stripe&rsquo;s privacy policy</a>.</li>
             <li><strong>Resend</strong> — transactional email delivery</li>
             <li><strong>Cloudinary</strong> — file storage for job-related photos and documents</li>
             <li><strong>Our internal team</strong> via Discord — for crew coordination (first name + address only)</li>

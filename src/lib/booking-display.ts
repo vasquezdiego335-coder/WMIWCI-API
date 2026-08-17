@@ -16,6 +16,16 @@
 //      a travel-fee status; the owner approval card keeps the full breakdown.
 // ════════════════════════════════════════════════════════════════════════
 
+import { resolveBookingScope, scopeInventoryLine } from './booking-scope'
+
+/** "1000 Executive Dr, West Orange, NJ — Unit 443A". The unit is appended, not
+ *  left buried inside the street string where no filter could ever see it. */
+function unitSuffixed(address: string | null | undefined, unit: string | null): string | null {
+  const a = (address ?? '').trim()
+  if (!a) return null
+  return unit ? `${a} — Unit ${unit}` : a
+}
+
 // ── Human labels for the structured access fields ─────────────────────────
 export const ELEVATOR_LABELS: Record<string, string> = {
   none: 'No elevator — stairs only',
@@ -104,8 +114,17 @@ export function shortRef(id?: string | null): string {
 }
 
 // ── Money / date helpers ───────────────────────────────────────────────────
+/**
+ * "$699" for a whole amount, "$719.10" when there are cents.
+ *
+ * The cents used to be dropped entirely: a $719.10 total rendered as "$719.1",
+ * which reads as a typo on a card an owner is about to approve money against.
+ * Whole dollars stay whole because most of our prices are.
+ */
 export function moneyFromDollars(n: unknown): string | null {
-  return typeof n === 'number' && Number.isFinite(n) ? `$${n.toLocaleString('en-US')}` : null
+  if (typeof n !== 'number' || !Number.isFinite(n)) return null
+  const digits = Number.isInteger(n) ? 0 : 2
+  return `$${n.toLocaleString('en-US', { minimumFractionDigits: digits, maximumFractionDigits: 2 })}`
 }
 
 const TZ = 'America/New_York'
@@ -316,12 +335,14 @@ export function accessBulletsFromDescription(description?: string | null): strin
 
 // ── Service / truck labels straight from itemsDescription ─────────────────
 export function serviceLabelFromDescription(description?: string | null): string | null {
-  const m = (description ?? '').match(/^Service:\s*(.+)$/im)
+  // "Move Size:" is the current wording; "Service:" is what every booking
+  // taken before 2026-08-14 carries. Both are the SIZE, never a truck claim.
+  const m = (description ?? '').match(/^(?:Move\s*Size|Service):\s*(.+)$/im)
   return m ? m[1].trim() : null
 }
 
 export function truckLabelFromDescription(description?: string | null): string | null {
-  const m = (description ?? '').match(/^Truck:\s*(.+)$/im)
+  const m = (description ?? '').match(/^Truck(?:\s*Provider)?:\s*(.+)$/im)
   if (!m) return null
   const v = m[1].trim()
   if (/customer provides/i.test(v)) return TRUCK_OPTION_LABELS['own-truck']
@@ -555,6 +576,19 @@ export type ApprovalCardData = {
   requestedDate?: Date | string | null
   serviceType?: string | null // human label; falls back to parsing rawDescription
   truckOptionLabel?: string | null
+  // ── The three separate facts (owner spec 2026-08-14, WMIC-1019) ─────────
+  //    "Service: 1 Bedroom / Truck: Customer-provided" read as a bedroom
+  //    package that happened to mention a truck. It is a LABOR ONLY job of
+  //    1-bedroom size on the customer's truck — three answers, shown as three.
+  serviceHeadline?: string | null // "LABOR ONLY" / "FULL SERVICE"
+  moveSizeLabel?: string | null // "2 Bedrooms" — size only, never a truck claim
+  truckProviderLabel?: string | null // "Customer" / "Move It Clear It"
+  /** The unresolved-scope banners, most serious first. */
+  scopeAlerts?: { banner: string; detail: string }[]
+  /** The one-paragraph brief; rendered at the very top of the embed. */
+  alertParagraph?: string | null
+  /** Disclosed inventory, one line. */
+  inventoryLine?: string | null
   originAddress?: string | null
   destAddress?: string | null
   access?: AccessInfo
@@ -570,7 +604,13 @@ export type ApprovalCardData = {
   discountPercent?: number | null
   depositDollars?: number | null
   depositPaid?: boolean
+  /** DOLLARS. THE final total: quote + add-ons − discount. */
   moveTotal?: number | null
+  /** DOLLARS. What the discount actually took off. */
+  discountDollars?: number | null
+  /** DOLLARS. Captured so far. An authorized hold is NOT captured. */
+  collectedDollars?: number | null
+  /** DOLLARS. What remains once the $49 authorization is captured. */
   balanceAfterJob?: number | null
   // Service area
   serviceAreaZone?: string | null
@@ -629,20 +669,21 @@ export function buildBookingApprovalCard(data: ApprovalCardData): {
     )
   )
 
-  // 2) Move (date / service / truck)
-  fields.push(
-    field(
-      '📅 Move',
-      [
-        jobDateTime(data.requestedDate),
-        data.serviceType || serviceLabelFromDescription(data.rawDescription) || 'Service in details',
-        `🚚 ${data.truckOptionLabel || truckLabelFromDescription(data.rawDescription) || TRUCK_OPTION_LABELS['own-truck']}`,
-      ]
-        .filter(Boolean)
-        .join('\n'),
-      true
-    )
-  )
+  // 2) Move — the SERVICE, the SIZE and the TRUCK as three separate lines.
+  //    They used to be one ("1 Bedroom") plus a truck footnote, which is how a
+  //    job on the customer's own U-Haul read as a full-service bedroom package.
+  const moveLines: string[] = [jobDateTime(data.requestedDate)]
+  if (data.serviceHeadline) {
+    moveLines.push(`**${data.serviceHeadline}**`)
+    if (data.moveSizeLabel) moveLines.push(`Move size: ${data.moveSizeLabel}`)
+    else moveLines.push('Move size: not selected')
+    moveLines.push(`🚚 Truck: ${data.truckProviderLabel || 'Not confirmed'}`)
+  } else {
+    // Degraded path (the booking row was unavailable): whatever the payload had.
+    moveLines.push(data.serviceType || serviceLabelFromDescription(data.rawDescription) || 'Service in details')
+    moveLines.push(`🚚 ${data.truckOptionLabel || truckLabelFromDescription(data.rawDescription) || TRUCK_OPTION_LABELS['own-truck']}`)
+  }
+  fields.push(field('📅 Move', moveLines.filter(Boolean).join('\n'), true))
 
   // 3) Agreement
   fields.push(
@@ -667,29 +708,47 @@ export function buildBookingApprovalCard(data: ApprovalCardData): {
       : accessBulletsFromDescription(data.rawDescription)
   if (bullets.length) fields.push(field('🔑 Access', bullets.map((b) => `• ${b}`).join('\n')))
 
-  // 7) Pricing — the full owner breakdown.
+  // 7) Pricing — the full owner breakdown, ending on ONE final total.
+  //
+  //    This block used to print the discount as a note ("MOVE10 10% off") and
+  //    then a "Move total" that ignored it, followed by a "Balance after job"
+  //    of total − deposit. On WMIC-1019 that read $550 and $501 for a booking
+  //    the admin correctly showed as $495. Every figure below now comes from
+  //    the canonical calculation in booking-quote.ts.
   const priceLines: string[] = []
   if (typeof data.baseRate === 'number' && data.baseRate > 0) priceLines.push(`Base labor: ${money(data.baseRate)}`)
   if (data.manualReviewRequired) priceLines.push('Travel fee: Pending owner review')
   else if (typeof data.travelFeeDollars === 'number' && data.travelFeeDollars > 0)
     priceLines.push(`Travel fee: ${money(data.travelFeeDollars)} — collected on move day`)
   if (data.truckAddonDueOnMoveDay)
-    priceLines.push(`Truck add-on: ${money((data.truckAddonAmountCents ?? 5000) / 100)} — collected on move day`)
+    priceLines.push(`Truck pickup & return: ${money((data.truckAddonAmountCents ?? 5000) / 100)} — crew labor, collected on move day`)
   if (data.discountCode || data.discountType) {
     const parts = [
       data.discountCode ? `\`${data.discountCode}\`` : null,
       typeof data.discountPercent === 'number' && data.discountPercent > 0 ? `${data.discountPercent}% off` : null,
       data.discountType ? `(${data.discountType})` : null,
     ].filter(Boolean)
-    priceLines.push(`Discount: ${parts.join(' ')}`)
+    const applied = typeof data.discountDollars === 'number' && data.discountDollars > 0
+      ? ` −${money(data.discountDollars)}`
+      : ''
+    priceLines.push(`Discount: ${parts.join(' ')}${applied}`)
   }
-  priceLines.push(
-    data.depositPaid
-      ? `Deposit: ${money(data.depositDollars ?? 49)} captured ✅`
-      : `Deposit: ${money(data.depositDollars ?? 49)} held (captured on approval)`
-  )
-  if (typeof data.moveTotal === 'number') priceLines.push(`Move total: ${money(data.moveTotal)}`)
-  if (typeof data.balanceAfterJob === 'number') priceLines.push(`Balance after job: ${money(data.balanceAfterJob)}`)
+  // THE number. Bold, because it is the one an owner acts on.
+  if (typeof data.moveTotal === 'number') priceLines.push(`**Final total: ${money(data.moveTotal)}**`)
+
+  // The deposit is APPLIED toward that total, never added to it.
+  const depositDollars = data.depositDollars ?? 49
+  const collected = data.collectedDollars ?? 0
+  if (data.depositPaid || collected > 0) {
+    priceLines.push(`Deposit paid: ${money(Math.min(depositDollars, collected) || depositDollars)}`)
+    if (typeof data.balanceAfterJob === 'number')
+      priceLines.push(`Remaining move-day balance: ${money(data.balanceAfterJob)}`)
+  } else {
+    priceLines.push(`Deposit authorized: ${money(depositDollars)} — captured on approval`)
+    priceLines.push(`Amount captured so far: ${money(collected)}`)
+    if (typeof data.balanceAfterJob === 'number')
+      priceLines.push(`Remaining after capture: ${money(data.balanceAfterJob)}`)
+  }
   fields.push(field('💰 Pricing', priceLines.join('\n')))
 
   // 8) Stripe references
@@ -698,6 +757,23 @@ export function buildBookingApprovalCard(data: ApprovalCardData): {
   if (data.stripeCheckoutId) stripeLines.push(`Checkout Session: \`${shortRef(data.stripeCheckoutId)}\``)
   if (data.stripeChargeId) stripeLines.push(`Charge: \`${shortRef(data.stripeChargeId)}\``)
   fields.push(field('💳 Stripe', stripeLines.join('\n'), true))
+
+  // 7-bis) UNRESOLVED SCOPE. Full width, immediately under the money, because
+  //        every one of these can change the money. Each banner is the owner's
+  //        own wording ("⚠️ INVENTORY EXCEEDS SELECTED MOVE SIZE …") with one
+  //        sentence of detail underneath.
+  const scopeAlerts = (data.scopeAlerts ?? []).filter((a) => a && a.banner)
+  if (scopeAlerts.length) {
+    fields.push(
+      field(
+        '🚨 Before You Approve',
+        scopeAlerts.map((a) => `**${a.banner}**\n${a.detail}`).join('\n\n'),
+        false
+      )
+    )
+  }
+
+  if (data.inventoryLine) fields.push(field('📦 Disclosed Inventory', data.inventoryLine, false))
 
   // 8-bis) WHY this needs review. Full width and directly above the buttons the
   //        owner is about to press — a bare "⚠️ Owner review required" told them
@@ -776,6 +852,8 @@ export function buildBookingApprovalCard(data: ApprovalCardData): {
   }
 
   const descriptionParts: string[] = []
+  // The whole problem in one breath, above everything else on the card.
+  if (data.alertParagraph) descriptionParts.push(`**${data.alertParagraph}**`)
   if (data.rescheduled) descriptionParts.push('🔁 **Rescheduled by the customer** — approve for the new date.')
   if (data.manualReviewRequired)
     descriptionParts.push(
@@ -881,6 +959,31 @@ export type ApprovalBookingInput = {
   source?: string | null
   foundUs?: string | null
   customer?: { name?: string | null; email?: string | null; phone?: string | null } | null
+  // ── The labor-only booking shape (owner spec 2026-08-14). All optional:
+  //    a historical row carries none of them and service-shape.ts derives the
+  //    answer from truckProvider + the "Truck:" line in itemsDescription. ──
+  serviceTypeKey?: string | null
+  moveSizeKey?: string | null
+  truckProvider?: string | null
+  inventoryDetail?: unknown
+  inventoryReviewRequired?: boolean | null
+  numBoxes?: number | null
+  needsAssembly?: boolean | null
+  needsDisassembly?: boolean | null
+  assemblyItems?: string | null
+  disassemblyItems?: string | null
+  assemblyFee?: number | null // cents
+  disassemblyFee?: number | null // cents
+  assemblyApprovalRequired?: boolean | null
+  coiRequiredOrigin?: string | null
+  coiRequiredDest?: string | null
+  coiNotes?: string | null
+  discountRejected?: unknown
+  originUnit?: string | null
+  destUnit?: string | null
+  additionalTruckFees?: number | null // cents
+  /** CENTS captured so far, when the caller has the payment rows. */
+  payments?: { amount: number; status: string; isInternalTest?: boolean | null }[] | null
 }
 
 export function approvalCardDataFromBooking(
@@ -898,7 +1001,25 @@ export function approvalCardDataFromBooking(
 ): ApprovalCardData {
   const dollars = (cents?: number | null): number | null => (typeof cents === 'number' ? cents / 100 : null)
   const deposit = dollars(b.depositAmount ?? 4900) ?? 49
-  const moveTotal = typeof b.totalEstimate === 'number' ? b.totalEstimate : null
+
+  // ── ONE resolution of the booking's shape, scope and money ──────────────
+  //    The card, the admin page and the approval guards all call this same
+  //    function, so the card can no longer describe a booking differently
+  //    from the page the owner opens two seconds later.
+  const collectedCents = (b.payments ?? [])
+    .filter((p) => p.status === 'COMPLETED' && !p.isInternalTest)
+    .reduce((s, p) => s + p.amount, 0)
+  const authorizedCents = (b.payments ?? [])
+    .filter((p) => p.status === 'PENDING' && !p.isInternalTest)
+    .reduce((s, p) => s + p.amount, 0)
+  const scope = resolveBookingScope({
+    ...b,
+    additionalCents: (b.truckAddonDueOnMoveDay ? b.truckAddonAmount ?? 0 : 0) + (b.additionalTruckFees ?? 0),
+    collectedCents: collectedCents || (b.depositPaid ? b.depositAmount ?? 4900 : 0),
+    authorizedNotCapturedCents: authorizedCents,
+    photoCount: opts?.photoCount ?? opts?.photos?.length ?? 0,
+  })
+
   return {
     bookingId: b.id,
     displayId: b.displayId ?? null,
@@ -912,8 +1033,19 @@ export function approvalCardDataFromBooking(
     truckOptionLabel: b.truckAddonDueOnMoveDay
       ? TRUCK_OPTION_LABELS['truck-pickup-return']
       : truckLabelFromDescription(b.itemsDescription),
-    originAddress: b.originAddress ?? null,
-    destAddress: b.destAddress ?? null,
+    serviceHeadline: scope.headline,
+    moveSizeLabel: scope.shape.moveSizeLabel,
+    truckProviderLabel: scope.shape.truckProviderDetail
+      ? `${scope.shape.truckProviderLabel} (${scope.shape.truckProviderDetail})`
+      : scope.shape.truckProviderLabel,
+    scopeAlerts: scope.flags
+      .filter((f) => f.severity !== 'info' || f.code === 'photos_recommended' || f.code === 'coi_unknown')
+      .map((f) => ({ banner: f.banner, detail: f.detail })),
+    alertParagraph: scope.alertParagraph,
+    inventoryLine: scope.inventory.inventory.empty ? null : scopeInventoryLine(scope),
+    // Units are split out of the street string for display — see address.ts.
+    originAddress: unitSuffixed(scope.addresses.origin.address, scope.addresses.origin.unit),
+    destAddress: unitSuffixed(scope.addresses.dest.address, scope.addresses.dest.unit),
     rawDescription: b.itemsDescription ?? null,
     customerNotes: b.customerNotes ?? null,
     baseRate: b.baseRate ?? null,
@@ -925,8 +1057,14 @@ export function approvalCardDataFromBooking(
     discountPercent: b.discountPercent ?? null,
     depositDollars: deposit,
     depositPaid: b.depositPaid ?? false,
-    moveTotal,
-    balanceAfterJob: moveTotal != null ? Math.round((moveTotal - deposit) * 100) / 100 : null,
+    // THE final total (quote + add-ons − discount) and what is left once the
+    // $49 authorization is captured — both from the canonical calculation.
+    // These two lines used to read `totalEstimate` and `totalEstimate − 49`,
+    // which is where $550 and $501 came from on a $495 booking.
+    moveTotal: scope.quote.quoteMissing && scope.quote.finalTotalCents === 0 ? null : scope.quote.finalTotalDollars,
+    discountDollars: scope.quote.discountDollars,
+    collectedDollars: scope.quote.collectedDollars,
+    balanceAfterJob: scope.quote.quoteMissing && scope.quote.finalTotalCents === 0 ? null : scope.quote.remainingAfterDepositDollars,
     serviceAreaZone: b.serviceAreaZone ?? null,
     manualReviewRequired: b.manualReviewRequired ?? false,
     serviceAreaMessage: b.serviceAreaMessage ?? null,

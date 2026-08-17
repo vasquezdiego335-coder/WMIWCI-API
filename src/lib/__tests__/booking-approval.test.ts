@@ -30,8 +30,19 @@ function makeBooking(over: Partial<ApprovableBooking> = {}): ApprovableBooking {
     itemsDescription: '1 Bedroom move',
     arrivalWindow: '8:00-10:00 AM',
     totalEstimate: 599,
-    originAddress: '1 A St, Newark NJ',
-    destAddress: '2 B St, Newark NJ',
+    // ── A FULLY RESOLVED booking (owner spec 2026-08-14) ─────────────────
+    //    approveBooking now runs the pre-approval scope checklist before it
+    //    touches Stripe, so the fixture for the CAPTURE tests has to be a
+    //    booking with nothing outstanding — otherwise every test below would
+    //    be measuring the guard instead of the capture. The guard's own
+    //    behaviour is asserted separately at the end of this file, and
+    //    exhaustively in labor-only-booking.test.ts.
+    originAddress: '1 A St, Newark, NJ 07102',
+    destAddress: '2 B St, Newark, NJ 07102',
+    serviceTypeKey: 'full_service',
+    truckProvider: 'WMIWCI',
+    coiRequiredOrigin: 'no',
+    coiRequiredDest: 'no',
     serviceAreaZone: 'primary',
     travelFee: 0,
     manualReviewRequired: false,
@@ -383,4 +394,101 @@ test('decline still cancels even if the hold release fails (non-fatal)', async (
   assert.equal((res as { holdReleased: boolean }).holdReleased, false)
   assert.equal(h.state.booking?.status, 'CANCELLED') // still cancelled
   assert.equal(h.state.declines.length, 1)
+})
+
+// ══════════════════════════════════════════════════════════════════════════
+//  THE PRE-APPROVAL SCOPE CHECKLIST (owner spec 2026-08-14, WMIC-1019)
+//  ------------------------------------------------------------------------
+//  Confirm Booking used to capture $49 and schedule a crew against a booking
+//  with unresolved questions on it — the warnings were on the page and the
+//  button never read them. The checklist runs HERE, before the atomic claim
+//  and therefore before Stripe, so the Discord card and the admin button
+//  refuse exactly the same bookings. What matters most in these tests is what
+//  did NOT happen: no capture, and no claim.
+// ══════════════════════════════════════════════════════════════════════════
+
+test('unresolved scope stops the approval BEFORE the claim and before Stripe', async () => {
+  // A 1-bedroom package holding a two-bedroom load, with no COI answer.
+  const h = makeHarness(
+    makeBooking({
+      itemsDescription: 'Service: 1 Bedroom',
+      customerNotes: 'Inventory: 15 boxes, 2 beds/mattresses, 3 dressers, 2 sofas, 2 tables/chairs.',
+      coiRequiredOrigin: null,
+      coiRequiredDest: null,
+      baseRate: 550,
+      totalEstimate: 550,
+    }),
+  )
+  const res = await approveBooking({ bookingId: 'bk_1', actor: { name: 'Diego', role: 'OWNER' }, source: 'admin' }, h.deps)
+
+  assert.equal(res.ok, false)
+  assert.equal((res as { code: string }).code, 'needs_acknowledgement')
+  const prompt = (res as { message: string }).message
+  assert.match(prompt, /Inventory matches selected move size/)
+  // It names the fix that does NOT cost the customer a new booking.
+  assert.match(prompt, /change the size to 2 Bedrooms \(the customer does not need to rebook\)/)
+  assert.match(prompt, /COI requirement reviewed/)
+  // The money is untouched and the booking is still approvable.
+  assert.equal(h.state.captures.length, 0)
+  assert.equal(h.state.booking?.status, 'PENDING_APPROVAL')
+})
+
+test('acknowledging the warnings lets the same booking through, and captures once', async () => {
+  const h = makeHarness(
+    makeBooking({
+      itemsDescription: 'Service: 1 Bedroom',
+      customerNotes: 'Inventory: 15 boxes, 2 beds/mattresses, 3 dressers, 2 sofas, 2 tables/chairs.',
+      coiRequiredOrigin: null,
+      coiRequiredDest: null,
+      baseRate: 550,
+      totalEstimate: 550,
+    }),
+  )
+  const res = await approveBooking(
+    { bookingId: 'bk_1', actor: { name: 'Diego', role: 'OWNER' }, source: 'admin', acknowledgeWarnings: true },
+    h.deps,
+  )
+  assert.equal(res.ok, true)
+  assert.equal(h.state.captures.length, 1)
+})
+
+test('a hard block is NOT overridable by acknowledging it', async () => {
+  // A truck charge on a job running on the customer's own truck. We supply no
+  // truck here, so this is a defect in the booking, not a price.
+  const h = makeHarness(
+    makeBooking({
+      serviceTypeKey: 'labor_only',
+      truckProvider: 'customer',
+      additionalTruckFees: 7500,
+    }),
+  )
+  const res = await approveBooking(
+    { bookingId: 'bk_1', actor: { name: 'Diego', role: 'OWNER' }, source: 'admin', acknowledgeWarnings: true },
+    h.deps,
+  )
+  assert.equal(res.ok, false)
+  assert.equal((res as { code: string }).code, 'scope_blocked')
+  assert.match((res as { message: string }).message, /labor-only job carries/i)
+  assert.equal(h.state.captures.length, 0)
+})
+
+test('the Discord path is gated identically — one checklist, both surfaces', async () => {
+  const h = makeHarness(makeBooking({ serviceTypeKey: 'labor_only', truckProvider: 'customer', additionalTruckFees: 7500 }))
+  const res = await approveBooking(
+    { discordMessageId: 'msg_1', actor: { name: 'Sebastian', role: 'OWNER' }, source: 'discord' },
+    h.deps,
+  )
+  assert.equal(res.ok, false)
+  assert.equal((res as { code: string }).code, 'scope_blocked')
+  assert.equal(h.state.captures.length, 0)
+})
+
+test('skipScopeGuards is honoured for internal fixtures only', async () => {
+  const h = makeHarness(makeBooking({ serviceTypeKey: 'labor_only', truckProvider: 'customer', additionalTruckFees: 7500 }))
+  const res = await approveBooking(
+    { bookingId: 'bk_1', actor: { name: 'Diego', role: 'OWNER' }, source: 'admin', skipScopeGuards: true },
+    h.deps,
+  )
+  assert.equal(res.ok, true)
+  assert.equal(h.state.captures.length, 1)
 })

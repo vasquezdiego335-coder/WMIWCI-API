@@ -44,6 +44,7 @@ import { t } from './i18n'
 import { outboxEnabled, emitApproved } from '../outbox/integration'
 import { can, type Role } from './permissions'
 import { apiLogger } from './logger'
+import { evaluateApproval, type ApprovalGuardInput } from './approval-guards'
 
 // ── Public types ────────────────────────────────────────────────────────────
 
@@ -69,6 +70,15 @@ export type ApprovalErrorCode =
   | 'no_payment_intent'
   | 'capture_failed'
   | 'raced'
+  // ── Scope guards (owner spec 2026-08-14, booking WMIC-1019) ───────────
+  /** Approving would take money against a booking we cannot honestly price
+   *  or dispatch — an unpriced job, a truck charge on a labor-only move, a
+   *  missing address. Never overridable from the button. */
+  | 'scope_blocked'
+  /** Resolvable questions the owner must SEE before confirming: oversized
+   *  inventory, unknown assembly scope, an unreviewed COI. Re-send with
+   *  `acknowledgeWarnings: true` to proceed. */
+  | 'needs_acknowledgement'
 
 export type ApprovalResult =
   | {
@@ -92,6 +102,17 @@ export type ApproveInput = {
   notify?: boolean
   /** Cap on how long we wait for notification enqueue (Discord's 3s window). */
   notifyTimeoutMs?: number
+  /**
+   * The approver has been shown the unresolved-scope warnings and still wants
+   * to confirm. Blocks are never overridable this way — only the
+   * 'acknowledge' tier is (see approval-guards.ts).
+   */
+  acknowledgeWarnings?: boolean
+  /**
+   * Skip the scope checklist entirely. For internal rehearsal / test-booking
+   * fixtures only; a real approval surface must never pass this.
+   */
+  skipScopeGuards?: boolean
 }
 
 /** The subset of Booking (+ customer) the approval flow reads. Prisma returns a
@@ -117,6 +138,37 @@ export type ApprovableBooking = {
   scheduledEnd: Date | null
   estimatedHours: number | null
   customer: { name: string; email: string; phone: string | null; locale: string }
+  // ── Scope columns read by the pre-approval checklist (owner spec
+  //    2026-08-14). All optional: the store already loads the whole row, and
+  //    a booking taken before these columns existed reads null and is
+  //    derived from what it does carry. See src/lib/approval-guards.ts.
+  baseRate?: number | null
+  serviceTypeKey?: string | null
+  moveSizeKey?: string | null
+  truckProvider?: string | null
+  truckAddonDueOnMoveDay?: boolean | null
+  truckAddonAmount?: number | null
+  additionalTruckFees?: number | null
+  discountPercent?: number | null
+  discountRejected?: unknown
+  customerNotes?: string | null
+  inventoryDetail?: unknown
+  inventoryReviewRequired?: boolean | null
+  numBoxes?: number | null
+  needsAssembly?: boolean | null
+  needsDisassembly?: boolean | null
+  assemblyItems?: string | null
+  disassemblyItems?: string | null
+  assemblyFee?: number | null
+  disassemblyFee?: number | null
+  assemblyApprovalRequired?: boolean | null
+  coiRequiredOrigin?: string | null
+  coiRequiredDest?: string | null
+  coiNotes?: string | null
+  originUnit?: string | null
+  destUnit?: string | null
+  priceChangeApprovedAt?: Date | null
+  moveSizeChangedAt?: Date | null
 }
 
 // ── Injectable dependencies (real impls in defaultApprovalDeps) ───────────────
@@ -247,6 +299,34 @@ export async function approveBooking(
 
   const guard = checkApprovable(booking.status, !!booking.stripePaymentIntentId)
   if (!guard.ok) return errResult(guard.code, guard.message, booking)
+
+  // 0) THE SCOPE CHECKLIST (owner spec 2026-08-14) — BEFORE the claim, and
+  //    therefore before Stripe. Confirm Booking used to capture $49 and
+  //    schedule a crew against a booking with four unresolved questions on
+  //    it; the warnings were on the page and the button never read them.
+  //
+  //    Runs on BOTH surfaces because both come through here, so the Discord
+  //    card and the admin button refuse exactly the same bookings.
+  if (!input.skipScopeGuards) {
+    const verdict = evaluateApproval({
+      ...(booking as unknown as ApprovalGuardInput),
+      // Nothing is captured at approval time — that is what we are about to
+      // do — so the balance is measured against zero collected.
+      collectedCents: 0,
+      authorizedNotCapturedCents: booking.depositAmount,
+      acknowledged: input.acknowledgeWarnings,
+    })
+    if (!verdict.canApprove) {
+      return errResult('scope_blocked', verdict.confirmationPrompt ?? 'This booking cannot be confirmed yet.', booking)
+    }
+    if (verdict.mustAcknowledge.length > 0) {
+      return errResult(
+        'needs_acknowledgement',
+        verdict.confirmationPrompt ?? 'This booking has unresolved questions.',
+        booking,
+      )
+    }
+  }
 
   // 1) ATOMIC CLAIM — win the PENDING_APPROVAL → CONFIRMED transition before
   //    touching Stripe. Exactly one concurrent approver gets rows-changed === 1.

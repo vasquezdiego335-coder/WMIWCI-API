@@ -41,7 +41,12 @@ export const BookingSchema = z.object({
   fullName: cleanString(2, 100),
   phone: cleanString(7, 25),
   email: z.string().transform((v) => sanitizeText(v).toLowerCase()).pipe(z.string().email()),
-  serviceType: cleanString(1, 60),
+  /** @deprecated LEGACY. This field meant BOTH the product and the bedroom
+   *  package, which is the overload the two-product contract exists to end.
+   *  New payloads send `serviceTypeKey` (the product) and `moveSizeKey` (the
+   *  package). Kept OPTIONAL so a browser tab opened before the cutover still
+   *  parses; the route reads it only as a fallback for `moveSizeKey`. */
+  serviceType: z.string().transform(sanitizeText).pipe(z.string().max(60)).optional(),
   date: z.string().transform(sanitizeText).optional(),
   time: z.string().transform(sanitizeText).optional(),
   truckOption: z.string().transform(normalizeTruckOption).optional(),
@@ -197,6 +202,82 @@ export const BookingSchema = z.object({
   //    Customer. Absent on any tab opened before this cutover — safely ignored. ──
   bookingSessionId: z.string().transform(sanitizeText).pipe(z.string().max(80)).optional(),
   marketingConsent: z.boolean().optional(),
+
+  // ── THE PRODUCT (owner spec 2026-08-14, booking WMIC-1019) ──────────────
+  //    The booking form has been sending serviceTypeKey / laborService /
+  //    customerTruckStatus for a while. They were not in this schema, so
+  //    z.object() dropped all three on every submission — which is precisely
+  //    how a labor-only job on the customer's own truck was stored as a
+  //    full-service bedroom package.
+  //
+  //    serviceType (the PACKAGE) stays separate on purpose: a labor-only job
+  //    still has a size, and the size is not a claim about whose truck it is.
+  //  REQUIRED. The discriminant for the whole booking contract. It is not
+  //  optional and it is never inferred: guessing the product from the package,
+  //  the truck provider or the notes is how a job on the customer's own U-Haul
+  //  was recorded as a company-truck move. A browser tab opened before this
+  //  cutover fails validation with a field-mapped message telling the customer
+  //  to choose a service, which is the honest outcome.
+  serviceTypeKey: z
+    .string({ required_error: 'Choose a service: Full-Service Moving or Labor-Only Moving Help.' })
+    .transform((v) => sanitizeText(v).toLowerCase().replace(/[\s-]+/g, '_'))
+    .pipe(z.enum(['labor_only', 'full_service'], {
+      errorMap: () => ({ message: 'Choose a service: Full-Service Moving or Labor-Only Moving Help.' }),
+    })),
+  /** FULL-SERVICE only: which flat package. Replaces the overloaded
+   *  `serviceType`, which meant both the product and the bedroom size. */
+  moveSizeKey: z.string().transform(sanitizeText).pipe(z.string().max(40)).optional(),
+  /** Which labor product ("loading_only", "unloading_only", "load_and_unload"). */
+  laborService: z.string().transform(sanitizeText).pipe(z.string().max(40)).optional(),
+  laborHours: z.coerce.number().min(0).max(24).optional(),
+  /** Whether the customer's rental truck is booked yet. */
+  customerTruckStatus: z.string().transform(sanitizeText).pipe(z.string().max(40)).optional(),
+  /** FULL-SERVICE only: the customer asked for a larger COMPANY truck. Its
+   *  presence on a labor-only payload is a contradiction the product gate
+   *  rejects — we supply no truck on those jobs. */
+  truckSizeUpgradeRequested: z.coerce.boolean().optional(),
+
+  // ── DISCLOSED INVENTORY (owner spec 2026-08-14) ─────────────────────────
+  //    Counted items and the declared flags. Until now the browser folded
+  //    these into the notes text because the server had nowhere to put them,
+  //    so nothing could compare the load against the selected package. Every
+  //    field is optional and capped; a tab opened before this cutover simply
+  //    sends none of them and the notes fallback still works.
+  inventory: z
+    .object({
+      boxes: z.coerce.number().int().min(0).max(999).optional(),
+      beds: z.coerce.number().int().min(0).max(99).optional(),
+      dressers: z.coerce.number().int().min(0).max(99).optional(),
+      sofas: z.coerce.number().int().min(0).max(99).optional(),
+      tables: z.coerce.number().int().min(0).max(99).optional(),
+      tvs: z.coerce.number().int().min(0).max(99).optional(),
+      mirrors: z.coerce.number().int().min(0).max(99).optional(),
+      appliances: z.coerce.number().int().min(0).max(99).optional(),
+      wardrobes: z.coerce.number().int().min(0).max(99).optional(),
+      desks: z.coerce.number().int().min(0).max(99).optional(),
+      piano: z.coerce.boolean().optional(),
+      safe: z.coerce.boolean().optional(),
+      oversized: z.coerce.boolean().optional(),
+      assembly: z.coerce.boolean().optional(),
+    })
+    .optional(),
+
+  // ── ASSEMBLY / DISASSEMBLY AS A SCOPE, NOT A SENTENCE ───────────────────
+  //    "Assembly needed" in the notes told the crew nothing about WHAT. These
+  //    say which furniture. When assembly is requested and neither list is
+  //    provided, the booking is flagged ASSEMBLY SCOPE UNKNOWN and the quote
+  //    is not treated as final — see src/lib/booking-scope.ts.
+  needsAssembly: z.coerce.boolean().optional(),
+  needsDisassembly: z.coerce.boolean().optional(),
+  assemblyItems: z.string().transform(sanitizeNotes).pipe(z.string().max(500)).optional(),
+  disassemblyItems: z.string().transform(sanitizeNotes).pipe(z.string().max(500)).optional(),
+
+  // ── CERTIFICATE OF INSURANCE ────────────────────────────────────────────
+  //    Tri-state, and 'unknown' is the honest default for a building nobody
+  //    has called. A COI discovered on move day is a crew turned away.
+  coiRequiredOrigin: z.enum(['yes', 'no', 'unknown']).optional().catch(undefined),
+  coiRequiredDest: z.enum(['yes', 'no', 'unknown']).optional().catch(undefined),
+  coiNotes: z.string().transform(sanitizeNotes).pipe(z.string().max(500)).optional(),
 
   // ── Inventory accuracy attestation (hard-required, owner fix 2026-07-28) ──
   //    The flat rate is quoted against the inventory the customer described, so

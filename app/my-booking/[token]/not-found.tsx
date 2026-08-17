@@ -7,7 +7,7 @@ export default function NotFound() {
           Link expired or not found
         </h1>
         <p style={{ fontSize: '14px', color: '#6B7280', margin: '0 0 24px', lineHeight: '1.6' }}>
-          This booking link has either expired or doesn't exist.
+          This booking link has either expired or doesn&rsquo;t exist.
           Booking links are valid for 30 days after your scheduled date.
         </p>
         <p style={{ fontSize: '14px', color: '#6B7280', margin: '0' }}>

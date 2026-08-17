@@ -20,6 +20,16 @@ import { dirname, resolve } from 'node:path'
 import {
   PACKAGES, PACKAGE_INCLUDES, BOOKING_AUTHORIZATION, TRUCK_PICKUP_RETURN,
   TRUCK_SIZE_UPGRADE,
+  // ── The two-product contract (reconstructed 2026-08-15) ──
+  //    The browser BUILDS UI from these: booking-form.html:3217 iterates
+  //    LABOR_SERVICE_KEYS to render the labor grid, and reads LABOR_ONLY for
+  //    the rate copy. Omitting any of them from the mirror breaks the live
+  //    form, which is how a full-service-only mirror would have taken
+  //    labor-only off the site.
+  SERVICE_TYPES, TRUCK_SIZES, LABOR_ONLY, LABOR_SERVICES, LABOR_SERVICE_KEYS,
+  LABOR_ONLY_INCLUDES, LABOR_ONLY_EXCLUDES, LABOR_ONLY_EXAMPLES,
+  TRANSPORTATION_MILEAGE, LEGACY_TRAVEL, SERVICE_AREA, ANALYTICS_IDS,
+  PRICED_PACKAGE_KEYS, LEGACY_PACKAGE_KEYS,
   STAIRS, LONG_CARRY, ELEVATOR, ADDITIONAL_LOCATION, HEAVY_ITEM,
   NO_OVERSIZED_FURNITURE_FEE, NO_BUILDING_AGE_FEE, NO_MATTRESS_BAG_SKU,
   ADDITIONAL_ROOMS, WEEKEND_HOLIDAY, TRAVEL, NEW_YORK, PARKING_TOLLS_DELAYS,
@@ -32,6 +42,12 @@ export function buildPricingPayload(): Record<string, unknown> {
   return {
     PACKAGES, PACKAGE_INCLUDES, BOOKING_AUTHORIZATION, TRUCK_PICKUP_RETURN,
     TRUCK_SIZE_UPGRADE,
+    SERVICE_TYPES, TRUCK_SIZES, LABOR_ONLY, LABOR_SERVICES,
+    LABOR_SERVICE_KEYS: [...LABOR_SERVICE_KEYS],
+    LABOR_ONLY_INCLUDES, LABOR_ONLY_EXCLUDES, LABOR_ONLY_EXAMPLES,
+    TRANSPORTATION_MILEAGE, LEGACY_TRAVEL, SERVICE_AREA, ANALYTICS_IDS,
+    PRICED_PACKAGE_KEYS: [...PRICED_PACKAGE_KEYS],
+    LEGACY_PACKAGE_KEYS: [...LEGACY_PACKAGE_KEYS],
     STAIRS, LONG_CARRY, ELEVATOR, ADDITIONAL_LOCATION, HEAVY_ITEM,
     NO_OVERSIZED_FURNITURE_FEE, NO_BUILDING_AGE_FEE, NO_MATTRESS_BAG_SKU,
     ADDITIONAL_ROOMS, WEEKEND_HOLIDAY, TRAVEL, NEW_YORK, PARKING_TOLLS_DELAYS,
@@ -135,7 +151,115 @@ export function renderPricingConfigJs(payload: Record<string, unknown>): string 
     return { percentApplied: percentApplied, discountAmount: discountAmount, total: total, clamped: raw > cap };
   }
 
+
+  /* ── Two-product resolvers (reconstructed 2026-08-15) ──
+     Mirrors of the TypeScript in pricing-config.ts. The browser calls these,
+     so a divergence here quotes the customer a different number from the one
+     the server stores — which is the entire class of bug this file exists to
+     prevent. Keep them byte-equivalent in behaviour. */
+
+  function includedTruckForPackage(key) {
+    var pkg = key ? P.PACKAGES[key] : null;
+    var t = pkg && pkg.includedTruck;
+    return (t && P.TRUCK_SIZES[t]) ? t : null;
+  }
+
+  function isSelectablePackage(key) {
+    return !!key && P.PRICED_PACKAGE_KEYS.indexOf(key) !== -1;
+  }
+
+  function isLaborService(key) {
+    if (!key) return false;
+    if (Object.prototype.hasOwnProperty.call(P.LABOR_SERVICES, key)) return true;
+    return key === 'load_and_unload';
+  }
+
+  /* At most ONE upgrade, never auto-applied. hasOwnProperty rather than a
+     truthiness test because the 10ft amount is a legitimate ZERO. */
+  function truckUpgradeForPackage(key) {
+    var none = { available: false, from: null, to: null, amount: null,
+                 amountCents: null, requiresCustomQuote: false, requiresReview: false };
+    var included = includedTruckForPackage(key);
+    if (!included) return none;
+    var pkg = P.PACKAGES[key];
+    var to = pkg && pkg.upgradeTruck;
+    if (!to || !P.TRUCK_SIZES[to]) {
+      return { available: false, from: included, to: null, amount: null,
+               amountCents: null, requiresCustomQuote: true, requiresReview: false };
+    }
+    var table = P.TRUCK_SIZE_UPGRADE.amountByTruck;
+    if (!Object.prototype.hasOwnProperty.call(table, to)) {
+      return { available: false, from: included, to: null, amount: null,
+               amountCents: null, requiresCustomQuote: true, requiresReview: false };
+    }
+    var amount = table[to];
+    return { available: true, from: included, to: to, amount: amount,
+             amountCents: Math.round(amount * 100), requiresCustomQuote: false,
+             requiresReview: true };
+  }
+
+  /* $3 per routed mile, fuel included, the WHOLE route rounded up.
+     An unmeasurable route carries NO amount, so nothing can sum it as $0
+     and quietly ship a free trip. */
+  function mileageChargeForMiles(miles) {
+    if (miles === null || miles === undefined || !isFinite(miles) || miles < 0) {
+      return { kind: 'pending_review', per: 'job', requiresReview: true,
+               label: P.TRANSPORTATION_MILEAGE.label,
+               note: P.TRANSPORTATION_MILEAGE.note, billableMiles: null };
+    }
+    var billableMiles = Math.ceil(miles);
+    var amountCents = billableMiles * P.TRANSPORTATION_MILEAGE.ratePerMileCents;
+    return { kind: 'fixed', per: 'job', requiresReview: false,
+             label: P.TRANSPORTATION_MILEAGE.label,
+             note: P.TRANSPORTATION_MILEAGE.note,
+             amount: amountCents / 100, amountCents: amountCents,
+             billableMiles: billableMiles };
+  }
+
+  function chargesMileage(serviceTypeKey) {
+    return serviceTypeKey === P.TRANSPORTATION_MILEAGE.appliesTo;
+  }
+
+  /* OWNER RULE: below the two-hour minimum this returns ZERO, not the short
+     amount and not the clamped amount. The form shows the minimum message and
+     blocks submit; the server refuses independently. */
+  function laborOnlyEstimate(hours) {
+    var raw = isFinite(hours) ? Math.max(0, hours) : 0;
+    var min = P.LABOR_ONLY.minimumHours;
+    var below = raw > 0 && raw < min;
+    var cents = below ? 0 : Math.round(Math.round(raw * 60) * P.LABOR_ONLY.hourlyRateCents / 60);
+    return { hours: raw, workers: P.LABOR_ONLY.includedWorkers,
+             hourlyRate: P.LABOR_ONLY.hourlyRate,
+             subtotal: cents / 100, subtotalCents: cents,
+             belowMinimum: below, minimumHours: min };
+  }
+
+  /* The travel BANDS are retired. Kept as functions so any surviving caller
+     gets an explicit retired marker rather than a silent undefined. */
+  var TRAVEL_RETIRED = { kind: 'included', per: 'job', requiresReview: false,
+                         label: 'Travel', retired: true,
+                         note: P.LEGACY_TRAVEL.historicalNote };
+  function travelChargeForMiles() { return TRAVEL_RETIRED; }
+
+  /* Nothing that identifies a person may be pushed into analytics. */
+  function assertNoPii(obj) {
+    var BAD = /email|phone|name|address|street|zip|postal|token|card/i;
+    var bad = [];
+    Object.keys(obj || {}).forEach(function (k) { if (BAD.test(k)) bad.push(k); });
+    if (bad.length) throw new Error('PII in analytics payload: ' + bad.join(', '));
+    return true;
+  }
+
   P.stairChargeForFlights = stairChargeForFlights;
+  P.includedTruckForPackage = includedTruckForPackage;
+  P.isSelectablePackage = isSelectablePackage;
+  P.isLaborService = isLaborService;
+  P.truckUpgradeForPackage = truckUpgradeForPackage;
+  P.mileageChargeForMiles = mileageChargeForMiles;
+  P.chargesMileage = chargesMileage;
+  P.laborOnlyEstimate = laborOnlyEstimate;
+  P.travelChargeForMiles = travelChargeForMiles;
+  P.assertNoPii = assertNoPii;
   P.longCarryChargeForFeet = longCarryChargeForFeet;
   P.heavyItemChargeForWeight = heavyItemChargeForWeight;
   P.additionalLocationChargeForMiles = additionalLocationChargeForMiles;

@@ -144,7 +144,7 @@ export default async function AdminDashboard() {
   return (
     <div>
       <h1 style={h1}>Dashboard</h1>
-      <p style={subtitle}>Good morning, {session?.name}. Here's what's happening today.</p>
+      <p style={subtitle}>Good morning, {session?.name}. Here&rsquo;s what&rsquo;s happening today.</p>
 
       {/* D6 (Stage 4): the owner cannot close ANY move until these are set.
           Shown above the money so it is read before the numbers are trusted. */}
@@ -313,7 +313,7 @@ export default async function AdminDashboard() {
       )}
 
       {/* Today's schedule */}
-      <h2 style={h2}>Today's Jobs</h2>
+      <h2 style={h2}>Today&rsquo;s Jobs</h2>
       {todayBookings.length === 0 ? (
         <p style={empty}>No jobs scheduled for today.</p>
       ) : (

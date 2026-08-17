@@ -68,7 +68,7 @@ export default function CrewAssignmentCard({ a }: { a: A }) {
           {!declining ? (
             <div style={{ display: 'flex', gap: '8px' }}>
               <Btn primary busy={busy === 'ACKNOWLEDGE'} onClick={() => respond('ACKNOWLEDGE')}>Confirm</Btn>
-              <Btn onClick={() => setDeclining(true)}>Can't make it</Btn>
+              <Btn onClick={() => setDeclining(true)}>Can&rsquo;t make it</Btn>
             </div>
           ) : (
             <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>

@@ -61,7 +61,7 @@ export default function TermsPage() {
         </Section>
 
         <Section title="6. Liability Limitations">
-          <p>We take reasonable care with all items. However, our liability for damage to items is limited to the lesser of the item's depreciated value or $100 per item. We are not responsible for damage to items that were improperly packed by the customer, pre-existing damage, or damage to furniture that cannot be safely navigated through doorways or stairs.</p>
+          <p>We take reasonable care with all items. However, our liability for damage to items is limited to the lesser of the item&rsquo;s depreciated value or $100 per item. We are not responsible for damage to items that were improperly packed by the customer, pre-existing damage, or damage to furniture that cannot be safely navigated through doorways or stairs.</p>
           <p>We are not liable for: acts of God, delays caused by traffic or weather, or any indirect or consequential damages.</p>
         </Section>
 
