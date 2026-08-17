@@ -230,6 +230,11 @@ export const BookingSchema = z.object({
   /** Which labor product ("loading_only", "unloading_only", "load_and_unload"). */
   laborService: z.string().transform(sanitizeText).pipe(z.string().max(40)).optional(),
   laborHours: z.coerce.number().min(0).max(24).optional(),
+  /** Labor-only crew size. Omitted = the published two-worker product. Range
+   *  is validated by checkIntake (2–6, $75/worker/hour ladder) so the customer
+   *  gets a sentence, not a bare Zod error; the wide bound here only stops
+   *  garbage. */
+  laborWorkers: z.coerce.number().int().min(1).max(99).optional(),
   /** Whether the customer's rental truck is booked yet. */
   customerTruckStatus: z.string().transform(sanitizeText).pipe(z.string().max(40)).optional(),
   /** FULL-SERVICE only: the customer asked for a larger COMPANY truck. Its

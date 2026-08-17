@@ -33,7 +33,12 @@ import {
   LABOR_SERVICES,
   LEGACY_PACKAGE_KEYS,
   SERVICE_TYPES,
+  LABOR_MIN_WORKERS,
+  LABOR_MAX_WORKERS,
+  LABOR_PER_WORKER_RATE_CENTS,
+  laborOnlyCrewSize,
   laborOnlyQuoteCents,
+  laborOnlyRateCentsForWorkers,
   normalizeLaborService,
   type LaborServiceKey,
   type PackageKey,
@@ -95,31 +100,43 @@ export type LaborEstimate = {
 /**
  * THE authoritative labor-only price.
  *
- *     max(requestedMinutes, 120) × 15000 ÷ 60
+ *     max(requestedMinutes, 120) × rate(workers) ÷ 60
  *
  * The requested minutes are preserved separately so the customer's own answer
  * is never overwritten by the minimum — an owner needs to see "they asked for
  * 1 hour, we are billing the 2-hour minimum", not a booking that claims the
  * customer requested two hours.
  *
+ * `workers` (default 2) prices the crew off the $75/worker/hour ladder:
+ * 2 → $150/hr, 3 → $225/hr, 4 → $300/hr. The booking form sells the
+ * two-worker product; a larger crew is an owner/admin decision, and the rate
+ * stored on the booking (laborRateCents) is the snapshot that survives any
+ * later ladder change.
+ *
  * No rounding policy beyond the minimum is applied. The audit is explicit
  * that inventing one (to the next 15/30 minutes, say) is not permitted
  * without the owner's approval, because it silently raises prices.
  */
-export function laborOnlyEstimateCents(requestedMinutes: number): LaborEstimate {
+export function laborOnlyEstimateCents(requestedMinutes: number, workers?: number | null): LaborEstimate {
   const requested = Number.isFinite(requestedMinutes) ? Math.max(0, Math.round(requestedMinutes)) : 0
   const billable = Math.max(requested, LABOR_ONLY_MINIMUM_MINUTES)
+  const crew = laborOnlyCrewSize(workers)
+  const rate = laborOnlyRateCentsForWorkers(crew)
   return {
     requestedMinutes: requested,
     billableMinutes: billable,
     minimumApplied: requested < LABOR_ONLY_MINIMUM_MINUTES,
-    workers: LABOR_ONLY_WORKERS,
-    hourlyRateCents: LABOR_ONLY_RATE_CENTS,
+    workers: crew,
+    hourlyRateCents: rate,
     // Cents first, divide last: (120 × 15000) ÷ 60 = 30000 exactly. Doing the
     // division in hours first would introduce a float for every half-hour.
-    subtotalCents: Math.round((billable * LABOR_ONLY_RATE_CENTS) / 60),
+    subtotalCents: Math.round((billable * rate) / 60),
   }
 }
+
+// Crew-ladder re-exports so intake/admin code reads the policy through the
+// catalog without a second import path into the price book.
+export { LABOR_MIN_WORKERS, LABOR_MAX_WORKERS, LABOR_PER_WORKER_RATE_CENTS, laborOnlyRateCentsForWorkers, laborOnlyCrewSize }
 
 /** Hours → minutes, for the form's half-hour selector. 2.5 → 150. */
 export const hoursToMinutes = (hours: number): number =>
@@ -256,6 +273,11 @@ export type ServiceCatalogEntry = {
     minimumMinutes: number
     workers: number
     maxMinutes: number
+    /** $75/worker/hour crew ladder (owner rule): 2 → $150, 3 → $225, 4 → $300. */
+    perWorkerRateCents: number
+    minWorkers: number
+    maxWorkers: number
+    crewRatesCents: Record<string, number>
     services: { key: LaborServiceKey; label: string; label_es: string; twoAddresses: boolean }[]
   }
 }
@@ -300,6 +322,15 @@ export function serviceCatalog(): ServiceCatalogEntry[] {
         minimumMinutes: LABOR_ONLY_MINIMUM_MINUTES,
         workers: LABOR_ONLY_WORKERS,
         maxMinutes: LABOR_ONLY_MAX_MINUTES,
+        perWorkerRateCents: LABOR_PER_WORKER_RATE_CENTS,
+        minWorkers: LABOR_MIN_WORKERS,
+        maxWorkers: LABOR_MAX_WORKERS,
+        crewRatesCents: Object.fromEntries(
+          Array.from({ length: LABOR_MAX_WORKERS - LABOR_MIN_WORKERS + 1 }, (_, n) => {
+            const w = LABOR_MIN_WORKERS + n
+            return [String(w), laborOnlyRateCentsForWorkers(w)]
+          }),
+        ),
         // Six services, from the price book, in the order the form shows them.
         services: LABOR_SERVICE_KEYS.map((key) => ({
           key,
@@ -340,6 +371,7 @@ export type IntakeRejection = {
     | 'labor_too_long'
     | 'labor_hours_missing'
     | 'labor_service_missing'
+    | 'labor_workers_invalid'
     | 'contradictory_product'
     | 'service_retired'
   /** Which submitted field is at fault, for a field-mapped 422. */
@@ -359,6 +391,8 @@ export type IntakeCheckInput = {
   /** Labor-only only: requested duration in MINUTES. */
   laborMinutes?: number | null
   laborService?: string | null
+  /** Labor-only only: requested crew size. Omitted = the two-worker product. */
+  laborWorkers?: number | null
   /** Fields that only make sense for a company truck. */
   hasCompanyTruckFields?: boolean
   /** The raw `truckOption` as submitted, in any historical spelling. */
@@ -460,6 +494,25 @@ export function checkIntake(i: IntakeCheckInput): IntakeRejection[] {
     out.push({ code: 'labor_service_missing', field: 'laborService', message: 'Choose loading, unloading, or both.' })
   } else if (normalizeLaborService(i.laborService) === null) {
     out.push({ code: 'contradictory_product', field: 'laborService', message: 'Choose loading, unloading, or both.' })
+  }
+  // Crew size, when asked for explicitly. Omitted = the published two-worker
+  // product. An out-of-range request is REFUSED, never silently clamped —
+  // clamping at intake would book a crew the customer did not ask for.
+  if (i.laborWorkers != null) {
+    const w = Math.round(i.laborWorkers)
+    if (!Number.isFinite(i.laborWorkers) || w < LABOR_MIN_WORKERS) {
+      out.push({
+        code: 'labor_workers_invalid',
+        field: 'laborWorkers',
+        message: `Labor-only crews start at ${LABOR_MIN_WORKERS} workers ($${(laborOnlyRateCentsForWorkers(LABOR_MIN_WORKERS) / 100).toFixed(0)}/hour).`,
+      })
+    } else if (w > LABOR_MAX_WORKERS) {
+      out.push({
+        code: 'labor_workers_invalid',
+        field: 'laborWorkers',
+        message: `For crews larger than ${LABOR_MAX_WORKERS}, please contact us so we can plan the job properly.`,
+      })
+    }
   }
   // A full-service PACKAGE on a labor-only booking would attach a flat truck-
   // inclusive price to a job where the customer supplies the truck.
