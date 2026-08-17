@@ -1342,6 +1342,50 @@ export function truckUpgradeForPackage(key?: string | null): TruckUpgrade {
 // It is split in two, because the minimum means different things before and
 // after the crew turns up.
 
+// ── CREW-SIZE LADDER (owner rule, audited 2026-08-17) ─────────────────────
+//
+// The hourly rate scales LINEARLY with crew size at $75 per worker per hour:
+//
+//     2 workers  $150/hour   (the published two-mover product)
+//     3 workers  $225/hour
+//     4 workers  $300/hour
+//     5+ workers +$75/hour each
+//
+// LABOR_ONLY.hourlyRateCents stays the TWO-WORKER rate — it is the published
+// number the form advertises and the browser mirror ships, and 2 × 7500 =
+// 15000 keeps it arithmetically derived from the same ladder. A booking's
+// ACCEPTED snapshot (Booking.laborRateCents / laborWorkers) always outranks
+// this table: a future rate change must never silently re-price a quote a
+// customer already accepted.
+
+/** $75.00 per worker per hour. The one increment every crew size derives from. */
+export const LABOR_PER_WORKER_RATE_CENTS = 7500
+/** The smallest crew we send. A one-worker job is not a product we sell. */
+export const LABOR_MIN_WORKERS = 2
+/** Owner plans anything larger by hand — same spirit as LABOR_ONLY_MAX_MINUTES. */
+export const LABOR_MAX_WORKERS = 6
+
+/**
+ * The hourly rate for a crew of `workers`, in INTEGER CENTS.
+ *
+ * Out-of-range input is CLAMPED to the published crew range rather than
+ * rejected: this is the money function, and the intake gate (booking-schema /
+ * checkIntake) is where a bad crew size gets a customer-facing refusal. A
+ * clamp here means even a defective caller can never bill below the two-worker
+ * floor or invent an unpublished mega-crew rate.
+ */
+export function laborOnlyRateCentsForWorkers(workers?: number | null): number {
+  const w = Number.isFinite(workers as number) ? Math.round(workers as number) : LABOR_MIN_WORKERS
+  const crew = Math.min(LABOR_MAX_WORKERS, Math.max(LABOR_MIN_WORKERS, w))
+  return crew * LABOR_PER_WORKER_RATE_CENTS
+}
+
+/** The clamped crew size the rate above actually priced. */
+export function laborOnlyCrewSize(workers?: number | null): number {
+  const w = Number.isFinite(workers as number) ? Math.round(workers as number) : LABOR_MIN_WORKERS
+  return Math.min(LABOR_MAX_WORKERS, Math.max(LABOR_MIN_WORKERS, w))
+}
+
 export type LaborQuote =
   | {
       ok: true
@@ -1362,8 +1406,15 @@ export type LaborQuote =
  * INTAKE. What we may quote before any work happens.
  * Below the published minimum this REFUSES — it never silently bills the
  * minimum, and it never quotes the short amount either.
+ *
+ * `workers` (optional, default 2) prices the crew off the $75/worker/hour
+ * ladder: 2 → $150, 3 → $225, 4 → $300. Omitted means the published
+ * two-worker product, which is what the booking form sells.
  */
-export function laborOnlyQuoteCents(requestedMinutes: number | null | undefined): LaborQuote {
+export function laborOnlyQuoteCents(
+  requestedMinutes: number | null | undefined,
+  workers?: number | null,
+): LaborQuote {
   const min = LABOR_ONLY.minimumMinutes
   if (requestedMinutes == null || !Number.isFinite(requestedMinutes) || requestedMinutes <= 0) {
     return { ok: false, code: 'labor_hours_missing', requestedMinutes: 0, minimumMinutes: min }
@@ -1372,14 +1423,16 @@ export function laborOnlyQuoteCents(requestedMinutes: number | null | undefined)
   if (requested < min) {
     return { ok: false, code: 'labor_below_minimum', requestedMinutes: requested, minimumMinutes: min }
   }
+  const crew = laborOnlyCrewSize(workers)
+  const rate = laborOnlyRateCentsForWorkers(crew)
   return {
     ok: true,
     requestedMinutes: requested,
     billableMinutes: requested,
-    workers: LABOR_ONLY.includedWorkers,
-    hourlyRateCents: LABOR_ONLY.hourlyRateCents,
+    workers: crew,
+    hourlyRateCents: rate,
     // Cents first, divide last: (180 x 15000) / 60 = 45000 exactly.
-    subtotalCents: Math.round((requested * LABOR_ONLY.hourlyRateCents) / 60),
+    subtotalCents: Math.round((requested * rate) / 60),
   }
 }
 
@@ -1397,19 +1450,32 @@ export type LaborBilling = {
  * Here the minimum DOES apply: the crew arrived, and a two-hour minimum that
  * evaporates when a job runs short is not a minimum. Actual minutes are kept
  * beside it so an owner can always see the difference.
+ *
+ * `opts.workers` sizes the crew off the $75/worker/hour ladder (default 2).
+ * `opts.snapshotRateCents` — the ACCEPTED quote's stored Booking.laborRateCents
+ * — outranks the ladder entirely when present: a booking is billed at the rate
+ * the customer accepted, never at whatever the price book says today.
  */
-export function laborOnlyBillingCents(actualMinutes: number | null | undefined): LaborBilling {
+export function laborOnlyBillingCents(
+  actualMinutes: number | null | undefined,
+  opts?: { workers?: number | null; snapshotRateCents?: number | null },
+): LaborBilling {
   const actual = Number.isFinite(actualMinutes as number)
     ? Math.max(0, Math.round(actualMinutes as number))
     : 0
   const billable = Math.max(actual, LABOR_ONLY.minimumMinutes)
+  const crew = laborOnlyCrewSize(opts?.workers)
+  const snapshot = opts?.snapshotRateCents
+  const rate = typeof snapshot === 'number' && Number.isFinite(snapshot) && snapshot > 0
+    ? Math.round(snapshot)
+    : laborOnlyRateCentsForWorkers(crew)
   return {
     actualMinutes: actual,
     billableMinutes: billable,
     minimumApplied: billable > actual,
-    workers: LABOR_ONLY.includedWorkers,
-    hourlyRateCents: LABOR_ONLY.hourlyRateCents,
-    subtotalCents: Math.round((billable * LABOR_ONLY.hourlyRateCents) / 60),
+    workers: crew,
+    hourlyRateCents: rate,
+    subtotalCents: Math.round((billable * rate) / 60),
   }
 }
 
