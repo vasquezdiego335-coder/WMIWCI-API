@@ -67,7 +67,12 @@ test('the deposit page declares the full Open Graph set the spec requires', () =
   assert.match(src, /type: 'image\/jpeg'/)
   assert.match(src, /alt: 'Move It Clear It — secure online deposit payment'/)
   assert.match(src, /card: 'summary_large_image'/)
-  assert.match(src, /themeColor: ORANGE/)
+  // themeColor lives in generateViewport, not metadata. Next 14 ignores it in the
+  // metadata export and warns on every request; asserting the export keeps the
+  // brand colour from silently reverting to a no-op.
+  assert.match(src, /export function generateViewport\(\): Viewport/)
+  assert.match(src, /return \{ themeColor: ORANGE \}/)
+  assert.ok(!/themeColor: ORANGE,/.test(src), 'themeColor must NOT be in the metadata export')
   assert.match(src, /const ORANGE = '#FF5A1F'/)
 })
 
