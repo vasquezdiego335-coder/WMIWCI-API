@@ -16,7 +16,7 @@
 //  DOM, replaying the POST or forging a body changes nothing about what Stripe
 //  is told to charge.
 // ════════════════════════════════════════════════════════════════════════════
-import type { Metadata } from 'next'
+import type { Metadata, Viewport } from 'next'
 import { notFound } from 'next/navigation'
 import { prisma } from '@/lib/db'
 import {
@@ -83,9 +83,17 @@ export async function generateMetadata({ params }: { params: { token: string } }
       description: 'Review and securely pay your Move It Clear It deposit.',
       images: [image],
     },
-    themeColor: ORANGE,
-    other: { 'theme-color': ORANGE },
   }
+}
+
+// Next 14 moved themeColor OUT of the metadata export. Left in `metadata` it is
+// silently ignored and logs an 'Unsupported metadata themeColor' warning on
+// EVERY request — which is how it was shipping: the tag you could see in the
+// HTML came from an `other: { 'theme-color' }` fallback, while the real field
+// did nothing but fill the production log. One source now, in the API that owns
+// it, so the tag and the log agree.
+export function generateViewport(): Viewport {
+  return { themeColor: ORANGE }
 }
 
 // ── Data ────────────────────────────────────────────────────────────────────
