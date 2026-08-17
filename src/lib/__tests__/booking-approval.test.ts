@@ -52,7 +52,8 @@ type Harness = {
     booking: ApprovableBooking | null
     captures: Array<{ pi: string; key: string }>
     commits: CommitArgs[]
-    notifications: Array<{ cents: number; by: string }>
+    /** ITEM M1 — null = Stripe reported no captured amount. */
+    notifications: Array<{ cents: number | null; by: string }>
     rollbacks: number
     captureError?: string
     claimForceZero?: boolean

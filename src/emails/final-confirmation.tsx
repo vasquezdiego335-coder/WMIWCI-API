@@ -132,8 +132,13 @@ export default function FinalConfirmationEmail({
         cta: 'Ver mi reserva',
         supportTitle: 'Estamos para ayudarte',
         contactLabels: { phone: 'Llama o escribe', email: 'Correo', website: 'Sitio web' },
-        disclaimer:
-          `¿Necesitas hacer un cambio? Llámanos o escríbenos cuando quieras — con gusto te ayudamos. Tu depósito de ${money(amountPaid, es)} se aplica a tu mudanza; cualquier saldo restante se paga el día de la mudanza.`,
+        // ITEM M1 — the amount appears ONLY when the sender proved one. Without
+        // it this read "Tu depósito de el monto indicado arriba…", and before
+        // that it read a figure taken from a booking column rather than from
+        // Stripe. The deposit sentence still stands; it just names no number.
+        disclaimer: amountPaid
+          ? `¿Necesitas hacer un cambio? Llámanos o escríbenos cuando quieras — con gusto te ayudamos. Tu depósito de ${money(amountPaid, es)} se aplica a tu mudanza; cualquier saldo restante se paga el día de la mudanza.`
+          : '¿Necesitas hacer un cambio? Llámanos o escríbenos cuando quieras — con gusto te ayudamos. Tu depósito se aplica a tu mudanza; cualquier saldo restante se paga el día de la mudanza.',
         footerLabels: { manage: 'Administrar preferencias', unsubscribe: 'Cancelar suscripción', rights: 'Todos los derechos reservados.' },
         defTruck: 'U-Haul — a tu nombre',
       }
@@ -165,8 +170,10 @@ export default function FinalConfirmationEmail({
         cta: 'View booking',
         supportTitle: 'We’re here to help',
         contactLabels: { phone: 'Call or text', email: 'Email', website: 'Website' },
-        disclaimer:
-          `Need to make a change? Call or text us any time — we’re always happy to help. Your ${money(amountPaid, es)} deposit is applied to your move; any remaining balance is settled on move day.`,
+        // ITEM M1 — see the Spanish note above: no proven amount, no figure.
+        disclaimer: amountPaid
+          ? `Need to make a change? Call or text us any time — we’re always happy to help. Your ${money(amountPaid, es)} deposit is applied to your move; any remaining balance is settled on move day.`
+          : 'Need to make a change? Call or text us any time — we’re always happy to help. Your deposit is applied to your move; any remaining balance is settled on move day.',
         footerLabels: { manage: 'Manage preferences', unsubscribe: 'Unsubscribe', rights: 'All rights reserved.' },
         defTruck: 'U-Haul — rented in your name',
       }

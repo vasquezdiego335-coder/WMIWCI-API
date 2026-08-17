@@ -246,24 +246,85 @@ export function planStageTimes(
   })
 }
 
+/**
+ * QUEUE-LEVEL DEDUPLICATION for one enqueue (item T4/R5).
+ *
+ * `id` is a key SHARED by every submission that must collapse into one job;
+ * `ttlMs` is how long that key holds. BullMQ implements it inside the same
+ * atomic Lua script as the add — `SET <de:id> <jobId> PX <ttl> NX` — so of two
+ * concurrent adds exactly one creates a job and the other is told which job
+ * won. That is the property this exists for: unlike a jobId (which only
+ * collapses re-adds of the SAME subject), a dedupe id collapses adds from
+ * DIFFERENT subjects, which is what a double-submitted booking form is.
+ */
+export type EnqueueDedupe = { id: string; ttlMs: number }
+
+/**
+ * What an enqueue attempt actually did (blocker D3).
+ *
+ * `enqueue` swallows a rejection by design — a Redis stall must never fail a
+ * booking write — but "swallowed" and "scheduled" are different facts, and a
+ * caller that reports to the owner needs to tell them apart. Returning this
+ * costs nothing: `JourneyDeps.enqueue` still admits a `void` implementation,
+ * so every existing caller and every existing fake is unchanged.
+ */
+export type EnqueueResult = {
+  /** TRUE only when the queue accepted the job (or an equivalent job already
+   *  holds the dedupe key, i.e. the work IS on the queue). */
+  ok: boolean
+  /** Machine-readable detail: the failure message, or `already_owned` when a
+   *  dedupe key collapsed this add into another submission's job. */
+  reason?: string
+}
+
 /** Enqueue one stage. Guarded so a Redis stall can never hang the caller. */
 async function enqueue(
   stage: string,
   data: Record<string, unknown>,
   fireAt: Date,
-  jobId: string
-): Promise<void> {
+  jobId: string,
+  dedupe?: EnqueueDedupe
+): Promise<EnqueueResult> {
   // Shift promotional sends out of quiet hours at SCHEDULE time. The guard
   // re-checks at send time too — this just avoids pointless deferral churn.
   const when = nextAllowedTime(fireAt)
   const delay = Math.max(0, when.getTime() - Date.now())
 
-  await Promise.race([
-    scheduledQueue.add(stage, { type: stage, ...data }, { delay, jobId }),
-    new Promise((_, reject) => setTimeout(() => reject(new Error('scheduledQueue.add timed out (Redis?)')), 5000)),
-  ]).catch((err) =>
-    log.warn({ err: err instanceof Error ? err.message : String(err), stage, jobId }, 'enqueue failed (non-fatal)')
-  )
+  return Promise.race([
+    scheduledQueue.add(
+      stage,
+      { type: stage, ...data },
+      {
+        delay,
+        jobId,
+        ...(dedupe ? { deduplication: { id: dedupe.id, ttl: dedupe.ttlMs } } : {}),
+      }
+    ),
+    new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error('scheduledQueue.add timed out (Redis?)')), 5000)
+    ),
+  ])
+    .then((job): EnqueueResult => {
+      // WHAT ACTUALLY HAPPENED, not what we asked for. On a dedupe hit BullMQ
+      // adds NOTHING and returns the id of the job that already holds the key,
+      // so `job.id !== jobId` is the queue telling us this submission lost the
+      // race. Saying "scheduled" here would be the phantom-sequence claim R5
+      // was opened about, pointing the other way.
+      const landedAs = job && typeof job === 'object' ? (job as { id?: string | number | null }).id : null
+      if (dedupe && landedAs != null && String(landedAs) !== jobId) {
+        log.info(
+          { stage, jobId, dedupeId: dedupe.id, ownedBy: String(landedAs) },
+          'stage collapsed into a sequence another submission already owns — nothing was queued for this one'
+        )
+        return { ok: true, reason: 'already_owned' }
+      }
+      return { ok: true }
+    })
+    .catch((err): EnqueueResult => {
+      const reason = err instanceof Error ? err.message : String(err)
+      log.warn({ err: reason, stage, jobId }, 'enqueue failed (non-fatal)')
+      return { ok: false, reason }
+    })
 }
 
 /** Best-effort removal of a pending stage. Absent/active jobs are not errors.
@@ -322,15 +383,39 @@ type StopOpts = Parameters<typeof stopEnrollmentsFor>[2]
 
 export interface JourneyDeps {
   now(): Date
-  enqueue(stage: string, data: Record<string, unknown>, fireAt: Date, jobId: string): Promise<void>
+  /** `dedupe` (item T4/R5) is OPTIONAL and only the abandoned-recovery path
+   *  passes it. An implementation that ignores it schedules exactly as before —
+   *  which is why it is a 5th parameter and not a changed contract. */
+  /** An implementation that returns nothing still satisfies this seam (every
+   *  existing fake does). Only a caller that REPORTS the outcome to a human —
+   *  `onBookingCompletedBalance` — reads the result, and it treats an
+   *  implementation that says nothing as "cannot prove it was scheduled". */
+  enqueue(
+    stage: string,
+    data: Record<string, unknown>,
+    fireAt: Date,
+    jobId: string,
+    dedupe?: EnqueueDedupe
+  ): Promise<EnqueueResult | void>
   cancel(jobId: string): Promise<void>
   loadLead(leadId: string): Promise<JourneyLead | null>
   /** Booking HISTORY, not lead status — see leads.hasEverBooked. */
   hasEverBooked(email: string | null): Promise<boolean>
   /** email-eligibility.bookingMarketingBlockReason. */
   bookingMarketingBlock(bookingId: string): Promise<string | null>
-  /** An EARLIER unpaid booking for the same customer, if any. */
+  /** An EARLIER unpaid booking for the same customer, if any. CANDIDATE only —
+   *  being unpaid is not evidence that it owns a recovery sequence. */
   siblingUnpaidBooking(bookingId: string): Promise<string | null>
+  /** PROOF that a booking already owns a recovery sequence: stage jobs still in
+   *  the queue, and stage emails already in the send ledger. `null` means the
+   *  evidence could not be read at all — never "no sequence". */
+  recoverySequenceFor(bookingId: string): Promise<RecoveryEvidence | null>
+  /** WHOSE recovery sequence is this — the inbox the stages would land in
+   *  (item T4/R5). Two bookings that share it may only ever own ONE sequence,
+   *  and the queue enforces that atomically; see `recoveryDedupeFor`. `null` =
+   *  unknown, which disables the collapse rather than guessing at it. Optional:
+   *  deps that predate it keep the old (racy) behaviour instead of failing. */
+  recoveryGroupId?(bookingId: string): Promise<string | null>
   /** leads.markLeadConverted — the canonical consent propagation. */
   convertLead(
     email: string | null | undefined,
@@ -380,6 +465,8 @@ export function defaultJourneyDeps(): JourneyDeps {
     hasEverBooked,
     bookingMarketingBlock: bookingMarketingBlockReason,
     siblingUnpaidBooking,
+    recoverySequenceFor,
+    recoveryGroupId,
     convertLead: markLeadConverted,
     async loadBookingDates(bookingId) {
       return prisma.booking
@@ -442,8 +529,21 @@ export const DUPLICATE_BOOKING_WINDOW_MS =
   Math.max(0, Number(process.env.EMAIL_DUPLICATE_BOOKING_WINDOW_MINUTES) || 30) * 60_000
 
 /**
- * Is there an EARLIER unpaid booking for the same customer that already owns a
- * recovery sequence?
+ * Is there an EARLIER unpaid booking for the same customer?
+ *
+ * THIS IS A CANDIDATE FINDER, NOT A VERDICT. It answers "does an earlier unpaid
+ * booking exist", which is a much weaker statement than "that booking already
+ * owns a recovery sequence" — see `recoverySequenceFor`, which is the half that
+ * is allowed to suppress anything.
+ *
+ * WHY THE DISTINCTION IS LOAD-BEARING (release blocker R5). This predicate was
+ * written when a public booking was created DRAFT and only promoted to
+ * PENDING_PAYMENT after Stripe answered, so a submission stranded by a crash
+ * stayed DRAFT and did not match here. B9 made the row BORN PENDING_PAYMENT —
+ * which is right, and it made this query start matching the stranded row. A
+ * customer whose first attempt died mid-request, and who immediately re-submits,
+ * would then have their GOOD booking suppressed by their own broken one: after
+ * the strand, NEITHER booking got a recovery email. Status is not evidence.
  *
  * WHY THIS EXISTS, and what it deliberately does NOT do. `Booking` carries no
  * client submission id — `bookingSessionId` is accepted by the API but is only
@@ -497,8 +597,244 @@ async function siblingUnpaidBooking(bookingId: string): Promise<string | null> {
 }
 
 /**
+ * The recovery work a booking actually owns.
+ *
+ * `queuedStages` — stage jobs the scheduled queue still holds under this
+ * booking's stable job ids. `sentStages` — recovery stage emails the send ledger
+ * has recorded for it. Two sources because neither alone is complete: the queue
+ * keeps only the last 200 completed jobs (`getScheduledQueue`), so a stage that
+ * has already fired can be evicted; and the ledger only ever knows about stages
+ * that already ran.
+ */
+export type RecoveryEvidence = {
+  queuedStages: number
+  sentStages: number
+}
+
+/** The journey tag and the three templates the recovery stages send — the
+ *  ledger's side of the evidence. Kept in step with the three
+ *  `abandoned-checkout-recovery*` cases in src/workers/scheduled.worker.ts,
+ *  which set `journey: 'abandoned'` on the payload and pick the template by
+ *  stage number. */
+export const ABANDONED_JOURNEY = 'abandoned'
+export const ABANDONED_STAGE_TEMPLATES = [
+  'abandoned-checkout',
+  'abandoned-checkout-2',
+  'abandoned-checkout-3',
+]
+
+/** Stage jobs this booking still has in the queue, or null if Redis could not
+ *  answer. Time-boxed exactly like `cancel` above: `maxRetriesPerRequest: null`
+ *  means an un-raced `getJob` retries forever, and this runs inside the customer's
+ *  checkout request. */
+async function countQueuedRecoveryStages(bookingId: string): Promise<number | null> {
+  try {
+    const jobs = await Promise.race([
+      Promise.all(
+        ABANDONED_STAGES.map((s) => scheduledQueue.getJob(jobIdFor('abandoned', s.type, bookingId)))
+      ),
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error('scheduledQueue.getJob timed out (Redis?)')), 5000)
+      ),
+    ])
+    return jobs.filter(Boolean).length
+  } catch (err) {
+    log.warn(
+      { bookingId, err: err instanceof Error ? err.message : String(err) },
+      'queued-stage lookup failed — cannot prove a recovery sequence from the queue'
+    )
+    return null
+  }
+}
+
+/** Recovery stage emails the ledger has recorded for this booking, or null if
+ *  the ledger could not be read. */
+async function countLedgerRecoveryStages(bookingId: string): Promise<number | null> {
+  try {
+    return await prisma.emailSend.count({
+      where: {
+        bookingId,
+        OR: [{ journey: ABANDONED_JOURNEY }, { template: { in: ABANDONED_STAGE_TEMPLATES } }],
+      },
+    })
+  } catch (err) {
+    log.warn(
+      { bookingId, err: err instanceof Error ? err.message : String(err) },
+      'send-ledger lookup failed — cannot prove a recovery sequence from the ledger'
+    )
+    return null
+  }
+}
+
+/**
+ * Does this booking GENUINELY own a recovery sequence?
+ *
+ * Returns null only when NEITHER source could be read — that is "unknown", and
+ * the caller must not suppress on it. When one source answers and the other does
+ * not, the answer we have is used: a partial read can under-count, and
+ * under-counting schedules a possible duplicate, which this module has always
+ * treated as the better failure than losing the recovery email entirely (see
+ * `siblingUnpaidBooking`'s fail-open note). The daily promotional cap throttles
+ * the duplicate; nothing rescues the silence.
+ */
+async function recoverySequenceFor(bookingId: string): Promise<RecoveryEvidence | null> {
+  const [queued, sent] = await Promise.all([
+    countQueuedRecoveryStages(bookingId),
+    countLedgerRecoveryStages(bookingId),
+  ])
+  if (queued === null && sent === null) return null
+  return { queuedStages: queued ?? 0, sentStages: sent ?? 0 }
+}
+
+// ── ITEM T4 / R5 — THE HALF EVIDENCE CANNOT DECIDE ──────────────────────
+//
+// THE HOLE THE EVIDENCE CHECK LEFT. `siblingUnpaidBooking` + `recoverySequenceFor`
+// is a READ, and the thing it reads about is WRITTEN by the sibling moments
+// later. Two submissions of the same form 900ms apart therefore BOTH see "0
+// queued, 0 sent" for each other and both schedule: `Promise.all([
+// onCheckoutStarted('bk_1'), onCheckoutStarted('bk_2') ])` produced SIX stage
+// jobs at one inbox. That is the same read-then-write shape that has now caused
+// three separate defects in this codebase, and no amount of re-reading closes
+// it — at the instant of the read the other sequence genuinely does not exist.
+//
+// SO THE DECISION IS NOT MADE BY A READ. The enqueue itself is made idempotent
+// ACROSS SUBMISSIONS: every stage carries a deduplication id derived from the
+// customer, and BullMQ resolves it with `SET <key> <jobId> PX <ttl> NX` inside
+// the same atomic script that would create the job (verified in the shipped
+// `addDelayedJob` Lua). One add creates the job; the other creates nothing and
+// is told which job won. A double-scheduled sequence COLLAPSES instead of
+// duplicating, whatever order the two requests interleave in.
+//
+// WHY THE JOB IDS ARE UNTOUCHED. A stage job's id stays `…__<bookingId>`, so a
+// recovery email still points at the booking it was scheduled for. The stranded
+// -attempt case (R5) is unaffected: the stranded row never ran this function, so
+// it holds no dedupe key, and the good re-submission schedules its full sequence
+// under its OWN ids. Only two submissions that BOTH reach the enqueue collapse —
+// which is exactly the duplicate the suppression above exists to prevent, and
+// could not prevent when it lost the race.
+//
+// WHY THE WINDOW IS THE SAME ONE. `ttl` is `DUPLICATE_BOOKING_WINDOW_MS`, so the
+// queue collapses over precisely the period `siblingUnpaidBooking` calls an
+// accidental re-submission. Two genuinely separate moves booked further apart
+// hold no shared key and each keep their sequence — the behaviour test
+// "two genuinely separate moves … each keep their sequence" already pins.
+//
+// A STALE KEY WOULD TURN A COLLAPSE INTO SILENCE, so two things stop it. BullMQ's
+// `removeJob` reads the job's stored `deid` and DELETEs the key when the job that
+// holds it is removed — so the moment the customer pays and `cancel` drops the
+// stages, the key goes with them and a genuinely new booking may schedule at
+// once. And the key is TTL'd regardless: it outlives nothing but the window in
+// which a second booking by the same customer is, by this module's own
+// definition, a re-submission.
+//
+// FAILS OPEN, like everything else here: an unknown group id means no dedupe id,
+// which is exactly today's behaviour. Losing a recovery email is the worse
+// failure; a duplicate is still throttled by the daily promotional cap.
+
+/** The inbox a booking's recovery sequence belongs to. `customerId` rather than
+ *  the email address because it is what `siblingUnpaidBooking` already matches
+ *  on, so the two halves of this rule can never disagree about who "the same
+ *  customer" is. Unreadable → null → no collapse (never a guess). */
+async function recoveryGroupId(bookingId: string): Promise<string | null> {
+  try {
+    const row = await prisma.booking.findUnique({ where: { id: bookingId }, select: { customerId: true } })
+    return row?.customerId ?? null
+  } catch (err) {
+    log.warn(
+      { bookingId, err: err instanceof Error ? err.message : String(err) },
+      'recovery-group read failed — scheduling without cross-submission deduplication (fails open)'
+    )
+    return null
+  }
+}
+
+/**
+ * PURE: the deduplication key one recovery stage enqueues under, or null when
+ * there is nothing to collapse against.
+ *
+ * Scoped per STAGE as well as per group, deliberately. A sequence is three
+ * independent adds; if stage 1 lands and stages 2-3 time out, only stage 1 holds
+ * a key, so a retry can still queue the two that never made it. One key for the
+ * whole sequence would let a partial failure lock out its own repair.
+ */
+export function recoveryDedupeFor(
+  stage: string,
+  groupId: string | null | undefined,
+  windowMs: number = DUPLICATE_BOOKING_WINDOW_MS
+): EnqueueDedupe | null {
+  if (!groupId || !(windowMs > 0)) return null
+  return { id: `journey__${ABANDONED_JOURNEY}__${stage}__group__${groupId}`, ttlMs: windowMs }
+}
+
+export type SuppressionDecision = {
+  /** Skip scheduling for THIS booking? */
+  suppress: boolean
+  /** Structured log fields — every number here was read from a real source. */
+  fields: Record<string, unknown>
+  /** The log line. It states only what `evidence` proved. */
+  message: string
+}
+
+/**
+ * PURE: given a sibling candidate and the evidence about it, may this booking's
+ * recovery sequence be suppressed?
+ *
+ * Exported and pure so the log statement is TESTABLE, which is the second half
+ * of R5: the shipped line claimed "an earlier unpaid booking already owns a
+ * recovery sequence" in the exact case where the sibling owned none — a claim
+ * the database could not support. Suppression now requires a positive count, and
+ * the message carries the counts it was decided on.
+ */
+export function decideDuplicateSuppression(input: {
+  bookingId: string
+  sibling: string | null
+  evidence: RecoveryEvidence | null
+}): SuppressionDecision {
+  const { bookingId, sibling, evidence } = input
+  if (!sibling) {
+    return { suppress: false, fields: { bookingId }, message: 'no earlier unpaid booking — scheduling' }
+  }
+  if (!evidence) {
+    return {
+      suppress: false,
+      fields: { bookingId, sibling, evidence: 'unreadable' },
+      message:
+        'an earlier unpaid booking exists but its recovery sequence could not be read — scheduling ' +
+        '(suppression has to be provable)',
+    }
+  }
+  const stages = evidence.queuedStages + evidence.sentStages
+  if (stages > 0) {
+    return {
+      suppress: true,
+      fields: {
+        bookingId,
+        duplicateOf: sibling,
+        queuedStages: evidence.queuedStages,
+        sentStages: evidence.sentStages,
+      },
+      message:
+        `an earlier unpaid booking owns a recovery sequence (${evidence.queuedStages} stage job(s) queued, ` +
+        `${evidence.sentStages} in the send ledger) — not scheduling a second`,
+    }
+  }
+  return {
+    suppress: false,
+    fields: { bookingId, sibling, queuedStages: 0, sentStages: 0 },
+    message:
+      'an earlier unpaid booking exists but owns NO recovery sequence (0 queued, 0 sent) — scheduling this one ' +
+      '(a stranded attempt must not suppress the re-submission that replaces it)',
+  }
+}
+
+/**
  * Stripe checkout created, deposit not yet paid → start recovery.
- * Idempotent: stable jobIds mean a second call replaces rather than duplicates.
+ *
+ * Idempotent TWICE OVER, for two different duplicates: a stable jobId means a
+ * second call for the SAME booking replaces rather than duplicates, and a
+ * customer-scoped deduplication id (item T4/R5) means a second call for a
+ * DIFFERENT booking by the same customer collapses instead of scheduling a
+ * second sequence — atomically, so two concurrent submissions cannot both win.
  *
  * ORDERING CONTRACT: this reads `Customer.emailMarketingConsent`, so it MUST
  * run after the booking's consent has been propagated onto the Customer row.
@@ -529,19 +865,47 @@ export async function onCheckoutStarted(
     return
   }
 
-  const duplicateOf = await deps.siblingUnpaidBooking(bookingId)
-  if (duplicateOf) {
-    log.info({ bookingId, duplicateOf }, 'an earlier unpaid booking already owns a recovery sequence — not scheduling a second')
-    return
-  }
+  // DUPLICATE SUBMISSION (release blocker R5). Two questions, in order: is there
+  // an earlier unpaid booking at all, and — only if there is — does it genuinely
+  // own a recovery sequence? Suppressing on the first question alone is what
+  // silenced BOTH bookings when the first attempt was stranded mid-request.
+  const sibling = await deps.siblingUnpaidBooking(bookingId)
+  const decision = decideDuplicateSuppression({
+    bookingId,
+    sibling,
+    evidence: sibling ? await deps.recoverySequenceFor(sibling) : null,
+  })
+  if (sibling) log.info(decision.fields, decision.message)
+  if (decision.suppress) return
+
+  // CONCURRENT DUPLICATE (item T4/R5). The check above is a read, and the
+  // sibling writes what it reads moments later — two submissions 900ms apart
+  // both saw "no sequence" and both scheduled. So the ENQUEUE is what decides:
+  // every stage carries a customer-scoped deduplication id, and the queue
+  // resolves it atomically (SET NX). Unknown group → no id → today's behaviour.
+  const groupId = deps.recoveryGroupId ? await deps.recoveryGroupId(bookingId).catch(() => null) : null
 
   const now = deps.now().getTime()
   await Promise.all(
     ABANDONED_STAGES.map((s) =>
-      deps.enqueue(s.type, { bookingId }, new Date(now + s.delay), jobIdFor('abandoned', s.type, bookingId))
+      deps.enqueue(
+        s.type,
+        { bookingId },
+        new Date(now + s.delay),
+        jobIdFor('abandoned', s.type, bookingId),
+        recoveryDedupeFor(s.type, groupId) ?? undefined
+      )
     )
   )
-  log.info({ bookingId, stages: ABANDONED_STAGES.length }, 'abandoned-recovery scheduled')
+  // "submitted", not "scheduled": `enqueue` swallows a Redis failure and the
+  // queue may collapse a stage into a concurrent submission's sequence. What
+  // each stage actually did is logged at that seam, by the code that saw it.
+  log.info(
+    { bookingId, stages: ABANDONED_STAGES.length, dedupeGroup: groupId },
+    groupId
+      ? 'abandoned-recovery stages submitted (a concurrent duplicate collapses on the customer dedupe key)'
+      : 'abandoned-recovery stages submitted (no dedupe group — a concurrent duplicate cannot be collapsed)'
+  )
 }
 
 /**
@@ -738,21 +1102,57 @@ export async function onBookingCancelled(
 //  enforces one).
 export const BALANCE_REMINDER_DELAY_MS = 24 * HOUR
 
+/**
+ * What `onBookingCompletedBalance` ACTUALLY did (blocker D3).
+ *
+ * This returned `void` and returned EARLY whenever the journey flag was off —
+ * the SHIPPED DEFAULT — so the lifecycle EffectReport, which could only see
+ * "it did not throw", told the owner "balance reminder scheduled" for a
+ * reminder that does not exist. It also returned normally when the queue add
+ * was swallowed by `enqueue`.
+ */
+export type BalanceReminderOutcome = {
+  /** TRUE only when the +24h reminder is really on the queue. */
+  scheduled: boolean
+  /** Machine-readable reason it is not: `journeys_disabled` (the master
+   *  switch), `journey_disabled` (this journey only), `enqueue_failed`, or
+   *  `enqueue_unverified` (the seam did not report — never assumed to be a
+   *  success). NULL when it was scheduled. */
+  reason: string | null
+}
+
 export async function onBookingCompletedBalance(
   bookingId: string,
   deps: JourneyDeps = defaultJourneyDeps()
-): Promise<void> {
-  // Completion is also the move_completed automation trigger.
+): Promise<BalanceReminderOutcome> {
+  // Completion is also the move_completed automation trigger. It runs
+  // regardless of the journey flag and owns its own error handling; it is not
+  // part of this outcome because nothing here can prove what it enrolled.
   deps.fireBookingTrigger('move_completed', bookingId)
 
-  if (!enabled('balance')) return
-  await deps.enqueue(
+  // The two "off" cases are DISTINCT to the owner: the whole marketing engine
+  // being off is a different sentence from this one journey being off.
+  if (!JOURNEYS_ENABLED) {
+    log.info({ bookingId }, 'EMAIL_JOURNEYS_ENABLED!=true — no post-completion balance reminder scheduled')
+    return { scheduled: false, reason: 'journeys_disabled' }
+  }
+  if (!enabled('balance')) {
+    log.info({ bookingId }, 'the balance journey is disabled — no post-completion balance reminder scheduled')
+    return { scheduled: false, reason: 'journey_disabled' }
+  }
+
+  const result = await deps.enqueue(
     'balance-reminder-post',
     { bookingId },
     new Date(deps.now().getTime() + BALANCE_REMINDER_DELAY_MS),
     jobIdFor('balance', 'balance-reminder-post', bookingId)
   )
+  // A seam that reports nothing cannot be quoted as proof. `enqueue` (the real
+  // one) always reports; only a fake can land here.
+  if (!result) return { scheduled: false, reason: 'enqueue_unverified' }
+  if (!result.ok) return { scheduled: false, reason: result.reason ?? 'enqueue_failed' }
   log.info({ bookingId }, 'post-completion balance reminder scheduled')
+  return { scheduled: true, reason: null }
 }
 
 /**

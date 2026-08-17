@@ -391,6 +391,32 @@ async function processScheduledJob(job: Job<ScheduledJobData>): Promise<void> {
       break
     }
 
+    // ── STALE CHECKOUT REPORT (blocker B6, reverted to a report by D1) ──
+    // The net under a missed `checkout.session.expired` webhook. It asks Stripe
+    // what each recorded session IS and REPORTS what it finds; it cancels
+    // nothing. B6 had this cancel the booking, which meant a customer being
+    // redirected into a fresh session could be cancelled mid-payment (the
+    // resume route retires the recorded session first, so a live booking
+    // routinely carries a dead session id) — and CANCELLED has no exit. The
+    // owner ends a hold deliberately, from the booking page; the Action Center
+    // rule `checkout-hold-stale` is where these land in front of him.
+    // The job type keeps its name so the already-registered repeatable cron
+    // ('cron:stale-checkout-sweep') keeps matching a handler.
+    // A pass with nothing to do is one indexed query and no Stripe calls.
+    case 'stale-checkout-sweep': {
+      const { reportStaleCheckouts } = await import('../lib/checkout-expiry')
+      const report = await reportStaleCheckouts()
+      if (report.staleHolds > 0 || report.authorized > 0 || report.retired > 0) {
+        log.warn(
+          { ...report, findings: report.findings.length },
+          'stale-checkout report: unpaid holds and/or live sessions found — nothing was cancelled',
+        )
+      } else {
+        log.info({ ...report, findings: 0 }, 'stale-checkout report complete (no stale holds)')
+      }
+      break
+    }
+
     // ── MARKETING DISCOVERY (owner spec 2026-08-07) ───────────────
     // The AI marketing agent's daily sweep: deterministic reactivation
     // audiences → at most one DRAFT campaign + a Discord opportunity notice.
@@ -806,6 +832,21 @@ async function registerCronJobs(): Promise<void> {
     'lifecycle-repair',
     { type: 'lifecycle-repair' },
     { repeat: { pattern: '35 * * * *' }, jobId: 'cron:lifecycle-repair' }
+  )
+
+  // ── Stale checkout sweep (release blocker B6) ──
+  // Hourly at :50, clear of the other sweeps. Hourly rather than daily because
+  // the condition it clears is a HELD TRUCK: every hour it is not cleared is an
+  // hour the owner is refused a truck he actually has, or overrides the one
+  // guard against a genuine double-booking. It is cheap — one indexed query,
+  // and a Stripe call only for a booking that is genuinely past its grace with
+  // a recorded session — and every action it takes is idempotent (the release
+  // is one conditional UPDATE), so the cadence is a freshness knob, not a
+  // correctness one.
+  await scheduledQueue.add(
+    'stale-checkout-sweep',
+    { type: 'stale-checkout-sweep' },
+    { repeat: { pattern: '50 * * * *' }, jobId: 'cron:stale-checkout-sweep' }
   )
 
   // The agent cron previously ran every 5 minutes under the SAME jobId. BullMQ

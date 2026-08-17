@@ -244,6 +244,13 @@ export type ScheduledJobData = {
     // otherwise stay stranded forever. Bounded + idempotent; see
     // journeys.repairStrandedQuoteJourneys.
     | 'lifecycle-repair'
+    // Hourly (blocker B6, reverted to a REPORT by D1): find unpaid
+    // PENDING_PAYMENT bookings whose Stripe checkout session is provably dead
+    // and still hold a truck, and REPORT them. It is also the net for a missed
+    // `checkout.session.expired` webhook. IT CANCELS NOTHING: B6 had it cancel
+    // the booking, which cancelled customers who were mid-payment, terminally.
+    // The owner ends a hold from the booking page. See checkout-expiry.ts.
+    | 'stale-checkout-sweep'
     // Daily: the marketing discovery sweep — deterministic reactivation
     // audiences -> at most ONE drafted campaign + a Discord ask. Never sends;
     // flag-gated on EMAIL_MARKETING_AGENT_ENABLED. See email-marketing-agent.ts.

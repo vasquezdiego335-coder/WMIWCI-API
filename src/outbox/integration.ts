@@ -31,7 +31,10 @@ async function safe(label: string, fn: () => Promise<unknown>): Promise<boolean>
 
 export async function emitPaymentCompleted(p: {
   bookingId: string
-  amountPaid: string
+  /** ITEM C1 (round 8) — dollars STRIPE reported it authorized, or absent. It
+   *  becomes the "$X hold" line in the customer's pre-approval email, so it may
+   *  never be defaulted to the house fee. See PaymentCompletedPayload. */
+  amountPaid?: string | null
   customerName: string
   customerEmail: string
   requestedDate: string | null
@@ -48,6 +51,12 @@ export async function emitApproved(p: {
   customerEmail: string
   requestedDate: string | null
   items?: string
+  /** ITEM D2 — the amount STRIPE reported for this capture, in cents, or null
+   *  when it reported none. Optional so the approval path can be updated
+   *  independently; omitted means the confirmation falls back to the COMPLETED
+   *  Payment row and, failing that, names no amount. It must NEVER be filled
+   *  from `booking.depositAmount`. */
+  capturedAmountCents?: number | null
 }): Promise<boolean> {
   if (!outboxEnabled()) return false
   return safe('emitApproved', () => handleApprove(p))

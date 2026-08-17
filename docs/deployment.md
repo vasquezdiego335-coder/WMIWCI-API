@@ -180,6 +180,55 @@ from the generated client, so a query that names no new column still throws
 P2022 while the SQL is missing; the known code-before-SQL degradations are
 tracked in `docs/moving-os-p0-review.md` § E.
 
+### Environment: `CRON_SECRET` and the only automated money check (item R6)
+
+`vercel.json` declares one schedule — `GET /api/admin/reconciliation`, daily at
+13:00 UTC. That endpoint is **the only automated check that compares Stripe
+against our own database**. It authenticates a scheduler with
+`Authorization: Bearer $CRON_SECRET`, and the platform sends that header **only
+when `CRON_SECRET` is set on the deployment**.
+
+Until it is set, the schedule fires and is refused every day. State the cost
+plainly, because a refused schedule and a clean day look identical from outside:
+
+- **"Stripe captured the $49 and the app recorded no `Payment` row"** — detected
+  by nothing. The customer's move-day balance stays $49 too high and the Action
+  Center eventually asks the owner to collect it *again*.
+- **"Booking `CONFIRMED`, hold never captured"** — detected by nothing. The
+  authorization expires in ~7 days and the deposit is never collected.
+- amount drift, duplicate payments, refund/dispute state mismatch — visible only
+  to whoever remembers to run `npm run reconcile`.
+
+Rules (in `src/lib/reconciliation.ts`, `isScheduledRunAuthorized`, unit-tested):
+**≥16 characters**, no placeholder-shaped values (`REPLACE…`, `PASTE…`, `YOUR…`,
+`TODO…`), and unset means scheduled access is impossible — never "everyone
+passes". The owner session and `npm run reconcile` are unaffected.
+
+Since this round a **refused scheduled run raises an ops alert** on the Discord
+alerts channel (falling back to operations) rather than only logging —
+`src/lib/scheduled-run-guard.ts`, throttled per process per reason. Delivery
+needs `DISCORD_BOT_TOKEN` plus `DISCORD_CHANNEL_ALERTS` or
+`DISCORD_CHANNEL_OPERATIONS`; without them the refusal is logged as an ERROR and
+the alert result records that nothing was reached.
+
+**This service deploys on Railway** (`nixpacks.toml`, §5 below), and
+`vercel.json` crons **only run on Vercel**. So on the current target, setting
+`CRON_SECRET` makes the endpoint *callable by a scheduler* — it does not create
+one. Either add a scheduled job on the platform that actually runs this service
+(same URL, same `Authorization` header), or accept that reconciliation is manual
+and run `npm run reconcile` on a stated cadence. Do not record "the daily money
+check is on" on the strength of the `crons` block alone; that block is exactly
+the "presence != configuration" shape this project keeps losing rounds to.
+
+Verify after deploy (a correct secret answers 200 with the report):
+```
+curl -sS -o /dev/null -w '%{http_code}\n' \
+  -H "Authorization: Bearer $CRON_SECRET" \
+  https://<admin-host>/api/admin/reconciliation
+```
+Full variable reference: `.env.example` → "SCHEDULED JOBS / CRON"; secret
+generation: `DEPLOY.md` § 7.
+
 ### Backup: what `npm run backup` is and is not
 
 `npm run backup` runs `bash scripts/backup-db.sh`, which needs **bash + pg_dump

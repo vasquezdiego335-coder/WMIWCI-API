@@ -113,6 +113,27 @@ export default function PreApprovalEmail({
   const timeOnly = timeLabel || when.time || undefined
   const access = [stairs, elevator].filter(Boolean).join(' · ')
 
+  // ── ITEM C1 (round 8) — THE HOLD FIGURE, OR AN HONEST NOUN ────────────────
+  //  `money(undefined)` answers "the amount shown above", which is correct for a
+  //  RECEIPT (the amount really is printed above it) and wrong here twice over:
+  //  the only amount above this block is the move ESTIMATE, so "the amount shown
+  //  above hold" points the customer at $550 as the authorization; and the
+  //  headline read "the amount shown above hold" as a sentence.
+  //
+  //  This email is sent the moment Stripe authorizes the card, and Stripe's
+  //  `session.amount_total` is nullable — when it is null the sender now passes
+  //  NOTHING rather than the house $49 (src/lib/fulfillment.ts). So the absent
+  //  case is real, reachable, and must name the fee without naming a number.
+  const holdAmount = amountHold != null && String(amountHold).trim() !== '' ? money(amountHold, es) : null
+  const holdBig = holdAmount ? (es ? `Retención de ${holdAmount}` : `${holdAmount} hold`) : es ? 'Retención de la tarifa de reserva' : 'Booking fee hold'
+  const holdDisclaimer = holdAmount
+    ? es
+      ? `La autorización de ${holdAmount} es una retención, no un cargo, y se libera si tu reserva no se aprueba.`
+      : `The ${holdAmount} authorization is a hold, not a charge, and is released if your booking isn’t approved.`
+    : es
+      ? 'La autorización de la tarifa de reserva es una retención, no un cargo, y se libera si tu reserva no se aprueba.'
+      : 'The booking fee authorization is a hold, not a charge, and is released if your booking isn’t approved.'
+
   const t = es
     ? {
         preview: `Recibimos tu solicitud de reserva${displayId ? ` (${displayId})` : ''}. La estamos revisando ahora.`,
@@ -126,7 +147,7 @@ export default function PreApprovalEmail({
           { label: 'Reserva aprobada', micro: 'Sigue', state: 'todo' as const },
           { label: 'Pago procesado', micro: 'Tras aprobar', state: 'todo' as const },
         ],
-        payBig: `Retención de ${money(amountHold, es)}`,
+        payBig: holdBig,
         payBadge: 'No es un cargo',
         pay: ['Autorización temporal en tu tarjeta.', 'Se libera si no podemos realizar la mudanza.', 'Solo se cobra después de la aprobación.'],
         sumTitle: 'Resumen de la reserva',
@@ -148,7 +169,7 @@ export default function PreApprovalEmail({
         supportTitle: '¿Necesitas ayuda?',
         contactLabels: { phone: 'Llama o escribe', email: 'Correo', website: 'Sitio web' },
         disclaimer:
-          `Este correo confirma que recibimos tu solicitud — no es una confirmación final. El precio es un estimado y puede ajustarse tras revisar acceso y detalles. La autorización de ${money(amountHold, es)} es una retención, no un cargo, y se libera si tu reserva no se aprueba.`,
+          `Este correo confirma que recibimos tu solicitud — no es una confirmación final. El precio es un estimado y puede ajustarse tras revisar acceso y detalles. ${holdDisclaimer}`,
         footerLabels: { manage: 'Administrar preferencias', unsubscribe: 'Cancelar suscripción', rights: 'Todos los derechos reservados.' },
         defTruck: 'U-Haul — a tu nombre',
       }
@@ -164,7 +185,7 @@ export default function PreApprovalEmail({
           { label: 'Booking approved', micro: 'Up next', state: 'todo' as const },
           { label: 'Payment processed', micro: 'After approval', state: 'todo' as const },
         ],
-        payBig: `${money(amountHold, es)} hold`,
+        payBig: holdBig,
         payBadge: 'Not a charge',
         pay: ['Temporary authorization on your card.', 'Released if we can’t take the move.', 'Only captured after approval.'],
         sumTitle: 'Booking summary',
@@ -186,7 +207,7 @@ export default function PreApprovalEmail({
         supportTitle: 'Need a hand?',
         contactLabels: { phone: 'Call or text', email: 'Email', website: 'Website' },
         disclaimer:
-          `This email confirms we’ve received your booking request — it is not a final confirmation. Pricing is an estimate and may adjust after we review access and details. The ${money(amountHold, es)} authorization is a hold, not a charge, and is released if your booking isn’t approved.`,
+          `This email confirms we’ve received your booking request — it is not a final confirmation. Pricing is an estimate and may adjust after we review access and details. ${holdDisclaimer}`,
         footerLabels: { manage: 'Manage preferences', unsubscribe: 'Unsubscribe', rights: 'All rights reserved.' },
         defTruck: 'U-Haul — rented in your name',
       }

@@ -334,22 +334,73 @@ test('approval card: shows BOTH addresses as their own fields (the dropped-addre
   assert.equal(fields.find((f) => f.name === '📍 Dropoff')?.value, '45 Oak Ave, Montclair, NJ 07042')
 })
 
+// ITEM C1 — THE DEPOSIT LINE'S VOCABULARY CHANGED, AND SO DID THIS TEST.
+//   These two assertions used to require "Deposit: $49 held" and "hold
+//   authorized", which the card produced from `depositAmount ?? 4900` and
+//   `depositPaid`. Neither column is evidence: `depositPaid` is written by the
+//   approval CLAIM before Stripe is called, so in the `captured_no_payment_row`
+//   failure state the card announced a captured deposit over a database with no
+//   Payment row. The card now separates QUOTED (the column, always safe to
+//   print under that word), CAPTURED (`provenDepositMoney` over the booking's
+//   own PaymentIntent) and UNKNOWN (the caller could not read the ledger).
+//
+//   `APPROVAL_BOOKING` carries NO `payments`, which is exactly "the ledger was
+//   not read" — so UNKNOWN is the correct answer for this fixture, and the two
+//   cases that DO carry rows are asserted underneath.
 test('approval card: full pricing breakdown (base, travel, truck add-on, discount, deposit, total, balance)', () => {
   const pricing = approvalFields(approvalCardDataFromBooking(APPROVAL_BOOKING)).find((f) => f.name === '💰 Pricing')?.value ?? ''
   assert.match(pricing, /Base labor: \$699/)
   assert.match(pricing, /Travel fee: \$50/)
   assert.match(pricing, /Truck add-on: \$50/)
   assert.match(pricing, /10% off/)
-  assert.match(pricing, /Deposit: \$49 held/)
+  assert.match(pricing, /Deposit quoted: \$49/)
+  assert.match(pricing, /Deposit captured: UNKNOWN/, 'no ledger was handed in, so no capture may be claimed')
   assert.match(pricing, /Move total: \$749/)
   assert.match(pricing, /Balance after job: \$700/)
 })
 
+test('approval card: the deposit line follows the LEDGER, never depositPaid', () => {
+  const pricingFor = (over: Record<string, unknown>) =>
+    approvalFields(approvalCardDataFromBooking({ ...APPROVAL_BOOKING, ...over })).find((f) => f.name === '💰 Pricing')?.value ?? ''
+
+  // Ledger read, nothing in it: an honest "no record" — not a capture.
+  assert.match(pricingFor({ payments: [] }), /Deposit captured: no record/)
+
+  // The B1 failure state: the booking is FLAGGED paid and the ledger is empty.
+  assert.match(
+    pricingFor({ payments: [], depositPaid: true }),
+    /Deposit captured: NOT RECORDED/,
+    'the claim flag alone must read as an incident, never as a capture',
+  )
+
+  // A Stripe-reported COMPLETED row on this booking's own intent IS proof.
+  const captured = pricingFor({
+    payments: [
+      {
+        id: 'pay_1',
+        amount: 4900,
+        status: 'COMPLETED',
+        isInternalTest: false,
+        stripePaymentIntentId: 'pi_1234567890ABCDEF',
+        stripeChargeId: 'ch_1',
+        createdAt: new Date('2026-07-13T15:00:00Z'),
+      },
+    ],
+  })
+  assert.match(captured, /Deposit captured: \$49\.00 ✅/)
+})
+
 test('approval card: Stripe references shown (PI + checkout session short refs)', () => {
-  const stripe = approvalFields(approvalCardDataFromBooking(APPROVAL_BOOKING)).find((f) => f.name === '💳 Stripe')?.value ?? ''
-  assert.match(stripe, /hold authorized/i)
+  const stripeFor = (over: Record<string, unknown> = {}) =>
+    approvalFields(approvalCardDataFromBooking({ ...APPROVAL_BOOKING, ...over })).find((f) => f.name === '💳 Stripe')?.value ?? ''
+
+  const stripe = stripeFor()
+  assert.match(stripe, /Deposit UNKNOWN/i, 'no ledger handed in ⇒ unknown, not "hold authorized"')
   assert.match(stripe, /Payment Intent/)
   assert.match(stripe, /Checkout Session/)
+
+  // With the ledger read and nothing captured, the pre-approval wording stands.
+  assert.match(stripeFor({ payments: [] }), /hold authorized/i)
 })
 
 test('approval card: notes are the customer words only, not the mixed description blob', () => {

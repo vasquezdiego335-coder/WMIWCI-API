@@ -28,6 +28,10 @@ export async function handleApprove(params: {
   customerEmail: string
   requestedDate: string | null // ISO
   items?: string
+  /** ITEM D2 — cents Stripe reported for THIS capture, or null/absent when it
+   *  reported none. Carried verbatim into the payload; never invented here and
+   *  never read off the booking (see domain/events.ts ApprovedPayload). */
+  capturedAmountCents?: number | null
 }): Promise<ApproveResult> {
   return prisma.$transaction(async (tx) => {
     const current = await readBookingOutboxState(tx, params.bookingId)
@@ -55,6 +59,9 @@ export async function handleApprove(params: {
       requestedDate: params.requestedDate,
       approvedBy: params.approvedBy,
       items: params.items,
+      // ITEM D2 — a PROVEN figure travels with the event; an unproven one is
+      // stored as null, which the renderer reads as "unknown", not as zero.
+      capturedAmountCents: params.capturedAmountCents ?? null,
     }
     const { inserted } = await saveEmailJob(tx, {
       bookingId: params.bookingId,

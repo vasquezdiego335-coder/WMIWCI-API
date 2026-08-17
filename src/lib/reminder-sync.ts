@@ -146,6 +146,11 @@ export async function performSync(now = new Date()): Promise<SyncResult> {
       // `job-no-start-time` into "day-level by choice" vs "time genuinely
       // missing". Loaded by the same `include` above.
       startTimeKnown: b.startTimeKnown,
+      // D1: how long this row has been waiting for its deposit. The ONLY rule
+      // that reads it is `checkout-hold-stale`, which lists an unpaid truck
+      // hold for the owner to end deliberately — B6's automatic cancellation of
+      // these was removed because it cancelled customers mid-payment.
+      createdAt: b.createdAt,
       crew: (b.job?.crew ?? []).map((c) => ({
         userId: c.userId,
         userName: c.user.name,

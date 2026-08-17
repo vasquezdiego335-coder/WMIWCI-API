@@ -3,6 +3,7 @@ import type { Prisma } from '@prisma/client'
 import { render } from '@react-email/render'
 import { prisma } from '../../lib/db'
 import { readBookingWithMigrationFallback } from '../../lib/migration-window'
+import { provenCapturedCents, PROOF_PAYMENT_SELECT, type ProofPayment } from '../domain/captured-amount'
 import { emailSubject } from '../../lib/i18n'
 import PreApprovalEmail from '../../emails/pre-approval'
 import FinalConfirmationEmail from '../../emails/final-confirmation'
@@ -71,6 +72,45 @@ export function dollarsFromInput(value?: string | number | null): string | undef
   const n = Number(value)
   if (!Number.isFinite(n)) return undefined
   return n.toFixed(2)
+}
+
+/**
+ * ITEM D2 — the LEDGER answer to "how much did we actually take?".
+ *
+ * The outbox is the live email path (EMAIL-REGISTRY.md), and its APPROVED event
+ * carried no amount, so the confirmation renderer fell through to
+ * `dollarsFromCents(b?.depositAmount)` — a booking column, i.e. what the booking
+ * was SUPPOSED to be charged. Reproduced end to end with `depositAmount = 12345`:
+ * "Your $123.45 deposit is applied to your move".
+ *
+ * A COMPLETED Payment row is the only proof this system has, and it is a strong
+ * one: the approval path writes that row ONLY from a Stripe-reported amount and
+ * refuses to write it at all when Stripe reports none. So the renderer asks the
+ * ledger rather than the intention column, and prints nothing when the ledger is
+ * silent — which is exactly the state `reconciliation.ts` reports as
+ * `captured_no_payment_row` and the admin's "Retry payment record" repairs.
+ *
+ * Never throws: a failed read (including the code-before-SQL window) is "no
+ * proven amount", which renders as no figure — never as a guess.
+ */
+// ITEM C1 (round 8) — this used to be a LOCAL copy of the column list that
+// omitted `stripeChargeId`, so the Stripe-evidence half of the rule
+// (`isStripePayment`) ran here with one of its two inputs permanently
+// undefined. The rule and the columns it reads now travel together.
+async function ledgerCapturedCents(bookingId: string, stripePaymentIntentId?: string | null): Promise<number | null> {
+  try {
+    const rows = (await prisma.payment.findMany({
+      where: { bookingId },
+      select: PROOF_PAYMENT_SELECT,
+    })) as unknown as ProofPayment[]
+    return provenCapturedCents(rows, { stripePaymentIntentId })
+  } catch (err) {
+    console.error(
+      `[outbox/email] could not read the payment ledger for ${bookingId} — the email will name no amount:`,
+      err instanceof Error ? err.message : err,
+    )
+    return null
+  }
 }
 
 const APP_URL = (process.env.APP_URL ?? 'https://wmiwci-api.vercel.app').replace(/\/+$/, '')
@@ -154,7 +194,11 @@ export { moveTimeLabel }
 /** PAYMENT_COMPLETED → the premium "we've received your request" email. */
 export async function renderPreApproval(
   bookingId: string,
-  opts: { amountPaid?: string } & Fallback = {}
+  /** ITEM C1 (round 8) — `amountPaid` is nullable because the SENDER can now
+   *  honestly not know it: `session.amount_total` is nullable in Stripe's API
+   *  and `fulfillPaidCheckout` stopped substituting the house $49 for it. Null
+   *  and undefined both mean "name no figure". */
+  opts: { amountPaid?: string | null } & Fallback = {}
 ): Promise<RenderedEmail> {
   const b = await loadBooking(bookingId)
   const locale = b?.customer.locale ?? opts.locale ?? 'en'
@@ -162,7 +206,13 @@ export async function renderPreApproval(
   const access = b ? accessSummary(b) : {}
   // Cents preserved; NO '49' fallback (finding EMAIL-P2-17). Undefined when we
   // genuinely do not know the amount — the template renders a neutral phrase.
-  const amountHold = dollarsFromInput(opts.amountPaid) ?? dollarsFromCents(b?.depositAmount)
+  //
+  // ITEM D2 — and NO `depositAmount` fallback either. The authorization is
+  // created for `BOOKING_FEE_CENTS` (src/lib/stripe.ts createBookingCheckout),
+  // never for this column, so a booking whose `depositAmount` had drifted
+  // printed a hold figure that was never authorized. The proven number is the
+  // Stripe session total, which the PAYMENT_COMPLETED payload carries.
+  const amountHold = dollarsFromInput(opts.amountPaid)
 
   const payload: Record<string, unknown> = {
       customerName: b?.customer.name ?? opts.customerName,
@@ -200,15 +250,23 @@ export async function renderPreApproval(
 /** APPROVED → the premium "your booking is approved" email. */
 export async function renderFinalConfirmation(
   bookingId: string,
-  opts: { amountPaid?: string } & Fallback = {}
+  opts: { capturedAmountCents?: number | null } & Fallback = {}
 ): Promise<RenderedEmail> {
   const b = await loadBooking(bookingId)
   const locale = b?.customer.locale ?? opts.locale ?? 'en'
   const to = b?.customer.email ?? opts.customerEmail ?? ''
   const access = b ? accessSummary(b) : {}
   const moveDate = b?.scheduledStart ?? b?.confirmedDate ?? b?.requestedDate ?? (opts.requestedDate ? new Date(opts.requestedDate) : null)
-  // Cents preserved; NO '49' fallback (finding EMAIL-P2-17).
-  const amountPaid = dollarsFromInput(opts.amountPaid) ?? dollarsFromCents(b?.depositAmount)
+  // ITEM D2 — the captured figure, or nothing. TWO sources, both proofs:
+  //   1. `capturedAmountCents` on the APPROVED event — what Stripe reported to
+  //      the approval that captured it (item M1's `capturedAmountFromIntent`);
+  //   2. the COMPLETED Payment row, when the event carried none (every event
+  //      written before this item, and every resend).
+  // `booking.depositAmount` is NOT a source: it is what the booking was supposed
+  // to be charged. Absent ⇒ the template omits the payment row and the deposit
+  // sentence names no amount; the confirmation itself still goes out.
+  const capturedCents = opts.capturedAmountCents ?? (await ledgerCapturedCents(bookingId, b?.stripePaymentIntentId))
+  const amountPaid = dollarsFromCents(capturedCents)
 
   const payload: Record<string, unknown> = {
       customerName: b?.customer.name ?? opts.customerName,

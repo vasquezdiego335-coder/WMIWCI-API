@@ -26,7 +26,14 @@ openssl rand -base64 64
 
 # CSRF secret (32 chars hex)
 openssl rand -hex 32
+
+# CRON secret (32 chars hex) — authenticates the daily payment reconciliation
+openssl rand -hex 32
 ```
+
+**`CRON_SECRET` is not optional if you want the money check to run.** See
+[§ 7. Scheduled jobs](#7-scheduled-jobs-cron_secret) below for what stops
+working without it.
 
 ### 2. Hash passwords for Diego and Sebastian
 ```bash
@@ -64,6 +71,49 @@ npm run register-commands
 In Stripe Dashboard → Developers → Webhooks → Add endpoint:
 - URL: `https://wmiwci-backend.vercel.app/api/stripe/webhook`
 - Events: `checkout.session.completed`, `checkout.session.expired`, `payment_intent.payment_failed`
+
+### 7. Scheduled jobs (`CRON_SECRET`)
+
+**Set `CRON_SECRET` on the deployment.** `vercel.json` declares one schedule —
+`GET /api/admin/reconciliation`, daily at 13:00 UTC — and the platform sends
+`Authorization: Bearer $CRON_SECRET` **only when that variable is set**. With it
+unset, the schedule fires and is refused, every day.
+
+**What does not run until it is set** (this is the whole reason it matters — a
+refused schedule looks exactly like a quiet day):
+
+| Not detected | Consequence |
+|---|---|
+| Stripe captured the $49 and no `Payment` row exists | revenue under-counted; the customer's move-day balance is $49 too high, and the Action Center later asks Diego to collect it *again* |
+| Booking `CONFIRMED` but the hold was never captured | the authorization expires in ~7 days and the deposit is never collected |
+| amount drift / duplicate payments / refund + dispute state mismatches | only ever seen by someone who remembers to run `npm run reconcile` by hand |
+
+Rules, enforced in `src/lib/reconciliation.ts` (`isScheduledRunAuthorized`):
+- **minimum 16 characters**; shorter refuses.
+- placeholder-shaped values (`REPLACE…`, `PASTE…`, `YOUR…`, `TODO…`) refuse, so
+  an unconfigured deployment looks unconfigured rather than half-working.
+- unset ⇒ scheduled access is impossible. The owner session still works, and
+  `npm run reconcile` still works.
+
+A refused scheduled run raises an **ops alert** on the Discord alerts channel
+(falling back to operations) — `src/lib/scheduled-run-guard.ts`. That needs
+`DISCORD_BOT_TOKEN` plus `DISCORD_CHANNEL_ALERTS` or
+`DISCORD_CHANNEL_OPERATIONS`; without them the refusal is logged as an ERROR and
+the alert records that it could not be delivered.
+
+**Not deploying on Vercel?** `vercel.json` crons only run on Vercel. The admin
+runbook (`docs/deployment.md`) describes a Railway service — on that platform the
+schedule must be created there (a cron service / scheduled job calling the same
+URL with the same header). Setting `CRON_SECRET` alone does not create a
+schedule; it only makes one possible.
+
+Verify after deploy — a correct secret returns the JSON report, a wrong one 403s:
+```bash
+curl -sS -o /dev/null -w '%{http_code}\n' \
+  -H "Authorization: Bearer $CRON_SECRET" \
+  https://<your-host>/api/admin/reconciliation
+# 200 = the schedule can run. 403 = it cannot, and the daily money check is dead.
+```
 
 ---
 

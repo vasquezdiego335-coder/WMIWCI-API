@@ -97,13 +97,20 @@ type Harness = {
   bookingCustomer: Map<string, string>
   /** bookingId -> an EARLIER unpaid booking, when one exists. */
   siblings: Map<string, string>
+  /** bookingId -> recovery stage emails the send ledger has recorded for it.
+   *  The queue side of the evidence is read from `jobs` below, so a sibling
+   *  "owns a sequence" here only when one was really scheduled or really sent. */
+  ledgerSends: Map<string, number>
+  /** Bookings whose recovery evidence cannot be read at all (Redis + Postgres
+   *  both down) — the dep returns null, never a zero it cannot support. */
+  evidenceUnreadable: Set<string>
   /** Leads the send ledger has already seen a quote stage for. */
   alreadyAttempted: Set<string>
   repairPool: JourneyLead[]
   ledgerThrows: boolean
 }
 
-function harness(over: Partial<Pick<Harness, 'leads' | 'customerConsent' | 'priorCustomers' | 'bookingCustomer' | 'siblings' | 'alreadyAttempted' | 'repairPool' | 'ledgerThrows'>> = {}): Harness {
+function harness(over: Partial<Pick<Harness, 'leads' | 'customerConsent' | 'priorCustomers' | 'bookingCustomer' | 'siblings' | 'ledgerSends' | 'evidenceUnreadable' | 'alreadyAttempted' | 'repairPool' | 'ledgerThrows'>> = {}): Harness {
   const h: Harness = {
     deps: null as unknown as JourneyDeps,
     jobs: new Map(),
@@ -117,6 +124,8 @@ function harness(over: Partial<Pick<Harness, 'leads' | 'customerConsent' | 'prio
     priorCustomers: over.priorCustomers ?? new Set(),
     bookingCustomer: over.bookingCustomer ?? new Map([['bk_1', EMAIL]]),
     siblings: over.siblings ?? new Map(),
+    ledgerSends: over.ledgerSends ?? new Map(),
+    evidenceUnreadable: over.evidenceUnreadable ?? new Set(),
     alreadyAttempted: over.alreadyAttempted ?? new Set(),
     repairPool: over.repairPool ?? [],
     ledgerThrows: over.ledgerThrows ?? false,
@@ -149,6 +158,18 @@ function harness(over: Partial<Pick<Harness, 'leads' | 'customerConsent' | 'prio
     },
     async siblingUnpaidBooking(bookingId) {
       return h.siblings.get(bookingId) ?? null
+    },
+    // The REAL edge: the queue is asked for this booking's stage jobs and the
+    // send ledger for its stage emails. Modelled off `jobs` so a sibling can
+    // only "own a sequence" here if one was actually scheduled (or actually
+    // sent) — a status is not evidence, which is the whole of R5.
+    async recoverySequenceFor(bookingId) {
+      h.calls.push(`recoveryEvidence:${bookingId}`)
+      if (h.evidenceUnreadable.has(bookingId)) return null
+      return {
+        queuedStages: ABANDONED_STAGES.filter((s) => h.jobs.has(jobIdFor('abandoned', s.type, bookingId))).length,
+        sentStages: h.ledgerSends.get(bookingId) ?? 0,
+      }
     },
     async convertLead(email, bookingId, opts) {
       h.calls.push(`convertLead:${bookingId}`)

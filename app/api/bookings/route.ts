@@ -3,6 +3,12 @@ import { z } from 'zod'
 import type { Prisma } from '@prisma/client'
 import { prisma } from '@/lib/db'
 import { BOOKING_FEE_CENTS, createBookingCheckout } from '@/lib/stripe'
+import {
+  checkoutIdempotencyKey,
+  defaultCheckoutSessionDeps,
+  recordCheckoutSession,
+  unrecordedSessionAlert,
+} from '@/lib/checkout-session'
 import { apiLogger } from '@/lib/logger'
 import { AGREEMENT_VERSION } from '@/lib/agreement'
 import { notifyBookingCreated } from '@/lib/notify'
@@ -417,7 +423,25 @@ async function handleBooking(req: NextRequest): Promise<NextResponse> {
       customerId: customer.id,
       bookingReference,
       displayId: bookingReference,
-      status: 'DRAFT',
+      // ── BORN RECOVERABLE (release blocker B9) ──────────────────────────
+      //    This row used to be created DRAFT and promoted to PENDING_PAYMENT
+      //    by a single unguarded UPDATE after the Stripe session existed. A
+      //    failure of that one statement — a Neon blip, a function timeout at
+      //    the tail of a route that has already made two Google calls, ~5
+      //    Postgres round trips, a sequence read and a Stripe call — left the
+      //    customer with an opaque browser error and the booking in DRAFT,
+      //    which is the ONE status nothing can recover: the resume route, the
+      //    abandoned-checkout worker and the recovery journey all key on
+      //    PENDING_PAYMENT. The customer had already signed the agreement and
+      //    burned a WMIC reference by then.
+      //
+      //    So the awaiting-deposit state is written HERE, in the same
+      //    statement that creates the row — exactly what the admin create
+      //    already does (admin-booking.decideStatus -> buildBookingCreateData
+      //    writes PENDING_PAYMENT before its Stripe step). A booking that
+      //    never reaches Stripe is deleted below; one that does is already
+      //    findable, resumable and chased by the recovery sequence.
+      status: 'PENDING_PAYMENT',
       originAddress: originDisplay || 'Provided at confirmation',
       destAddress: destDisplay || 'Provided at confirmation',
       itemsDescription,
@@ -514,6 +538,11 @@ async function handleBooking(req: NextRequest): Promise<NextResponse> {
       agreementAccepted: true,
       agreementVersion: AGREEMENT_VERSION,
       agreementName: data.agreementName,
+      // ONE payable session per booking (B9). A create that times out
+      // mid-flight can be retried without leaving a second live $49
+      // authorization behind. The key is derived from the booking id — see
+      // checkoutIdempotencyKey for why it cannot be ONLY the booking id.
+      idempotencyKey: checkoutIdempotencyKey({ bookingId: booking.id }),
       // Server-computed estimate on the payment (owner/finance traceability).
       // bookingReference is added below once the booking row exists.
       extraMetadata: {
@@ -547,21 +576,52 @@ async function handleBooking(req: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ error: 'Failed to initialize payment' }, { status: 500 })
   }
 
-  // `select` on a write whose result is discarded (the same P0-E fix the admin
-  // create carries). Without it Prisma's UPDATE ... RETURNING asks for every
-  // generated column, so this statement — which runs AFTER the Stripe session
-  // exists — would be the one to discover a missing column, and the customer
-  // would get an opaque 500 for a booking that was created and a checkout they
-  // never saw. The preflight above is the real guard; this closes the window
-  // between it and here.
-  await prisma.booking.update({
-    where: { id: booking.id },
-    data: {
-      status: 'PENDING_PAYMENT',
-      stripeCheckoutId: checkoutSession.id,
-    },
-    select: { id: true },
-  })
+  // ── Record the session id — NON-FATAL (release blocker B9) ───────────────
+  //
+  //    THIS STATEMENT USED TO BE THE WHOLE BUG. It was an unguarded
+  //    `booking.update` that promoted DRAFT -> PENDING_PAYMENT and stored the
+  //    session id, and everything the customer and the owner actually need
+  //    sits BELOW it: the job photos, the lead ingest, the lifecycle hand-over
+  //    (lead conversion, consent propagation, the abandoned-checkout recovery
+  //    sequence), the owner's Discord alert — and the response carrying the
+  //    Stripe checkout URL. One failed UPDATE skipped all of it, and because
+  //    the POST wrapper attaches CORS headers only to a returned response, the
+  //    browser did not even get a readable error.
+  //
+  //    The awaiting-deposit STATUS is now written by the create above, so the
+  //    only thing left here is the session id — and `stripeCheckoutId` is
+  //    display-only (nothing resolves a booking by it; the webhook and the
+  //    success redirect both resolve by session metadata). Losing it must
+  //    therefore never cost the customer their checkout page, so the failure
+  //    is recorded, alerted, and stepped over. recordCheckoutSession does not
+  //    throw; the try is a second wall so that nothing in this block can ever
+  //    again stand between a signed agreement and a checkout URL.
+  const checkoutDeps = defaultCheckoutSessionDeps()
+  try {
+    const recorded = await recordCheckoutSession(checkoutDeps, {
+      bookingId: booking.id,
+      sessionId: checkoutSession.id,
+    })
+    if (!recorded) {
+      // The session stays OPEN on purpose — the customer is being sent to it
+      // in the response below. The alert says exactly that and claims nothing
+      // about expiry or payment.
+      const alert = unrecordedSessionAlert({
+        context: 'public_create',
+        bookingId: booking.id,
+        displayId: booking.displayId,
+        sessionId: checkoutSession.id,
+        expired: 'kept',
+        handedToCustomer: true,
+      })
+      await checkoutDeps.alert(alert.title, alert.lines)
+    }
+  } catch (err) {
+    apiLogger.error(
+      { err, bookingId: booking.id },
+      'Could not record the Stripe checkout id (non-fatal) — the customer still gets their checkout',
+    )
+  }
 
   // ── Attach uploaded job photos as File rows (non-fatal) ──
   // The browser already uploaded these to Cloudinary; we only record the
@@ -640,21 +700,30 @@ async function handleBooking(req: NextRequest): Promise<NextResponse> {
   // brand-new customer the consent gate read `null` and refused the recovery
   // sequence moments before the same request recorded their explicit opt-in.
   // Sequencing that by hand in a 700-line route is what allowed it; the order
-  // now lives in journeys.onBookingCreated, where it is tested. Never fatal —
-  // the customer's checkout is already created and returned below.
-  const { convertedLeadId } = await onBookingCreated({
-    bookingId: booking.id,
-    email: customer.email,
-    // Match the exact partial lead captured in Step 1 (session first, then email).
-    bookingSessionId: data.bookingSessionId,
-    marketingConsent: data.marketingConsent,
-    // Controlled vocabulary + the disclosure version the visitor actually saw.
-    // `booking_step_1` was an ad-hoc string, and the version was never recorded
-    // at all — so a consent record could not say WHAT was agreed to.
-    consentSource: 'BOOKING_FORM',
-    consentVersion: CONSENT_VERSION,
-  })
-  if (convertedLeadId) apiLogger.info({ bookingId: booking.id, convertedLeadId }, 'lead converted (booking created)')
+  // now lives in journeys.onBookingCreated, where it is tested. "Never fatal"
+  // was a PROMISE IN A COMMENT until B9: each step inside onBookingCreated is
+  // contained, but the call itself sat unguarded between the Stripe session and
+  // the owner alert, so anything thrown outside those inner guards (building
+  // the journey deps, for instance) took the owner's only notification and the
+  // checkout URL down with it. The tail after a live Stripe session must be
+  // unskippable, so the promise is enforced here.
+  try {
+    const { convertedLeadId } = await onBookingCreated({
+      bookingId: booking.id,
+      email: customer.email,
+      // Match the exact partial lead captured in Step 1 (session first, then email).
+      bookingSessionId: data.bookingSessionId,
+      marketingConsent: data.marketingConsent,
+      // Controlled vocabulary + the disclosure version the visitor actually saw.
+      // `booking_step_1` was an ad-hoc string, and the version was never recorded
+      // at all — so a consent record could not say WHAT was agreed to.
+      consentSource: 'BOOKING_FORM',
+      consentVersion: CONSENT_VERSION,
+    })
+    if (convertedLeadId) apiLogger.info({ bookingId: booking.id, convertedLeadId }, 'lead converted (booking created)')
+  } catch (err) {
+    apiLogger.error({ err, bookingId: booking.id }, 'booking lifecycle hand-over failed (non-fatal)')
+  }
 
   // ── Owner alert: a new booking was started (non-fatal; never blocks booking) ──
   // The customer is intentionally NOT messaged here — they receive the existing

@@ -71,6 +71,13 @@ export async function createBookingCheckout(params: {
    *  ONLY by the owner-only, env-gated /api/admin/test-booking endpoint; the
    *  public booking flow never sets it, so a real customer is always the $49 floor. */
   amountCentsOverride?: number
+  /** Stripe idempotency key. A create that times out mid-flight can be retried
+   *  without producing a SECOND payable $49 session for the same booking.
+   *
+   *  Callers must derive it with `checkoutIdempotencyKey` (src/lib/checkout-session.ts)
+   *  — Stripe replays a key for 24h while `expires_at` below is 30 minutes, so a
+   *  key that never changes would hand a customer a dead checkout page. */
+  idempotencyKey?: string
 }): Promise<Stripe.Checkout.Session> {
   const extra = params.extraMetadata ?? {}
   const unitAmount = params.amountCentsOverride && params.amountCentsOverride > 0 ? params.amountCentsOverride : BOOKING_FEE_CENTS
@@ -118,7 +125,10 @@ export async function createBookingCheckout(params: {
     allow_promotion_codes: false,
     billing_address_collection: 'auto',
     phone_number_collection: { enabled: false },
-  })
+  },
+  // Same shape as captureDeposit's key: passed through only when the caller
+  // supplied one, so nothing about the existing callers changes.
+  params.idempotencyKey ? { idempotencyKey: params.idempotencyKey } : undefined)
 }
 
 // Capture the held $49 (used when a booking is APPROVED).

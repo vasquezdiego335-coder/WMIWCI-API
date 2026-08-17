@@ -18,7 +18,10 @@ export interface PaymentCompletedResult {
  */
 export async function handlePaymentCompleted(params: {
   bookingId: string
-  amountPaid: string
+  /** ITEM C1 (round 8) — dollars STRIPE reported for the authorization, or
+   *  absent. See `PaymentCompletedPayload.amountPaid`: absent stays absent all
+   *  the way to the template, which then names no figure. */
+  amountPaid?: string | null
   customerName: string
   customerEmail: string
   requestedDate: string | null // ISO
@@ -34,7 +37,9 @@ export async function handlePaymentCompleted(params: {
       customerName: params.customerName,
       customerEmail: params.customerEmail,
       requestedDate: params.requestedDate,
-      amountPaid: params.amountPaid,
+      // ITEM C1 (round 8) — null is normalized to ABSENT so the stored payload
+      // never carries a key whose value would read as "we know it is nothing".
+      ...(params.amountPaid != null && params.amountPaid !== '' ? { amountPaid: params.amountPaid } : {}),
       items: params.items,
     }
 

@@ -142,6 +142,7 @@ WMIWCI-API/
 **SMS (Twilio):** `TWILIO_ENABLED`, `TWILIO_ACCOUNT_SID` (`AC…`), `TWILIO_AUTH_TOKEN`, `TWILIO_PHONE_NUMBER` (E.164 `+1…`)
 **Discord:** `DISCORD_BOT_TOKEN`, `DISCORD_PUBLIC_KEY`, `DISCORD_APPLICATION_ID`, `DISCORD_GUILD_ID`, `DISCORD_CHANNEL_*`
 **Auth:** `JWT_SECRET`, `CSRF_SECRET`, `OWNER_*`, `MANAGER_*`
+**Scheduled jobs:** `CRON_SECRET` (≥16 chars) — authenticates the daily payment reconciliation declared in `vercel.json`. **Unset ⇒ the schedule is refused every day and no automated money check runs**: "Stripe captured $49 with no `Payment` row" and "CONFIRMED with no capture" are then detected by nothing. A refused run raises an ops alert (`src/lib/scheduled-run-guard.ts`). Details: `DEPLOY.md` § 7, `docs/deployment.md`.
 **Optional/test:** `ALLOW_TEST_ENDPOINTS` (gate for `/api/test/sms` in prod), `MARKETING_*`, `CLOUDINARY_*`
 
 ---

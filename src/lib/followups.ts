@@ -139,19 +139,88 @@ async function addScheduled(type: FollowupType, bookingId: string, delay: number
   ])
 }
 
-async function enqueueFollowup(bookingId: string, type: FollowupType, fireAt: Date): Promise<void> {
+/** Add one stage. Returns TRUE only when the queue accepted it.
+ *
+ *  BLOCKER D3: this used to swallow the rejection into a `log.warn` and return
+ *  void, so a caller had no way to tell a scheduled sequence from a Redis stall
+ *  — and the lifecycle EffectReport reported "scheduled" for both. The failure
+ *  is still NON-FATAL (a completion is not undone by a queue outage); it is now
+ *  REPORTABLE. */
+async function enqueueFollowup(
+  bookingId: string,
+  type: FollowupType,
+  fireAt: Date,
+  add: CompletionFollowupDeps['addScheduled'] = addScheduled
+): Promise<boolean> {
   const allowed = shiftIntoAllowedHours(fireAt)
   const delay = allowed.getTime() - Date.now()
-  // Stable jobId => a second completion trigger can't create a duplicate job.
-  await addScheduled(type, bookingId, delay, `followup__${type}__${bookingId}`).catch((err) =>
+  try {
+    // Stable jobId => a second completion trigger can't create a duplicate job.
+    await add(type, bookingId, delay, `followup__${type}__${bookingId}`)
+    return true
+  } catch (err) {
     log.warn({ err: err instanceof Error ? err.message : String(err), bookingId, type }, 'enqueue follow-up failed (non-fatal)')
-  )
+    return false
+  }
 }
 
 // ── public: schedule the post-completion sequence ───────────────────────
+
+/**
+ * What `onBookingCompleted` ACTUALLY did (blocker D3).
+ *
+ * This function returned `void` and returned EARLY in three different
+ * situations — the feature flag off, no promotional consent, and every queue
+ * add rejected. Its caller (the lifecycle EffectReport) could only observe
+ * "it did not throw", so the owner was told "review/referral sequence
+ * scheduled" for a sequence that was never scheduled. A caller cannot report
+ * honestly about work it cannot see, so the outcome is now returned.
+ *
+ * `scheduled` counts stages the QUEUE ACCEPTED — never stages we intended to
+ * add.
+ */
+export type FollowupScheduleOutcome = {
+  /** Stages the scheduled queue accepted. */
+  scheduled: number
+  /** Stages the queue refused. */
+  failed: number
+  /** Stages in the completion sequence (the denominator for the two above). */
+  total: number
+  /** Machine-readable reason nothing — or not everything — was scheduled:
+   *  `followups_disabled`, a consent/eligibility block reason from
+   *  `bookingMarketingBlockReason`, or `enqueue_failed`. NULL only when every
+   *  stage really is on the queue. */
+  reason: string | null
+}
+
+/** The edge `onBookingCompleted` touches outside this process. Injectable for
+ *  the same reason JourneyDeps / LeadDeps / QuoteCaptureDeps are: the ORDERING
+ *  and the OUTCOME are what the report depends on, and neither was testable
+ *  offline while the queue add was reached through a module-scope singleton. */
+export type CompletionFollowupDeps = {
+  /** Add ONE stage. MUST reject if the queue did not accept it. */
+  addScheduled(type: FollowupType, bookingId: string, delayMs: number, jobId: string): Promise<void>
+  /** The promotional-consent / eligibility gate; null = may schedule. */
+  consentBlock(bookingId: string): Promise<string | null>
+  now(): number
+}
+
+/** A literal transcription of the calls this module already made. */
+export function defaultCompletionFollowupDeps(): CompletionFollowupDeps {
+  return {
+    addScheduled,
+    consentBlock: bookingMarketingBlockReason,
+    now: () => Date.now(),
+  }
+}
+
 /** Stamp completedAt (once) and schedule the follow-up sequence. Idempotent:
  *  stable jobIds dedupe at the queue and the ledger dedupes the actual sends. */
-export async function onBookingCompleted(bookingId: string): Promise<void> {
+export async function onBookingCompleted(
+  bookingId: string,
+  deps: CompletionFollowupDeps = defaultCompletionFollowupDeps()
+): Promise<FollowupScheduleOutcome> {
+  const total = COMPLETION_DELAYS.length
   // First completion wins — never reset the anchor time on a re-trigger.
   await prisma.booking
     .updateMany({ where: { id: bookingId, completedAt: null }, data: { completedAt: new Date() } })
@@ -159,7 +228,7 @@ export async function onBookingCompleted(bookingId: string): Promise<void> {
 
   if (!FOLLOWUPS_ENABLED) {
     log.info({ bookingId }, 'MARKETING_FOLLOWUPS_ENABLED!=true — not scheduling follow-ups')
-    return
+    return { scheduled: 0, failed: 0, total, reason: 'followups_disabled' }
   }
 
   // PROMOTIONAL CONSENT (owner spec 2026-08-06). Every stage of this sequence —
@@ -171,19 +240,28 @@ export async function onBookingCompleted(bookingId: string): Promise<void> {
   //
   // The stamp of `completedAt` above deliberately happens FIRST and
   // unconditionally: completion is a fact about the job, not about marketing.
-  const consentBlock = await bookingMarketingBlockReason(bookingId)
+  const consentBlock = await deps.consentBlock(bookingId)
   if (consentBlock) {
     log.info({ bookingId, reason: consentBlock }, 'no promotional consent — post-move follow-ups not scheduled')
-    return
+    return { scheduled: 0, failed: 0, total, reason: consentBlock }
   }
 
-  const now = Date.now()
+  const now = deps.now()
   // Enqueue in parallel (each self-guarded) so a Redis stall bounds the caller
   // to ~5s, not 4×5s — the admin "mark complete" request awaits this.
-  await Promise.all(
-    COMPLETION_DELAYS.map(({ type, delay }) => enqueueFollowup(bookingId, type, new Date(now + delay)))
+  const accepted = await Promise.all(
+    COMPLETION_DELAYS.map(({ type, delay }) => enqueueFollowup(bookingId, type, new Date(now + delay), deps.addScheduled))
   )
-  log.info({ bookingId }, 'completion follow-ups scheduled')
+  const scheduled = accepted.filter(Boolean).length
+  const failed = accepted.length - scheduled
+  if (failed > 0) {
+    // A PARTIAL result is not a success. Reported as such: the owner-facing
+    // line for this outcome must not read "scheduled".
+    log.warn({ bookingId, scheduled, failed }, 'some completion follow-ups were NOT scheduled')
+    return { scheduled, failed, total, reason: 'enqueue_failed' }
+  }
+  log.info({ bookingId, scheduled }, 'completion follow-ups scheduled')
+  return { scheduled, failed: 0, total, reason: null }
 }
 
 // ── public: record a review; a positive one triggers ONE referral ask ───

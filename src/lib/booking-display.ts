@@ -16,6 +16,12 @@
 //      a travel-fee status; the owner approval card keeps the full breakdown.
 // ════════════════════════════════════════════════════════════════════════
 
+// ITEM C1 — the ONE proof rule for a captured card deposit. Pure (it reaches
+// only src/lib/profit.ts and src/lib/money-rules.ts, both prisma-free), so this
+// module stays offline-testable and the owner card cannot drift from what the
+// customer portal, the receipt route and the revenue aggregates count.
+import { provenDepositMoney, type ProofPayment } from '../outbox/domain/captured-amount'
+
 // ── Human labels for the structured access fields ─────────────────────────
 export const ELEVATOR_LABELS: Record<string, string> = {
   none: 'No elevator — stairs only',
@@ -756,8 +762,24 @@ export type ApprovalCardData = {
   discountType?: string | null
   discountCode?: string | null
   discountPercent?: number | null
+  /** DOLLARS the booking was QUOTED for the deposit (`Booking.depositAmount`).
+   *  ITEM C1 — this is an INTENTION, and the card now says so in words. It may
+   *  never be labelled "captured". */
   depositDollars?: number | null
+  /** `Booking.depositPaid`. ITEM C1 — kept ONLY so the card can raise the alarm
+   *  when the flag is set and the ledger cannot back it up. It is written by the
+   *  approval CLAIM, before Stripe is called, so it is not evidence of a
+   *  capture and must never by itself print "captured". */
   depositPaid?: boolean
+  /** ITEM C1 — CENTS this booking can PROVE were captured on its own deposit
+   *  intent (`provenDepositMoney`), or null. The ONLY figure the card may call
+   *  captured. */
+  capturedDepositCents?: number | null
+  /** CENTS proven refunded against that capture, when a refund is recorded. */
+  refundedDepositCents?: number | null
+  /** TRUE when the ledger could not be read at all. Nothing may be claimed
+   *  either way — not "captured", and not "no record". */
+  depositEvidenceDegraded?: boolean
   moveTotal?: number | null
   balanceAfterJob?: number | null
   // Service area
@@ -797,6 +819,65 @@ export type ApprovalCardData = {
 }
 
 const GALLERY_URL = 'https://www.moveitclearit.com'
+
+// ════════════════════════════════════════════════════════════════════════
+//  ITEM C1 — THE DEPOSIT VOCABULARY FOR THE OWNER CARD.
+//
+//  Three facts, kept apart on purpose, because collapsing them is what let a
+//  booking column be printed as money:
+//    QUOTED   — `Booking.depositAmount`, what the booking was supposed to be
+//               charged. Always safe to print, never as "captured".
+//    CAPTURED — `capturedDepositCents`, from `provenDepositMoney`: a
+//               Stripe-reported COMPLETED Payment row on THIS booking's own
+//               deposit intent. The only figure that may be called captured.
+//    UNKNOWN  — the ledger could not be read (`depositEvidenceDegraded`). Then
+//               neither "captured" nor "no record" is a fact.
+//
+//  PURE, and exported so the offline card tests can drive it directly.
+// ════════════════════════════════════════════════════════════════════════
+export type DepositCardEvidence = Pick<
+  ApprovalCardData,
+  'depositDollars' | 'depositPaid' | 'capturedDepositCents' | 'refundedDepositCents' | 'depositEvidenceDegraded'
+>
+
+const centsLabel = (cents: number): string => `$${(cents / 100).toFixed(2)}`
+
+export function depositCardLines(d: DepositCardEvidence): string[] {
+  const quoted =
+    typeof d.depositDollars === 'number' ? `Deposit quoted: ${moneyFromDollars(d.depositDollars)}` : 'Deposit quoted: —'
+
+  if (d.depositEvidenceDegraded) {
+    return [quoted, 'Deposit captured: UNKNOWN — the payment ledger could not be read. Check Stripe before telling the customer anything.']
+  }
+
+  const captured = d.capturedDepositCents
+  if (typeof captured === 'number' && Number.isFinite(captured) && captured > 0) {
+    const refunded = d.refundedDepositCents
+    const refundLine =
+      typeof refunded === 'number' && refunded > 0 ? ` · ${centsLabel(refunded)} refunded` : ''
+    return [quoted, `Deposit captured: ${centsLabel(captured)}${refundLine} ✅`]
+  }
+
+  // No proof. The two "no proof" states read nothing like each other: the second
+  // one is a live money incident.
+  return [
+    quoted,
+    d.depositPaid
+      ? 'Deposit captured: NOT RECORDED — the booking is flagged paid but no Stripe payment exists for its intent. Check Stripe before telling the customer anything.'
+      : 'Deposit captured: no record (hold not captured, or not captured yet)',
+  ]
+}
+
+/** The one-line Stripe-field summary. Same rule, shorter words. */
+export function depositStatusLabel(d: DepositCardEvidence): string {
+  if (d.depositEvidenceDegraded) return '❓ Deposit UNKNOWN — payment ledger unreadable'
+  const captured = d.capturedDepositCents
+  if (typeof captured === 'number' && Number.isFinite(captured) && captured > 0) {
+    return `✅ ${centsLabel(captured)} captured`
+  }
+  if (d.depositPaid) return '⚠️ flagged paid — NO recorded capture'
+  return '🔒 hold authorized (captured on approval)'
+}
 
 /** Build the owner-facing premium approval embed + buttons. */
 export function buildBookingApprovalCard(data: ApprovalCardData): {
@@ -871,17 +952,28 @@ export function buildBookingApprovalCard(data: ApprovalCardData): {
     ].filter(Boolean)
     priceLines.push(`Discount: ${parts.join(' ')}`)
   }
-  priceLines.push(
-    data.depositPaid
-      ? `Deposit: ${money(data.depositDollars ?? 49)} captured ✅`
-      : `Deposit: ${money(data.depositDollars ?? 49)} held (captured on approval)`
-  )
+  // ── ITEM C1 — THE DEPOSIT LINES, PROVEN ────────────────────────────────
+  //  These two lines used to read `Deposit: $49 captured ✅` straight off
+  //  `depositPaid` + `depositAmount ?? 4900`, on the PRIMARY card the owner
+  //  reads before he speaks to a customer. `depositPaid` is written by the
+  //  approval CLAIM before Stripe is called (booking-approval.ts), and
+  //  `depositAmount` is what the booking was SUPPOSED to be charged — so in the
+  //  exact failure state `reconciliation.ts` reports as `captured_no_payment_row`
+  //  the card announced a captured $49 over a database with no Payment row, and
+  //  in every other case it printed a booking column as money.
+  //
+  //  The vocabulary is the one the `/booking` details card already uses
+  //  (`depositEvidenceLines`, app/api/discord/interactions/route.ts): the column
+  //  is labelled QUOTED, and only `capturedDepositCents` — derived by
+  //  `provenDepositMoney` from a Stripe-reported Payment row on this booking's
+  //  own intent — may be called captured.
+  priceLines.push(...depositCardLines(data))
   if (typeof data.moveTotal === 'number') priceLines.push(`Move total: ${money(data.moveTotal)}`)
   if (typeof data.balanceAfterJob === 'number') priceLines.push(`Balance after job: ${money(data.balanceAfterJob)}`)
   fields.push(field('💰 Pricing', priceLines.join('\n')))
 
   // 8) Stripe references
-  const stripeLines: string[] = [data.paymentStatusLabel || '🔒 $49 hold authorized (captured on approval)']
+  const stripeLines: string[] = [data.paymentStatusLabel || depositStatusLabel(data)]
   if (data.stripePaymentIntentId) stripeLines.push(`Payment Intent: \`${shortRef(data.stripePaymentIntentId)}\``)
   if (data.stripeCheckoutId) stripeLines.push(`Checkout Session: \`${shortRef(data.stripeCheckoutId)}\``)
   if (data.stripeChargeId) stripeLines.push(`Charge: \`${shortRef(data.stripeChargeId)}\``)
@@ -1054,6 +1146,11 @@ export type ApprovalBookingInput = {
   discountPercent?: number | null
   depositAmount?: number | null // cents
   depositPaid?: boolean | null
+  /** ITEM C1 — the booking's Payment rows, so the card can PROVE a capture
+   *  instead of reading `depositPaid`. OMIT them (undefined) when the ledger
+   *  could not be read: the card then says UNKNOWN rather than "no record".
+   *  An empty array is a real answer — "there are no payments". */
+  payments?: ProofPayment[] | null
   serviceAreaZone?: string | null
   manualReviewRequired?: boolean | null
   serviceAreaMessage?: string | null
@@ -1088,7 +1185,21 @@ export function approvalCardDataFromBooking(
   }
 ): ApprovalCardData {
   const dollars = (cents?: number | null): number | null => (typeof cents === 'number' ? cents / 100 : null)
-  const deposit = dollars(b.depositAmount ?? 4900) ?? 49
+  // ── ITEM C1 — `b.depositAmount ?? 4900` is gone. A booking with no deposit
+  //    column has no quoted figure; it does not silently become the house fee.
+  //    `deposit` is used ONLY for the "quoted" line and the balance arithmetic.
+  const deposit = dollars(b.depositAmount)
+  // THE PROVEN capture, from the rows the caller already loaded. Absent
+  // `payments` means the caller could not read the ledger — which is UNKNOWN,
+  // not "nothing was captured".
+  const proven = b.payments ? provenDepositMoney(b.payments, { stripePaymentIntentId: b.stripePaymentIntentId }) : null
+  const evidence: DepositCardEvidence = {
+    depositDollars: deposit,
+    depositPaid: b.depositPaid ?? false,
+    capturedDepositCents: proven && proven.state !== 'none' ? proven.cents : null,
+    refundedDepositCents: proven && proven.state !== 'none' && !proven.refundAmountUnknown ? proven.refundedCents : null,
+    depositEvidenceDegraded: proven === null,
+  }
   const moveTotal = typeof b.totalEstimate === 'number' ? b.totalEstimate : null
   return {
     bookingId: b.id,
@@ -1117,10 +1228,12 @@ export function approvalCardDataFromBooking(
     discountType: b.discountType ?? null,
     discountCode: b.discountCode ?? null,
     discountPercent: b.discountPercent ?? null,
-    depositDollars: deposit,
-    depositPaid: b.depositPaid ?? false,
+    ...evidence,
     moveTotal,
-    balanceAfterJob: moveTotal != null ? Math.round((moveTotal - deposit) * 100) / 100 : null,
+    // ITEM C1 — the balance after the job nets off the QUOTED deposit, which is
+    // the only figure that exists before approval. With no quoted deposit there
+    // is no arithmetic to do, so the line is omitted rather than invented.
+    balanceAfterJob: moveTotal != null && deposit != null ? Math.round((moveTotal - deposit) * 100) / 100 : null,
     serviceAreaZone: b.serviceAreaZone ?? null,
     manualReviewRequired: b.manualReviewRequired ?? false,
     serviceAreaMessage: b.serviceAreaMessage ?? null,
@@ -1133,9 +1246,9 @@ export function approvalCardDataFromBooking(
     difficultBuildingPickup: b.difficultBuildingPickup ?? null,
     difficultBuildingDropoff: b.difficultBuildingDropoff ?? null,
     inventoryAccuracyConfirmed: b.inventoryAccuracyConfirmed ?? null,
-    paymentStatusLabel: b.depositPaid
-      ? `✅ $${deposit.toFixed(0)} captured`
-      : `🔒 $${deposit.toFixed(0)} hold authorized (captured on approval)`,
+    // ITEM C1 — was `depositPaid ? '✅ $49 captured' : '🔒 $49 hold authorized'`,
+    // both figures off `depositAmount ?? 4900` and the verb off the claim flag.
+    paymentStatusLabel: depositStatusLabel(evidence),
     stripePaymentIntentId: b.stripePaymentIntentId ?? null,
     stripeCheckoutId: b.stripeCheckoutId ?? null,
     stripeChargeId: opts?.stripeChargeId ?? null,

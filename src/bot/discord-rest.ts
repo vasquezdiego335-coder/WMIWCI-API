@@ -20,6 +20,7 @@ import {
   type LeadCardData,
 } from '../lib/booking-display'
 import { completenessLines } from '../lib/booking-completeness'
+import { CAPTURED_PAYMENT_WHERE } from '../lib/money-rules'
 
 // ════════════════════════════════════════════════════════════════════════
 //  Discord REST sender — for the WORKER process (and any non-gateway caller)
@@ -115,7 +116,10 @@ export async function postBookingApprovalCard(
       where: { id: bookingId },
       include: {
         customer: true,
-        payments: { where: { status: 'COMPLETED' }, orderBy: { createdAt: 'desc' }, take: 1 },
+        // ITEM C1 — see discord-actions.ts: the deposit line is derived from
+        // these rows, so a captured-then-refunded deposit must not be filtered
+        // out into a false "no record".
+        payments: { where: CAPTURED_PAYMENT_WHERE, orderBy: { createdAt: 'desc' }, take: 5 },
       },
     })
     .catch((err) => {

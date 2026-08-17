@@ -8,6 +8,8 @@ import { accessSections } from '@/lib/booking-access'
 import { customerBalance, JOB_MONEY_PAYMENT_SELECT } from '@/lib/job-money'
 import { waitingMinutesBetween, WAITING_GRACE_MINUTES, WAITING_POLICY } from '@/lib/waiting-time'
 import { moveTimeKnown } from '@/lib/booking-display'
+import { readDepositEvidence, type DepositEvidence } from '@/lib/deposit-evidence'
+import { paymentView, isCharged, isRefunded, canShowReceipt, type PaymentStatus } from './payment-view'
 
 export const revalidate = 0
 
@@ -68,18 +70,21 @@ type ViewStatus =
   | 'completed' // COMPLETED / ARCHIVED
   | 'cancelled' // CANCELLED
 
-type PaymentStatus =
-  | 'captured' // hold captured — genuinely paid
-  | 'received' // authorized/held (normal post-checkout state)
-  | 'awaiting' // no verified payment yet
-  | 'released' // authorization cancelled — customer not charged
-
+// ── ITEM C2 (release blocker B2) — THE PAYMENT STATE IS A PAYMENT QUESTION ──
+//  The union and its derivation now live in ./payment-view (pure, table-tested);
+//  see that file's header for the six false strings this replaced.
 type CustomerBookingView = {
   reference: string
   customerFirstName: string
   status: ViewStatus
   paymentStatus: PaymentStatus
-  bookingFee: number // dollars
+  /** PROVEN dollars, formatted, or null when nothing proves a figure. A null
+   *  renders as no number at all — never "$49", never the booking column. */
+  paidAmount: string | null
+  heldAmount: string | null
+  refundedAmount: string | null
+  /** TRUE when a refund is recorded but its amount is not knowable. */
+  refundAmountUnknown: boolean
   requestedDate: string | null // formatted, human
   requestedTime: string | null
   dateConfirmed: boolean
@@ -185,7 +190,7 @@ function parseItems(desc?: string | null): ParsedItems {
 
 type BookingRecord = NonNullable<Awaited<ReturnType<typeof loadBooking>>>
 
-function buildCustomerView(booking: BookingRecord): CustomerBookingView {
+function buildCustomerView(booking: BookingRecord, evidence: DepositEvidence): CustomerBookingView {
   const items = parseItems(booking.itemsDescription)
 
   const rawFirst = (booking.customer.name?.split(' ')[0] || 'there').trim()
@@ -194,12 +199,13 @@ function buildCustomerView(booking: BookingRecord): CustomerBookingView {
 
   const status: ViewStatus = STATUS_MAP[booking.status] ?? 'under_review'
 
-  const captured = booking.depositPaid || booking.payments.some((p) => p.status === 'COMPLETED')
-  const paymentStatus: PaymentStatus =
-    status === 'cancelled' ? 'released'
-      : captured ? 'captured'
-        : status === 'awaiting_payment' ? 'awaiting'
-          : 'received'
+  // ── ITEM C2 — ASK THE MONEY, NOT THE STATUS (release blocker B2) ─────────
+  //    `booking.depositPaid` and `status === 'cancelled'` are both gone from
+  //    this decision. See ./payment-view.
+  const pay = paymentView(evidence, {
+    cancelled: status === 'cancelled',
+    awaitingPayment: status === 'awaiting_payment',
+  })
 
   // Confirmed date wins over requested; fall back to requested for the review state.
   const confirmedStart = booking.scheduledStart ?? booking.confirmedDate ?? null
@@ -266,8 +272,12 @@ function buildCustomerView(booking: BookingRecord): CustomerBookingView {
     reference,
     customerFirstName: firstName,
     status,
-    paymentStatus,
-    bookingFee: (booking.depositAmount ?? 4900) / 100,
+    // ── ITEM C1 — `bookingFee: (booking.depositAmount ?? 4900) / 100` is gone.
+    //    That column is what the booking was SUPPOSED to be charged; the
+    //    authorization is created for BOOKING_FEE_CENTS (src/lib/stripe.ts), so
+    //    a drifted value printed "Paid today · $123.45 secured" over a booking
+    //    with no completed payment at all. Every figure below is proven or null.
+    ...pay,
     requestedDate,
     requestedTime,
     dateConfirmed,
@@ -321,7 +331,10 @@ function heroConfig(v: CustomerBookingView): HeroConfig {
       return {
         eyebrow: 'Booking submitted',
         title: 'Booking Submitted Successfully',
-        lede: (b) => `Hi, ${b.customerFirstName}. Your booking request and $${b.bookingFee.toFixed(0)} booking fee were received.`,
+        // ITEM C1 — the figure is the one Stripe reported for the hold, or none
+        // at all. It used to be `$${b.bookingFee.toFixed(0)}` off depositAmount.
+        lede: (b) =>
+          `Hi, ${b.customerFirstName}. Your booking request and ${b.heldAmount ? `${b.heldAmount} booking fee` : 'booking fee'} were received.`,
         reviewTitle: 'Under review',
         reviewBody:
           'Our team is reviewing your requested date, route, inventory, and crew requirements. Your move is officially submitted — the requested time and final details are confirmed once you receive our confirmation email or text.',
@@ -360,13 +373,62 @@ function heroConfig(v: CustomerBookingView): HeroConfig {
         tone: 'confirmed',
         showPaidChip: true,
       }
+    // ── ITEM C2 (release blocker B2) — ONE STATUS, FOUR TRUTHS ───────────────
+    //    This case used to be a single block asserting "any $49 hold has been
+    //    released — you were not charged" and "Nothing further is owed" for
+    //    EVERY cancelled booking, including the ones we had charged. The copy
+    //    now follows the proven payment state, and the deposit sentence matches
+    //    the cancellation email the same customer already has in their inbox.
     case 'cancelled':
+      // ITEM C1 (round 8) — a ledger read that FAILED is not proof the card was
+      // untouched. This booking is cancelled; nothing about the money is known,
+      // so nothing about the money is said.
+      if (v.paymentStatus === 'unknown') {
+        return {
+          eyebrow: 'Booking cancelled',
+          title: 'This Booking Was Cancelled',
+          lede: (b) => `Hi, ${b.customerFirstName}. This booking is cancelled.`,
+          reviewTitle: 'Cancelled',
+          reviewBody:
+            'We can’t show your payment details on this page right now. If you have any question about your deposit or a hold on your card, call or text us and a real person will confirm exactly where it stands.',
+          tone: 'stop',
+          showPaidChip: false,
+        }
+      }
+      if (isCharged(v.paymentStatus)) {
+        const refunded = v.paymentStatus === 'refunded'
+        const partial = v.paymentStatus === 'partially_refunded'
+        return {
+          eyebrow: 'Booking cancelled',
+          title: 'This Booking Was Cancelled',
+          lede: (b) =>
+            refunded
+              ? `Hi, ${b.customerFirstName}. This booking is cancelled and a refund of ${b.refundedAmount ?? 'your deposit'} is recorded.`
+              : partial
+                ? `Hi, ${b.customerFirstName}. This booking is cancelled. Your ${b.paidAmount ? `${b.paidAmount} deposit` : 'deposit'} was charged and ${b.refundedAmount ? `${b.refundedAmount} of it` : 'part of it'} is recorded as refunded — our team will follow up with you about the rest.`
+                : `Hi, ${b.customerFirstName}. This booking is cancelled. Your ${b.paidAmount ? `${b.paidAmount} deposit` : 'deposit'} was charged — our team will follow up with you about it.`,
+          reviewTitle: 'Cancelled',
+          reviewBody: refunded
+            ? 'Your refund can take a few business days to appear on your statement. Call or text us any time — we’d love to help with your next move.'
+            : partial
+              ? 'A refund can take a few business days to appear on your statement, and our team will be in touch about the remainder. Call or text us any time.'
+              : 'Your deposit was charged before this booking was cancelled, and our team will be in touch about it. Call or text us any time — we’d love to help with your next move.',
+          tone: 'stop',
+          showPaidChip: false,
+        }
+      }
       return {
         eyebrow: 'Booking cancelled',
         title: 'This Booking Was Cancelled',
-        lede: (b) => `Hi, ${b.customerFirstName}. This booking is cancelled and any $${b.bookingFee.toFixed(0)} hold has been released — you were not charged.`,
+        lede: (b) =>
+          b.paymentStatus === 'released'
+            ? `Hi, ${b.customerFirstName}. This booking is cancelled and ${b.heldAmount ? `the ${b.heldAmount} hold` : 'any hold'} on your card has been released — you were not charged.`
+            : `Hi, ${b.customerFirstName}. This booking is cancelled. We’re releasing ${b.heldAmount ? `the ${b.heldAmount} authorization` : 'any authorization'} on your card.`,
         reviewTitle: 'Cancelled',
-        reviewBody: 'Nothing further is owed. Call or text us any time to rebook — we’d love to help with your move.',
+        reviewBody:
+          v.paymentStatus === 'released'
+            ? 'Nothing further is owed. Call or text us any time to rebook — we’d love to help with your move.'
+            : 'Nothing further is owed for this booking. If an authorization is still showing as pending on your card after a few days, call or text us and we’ll clear it right away.',
         tone: 'stop',
         showPaidChip: false,
       }
@@ -388,8 +450,23 @@ function heroConfig(v: CustomerBookingView): HeroConfig {
 // confirmed while it is still under review.
 type StepState = 'done' | 'active' | 'upcoming'
 function trackerSteps(v: CustomerBookingView): { label: string; state: StepState }[] {
-  const paid = v.paymentStatus === 'received' || v.paymentStatus === 'captured'
-  const payLabel = v.paymentStatus === 'released' ? '$49 hold released' : '$49 payment received'
+  const paid = v.paymentStatus === 'received' || isCharged(v.paymentStatus)
+  // ITEM C1/C2 — the label used to hardcode "$49" and to call every cancelled
+  // booking a released hold. Both halves now follow the evidence.
+  const payLabel =
+    v.paymentStatus === 'unknown'
+      ? 'Booking fee'
+      : v.paymentStatus === 'released'
+      ? v.heldAmount ? `${v.heldAmount} hold released` : 'Hold released'
+      : v.paymentStatus === 'hold_unresolved'
+        ? 'Booking fee — releasing the hold'
+        : v.paymentStatus === 'refunded'
+          ? v.refundedAmount ? `${v.refundedAmount} refunded` : 'Deposit refunded'
+          : v.paymentStatus === 'partially_refunded'
+            ? v.refundedAmount ? `${v.refundedAmount} partially refunded` : 'Deposit partially refunded'
+            : v.paymentStatus === 'captured'
+              ? v.paidAmount ? `${v.paidAmount} payment received` : 'Payment received'
+              : v.heldAmount ? `${v.heldAmount} payment received` : 'Booking fee received'
 
   let thirdLabel = 'Crew review in progress'
   let thirdState: StepState = 'upcoming'
@@ -439,9 +516,44 @@ function nextSteps(v: CustomerBookingView): { t: string; b: string }[] {
         { t: 'Thanks for moving with us', b: 'A quick review is the best way to support our small crew.' },
         { t: 'Need more cleared out?', b: 'We also haul and clear junk, garages, and estates — call us any time.' },
       ]
+    // ── ITEM C2 — "Nothing is owed / your card was never charged" was printed
+    //    for EVERY cancelled booking. On a captured one it contradicted both the
+    //    cancellation email and the receipt link right below it.
     case 'cancelled':
+      // ITEM C1 (round 8) — nothing is known about the card, so nothing is
+      // claimed about it. "Nothing is owed" would still be a money statement.
+      if (v.paymentStatus === 'unknown') {
+        return [
+          { t: 'Your booking is cancelled', b: 'No crew is scheduled and nothing further is needed from you for this move.' },
+          { t: 'Questions about your deposit?', b: 'We can’t show your payment details here right now — call or text us and we’ll confirm exactly where it stands.' },
+        ]
+      }
+      if (v.paymentStatus === 'refunded') {
+        return [
+          { t: 'Your refund is recorded', b: `${v.refundedAmount ? `${v.refundedAmount} was refunded` : 'Your deposit was refunded'} — it can take a few business days to appear on your statement.` },
+          { t: 'Rebook whenever you’re ready', b: 'Call or text and a real person will get you back on the calendar.' },
+        ]
+      }
+      if (v.paymentStatus === 'partially_refunded') {
+        return [
+          { t: 'About your deposit', b: `${v.paidAmount ? `${v.paidAmount} was charged` : 'Your deposit was charged'} before this booking was cancelled${v.refundedAmount ? `, and ${v.refundedAmount} of it is recorded as refunded` : ', and a refund is recorded against part of it'}. Our team will follow up with you about the rest.` },
+          { t: 'Rebook whenever you’re ready', b: 'Call or text and a real person will get you back on the calendar.' },
+        ]
+      }
+      if (v.paymentStatus === 'captured') {
+        return [
+          { t: 'About your deposit', b: `${v.paidAmount ? `${v.paidAmount} was charged` : 'Your deposit was charged'} before this booking was cancelled. Our team will follow up with you about it.` },
+          { t: 'Rebook whenever you’re ready', b: 'Call or text and a real person will get you back on the calendar.' },
+        ]
+      }
+      if (v.paymentStatus === 'hold_unresolved') {
+        return [
+          { t: 'Nothing is owed', b: `We’re releasing ${v.heldAmount ? `the ${v.heldAmount} authorization` : 'the authorization'} on your card. If it is still pending in a few days, call or text us and we’ll clear it.` },
+          { t: 'Rebook whenever you’re ready', b: 'Call or text and a real person will get you back on the calendar.' },
+        ]
+      }
       return [
-        { t: 'Nothing is owed', b: 'Any $49 hold was released in full — your card was never charged.' },
+        { t: 'Nothing is owed', b: `${v.heldAmount ? `The ${v.heldAmount} hold` : 'Any hold'} was released in full — your card was never charged.` },
         { t: 'Rebook whenever you’re ready', b: 'Call or text and a real person will get you back on the calendar.' },
       ]
     default:
@@ -494,19 +606,40 @@ export default async function BookingStatusPage({ params }: { params: { token: s
   const booking = await loadBooking(params.token)
   if (!booking) notFound()
 
-  const v = buildCustomerView(booking)
+  // ITEM C1/C2 — the money facts, read once, from the ledger and the audit
+  // trail. Never throws: an unreadable ledger makes every figure and every
+  // payment claim on this page fall silent rather than fall back to a column.
+  const evidence = await readDepositEvidence(booking.id, { stripePaymentIntentId: booking.stripePaymentIntentId })
+
+  const v = buildCustomerView(booking, evidence)
   const hero = heroConfig(v)
   const steps = nextSteps(v)
   const track = trackerSteps(v)
 
   const isReviewing = v.status === 'under_review'
-  const paid = v.paymentStatus === 'received' || v.paymentStatus === 'captured'
+  const paid = v.paymentStatus === 'received' || isCharged(v.paymentStatus)
   const remaining = v.remainingBalance
-  const payHeadline = v.paymentStatus === 'captured' ? 'Payment successful'
+  const payHeadline = isCharged(v.paymentStatus) ? 'Payment successful'
     : v.paymentStatus === 'received' ? 'Payment successful'
       : v.paymentStatus === 'released' ? 'Hold released'
-        : 'Confirming your payment'
-  const receivedLabel = v.paymentStatus === 'captured' ? 'Paid today' : 'Received today'
+        : v.paymentStatus === 'hold_unresolved' ? 'Releasing your authorization'
+          : v.paymentStatus === 'unknown' ? 'Your booking fee'
+          : 'Confirming your payment'
+  const receivedLabel = isCharged(v.paymentStatus) ? 'Paid today' : 'Received today'
+  // The one figure the payment card leads with, PROVEN or absent.
+  const headlineAmount = v.paidAmount ?? v.heldAmount
+  // ── ITEM C1 — THE PAYMENT SUMMARY'S OWN FIGURES ─────────────────────────
+  //  This section shipped three renders of `v.bookingFee` — a field this view
+  //  no longer has, because it WAS `(booking.depositAmount ?? 4900) / 100`:
+  //      sub  "$123 today · balance on move day"
+  //      head "Paid today · $123 secured"
+  //      row  "Paid today            $123"
+  //  A booking column, printed three times as money the customer had paid,
+  //  including on a booking with no completed payment at all. `headlineAmount`
+  //  is the proven capture, else the figure Stripe reported for the hold, else
+  //  nothing — and every one of these lines now renders only when it exists.
+  const feeSectionSub = headlineAmount ? `${headlineAmount} today · balance on move day` : 'Booking fee · balance on move day'
+  const isCancelled = v.status === 'cancelled'
 
   const hasMoveDetails = !!(
     v.requestedDate || v.serviceType || v.origin || v.destination || v.truckType ||
@@ -712,7 +845,7 @@ export default async function BookingStatusPage({ params }: { params: { token: s
 
         {/* 5 — Payment summary */}
         <section className="bk-card bk-anim-up" style={anim(0.7)}>
-          <SectionHead icon={<IconReceipt size={18} />} iconClass="bk-ic-reveal" title="Payment" sub={`$${v.bookingFee.toFixed(0)} today · balance on move day`} />
+          <SectionHead icon={<IconReceipt size={18} />} iconClass="bk-ic-reveal" title="Payment" sub={isCancelled ? 'This booking was cancelled' : feeSectionSub} />
 
           {paid ? (
             <>
@@ -720,10 +853,15 @@ export default async function BookingStatusPage({ params }: { params: { token: s
                 <span className="bk-payhead__ic"><IconCheck size={18} strokeWidth={2.9} /></span>
                 <div>
                   <p className="bk-payhead__t">{payHeadline}</p>
-                  <p className="bk-payhead__s">{receivedLabel} · {money(v.bookingFee)} secured</p>
+                  {/* ITEM C1 — no proven figure ⇒ no figure. Never `bookingFee`. */}
+                  <p className="bk-payhead__s">{headlineAmount ? `${receivedLabel} · ${headlineAmount} secured` : receivedLabel}</p>
                 </div>
               </div>
-              <p className="bk-payreassure">Your booking fee has secured your reservation while our scheduling team prepares your move.</p>
+              <p className="bk-payreassure">
+                {isCancelled
+                  ? 'This booking was cancelled — the summary below is what was quoted for the move, not an amount now due.'
+                  : 'Your booking fee has secured your reservation while our scheduling team prepares your move.'}
+              </p>
               <dl className="bk-paybreak">
                 {v.estimateTotal != null && (
                   <div className="bk-payline">
@@ -743,22 +881,38 @@ export default async function BookingStatusPage({ params }: { params: { token: s
                     <dd className="bk-payline__v">−{money(v.discountTotal)}</dd>
                   </div>
                 )}
-                <div className="bk-payline bk-payline--accent">
-                  <dt className="bk-payline__k">{receivedLabel}</dt>
-                  <dd className="bk-payline__v">{money(v.bookingFee)}</dd>
-                </div>
-                {remaining != null && (
+                {/* ITEM C1 — the accent row printed `bookingFee` under the words
+                    "Paid today". It renders ONLY when the ledger (or Stripe's
+                    own hold figure) actually carries a number. */}
+                {headlineAmount && (
+                  <div className="bk-payline bk-payline--accent">
+                    <dt className="bk-payline__k">{receivedLabel}</dt>
+                    <dd className="bk-payline__v">{headlineAmount}</dd>
+                  </div>
+                )}
+                {isRefunded(v.paymentStatus) && v.refundedAmount && (
+                  <div className="bk-payline">
+                    <dt className="bk-payline__k">Refunded</dt>
+                    <dd className="bk-payline__v">−{v.refundedAmount}</dd>
+                  </div>
+                )}
+                {/* ITEM C2 — a cancelled booking has no move-day balance. The
+                    remaining-balance row and the "due on move day" line are a
+                    statement that money is owed, and nothing is owed here. */}
+                {!isCancelled && remaining != null && (
                   <div className="bk-payline">
                     <dt className="bk-payline__k">Remaining balance</dt>
                     <dd className="bk-payline__v">{money(remaining)}</dd>
                   </div>
                 )}
-                <div className="bk-paydue">Due on move day, after your crew is confirmed</div>
+                {!isCancelled && <div className="bk-paydue">Due on move day, after your crew is confirmed</div>}
               </dl>
               <p className="bk-note">
-                {v.paymentStatus === 'captured'
-                  ? 'Your booking fee is paid and applied to your move total — nothing hidden.'
-                  : 'Your booking fee is secured and applied to your move total once we confirm your crew.'}
+                {isCancelled
+                  ? 'Our team will follow up with you about your deposit. Call or text us any time.'
+                  : v.paymentStatus === 'captured'
+                    ? 'Your booking fee is paid and applied to your move total — nothing hidden.'
+                    : 'Your booking fee is secured and applied to your move total once we confirm your crew.'}
               </p>
             </>
           ) : (
@@ -769,13 +923,23 @@ export default async function BookingStatusPage({ params }: { params: { token: s
                 <p className="bk-pay__note">
                   {v.paymentStatus === 'released'
                     ? 'The authorization on your card was released in full. You were not charged.'
-                    : 'We’re confirming your booking fee. This updates automatically — reach out if it doesn’t clear in a few minutes.'}
+                    : v.paymentStatus === 'hold_unresolved'
+                      ? 'We’re releasing the authorization on your card. If it is still showing as pending in a few days, call or text us and we’ll clear it right away.'
+                      : v.paymentStatus === 'unknown'
+                        ? 'We can’t show your payment details on this page right now. Call or text us and we’ll confirm exactly where your booking fee stands.'
+                        : 'We’re confirming your booking fee. This updates automatically — reach out if it doesn’t clear in a few minutes.'}
                 </p>
               </div>
             </div>
           )}
 
-          {v.receiptUrl && (
+          {/* ── ITEM C2 (release blocker B2) — THE RECEIPT LINK ─────────────
+              This was gated on the Receipt row alone, so a "View payment
+              receipt" button rendered directly under "The authorization on your
+              card was released in full. You were not charged." A receipt is a
+              claim that money was taken; it may only appear where the ledger
+              proves money was taken. */}
+          {v.receiptUrl && canShowReceipt(v.paymentStatus) && (
             <a className="bk-btn bk-btn--ghost" href={v.receiptUrl} target="_blank" rel="noreferrer">
               <IconReceipt size={16} /> View payment receipt
             </a>

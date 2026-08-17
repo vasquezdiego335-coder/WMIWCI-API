@@ -11,7 +11,21 @@
 //  I/O — list recent Stripe charges + read local Payments/Bookings — and is
 //  exposed via GET /api/admin/reconciliation (owner-only) and
 //  scripts/reconcile-payments.ts, so it can run on demand or on a cron.
+//
+//  ── ITEM B1 (release blocker, 2026-08-14) — IT ALSO HAS TO BE RUN ──────────
+//  Verification found this detector ALREADY reports both shapes of the B1
+//  defect correctly (`captured_no_payment_row` critical + `confirmed_no_payment`
+//  high) — and that nothing ever ran it: no cron, no scheduled job, no admin
+//  page linking the route. A money defect nobody is told about is invisible
+//  whether or not a detector exists.
+//
+//  So `reconcile()` is UNCHANGED (it is correct; do not rewrite it) and what is
+//  added around it is delivery: a pure severity summary, a pure alert body, and
+//  `runReconciliationWithAlert`, which posts critical/high findings to the ops
+//  channel. The route can then be driven by a scheduler as well as by the owner.
 // ════════════════════════════════════════════════════════════════════════
+
+import { timingSafeEqual } from 'node:crypto'
 
 export type ReconIssueType =
   | 'captured_no_payment_row'
@@ -199,6 +213,97 @@ export function reconcile(input: ReconInput): ReconIssue[] {
   return issues
 }
 
+// ── ITEM B1 — turning findings into something a human is told ────────────────
+
+export type ReconSummary = {
+  total: number
+  critical: number
+  high: number
+  medium: number
+  /** True when at least one finding needs a human today. Critical and high are
+   *  both money-integrity findings (`captured_no_payment_row` is money taken and
+   *  never recorded; `confirmed_no_payment` is a confirmed job whose deposit is
+   *  either unrecorded or was never captured at all). Medium is drift worth
+   *  reading, not worth paging for. */
+  needsAttention: boolean
+}
+
+/** Pure. Counts findings by severity. */
+export function summarizeIssues(issues: ReconIssue[]): ReconSummary {
+  const count = (s: ReconSeverity): number => issues.filter((i) => i.severity === s).length
+  const critical = count('critical')
+  const high = count('high')
+  return { total: issues.length, critical, high, medium: count('medium'), needsAttention: critical + high > 0 }
+}
+
+/** What the owner is told to DO about each kind of finding. Every line is
+ *  derived from a detected row — nothing here claims an outcome. */
+const ISSUE_ACTIONS: Record<ReconIssueType, string> = {
+  captured_no_payment_row:
+    'Stripe has this money and the app does not. Open the booking and click Approve again — it re-drives the same record. Do NOT charge the customer again.',
+  confirmed_no_payment:
+    'Either the deposit was captured and never recorded, or it was never captured. Click Approve again on the booking; it checks Stripe and converges. Do NOT charge the customer again before it does.',
+  amount_mismatch: 'Compare the Stripe charge with the Payment row and correct the local amount.',
+  duplicate_payment: 'Two Payment rows describe one deposit — reporting and the customer balance will both be wrong.',
+  refund_state_mismatch: 'A refund exists at Stripe that the database never recorded.',
+  dispute_state_mismatch: 'A dispute exists at Stripe that the database never recorded — evidence deadlines are short.',
+}
+
+export type ReconAlert = { title: string; lines: Array<{ message: string; action?: string }> }
+
+/**
+ * Pure. The ops-channel body for a report, or null when nothing needs a human.
+ *
+ * Only critical/high findings are alerted: a channel that pings for routine
+ * drift gets muted, and a muted channel loses the critical alerts with it
+ * (ops-alert.ts design rule 3).
+ */
+export function buildReconAlert(report: ReconReport): ReconAlert | null {
+  const summary = summarizeIssues(report.issues)
+  if (!summary.needsAttention) return null
+  const urgent = report.issues.filter((i) => i.severity === 'critical' || i.severity === 'high')
+  return {
+    title:
+      `Payment reconciliation: ${summary.critical} critical, ${summary.high} high ` +
+      `(last ${report.windowDays}d, ${report.chargesChecked} charges checked)`,
+    // postToChannels caps the body at 8 lines; take the critical ones first so
+    // the cap can never drop the worst finding.
+    lines: [...urgent]
+      .sort((a, b) => (a.severity === b.severity ? 0 : a.severity === 'critical' ? -1 : 1))
+      .slice(0, 8)
+      .map((i) => ({ message: `[${i.severity.toUpperCase()}] ${i.detail}`, action: ISSUE_ACTIONS[i.type] })),
+  }
+}
+
+// ── ITEM B1 — who may trigger a SCHEDULED run ────────────────────────────────
+
+/** Placeholder-shaped secrets, so an unconfigured deployment LOOKS unconfigured
+ *  rather than accidentally authenticating (same rule as ops-alert.configured). */
+const PLACEHOLDER_SECRET = /^(REPLACE|PASTE|PUT|ADD|SET|INSERT|YOUR|CHANGE|EXAMPLE|SAMPLE|TODO|XXX)([_-]|$)/i
+
+/**
+ * May this request run the reconciliation WITHOUT an owner session?
+ *
+ * Used by GET /api/admin/reconciliation so a scheduler (Vercel Cron sends
+ * `Authorization: Bearer $CRON_SECRET`) can drive the detector that nobody was
+ * running. Pure and exported so the guard is unit-tested offline.
+ *
+ * FAILS CLOSED, three ways: no secret configured, a placeholder secret, or a
+ * secret short enough to be guessable all mean "no scheduled access" — never
+ * "everybody passes". The comparison is length-checked then constant-time.
+ */
+export function isScheduledRunAuthorized(authHeader: string | null | undefined, secret: string | undefined | null): boolean {
+  const expected = secret?.trim()
+  if (!expected || expected.length < 16 || PLACEHOLDER_SECRET.test(expected)) return false
+  const header = authHeader?.trim()
+  if (!header) return false
+  const presented = /^bearer\s+/i.test(header) ? header.replace(/^bearer\s+/i, '').trim() : header
+  const a = Buffer.from(presented)
+  const b = Buffer.from(expected)
+  if (a.length !== b.length) return false
+  return timingSafeEqual(a, b)
+}
+
 // ── Runner (I/O) — lazy-loads prisma + Stripe so the offline test never does. ──
 
 export type ReconReport = {
@@ -261,5 +366,41 @@ export async function runReconciliation(windowDays = 30): Promise<ReconReport> {
     paymentsChecked: payments.length,
     bookingsChecked: bookings.length,
     issues,
+  }
+}
+
+export type ReconRunResult = ReconReport & {
+  summary: ReconSummary
+  /** Whether an ops channel ACCEPTED the alert. `false` with a reason when
+   *  nothing was delivered — including "nothing needed reporting", so a silent
+   *  run and an undeliverable alert never look the same. */
+  alerted: boolean
+  alertReason?: string
+}
+
+/**
+ * ITEM B1 — run the detector AND tell somebody. This is what a scheduled run
+ * calls; the alert is best-effort and can never fail the report.
+ *
+ * `postAlert` is injected so the offline test proves the wiring without a
+ * network call; production defaults to ops-alert.postOpsAlert (bare HTTPS POST,
+ * never throws).
+ */
+export async function runReconciliationWithAlert(
+  windowDays = 30,
+  postAlert?: (title: string, lines: Array<{ message: string; action?: string }>) => Promise<{ delivered: boolean; reason?: string }>,
+): Promise<ReconRunResult> {
+  const report = await runReconciliation(windowDays)
+  const summary = summarizeIssues(report.issues)
+  const alert = buildReconAlert(report)
+  if (!alert) return { ...report, summary, alerted: false, alertReason: 'nothing needed reporting' }
+
+  const send = postAlert ?? (await import('./ops-alert')).postOpsAlert
+  try {
+    const res = await send(alert.title, alert.lines)
+    return { ...report, summary, alerted: res.delivered, ...(res.delivered ? {} : { alertReason: res.reason ?? 'not delivered' }) }
+  } catch (e) {
+    // postOpsAlert does not throw, but an injected sender might.
+    return { ...report, summary, alerted: false, alertReason: e instanceof Error ? e.message : String(e) }
   }
 }

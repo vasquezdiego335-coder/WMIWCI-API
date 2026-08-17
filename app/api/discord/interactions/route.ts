@@ -13,6 +13,7 @@ import {
   type Embed,
 } from "@/bot/task-service";
 import { approveBooking, declineBooking } from "@/lib/booking-approval";
+import { cancelJobForBooking, completeBooking } from "@/lib/lifecycle-service";
 import { onBookingConfirmed } from "@/lib/journeys";
 import { offerRescheduleToCustomer } from "@/lib/reschedule";
 import { t } from "@/lib/i18n";
@@ -78,8 +79,12 @@ type CardBooking = {
    *  still gets the anchor detected by shape. */
   scheduledStart?: Date | null;
   startTimeKnown?: boolean | null;
-  depositAmount: number;
   customer?: { name: string } | null;
+  // NOTE (item R7): `depositAmount` is deliberately ABSENT. It is what the
+  // booking was SUPPOSED to be charged, not what was captured, and while the
+  // card could reach for it the card kept printing "Captured $49.00" over
+  // databases with no captured payment. The amount now has exactly one source:
+  // the capture the approval call actually performed or verified.
 };
 
 // The "✅ Approved" card that replaces the approval card in place. The only
@@ -88,7 +93,7 @@ type CardBooking = {
 function confirmedCard(
   booking: CardBooking,
   approverName: string,
-  capturedCents?: number,
+  capturedCents?: number | null,
   receiptUrl?: string | null,
 ) {
   // Item R3-1: the card the owner sees AT THE MOMENT OF APPROVAL used to run
@@ -96,7 +101,23 @@ function confirmedCard(
   // shared booking-aware formatter prints the DATE for a day-level booking and
   // the real hour for a timed one.
   const dateStr = formatMoveWhen(booking) || "—";
-  const cents = capturedCents ?? booking.depositAmount ?? 4900;
+
+  // ── ITEM R7: PRINT ONLY WHAT WAS PROVED ────────────────────────────────
+  // This line used to read `capturedCents ?? booking.depositAmount ?? 4900`
+  // under a hardcoded "Deposit captured", so the card announced "💳 Captured
+  // $49.00" whenever the approval could not verify an amount — including the
+  // failure mode the convergence path exists for (booking CONFIRMED, Payment
+  // row absent or not COMPLETED, the $49 sitting in Stripe unrecorded). The
+  // owner then told the customer about a capture nothing had checked.
+  //
+  // `capturedCents` is non-null ONLY when this call captured the intent or read
+  // a COMPLETED Payment row for it. Null means UNKNOWN — and unknown is said
+  // out loud, never rounded up to the standard fee.
+  const provenCents =
+    typeof capturedCents === "number" && Number.isFinite(capturedCents) && capturedCents >= 0
+      ? capturedCents
+      : null;
+
   const components = receiptUrl
     ? [{ type: 1, components: [{ type: 2, style: 5, label: "🧾 Customer Receipt", url: receiptUrl }] }]
     : [];
@@ -105,11 +126,16 @@ function confirmedCard(
       {
         title: `✅ Approved — ${booking.displayId}`,
         color: 0x22c55e,
-        description: "Deposit captured · booking **CONFIRMED**.",
+        description:
+          provenCents === null
+            ? "Booking **CONFIRMED** · this action did NOT verify a deposit capture."
+            : "Deposit captured · booking **CONFIRMED**.",
         fields: [
           { name: "👤 Customer", value: booking.customer?.name ?? "—", inline: true },
           { name: "📅 Move date", value: dateStr, inline: true },
-          { name: "💳 Captured", value: `$${(cents / 100).toFixed(2)}`, inline: true },
+          provenCents === null
+            ? { name: "💳 Deposit", value: "Not verified — check Stripe", inline: true }
+            : { name: "💳 Captured", value: `$${(provenCents / 100).toFixed(2)}`, inline: true },
         ],
         footer: { text: `Approved by ${approverName}` },
         timestamp: new Date().toISOString(),
@@ -119,17 +145,100 @@ function confirmedCard(
   };
 }
 
-// The "❌ Denied" card (authorization released, no charge).
-function deniedCard(booking: { displayId: string; customer?: { name: string } | null }, approverName: string) {
+// ── ITEM R7 (second surface): the DEPOSIT LINE ON THE DETAILS CARD ────────
+//
+// `confirmedCard` above stopped inventing an amount. The `/booking` details
+// card printed the same untrue thing by another route: "Deposit: $49.00 · Paid:
+// Yes", straight off `Booking.depositAmount` and `Booking.depositPaid`. Neither
+// is evidence of a capture — `depositPaid` is written by the approval CLAIM,
+// BEFORE any money moves (src/lib/booking-approval.ts documents it as proving
+// nothing), and `depositAmount` is what the booking was SUPPOSED to be charged.
+// In the exact failure state the convergence path exists for (row CONFIRMED,
+// capture at Stripe, no Payment row) this card told the owner the deposit was
+// paid, and the owner tells the customer.
+//
+// The proof of a captured deposit is one COMPLETED Payment row on the booking's
+// OWN payment intent — the same proof `recordedByAnotherCaller` uses. Move-day
+// payments carry different intents and must never stand in for the deposit.
+//
+// PURE and free of closures on purpose: it is lifted out of this file and
+// called directly by src/lib/__tests__/discord-deposit-truth.test.ts, exactly
+// as day-anchor-display / discord-card-truth lift the card builders.
+function depositEvidenceLines(
+  booking: { depositAmount?: number | null; depositPaid?: boolean | null; stripePaymentIntentId?: string | null },
+  payments: Array<{ status?: string | null; amount?: number | null; stripePaymentIntentId?: string | null }>,
+): string[] {
+  const dollars = (cents: number): string => `$${(cents / 100).toFixed(2)}`;
+  const quoted =
+    typeof booking.depositAmount === "number"
+      ? `Deposit quoted: ${dollars(booking.depositAmount)}`
+      : "Deposit quoted: —";
+
+  const intent = booking.stripePaymentIntentId ?? null;
+  const captured = payments.filter(
+    (p) =>
+      p.status === "COMPLETED" &&
+      typeof p.amount === "number" &&
+      intent !== null &&
+      p.stripePaymentIntentId === intent,
+  );
+  if (captured.length > 0) {
+    const total = captured.reduce((sum, p) => sum + (p.amount as number), 0);
+    return [quoted, `Deposit captured: ${dollars(total)} · recorded on \`${intent}\``];
+  }
+  // No proof. Say which of the two "no proof" states this is — the second one
+  // is a live money incident and reads nothing like the first.
+  return [
+    quoted,
+    booking.depositPaid
+      ? "Deposit captured: NOT RECORDED — the booking is flagged paid but no COMPLETED payment exists for its intent. Check Stripe before telling the customer anything."
+      : "Deposit captured: no record (hold not captured, or not captured yet)",
+  ];
+}
+
+// ── ITEM C2 (release blocker B2): the "❌ Denied" card ─────────────────────
+//
+// This card hardcoded "Authorization released (no charge)" and "Hold: Released
+// — not charged". `declineBooking` HAS always computed and returned
+// `holdReleased`, and this call site threw it away — so when the Stripe release
+// threw, the owner's own record said the customer was not charged while $49 sat
+// pending on their card. He then repeats it to the customer on the phone.
+//
+// PURE and free of closures on purpose, exactly like `depositEvidenceLines`
+// above: a Next.js route file may only export handlers, so the test lifts this
+// declaration out of the shipped source, transpiles it and CALLS it
+// (src/lib/__tests__/cancelled-booking-truth.test.ts).
+function deniedCard(
+  booking: { displayId: string; customer?: { name: string } | null },
+  approverName: string,
+  release?: { released: boolean; state?: string } | null,
+) {
+  // Absent evidence is NOT a released hold. Only `released === true` may say so.
+  const released = release?.released === true;
+  const noHold = release?.state === "no_hold";
+  const failed = release?.state === "release_failed";
+
+  const holdValue = released
+    ? "Released — not charged"
+    : noHold
+      ? "None — no authorization was ever placed"
+      : failed
+        ? "⚠️ RELEASE FAILED — the customer may still have a pending $ hold. Press Deny again to retry, or void it in Stripe."
+        : "⚠️ NOT VERIFIED — this action did not confirm the hold was released. Check Stripe.";
+
   return {
     embeds: [
       {
         title: `❌ Denied — ${booking.displayId}`,
-        color: 0xef4444,
-        description: "Authorization released (no charge) · booking **CANCELLED**.",
+        color: released || noHold ? 0xef4444 : 0xf59e0b,
+        description: released
+          ? "Authorization released (no charge) · booking **CANCELLED**."
+          : noHold
+            ? "Booking **CANCELLED** · there was no authorization to release."
+            : "Booking **CANCELLED** — but the authorization release was NOT confirmed.",
         fields: [
           { name: "👤 Customer", value: booking.customer?.name ?? "—", inline: true },
-          { name: "💳 Hold", value: "Released — not charged", inline: true },
+          { name: "💳 Hold", value: holdValue, inline: true },
         ],
         footer: { text: `Denied by ${approverName}` },
         timestamp: new Date().toISOString(),
@@ -198,7 +307,9 @@ async function handleApprove(bookingId: string | undefined, messageId: string | 
   // Render the confirmed card from the (pre-claim) booking snapshot.
   return NextResponse.json({
     type: RES_UPDATE_MESSAGE,
-    data: confirmedCard(result.booking, approverName, result.capturedCents ?? undefined, result.receiptUrl),
+    // R7: `capturedCents` is passed THROUGH, null and all. Coercing null to
+    // undefined here would have re-created the fallback the card just lost.
+    data: confirmedCard(result.booking, approverName, result.capturedCents, result.receiptUrl),
   });
 }
 
@@ -220,7 +331,23 @@ async function handleDeny(bookingId: string | undefined, messageId: string | und
     }
     return ephemeral(`⚠️ ${result.message}`);
   }
-  return NextResponse.json({ type: RES_UPDATE_MESSAGE, data: deniedCard(result.booking, approverName) });
+  // ── B7 — the crew half of a deny (the same call the admin decline makes).
+  //    declineBooking owns the $49 hold release and the CANCELLED claim; it does
+  //    not know about the Job. A Job row can already exist (crew may be attached
+  //    before approval), and one left SCHEDULED keeps a cancelled move in the
+  //    worker's "upcoming" list and keeps ASSIGNMENT_ON_CANCELLED_JOB from ever
+  //    firing. Refuses to act unless the booking really is CANCELLED; idempotent.
+  await cancelJobForBooking({
+    bookingId: result.booking.id,
+    actor: { name: approverName, discordUserId: actor.userId },
+    source: "discord",
+    reason: "Booking denied",
+  });
+  // ITEM C2 — the release outcome the service computed now REACHES the card.
+  return NextResponse.json({
+    type: RES_UPDATE_MESSAGE,
+    data: deniedCard(result.booking, approverName, result.release),
+  });
 }
 
 // ── offer_reschedule:<id> → reuse the shared offer logic → update card ─────
@@ -458,7 +585,9 @@ async function handleViewFullBooking(bookingId: string | undefined, messageId: s
     `Base rate: ${moneyD(booking.baseRate)}`,
     `Total estimate: ${moneyD(booking.totalEstimate)}`,
     booking.finalAmount != null ? `Final: ${moneyD(booking.finalAmount)}` : null,
-    `Deposit: ${moneyC(booking.depositAmount)} · Paid: ${yn(booking.depositPaid)}`,
+    // Item R7: quoted and captured are DIFFERENT facts and are printed as two.
+    // `depositPaid` alone never says "paid" on an owner surface again.
+    ...depositEvidenceLines(booking, booking.payments),
     booking.truckAddonDueOnMoveDay ? `Truck add-on: ${moneyC(booking.truckAddonAmount)} (move day)` : null,
   ], true);
 
@@ -735,47 +864,59 @@ async function handleJobStart(bookingId: string | undefined, actor: DiscordActor
 }
 
 // ── job_complete:<id> — customer confirmed the move is finished ────────────
+//
+// ── BLOCKER B8 — THIS IS THE DEFAULT COMPLETION PATH, AND IT USED TO END HERE.
+//    src/lib/fulfillment.ts posts a move-day job card for EVERY paid booking, and
+//    "✅ Complete Job" on that card is one tap in the field; the admin
+//    equivalent is four sequential clicks. This handler wrote Booking + Job +
+//    audit atomically and then STOPPED — no move-complete email, no +24h
+//    reminder for the balance still owed, no `move_completed` trigger, no review
+//    request, no referral ask, no repeat-customer follow-up. And it was
+//    unrecoverable: VALID_TRANSITIONS['COMPLETED'] = ['ARCHIVED'], so the admin
+//    route could never run its completion block for the booking afterwards.
+//
+//    The transaction is now the SHARED one (src/lib/lifecycle-service.ts) that
+//    the admin route calls, so both surfaces write identical rows and emit
+//    identical messages. Discord's idempotent second press is preserved by the
+//    service's conditional claim, which reports `already_completed` instead of
+//    re-firing anything.
 async function handleJobComplete(bookingId: string | undefined, actor: DiscordActor) {
   const crewName = actor.username;
   if (!bookingId) return ephemeral("⚠️ This button is missing its booking reference.");
   const booking = await loadJobBooking(bookingId);
   if (!booking) return ephemeral("⚠️ Booking not found for this card.");
 
-  if (booking.status === "COMPLETED" || booking.status === "ARCHIVED") {
+  // A second press re-renders the card — but a booking left COMPLETED with NO
+  // `completedAt` (the stranded state the admin route used to create) still has
+  // a post-move sequence owing, and completeBooking's repair claim is the only
+  // thing that can send it. So the early return is now for a COMPLETE
+  // completion, not merely a COMPLETED status.
+  if ((booking.status === "COMPLETED" || booking.status === "ARCHIVED") && booking.completedAt) {
     return NextResponse.json({ type: RES_UPDATE_MESSAGE, data: await renderJobCard(booking) });
   }
   if (booking.status === "CANCELLED") {
     return ephemeral("⚠️ This booking was cancelled — nothing to complete.");
   }
   const skippedStart = booking.status === "CONFIRMED" || booking.status === "SCHEDULED";
-  if (!skippedStart && booking.status !== "IN_PROGRESS") {
+  if (!skippedStart && booking.status !== "IN_PROGRESS" && booking.status !== "COMPLETED" && booking.status !== "ARCHIVED") {
     return ephemeral("⚠️ This booking hasn't been approved yet — the owner needs to approve it first.");
   }
 
-  const now = new Date();
-  const startedAt = booking.job?.startedAt ?? null;
-  const durationMins = startedAt ? Math.max(0, Math.round((now.getTime() - startedAt.getTime()) / 60000)) : null;
+  const result = await completeBooking({
+    bookingId: booking.id,
+    actor: { name: crewName, discordUserId: actor.userId ?? null },
+    source: "discord",
+    // Discord's interaction window is ~3s. The lifecycle FACT is committed
+    // before this budget applies; only the (idempotent) message handoffs are
+    // bounded by it, and an expired budget is logged, never claimed as sent.
+    effectsTimeoutMs: 2000,
+  });
+  if (!result.ok) return ephemeral(`⚠️ ${result.message}`);
 
-  await prisma.$transaction([
-    prisma.booking.update({
-      where: { id: booking.id },
-      data: { status: "COMPLETED", completedAt: now },
-    }),
-    prisma.job.upsert({
-      where: { bookingId: booking.id },
-      update: { status: "COMPLETED", completedAt: now, ...(durationMins != null ? { durationMins } : {}) },
-      create: { bookingId: booking.id, status: "COMPLETED", startedAt: now, completedAt: now },
-    }),
-    prisma.auditLog.create({
-      data: {
-        action: "JOB_COMPLETED",
-        bookingId: booking.id,
-        details: { by: crewName, discordUserId: actor.userId ?? null, from: booking.status, startNotPressed: skippedStart || undefined },
-      },
-    }),
-  ]);
-
-  apiLogger.info({ bookingId: booking.id, by: crewName, durationMins }, "Job completed via Discord");
+  apiLogger.info(
+    { bookingId: booking.id, by: crewName, durationMins: result.durationMins, outcome: result.outcome, effects: result.effects },
+    "Job completed via Discord",
+  );
   const updated = await loadJobBooking(booking.id);
   return NextResponse.json({ type: RES_UPDATE_MESSAGE, data: await renderJobCard(updated ?? booking) });
 }

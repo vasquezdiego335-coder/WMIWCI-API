@@ -26,6 +26,9 @@ import { buildCloseoutView } from '@/lib/closeout-service'
 import { bpToPercentLabel } from '@/lib/profit-allocation'
 import { isSettledForMoney } from '@/lib/financial-completeness'
 import { isEligibleExpense } from '@/lib/money-rules'
+// ITEM C1 — THE deposit proof rule, shared with the customer portal, the Discord
+// cards and the receipt route, so this page cannot claim a capture they cannot.
+import { provenDepositMoney } from '@/outbox/domain/captured-amount'
 import { Callout, CompletenessBadge } from '../../_ui'
 import ExpenseForm from '../../ExpenseForm'
 import { EXPENSE_CATEGORY_LABELS } from '../../_labels'
@@ -117,6 +120,16 @@ export default async function JobDetail({ params }: { params: { id: string } }) 
   // a profit figure without it — crew pay of $0 usually means "not recorded".
   const completeness = jobFinancialCompleteness(booking)
   const collected = profit.netRevenueCents
+  // ── ITEM C1 — WHAT THIS BOOKING CAN PROVE ABOUT THE CARD DEPOSIT ─────────
+  //  The deposit badge below read `depositAmount` for the figure and
+  //  `depositPaid` for the verb, so it printed "Deposit (Stripe) $123.45 ·
+  //  captured" from two intention columns — `depositPaid` is set by the
+  //  approval CLAIM before Stripe is called, which is exactly the state
+  //  reconciliation.ts reports as `captured_no_payment_row`. Diego reads this
+  //  card and then tells the customer. The rows are already loaded above, so
+  //  this costs no query: it is the same rule the customer portal, the owner
+  //  cards and the receipt route use.
+  const depositProof = provenDepositMoney(booking.payments, { stripePaymentIntentId: booking.stripePaymentIntentId })
   const refunded = profit.refundedCents
   const crewRows = booking.job?.crew ?? []
   const labor = jobLabor(booking as never)
@@ -234,7 +247,10 @@ export default async function JobDetail({ params }: { params: { id: string } }) 
             </div>
             <div style={{ fontSize: '12px', color: '#9CA3AF' }}>#{booking.displayId} · {booking.serviceAreaZone ? String(booking.serviceAreaZone).replace(/_/g, ' ') : '—'} · booked {dateOnly(booking.createdAt)}</div>
           </div>
-          <BookingActions bookingId={booking.id} status={booking.status} />
+          {/* ITEM R2 — `booking.approve` is OWNER-only, and it gates the
+              "Retry payment record" repair action. The route checks it too;
+              this only stops rendering a button the reader may not press. */}
+          <BookingActions bookingId={booking.id} status={booking.status} canApprove={can(session?.role as Role, 'booking.approve')} />
         </div>
         <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', marginTop: '12px' }}>
           <QuickLink href={`tel:${digits(c.phone)}`}>📞 Call</QuickLink>
@@ -406,7 +422,34 @@ export default async function JobDetail({ params }: { params: { id: string } }) 
               </div>
             )}
             <div style={{ marginTop: '10px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
-              <PayBadge color="#3B82F6" label="Deposit (Stripe)" value={cents(booking.depositAmount) ?? '$0.00'} note={booking.depositPaid ? 'captured' : 'held, not captured'} />
+              {/* ITEM C1 — the figure and the verb are PROVEN, or the badge says
+                  so. A quoted deposit is labelled quoted; only a Stripe-reported
+                  Payment row on this booking's own intent is "captured". */}
+              {depositProof.state !== 'none' ? (
+                <PayBadge
+                  color="#3B82F6"
+                  label="Deposit (Stripe)"
+                  value={cents(depositProof.cents)!}
+                  note={
+                    depositProof.state === 'captured'
+                      ? 'captured'
+                      : depositProof.refundAmountUnknown
+                        ? 'captured · refund recorded (amount unknown)'
+                        : `captured · ${cents(depositProof.refundedCents)} refunded`
+                  }
+                />
+              ) : (
+                <PayBadge
+                  color={booking.depositPaid ? '#EF4444' : '#9CA3AF'}
+                  label="Deposit (Stripe)"
+                  value={cents(booking.depositAmount) ?? '—'}
+                  note={
+                    booking.depositPaid
+                      ? 'quoted · FLAGGED PAID BUT NOT RECORDED — check Stripe before telling the customer'
+                      : 'quoted · no capture recorded'
+                  }
+                />
+              )}
               <PayBadge color="#10B981" label="Collected" value={cents(balance.collectedCents) ?? '$0.00'} />
               {balance.refundedCents > 0 && <PayBadge color="#EF4444" label="Refunded" value={cents(balance.refundedCents)!} />}
               <PayBadge
@@ -418,7 +461,9 @@ export default async function JobDetail({ params }: { params: { id: string } }) 
             </div>
             {balance.outstandingCents > 0 && (
               <p style={{ fontSize: '11px', color: '#6B7280', margin: '10px 0 0' }}>
-                Stripe only ever holds the {cents(booking.depositAmount) ?? '$49.00'} deposit. The full
+                {/* ITEM C1 — `?? '$49.00'` invented the house fee for a booking
+                    with no deposit column at all. */}
+                Stripe only ever holds the {cents(booking.depositAmount) ?? 'quoted'} deposit. The full
                 outstanding balance — base labor included — is collected in person on move day and must be
                 logged with “Record payment”.
               </p>

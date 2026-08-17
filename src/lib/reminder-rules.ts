@@ -94,6 +94,11 @@ export interface RuleBooking {
    *  while a 20:00 studio does not. Optional: absent → the flat truck fallback,
    *  the pre-P0-A behaviour, so existing fixtures and callers are unchanged. */
   estimatedHours?: number | null
+  /** Booking.createdAt. Only the D1 stale-unpaid-hold rule reads it, and that
+   *  rule stays SILENT when it is absent: a row whose age nobody can prove is a
+   *  row nobody may call abandoned. Optional so every existing fixture and
+   *  caller behaves exactly as before. */
+  createdAt?: Date | null
   /** Booking.startTimeKnown (item R2-1). FALSE = the owner booked a DATE and
    *  has not committed to a crew hour, so `requestedDate`/`confirmedDate` are
    *  00:00 ET day anchors whose time-of-day must never be printed. Optional:
@@ -188,6 +193,17 @@ const digits = (s: string) => (s ?? '').replace(/\D/g, '').replace(/^1(?=\d{10}$
 const ACTIVE_STATUSES = ['PENDING_APPROVAL', 'CONFIRMED', 'SCHEDULED', 'IN_PROGRESS']
 const LIVE_STATUSES = ['CONFIRMED', 'SCHEDULED', 'IN_PROGRESS']
 
+/** D1: how old an unpaid hold must be before the Action Center lists it.
+ *
+ *  A REPORTING threshold, not a safety guard — nothing acts on it. It sits well
+ *  above `checkout-expiry.STALE_CHECKOUT_MIN_AGE_MS` (the 2 h floor the verified
+ *  findings asked for) and above the first two abandoned-checkout recovery
+ *  stages, so the owner is never handed a booking the recovery funnel is still
+ *  actively working; the relationship to that floor is pinned by a test rather
+ *  than trusted, because this module must stay free of Prisma/Stripe imports
+ *  and so cannot import the constant. */
+export const STALE_UNPAID_HOLD_MS = 24 * 3_600_000
+
 // True when this booking needs a truck someone must confirm.
 function truckUnresolved(b: RuleBooking): boolean {
   const needsTruck = b.truckAddonDueOnMoveDay || (b.truckProvider ?? '').toLowerCase() === 'customer'
@@ -275,6 +291,38 @@ export function evaluateBooking(b: RuleBooking, now: Date): ReminderCandidate[] 
         dedupeKey: key('booking-agreement-missing', 'booking', b.id), dueAt: start,
       })
     }
+  }
+
+  // ── D1: THE STALE UNPAID CHECKOUT HOLD, AS A REPORT ──────────────────────
+  //
+  // B6 made an hourly sweep CANCEL these. That path cancelled bookings whose
+  // customers were mid-payment and could never be undone, so D1 removed it: a
+  // stale hold is now SURFACED here and ended only by a person (the audited
+  // "Release truck hold" action on the booking page).
+  //
+  // Everything this says is provable from the row in front of it — the booking
+  // is PENDING_PAYMENT (a truck-hold status, R2-2), no deposit is recorded, a
+  // fleet truck is assigned, and the row is older than the threshold. It asks
+  // Stripe nothing and claims nothing about the customer's card. With no
+  // `createdAt` it says NOTHING: age it cannot prove is age it does not assert.
+  if (
+    b.status === 'PENDING_PAYMENT' &&
+    holdsTruck(b.status) &&
+    !!b.truckId &&
+    !!b.createdAt &&
+    now.getTime() - b.createdAt.getTime() >= STALE_UNPAID_HOLD_MS
+  ) {
+    out.push({
+      reminderType: 'checkout-hold-stale', category: 'JOBS_SCHEDULING', severity: 'MEDIUM',
+      title: `${b.customerName}: unpaid hold is still holding a truck`,
+      description:
+        `No deposit has been recorded for this booking since it was created on ${etDate(b.createdAt)}, and it still ` +
+        `holds its assigned truck${when}. If the customer is still coming, send them a fresh payment link. If not, open ` +
+        `the booking and use "Release truck hold" — that cancels the booking and cannot be undone, so nothing does it ` +
+        `automatically.`,
+      sourceEntityType: 'booking', sourceEntityId: b.id, sourceUrl: jobUrl(b.id),
+      dedupeKey: key('checkout-hold-stale', 'booking', b.id), dueAt: start,
+    })
   }
 
   if (b.status === 'PENDING_APPROVAL' && startsWithin(2 * DAY)) {

@@ -13,6 +13,12 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   const rawBody = await req.text()
   const signature = req.headers.get('stripe-signature')
 
+  // ITEM B3 / R3 — the status code IS the retry contract, so it is passed
+  // through UNCHANGED. 200 means the event was durably queued or genuinely
+  // finished. A 500 means it was neither, and a 409 means another runner holds
+  // a live lease so this delivery did nothing — in both of those cases Stripe's
+  // own retry schedule is the only thing that can still deliver the event.
+  // Never blanket-200 this route, and never collapse 409/500 into 200.
   const result = await processStripeWebhook(rawBody, signature)
   return NextResponse.json(result.body, { status: result.status })
 }

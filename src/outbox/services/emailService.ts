@@ -90,9 +90,19 @@ export async function sendPreApprovalEmail(p: PaymentCompletedPayload): Promise<
   return deliverRendered(rendered, { to: rendered.to || p.customerEmail, bookingId: p.bookingId })
 }
 
-/** APPROVED → the premium "your booking is approved" confirmation email. */
+/**
+ * APPROVED → the premium "your booking is approved" confirmation email.
+ *
+ * ITEM D2 — the payload's PROVEN captured amount is forwarded. It used to pass
+ * no amount at all, and the renderer then fell back to `booking.depositAmount`,
+ * so this — the live email path — printed a deposit figure that came from a
+ * booking column rather than from Stripe. An absent/null value stays absent:
+ * the renderer re-checks the COMPLETED Payment row and, failing that, sends the
+ * confirmation with no dollar amount in it.
+ */
 export async function sendFinalConfirmationEmail(p: ApprovedPayload): Promise<{ id: string }> {
   const rendered = await renderFinalConfirmation(p.bookingId, {
+    capturedAmountCents: p.capturedAmountCents ?? null,
     customerEmail: p.customerEmail,
     customerName: p.customerName,
     requestedDate: p.requestedDate,

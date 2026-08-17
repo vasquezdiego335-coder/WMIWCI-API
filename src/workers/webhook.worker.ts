@@ -2,7 +2,7 @@ import { Worker, Job } from 'bullmq'
 import type Stripe from 'stripe'
 import { bullConnection } from '../lib/redis'
 import { queueLogger } from '../lib/logger'
-import { processStripeEventJob } from '../lib/stripe-events'
+import { isWebhookLeaseHeld, processStripeEventJob } from '../lib/stripe-events'
 
 // ════════════════════════════════════════════════════════════════════════
 //  Stripe webhook worker — consumes the `webhook-retry` queue.
@@ -34,11 +34,41 @@ export function startWebhookWorker() {
     concurrency: 5,
   })
 
+  // ── ITEM R3 — a failure here is the RETRY, not the loss ────────────────
+  // Two shapes are worth telling apart in the log, because they call for
+  // opposite reactions:
+  //   • lease held  — another runner owns the event right now. Expected
+  //     contention; the retry exists precisely to come back for it. The job
+  //     MUST still fail so BullMQ re-delivers — returning normally is what
+  //     turned a killed run into a silently completed job.
+  //   • last attempt — the queue will not come back again. That is the moment
+  //     the event becomes invisible, so it is logged as such rather than as one
+  //     more identical line among five.
   worker.on('failed', (job, err) => {
-    queueLogger.error(
-      { jobId: job?.id, eventId: job?.data?.event?.id, err: err.message },
-      'Stripe webhook job failed'
-    )
+    const attempts = job?.opts?.attempts ?? 1
+    const made = job?.attemptsMade ?? 0
+    const isFinalAttempt = made >= attempts
+    const base = {
+      jobId: job?.id,
+      eventId: job?.data?.event?.id,
+      eventType: job?.data?.event?.type,
+      attempt: made,
+      attempts,
+      err: err.message,
+    }
+    if (isFinalAttempt) {
+      queueLogger.error(
+        base,
+        'Stripe webhook job failed on its LAST attempt — the queue will not retry it again. ' +
+          'The webhook_logs row for this event is left "failed"; replay the event from the Stripe dashboard.'
+      )
+      return
+    }
+    if (isWebhookLeaseHeld(err)) {
+      queueLogger.warn(base, 'Stripe webhook job deferred — another runner holds the lease; this delivery will be retried')
+      return
+    }
+    queueLogger.error(base, 'Stripe webhook job failed')
   })
 
   return worker

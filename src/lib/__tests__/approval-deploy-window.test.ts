@@ -320,7 +320,8 @@ async function createdRow(over: { startTime?: string } = {}): Promise<Row> {
 
 type Recorder = {
   captures: Array<{ pi: string; key: string }>
-  notified: Array<{ cents: number; by: string }>
+  /** ITEM M1 — null = Stripe reported no captured amount. */
+  notified: Array<{ cents: number | null; by: string }>
   warns: unknown[]
   errors: unknown[]
   infos: unknown[]

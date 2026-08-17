@@ -24,6 +24,7 @@ import {
   buildLeadCard,
   type LeadCardData,
 } from '../lib/booking-display'
+import { CAPTURED_PAYMENT_WHERE } from '../lib/money-rules'
 
 // ════════════════════════════════════════════════════════════════════════
 //  Move It Clear It. — Discord bot actions + gateway client
@@ -301,7 +302,11 @@ export async function postBookingApprovalCard(
       where: { id: bookingId },
       include: {
         customer: true,
-        payments: { where: { status: 'COMPLETED' }, orderBy: { createdAt: 'desc' }, take: 1 },
+        // ITEM C1 — the card PROVES its deposit line from these rows, so the
+        // filter must not hide a captured-then-refunded deposit (which is
+        // REFUNDED / PARTIALLY_REFUNDED, not COMPLETED) and make the card say
+        // "no record". CAPTURED_PAYMENT_WHERE is the shipped money-rules filter.
+        payments: { where: CAPTURED_PAYMENT_WHERE, orderBy: { createdAt: 'desc' }, take: 5 },
       },
     })
     .catch(() => null)

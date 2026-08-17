@@ -68,6 +68,8 @@ const MOVING_OS_TESTS = [
   'src/lib/__tests__/admin-route-coverage.test.ts',
   // Approval service: capture exactly once, atomic claim, rollback on failure
   'src/lib/__tests__/booking-approval.test.ts', // H4: P0-B/E rewrote booking-approval.ts
+  'src/lib/__tests__/approval-convergence.test.ts', // B1: captured-but-uncommitted, and the replay that repairs it
+  'src/lib/__tests__/reconciliation.test.ts', // B1: the money detector the convergence relies on
   // Estimate + crew/staffing
   'src/lib/__tests__/estimate-assistant.test.ts',
   'src/lib/__tests__/staffing-plan.test.ts',
@@ -81,6 +83,8 @@ const MOVING_OS_TESTS = [
   // Migration-window honesty on the approval path
   'src/lib/__tests__/approval-deploy-window.test.ts',
   'src/lib/__tests__/migration-window.test.ts', // P0-E: fulfillment claim + pre-capture staffing
+  // Stripe webhook durability + the truth of the fulfilment fan-out
+  'src/lib/__tests__/webhook-durability.test.ts', // B3/B4: 200 only when queued-or-processed; handoff tally
   // Truck double-booking + the conflict codes underneath it
   'src/lib/__tests__/truck-conflicts.test.ts',
   'src/lib/__tests__/truck-hold.test.ts',
@@ -91,6 +95,43 @@ const MOVING_OS_TESTS = [
   'src/lib/__tests__/action-center-kick.test.ts',
   'src/lib/__tests__/scan-lock.test.ts', // H4: scanCoversBooking / claim + cooldown (P0-D, H2)
   'src/lib/__tests__/reminder-rules.test.ts', // H4: the rule engine + sync diff the scan claim covers
+  // Recovery-sequence suppression, the scheduled money check, and the card the
+  // owner reads (tranche-1 repair R5/R6/R7)
+  'src/lib/__tests__/lifecycle-orchestration.test.ts', // R5: the journey orchestration the suppression lives in
+  'src/lib/__tests__/recovery-suppression.test.ts', // R5: suppress only against proof, never against a status
+  'src/lib/__tests__/scheduled-run-guard.test.ts', // R6: CRON_SECRET documented; a refused schedule alerts
+  'src/lib/__tests__/discord-card-truth.test.ts', // R7: the Approved card prints only a verified amount
+  // B6: an expired checkout must release its truck hold — and must NEVER cancel
+  // a booking whose customer is mid-payment (the session-identity, own-clock and
+  // grace guards, plus the sweep that is the net under a missed webhook)
+  'src/lib/__tests__/checkout-expiry.test.ts',
+  // B7/B8: the lifecycle blocker — ONE transactional service behind both the
+  // admin status route and the Discord move-day card (Booking + Job + crew +
+  // audit together, then the post-move messages), and the replay action that
+  // rescues a job completed before it existed.
+  'src/lib/__tests__/lifecycle-service.test.ts',
+  // D3: the lifecycle EffectReport may not claim work that was never
+  // scheduled. Two files because the flags they run under
+  // (MARKETING_FOLLOWUPS_ENABLED / EMAIL_JOURNEYS_ENABLED) are module-level
+  // consts read ONCE per process: `-report` is the SHIPPED DEFAULT (both off,
+  // which is the reproduction), `-consent` runs with them on.
+  'src/lib/__tests__/lifecycle-effect-report.test.ts',
+  'src/lib/__tests__/lifecycle-effect-consent.test.ts',
+  // C3/C4: the three narrow lifecycle holes (a thrown read reported as a
+  // deliberate skip, a failure nobody read, `already_cancelled` for a COMPLETED
+  // move) and the owner's release finishing the cancellation its two twins
+  // perform — job, crew, journeys, and the checkout session a cancelled booking
+  // can no longer consume.
+  'src/lib/__tests__/lifecycle-release.test.ts',
+  // C1/C2: no customer- or owner-facing string may state an amount, a capture,
+  // a release or a refund the system cannot prove from the database.
+  // `-proof-` is the money RULE and every renderer that prints a figure (the
+  // Discord cards, the admin money card, the admin cancellation email, the
+  // receipt route, the pre-approval hold figure and both outbox events);
+  // `cancelled-` is release blocker B2 — the customer portal's payment state,
+  // the denied card, the declined email, and the decline's release retry.
+  'src/lib/__tests__/deposit-proof-truth.test.ts',
+  'src/lib/__tests__/cancelled-booking-truth.test.ts',
 ]
 
 // ── KNOWN BASELINE FAILURES — deliberately NOT in this run ──────────────

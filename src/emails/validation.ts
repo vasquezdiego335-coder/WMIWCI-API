@@ -117,7 +117,15 @@ export function requireFields(template: string, data: Record<string, unknown>, r
 // booking-approval.ts / fulfillment.ts), so the gate blocks the real
 // "missing real date/window/link" case without blocking valid sends.
 export const REQUIRED_FIELDS = {
-  'final-confirmation': ['displayId', 'date', 'timeLabel', 'amountPaid', 'portalUrl'],
+  // ITEM M1 (2026-08-15) — `amountPaid` is NO LONGER REQUIRED here. It used to
+  // be, because every sender always had a figure to put in it — but the figure
+  // the approval sender used was `intent.amount_received ?? intent.amount ??
+  // booking.depositAmount`, and that last term is a booking column, not money
+  // anybody captured. With the invented fallback removed, a capture Stripe
+  // reports without an amount has NO provable figure, and the choice is between
+  // an honest confirmation with no dollar amount and no confirmation at all.
+  // The date / window / link requirements — what this gate exists for — stand.
+  'final-confirmation': ['displayId', 'date', 'timeLabel', 'portalUrl'],
   'job-reminder': ['scheduledStart', 'timeLabel', 'originAddress', 'portalUrl'],
   'payment-receipt': ['displayId', 'date', 'amountPaid', 'portalUrl'],
   'review-request': ['googleReviewUrl'],
