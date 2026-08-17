@@ -110,6 +110,56 @@ still completes and the admin page states that notifications are not configured.
 
 ---
 
+## The public URL: `moveitclearit.com/deposit/…`
+
+**Today, links work on `APP_URL`** — that host definitely serves the page, and
+`DEPOSIT_LINK_BASE_URL` is deliberately unset. A pretty URL that 404s is worse
+than an ugly one that works.
+
+To move to the brand domain, the path must be **proxied to this app**, and the
+proxy must forward the request server-side (a redirect would break the unfurl,
+because Discord and Facebook do not follow one before reading Open Graph).
+
+WMIWCI-SITE is served by Vercel. Add to its `vercel.json`:
+
+```json
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "rewrites": [
+    { "source": "/deposit/:path*",     "destination": "https://APP_HOST/deposit/:path*" },
+    { "source": "/api/deposit/:path*", "destination": "https://APP_HOST/api/deposit/:path*" }
+  ]
+}
+```
+
+`APP_HOST` is the deployed app's real hostname. **This is deliberately not
+filled in**: `APP_URL` in `.env` still reads `wmiwci-backend.vercel.app` while
+the app actually runs on Railway, and guessing wrong here 404s every deposit
+link. Confirm the host, put it in both rules, then set
+`DEPOSIT_LINK_BASE_URL=https://moveitclearit.com` on the API.
+
+Both rules are needed — the page and the checkout POST it makes must be on the
+same origin, or the route's same-origin guard rejects the request.
+
+Verify after configuring:
+
+```bash
+curl -sI https://moveitclearit.com/deposit/AAAAAAAAAAAA | head -1        # expect 200, not 3xx
+curl -s -A 'Discordbot/2.0' https://moveitclearit.com/deposit/AAAAAAAAAAAA | grep 'og:image'
+```
+
+## Preflight
+
+Read-only. Writes nothing, contacts nothing. Safe against production at any time.
+
+```bash
+node scripts/deposit-preflight.mjs
+```
+
+It checks the environment (including whether Stripe is live or test, and whether
+Discord is configured at all), that the 1200x630 card exists, and that the
+migration is still additive.
+
 ## Deployment checklist
 
 - [ ] `npx prisma migrate deploy` — applies
