@@ -493,7 +493,7 @@ const CSS = `
 .dp-herolabel{color:var(--navy);font-size:17px;font-weight:700;}
 .dp-heroval{color:var(--cta);font-size:36px;font-weight:800;line-height:1;
   font-variant-numeric:tabular-nums;letter-spacing:-.02em;}
-.dp-applied{color:#3F4854;font-size:15px;line-height:1.5;margin:0 0 18px;}
+.dp-applied{color:#3F4854;font-size:16px;line-height:1.5;margin:0 0 18px;}
 
 /* action */
 .dp-pay{display:block;width:100%;border:none;border-radius:12px;background:var(--cta);
@@ -505,7 +505,7 @@ const CSS = `
 .dp-secondary{margin-top:12px;border:1.5px solid var(--navy);border-radius:10px;
   background:var(--white);color:var(--navy);font-size:16px;font-weight:600;
   min-height:44px;padding:11px 18px;cursor:pointer;font-family:inherit;width:100%;}
-.dp-stripe{color:var(--muted);font-size:14px;text-align:center;margin:14px 0 0;}
+.dp-stripe{color:var(--muted);font-size:15px;text-align:center;margin:14px 0 0;}
 
 /* messages — never colour alone: each carries an icon and a border */
 .dp-notice{background:#FFFBEB;border:1px solid #F1D48A;border-left:4px solid var(--gold);
@@ -521,7 +521,7 @@ const CSS = `
 /* policy */
 .dp-policy{border-top:1px solid var(--dbone);margin-top:20px;padding-top:16px;}
 .dp-polh{color:var(--navy);font-size:16px;font-weight:700;margin:0 0 8px;}
-.dp-polb{color:#4A5361;font-size:15px;line-height:1.6;margin:0 0 8px;}
+.dp-polb{color:#4A5361;font-size:16px;line-height:1.6;margin:0 0 8px;}
 .dp-link{color:var(--cta);font-weight:600;}
 
 /* reassurance */

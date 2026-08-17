@@ -236,7 +236,8 @@ test('body text is at least 16px and prices are substantially larger', () => {
   assert.match(css, /\.dp-heroval\{[^}]*font-size:36px/)
   assert.match(css, /\.dp-mval\{[^}]*font-size:18px/)
   assert.match(css, /\.dp-mlabel\{[^}]*font-size:16px/)
-  assert.match(css, /\.dp-polb\{[^}]*font-size:15px/, 'policy text is readable, not fine print')
+  assert.match(css, /\.dp-polb\{[^}]*font-size:16px/, 'policy text is readable, not fine print')
+  assert.match(css, /\.dp-applied\{[^}]*font-size:16px/, 'body copy is 16px, not 15')
   // Nothing below 14px anywhere.
   const sizes = Array.from(css.matchAll(/font-size:(\d+)px/g), (m) => Number(m[1]))
   const tiny = sizes.filter((n) => n < 12)
