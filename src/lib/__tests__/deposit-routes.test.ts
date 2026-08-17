@@ -101,9 +101,11 @@ test('checkout reads the amount from the DATABASE and never from the request', (
 })
 
 test('the pay button sends no amount at all', () => {
-  const panel = code('app/deposit/[token]/PayPanel.tsx')
+  const panel = code('app/deposit/[token]/DepositView.tsx')
   assert.match(panel, /body: '\{\}'/, 'the client posts an empty body')
-  assert.ok(!/amount/i.test(panel.split('const pay =')[1]?.split('}, [token])')[0] ?? ''), 'the pay call must not mention an amount')
+  const payFn = panel.split('const pay = useCallback')[1]?.split('}, [token, t])')[0] ?? ''
+  assert.ok(payFn.length > 0, 'the pay handler must exist')
+  assert.ok(!/amountCents|amount:/i.test(payFn), 'the pay call must not send an amount')
 })
 
 test('the deposit URL carries a token only — no amount, no ids', () => {
@@ -157,13 +159,13 @@ test('a deposit is an immediate CHARGE — it never inherits the manual-capture 
 })
 
 test('no Stripe secret can reach the browser', () => {
-  for (const p of [CHECKOUT, 'app/deposit/[token]/page.tsx', 'app/deposit/[token]/PayPanel.tsx', 'app/(admin)/admin/deposit-links/DepositLinksClient.tsx']) {
+  for (const p of [CHECKOUT, 'app/deposit/[token]/page.tsx', 'app/deposit/[token]/DepositView.tsx', 'app/(admin)/admin/deposit-links/DepositLinksClient.tsx']) {
     const src = read(p)
     assert.ok(!src.includes('STRIPE_SECRET_KEY'), `${p} must not reference the secret key`)
     assert.ok(!src.includes('sk_live'), `${p} must not contain a live key`)
   }
   // The two CLIENT components must not import the Stripe SDK at all.
-  for (const p of ['app/deposit/[token]/PayPanel.tsx', 'app/(admin)/admin/deposit-links/DepositLinksClient.tsx']) {
+  for (const p of ['app/deposit/[token]/DepositView.tsx', 'app/(admin)/admin/deposit-links/DepositLinksClient.tsx']) {
     const src = read(p)
     assert.ok(src.trimStart().startsWith("'use client'"), `${p} is a client component`)
     assert.ok(!src.includes("from 'stripe'"), `${p} must not import Stripe`)
@@ -366,7 +368,7 @@ test('a duplicate webhook delivery is dropped by the existing idempotency log', 
 })
 
 test('the success REDIRECT never marks anything paid', () => {
-  const panel = code('app/deposit/[token]/PayPanel.tsx')
+  const panel = code('app/deposit/[token]/DepositView.tsx')
   const page = code('app/deposit/[token]/page.tsx')
   const status = code(STATUS)
 
@@ -381,7 +383,11 @@ test('the success REDIRECT never marks anything paid', () => {
   assert.ok(!/export async function (POST|PATCH|PUT|DELETE)/.test(status), 'the status route has no write verb')
 
   // And the honest holding state exists.
-  assert.match(panel, /Confirming your payment/)
+  // The copy lives in the i18n module now; assert it in BOTH languages so a
+  // Spanish customer cannot be dropped into an English holding state.
+  const copy = read('src/lib/deposit-copy.ts')
+  assert.match(copy, /Confirming your payment/)
+  assert.match(copy, /Confirmando su pago/)
 })
 
 test('the status poll leaks nothing but a status word', () => {
