@@ -201,7 +201,18 @@ export async function createDepositCheckout(params: {
       metadata,
       // A day is long enough for someone to read a text and pay; a session that
       // never expires is a payable page loose on the internet forever.
-      expires_at: Math.floor(Date.now() / 1000) + 24 * 60 * 60,
+      //
+      // QUANTIZED TO THE HOUR, and that is not cosmetic. Stripe only honours an
+      // idempotency key when EVERY parameter matches the first use. A raw
+      // `Date.now()` differs by milliseconds between two calls, so the retry
+      // this key exists to collapse was instead rejected with
+      // StripeIdempotencyError — which the checkout route turns into "We could
+      // not start the payment" for a customer who should simply have been handed
+      // the session that already existed. Found by a real test-mode call, not by
+      // reading the code. Rounding the base to the hour makes two calls in the
+      // same hour byte-identical, so the key does what its name says; expiry
+      // lands 24-25h out, which is the same promise as before.
+      expires_at: Math.floor(Date.now() / (60 * 60 * 1000)) * (60 * 60) + 24 * 60 * 60,
       success_url: params.successUrl,
       cancel_url: params.cancelUrl,
       allow_promotion_codes: false,

@@ -195,6 +195,26 @@ test('a rapid double-tap cannot create two usable payment sessions', () => {
   assert.match(code(STRIPE), /params\.idempotencyKey \? \{ idempotencyKey: params\.idempotencyKey \}/)
 })
 
+test('expires_at is QUANTIZED, or the idempotency key silently does nothing', () => {
+  const src = code(STRIPE)
+  const fn = src.slice(src.indexOf('export async function createDepositCheckout'))
+  const line = /expires_at:[^\n]+/.exec(fn)?.[0] ?? ''
+
+  // Stripe honours an idempotency key only when EVERY parameter matches the
+  // first use. A raw Date.now() differs by milliseconds between two calls, so
+  // the retry the key exists to collapse comes back as StripeIdempotencyError
+  // and the customer is told "We could not start the payment" instead of being
+  // handed the session that already exists. Verified against real test-mode
+  // Stripe: unquantized -> error, quantized -> same session id returned.
+  assert.ok(line.includes('60 * 60 * 1000'), 'expires_at must be quantized to the hour, not raw Date.now()')
+  assert.ok(!/expires_at:\s*Math\.floor\(Date\.now\(\) \/ 1000\)/.test(fn),
+    'a raw per-millisecond expires_at breaks the idempotency key')
+
+  // And it must still actually expire — an unbounded session is a payable page
+  // loose on the internet forever.
+  assert.ok(line.includes('24 * 60 * 60'), 'the session must still expire within a day')
+})
+
 test('the database enforces one session and one payment intent per deposit', () => {
   const schema = read('prisma/schema.prisma')
   const model = schema.slice(schema.indexOf('model DepositRequest'))
