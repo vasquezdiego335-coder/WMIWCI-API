@@ -22,6 +22,7 @@ import {
   LABOR_MIN_WORKERS,
   LABOR_MAX_WORKERS,
   LABOR_PER_WORKER_RATE_CENTS,
+  SCOPE_OVERAGE,
   laborOnlyRateCentsForWorkers,
   laborOnlyCrewSize,
   laborOnlyQuoteCents,
@@ -168,6 +169,35 @@ test('catalog: hourly block carries the crew ladder and it matches the money pat
   for (const [w, cents] of Object.entries(h.crewRatesCents)) {
     assert.equal(cents, laborOnlyRateCentsForWorkers(Number(w)), `catalog rate for ${w} workers`)
   }
+})
+
+// ── SCOPE_OVERAGE stays a separate published price ────────────────────────
+//
+// SCOPE_OVERAGE is the FULL-SERVICE beyond-approved-scope rate (per additional
+// 30 minutes, approval required first). It is deliberately NOT derived from —
+// and must never replace or be replaced by — the labor-only crew ladder. The
+// two answer different questions: "what does a labor-only crew cost per hour"
+// vs "what does extra time cost when a flat-rate job outgrows its scope".
+
+test('SCOPE_OVERAGE keeps its own published values — not derived from the ladder', () => {
+  // The published per-30-minute overage rates, pinned exactly.
+  assert.equal(SCOPE_OVERAGE.byCrewSize[2].amount, 75)
+  assert.equal(SCOPE_OVERAGE.byCrewSize[3].amount, 105)
+  assert.equal(SCOPE_OVERAGE.byCrewSize[4].amount, 140)
+  assert.equal(SCOPE_OVERAGE.requiresApprovalBeforeWork, true)
+})
+
+test('the ladder and SCOPE_OVERAGE are independent: 3-crew overage is $210/hr, 3-crew labor is $225/hr', () => {
+  // If either ever silently replaced the other, these two figures would
+  // collapse into one. They must stay different, at their own published values.
+  const overagePerHourCents = (SCOPE_OVERAGE.byCrewSize[3].amount ?? 0) * 2 * 100 // $105/30min → $210/hr
+  const ladderPerHourCents = laborOnlyRateCentsForWorkers(3) // $225/hr
+  assert.equal(overagePerHourCents, 21000)
+  assert.equal(ladderPerHourCents, 22500)
+  assert.notEqual(overagePerHourCents, ladderPerHourCents)
+  // Same independence at 4 crew: $140/30min = $280/hr vs ladder $300/hr.
+  assert.equal((SCOPE_OVERAGE.byCrewSize[4].amount ?? 0) * 2 * 100, 28000)
+  assert.equal(laborOnlyRateCentsForWorkers(4), 30000)
 })
 
 // ── WMIC-1019: the owner's exact oversized-inventory case ─────────────────
