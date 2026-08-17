@@ -893,7 +893,7 @@ test('rollout: a flag-shaped value is ignored, never read as "block everybody"',
   }
 })
 
-test('the support block cannot fall out of alignment again', () => {
+test('the support block cannot fall out of alignment again', async () => {
   // REPORTED FROM A REAL INBOX: "the phone number was not aligned, it's all
   // over". Three 33.33% columns, but icon 36 + gap 10 + a 23-character email
   // at 13px needs ~212px and the column only had 168px. Percentages without
@@ -911,9 +911,24 @@ test('the support block cannot fall out of alignment again', () => {
   assert.ok(!/33\.33%/.test(fn), 'the contact row must not use thirds — the longest value does not fit')
   assert.match(fn, /width=\{36\}/, 'the icon column stays a FIXED width so every icon shares one left edge')
 
-  // And the invariant that matters, asserted on the RENDERED output of every
-  // template that uses it: no fractional-width contact columns anywhere.
-  const rendered = readFileSync(resolve(__dirname, '..', '..', '..', 'email-previews/quote-request-received.html'), 'utf8')
+  // And the invariant that matters, asserted on RENDERED output. Rendered
+  // HERE, not read from email-previews/: that directory is gitignored and only
+  // exists after `npm run preview:emails`, so reading it made this the one
+  // test that failed on every fresh checkout while passing in every long-lived
+  // worktree that still carried a stale artifact. Rendering inline also tests
+  // the template as it IS, not as it once previewed. Same props the preview
+  // generator uses (scripts/preview-all-emails.ts).
+  const { render } = await import('@react-email/render')
+  const React = await import('react')
+  const { default: QuoteRequestReceived } = await import('../../emails/quote-request-received')
+  const rendered = await render(
+    React.createElement(QuoteRequestReceived, {
+      firstName: 'Diego (TEST)',
+      estimatedPrice: '$1,049',
+      moveDate: 'Saturday, September 5',
+      moveSize: '3 Bedrooms',
+    }),
+  )
   assert.ok(!rendered.includes('33.33%'), 'rendered email still contains a thirds column')
   assert.equal((rendered.match(/width:36px;height:36px/g) ?? []).length, 3, 'three fixed-width icon tiles')
 })
