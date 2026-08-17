@@ -50,15 +50,15 @@ test('generateMetadata does NOT depend on the database', () => {
 test('a database outage renders a page rather than losing the preview', () => {
   const src = read(DEPOSIT_PAGE)
   assert.match(src, /kind: 'unavailable'/)
-  assert.match(src, /UnavailableView/)
+  assert.match(read('app/deposit/[token]/DepositView.tsx'), /UnavailableState/)
   // And it must NOT tell a real customer their link is invalid.
-  assert.match(src, /Your link is fine/)
+  assert.match(read('src/lib/deposit-copy.ts'), /Your link is fine/)
 })
 
 test('the deposit page declares the full Open Graph set the spec requires', () => {
   const src = read(DEPOSIT_PAGE)
   assert.match(src, /title: 'Secure Your Move \| Move It Clear It'/)
-  assert.match(src, /description: 'Review and securely pay your Move It Clear It deposit\.'/)
+  assert.match(src, /description: 'Review your quote and securely pay your booking deposit\.'/)
   assert.match(src, /siteName: 'Move It Clear It'/)
   assert.match(src, /type: 'website'/)
   assert.match(src, /alternates: \{ canonical: url \}/)
@@ -71,8 +71,25 @@ test('the deposit page declares the full Open Graph set the spec requires', () =
   // metadata export and warns on every request; asserting the export keeps the
   // brand colour from silently reverting to a no-op.
   assert.match(src, /export function generateViewport\(\): Viewport/)
-  assert.match(src, /return \{ themeColor: ORANGE \}/)
-  assert.ok(!/themeColor: ORANGE,/.test(src), 'themeColor must NOT be in the metadata export')
+  const vp = src.slice(src.indexOf('export function generateViewport'))
+  assert.match(vp, /themeColor: ORANGE/)
+  // The page must not zoom-lock — older customers pinch to read a price.
+  assert.match(vp, /width: 'device-width'/)
+  assert.ok(!/maximum-scale|user-scalable/.test(src), 'never disable pinch zoom on a payment page')
+  // Scoped to generateMetadata ONLY. A file-wide scan also matches the
+  // legitimate themeColor inside generateViewport, which is where it belongs.
+  // Comment lines stripped: the explanation ABOVE generateViewport legitimately
+  // contains the word themeColor, and prose must not fail a rule about code.
+  const codeOnly = src
+    .split(/\r?\n/)
+    .filter((l) => !l.trim().startsWith('//'))
+    .join('\n')
+  const meta = codeOnly.slice(
+    codeOnly.indexOf('export async function generateMetadata'),
+    codeOnly.indexOf('export function generateViewport')
+  )
+  assert.ok(!/themeColor/.test(meta), 'themeColor must NOT be in the metadata export — Next 14 ignores it and warns')
+  assert.ok(!/'theme-color'/.test(meta), 'no other: theme-color fallback either — one source only')
   assert.match(src, /const ORANGE = '#FF5A1F'/)
 })
 

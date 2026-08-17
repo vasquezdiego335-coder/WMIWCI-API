@@ -82,13 +82,12 @@ function boundsCheck(cents: number): AmountParse {
   return { ok: true, cents }
 }
 
-/** Integer cents → "$1,234.56". The ONE money formatter for this feature. */
-export function formatCents(cents: number): string {
-  const neg = cents < 0
-  const abs = Math.abs(Math.round(cents))
-  const s = (abs / 100).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
-  return `${neg ? '-' : ''}$${s}`
-}
+// formatCents now lives in deposit-copy.ts so the CLIENT payment page can use
+// it without pulling node:crypto (below) into the browser bundle. Re-exported
+// here so every existing server caller and test keeps one import path.
+import { formatCents } from './deposit-copy'
+export { formatCents }
+
 
 // ── Public token ────────────────────────────────────────────────────────────
 // Crockford-style base32 minus I, L, O and U: unambiguous when read aloud over
