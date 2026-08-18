@@ -29,6 +29,11 @@ const EN = {
 
   // ── Primary ──
   title: 'Secure Your Move',
+  // The headline is SPLIT so "Move." can carry the orange, exactly as it does
+  // on the social card the customer just tapped. Kept alongside `title`, which
+  // is still used for the accessible page heading and the <title> tag.
+  titleLead: 'Secure Your',
+  titleAccent: 'Move.',
   intro: 'Review your quote and pay the deposit to reserve your move.',
   greeting: 'Hi {name} — here are your details.',
 
@@ -49,6 +54,12 @@ const EN = {
 
   // ── Reassurance ──
   reassureTitle: 'What happens next',
+  step1: 'Your deposit is applied to your moving balance — it is not an extra charge.',
+  step2: 'We confirm your date and send you the details. Your quoted price does not change.',
+  step3: 'You pay the rest on move day, once the work is done.',
+  ownerName: 'Diego',
+  ownerRole: 'Owner & Lead Mover — North Jersey',
+  seHablaEspanol: 'Se habla Español.',
   reassureApplied: 'Your deposit comes off the total you owe on move day.',
   reassureQuote: 'Your quoted price is locked in — we do not change it after you pay.',
   reassureHelp: 'A real person answers. Call or text us any time.',
@@ -107,6 +118,8 @@ const ES: Copy = {
   spanish: 'Español',
 
   title: 'Asegure su mudanza',
+  titleLead: 'Asegure su',
+  titleAccent: 'mudanza.',
   intro: 'Revise su cotización y pague el depósito para reservar su mudanza.',
   greeting: 'Hola {name} — estos son sus detalles.',
 
@@ -123,6 +136,12 @@ const ES: Copy = {
   stripeNote: 'Pago seguro procesado por Stripe',
 
   reassureTitle: 'Qué sigue',
+  step1: 'Su depósito se aplica al saldo de su mudanza — no es un cargo adicional.',
+  step2: 'Confirmamos su fecha y le enviamos los detalles. Su precio cotizado no cambia.',
+  step3: 'Usted paga el resto el día de la mudanza, cuando el trabajo esté hecho.',
+  ownerName: 'Diego',
+  ownerRole: 'Dueño y jefe de mudanzas — Norte de Nueva Jersey',
+  seHablaEspanol: 'Se habla Español.',
   reassureApplied: 'Su depósito se descuenta del total que debe el día de la mudanza.',
   reassureQuote: 'Su precio cotizado queda fijo — no lo cambiamos después de que usted pague.',
   reassureHelp: 'Le contesta una persona real. Llámenos o escríbanos cuando quiera.',

@@ -9,6 +9,17 @@ import type { PublicDepositView } from '@/lib/deposit-links'
 // ════════════════════════════════════════════════════════════════════════════
 //  The deposit page a customer actually sees.
 //  ------------------------------------------------------------------------
+//  THE COMPOSITION IS THE POINT. The customer taps a photographic card in
+//  Messenger — movers, Archivo headline, orange accent, gold hairline — and
+//  must land somewhere that is obviously the same company. The previous version
+//  used the right palette in the wrong shapes: a white card on a flat navy void
+//  reads as a payment processor, not as Move It Clear It.
+//
+//  So the header is cut from THE SAME PHOTOGRAPH the social card is cut from
+//  (public/img/move-it-clear-it-hero-poster.webp), carries the same gold
+//  hairline and the same "Secure Your / Move." lockup, and the page beneath it
+//  is BONE, not navy. One card, generous spacing, no floating boxes.
+//
 //  THE RULE THIS COMPONENT EXISTS TO KEEP: reaching the success URL is NOT a
 //  payment. Stripe redirects the browser the moment the customer finishes, but
 //  the money is only confirmed when the signed webhook arrives. So when the
@@ -25,9 +36,7 @@ import type { PublicDepositView } from '@/lib/deposit-links'
 //  and the customer would tap the button and watch nothing happen.
 //
 //  LANGUAGE. Switching is pure client state: no reload, no refetch, no new
-//  Checkout Session, no change to the token or any amount. A reload would
-//  re-request a page the customer reached from a chat app, which is exactly
-//  where links go to die.
+//  Checkout Session, no change to the token or any amount.
 // ════════════════════════════════════════════════════════════════════════════
 
 const POLL_INTERVAL_MS = 2000
@@ -181,19 +190,22 @@ export default function DepositView({ view, token, initialLang, returning, cance
   return (
     <>
       <style>{CSS}</style>
-      <main className="dp-page">
-        <div className="dp-shell">
-          <header className="dp-head">
+
+      {/* ── HERO: the same photograph the social card is cut from, so tapping
+          the preview and landing here is one continuous moment. ── */}
+      <header className="dp-hero">
+        <div className="dp-hairline" aria-hidden="true" />
+        <div className="dp-heroInner">
+          <div className="dp-topbar">
+            {/* The mark is used BARE. icon.svg is already a navy tile with an
+                orange chevron; wrapping it in a bone box double-tiled it and
+                stopped it reading as our logo. */}
             <a className="dp-brand" href="/" aria-label={t.brand}>
-              <span className="dp-mark" aria-hidden="true">
-                {/* eslint-disable-next-line @next/next/no-img-element */}
-                <img src="/icon.svg" alt="" width={30} height={30} />
-              </span>
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img className="dp-mark" src="/icon.svg" alt="" width={44} height={44} />
               <span className="dp-word">{t.brand}</span>
             </a>
 
-            {/* Language: a real control, not a flag. Both options always visible
-                so a Spanish speaker never has to guess what a toggle does. */}
             <div className="dp-lang" role="group" aria-label={t.langLabel}>
               <button
                 type="button"
@@ -215,88 +227,119 @@ export default function DepositView({ view, token, initialLang, returning, cance
                 {t.spanish}
               </button>
             </div>
-          </header>
-
-          <div className="dp-grid">
-            <section className="dp-intro">
-              <h1 className="dp-h1">
-                {state === 'paid' ? fill(t.paidTitle, { name: firstName ? `, ${firstName}` : '' }) : t.title}
-              </h1>
-              {state === 'pay' && <p className="dp-lede">{t.intro}</p>}
-              {state === 'pay' && firstName && (
-                <p className="dp-greet">{fill(t.greeting, { name: firstName })}</p>
-              )}
-            </section>
-
-            <section className="dp-cardcol" aria-labelledby="dp-card-h">
-              <h2 id="dp-card-h" className="dp-sr">{t.title}</h2>
-              <div className="dp-card">
-                {state === 'pay' && (
-                  <PayState
-                    t={t}
-                    view={view as PublicDepositView}
-                    phase={phase}
-                    error={error}
-                    canceled={canceled}
-                    onPay={pay}
-                    fmtDate={fmtDate}
-                  />
-                )}
-                {state === 'paid' && <PaidState t={t} view={view as PublicDepositView} fmtDate={fmtDate} />}
-                {state === 'closed' && <ClosedState t={t} status={(view as PublicDepositView).status} phone={phone} />}
-                {state === 'unavailable' && <UnavailableState t={t} phone={phone} />}
-
-                <div className="dp-policy">
-                  <h3 className="dp-polh">{t.policyTitle}</h3>
-                  {/* The APPROVED policy, and nothing more. The Terms'
-                      "non-refundable" sentence is about the CAPTURED $49 booking
-                      fee and is deliberately not repeated: this deposit is a
-                      different instrument, and inventing a refund policy for it
-                      would be a term the customer never agreed to. */}
-                  <p className="dp-polb">{t.policyBody}</p>
-                  <p className="dp-polb">
-                    {t.fullTerms}:{' '}
-                    <a className="dp-link" href="/terms">{t.terms}</a>
-                  </p>
-                </div>
-              </div>
-            </section>
-
-            <section className="dp-reassure" aria-labelledby="dp-reassure-h">
-              <h2 id="dp-reassure-h" className="dp-h2">{t.reassureTitle}</h2>
-              <ul className="dp-list">
-                <li>{t.reassureApplied}</li>
-                <li>{t.reassureQuote}</li>
-                <li>{t.reassureHelp}</li>
-              </ul>
-
-              <div className="dp-help">
-                <p className="dp-helph">{t.helpTitle}</p>
-                <div className="dp-helpbtns">
-                  <a className="dp-ghost" href={`tel:${phone.tel}`}>{t.callUs} {phone.display}</a>
-                  <a className="dp-ghost" href={`sms:${phone.sms}`}>{t.textUs}</a>
-                </div>
-              </div>
-            </section>
           </div>
+
+          <h1 className="dp-h1">
+            {state === 'paid' ? (
+              fill(t.paidTitle, { name: firstName ? `, ${firstName}` : '' })
+            ) : (
+              <>
+                <span className="dp-h1a">{t.titleLead}</span>
+                <span className="dp-h1b">{t.titleAccent}</span>
+              </>
+            )}
+          </h1>
+          {state === 'pay' && <p className="dp-lede">{t.intro}</p>}
+        </div>
+      </header>
+
+      {/* ── BODY: bone, one card. No navy void. ── */}
+      <main className="dp-body">
+        <div className="dp-card">
+          {state === 'pay' && (
+            <PayState
+              t={t}
+              view={view as PublicDepositView}
+              phase={phase}
+              error={error}
+              canceled={canceled}
+              firstName={firstName}
+              onPay={pay}
+              fmtDate={fmtDate}
+            />
+          )}
+          {state === 'paid' && <PaidState t={t} view={view as PublicDepositView} fmtDate={fmtDate} />}
+          {state === 'closed' && <ClosedState t={t} status={(view as PublicDepositView).status} phone={phone} />}
+          {state === 'unavailable' && <UnavailableState t={t} phone={phone} />}
+
+          {/* Human, local, and compact — the part that says a person answers. */}
+          <TrustRow t={t} phone={phone} />
+
+          {/* Quiet, last, and still fully readable. */}
+          <section className="dp-policy" aria-labelledby="dp-pol-h">
+            <h2 id="dp-pol-h" className="dp-polh">{t.policyTitle}</h2>
+            {/*
+              The APPROVED policy, and nothing more. The Terms' "non-refundable"
+              sentence is about the CAPTURED $49 booking fee and is deliberately
+              not repeated: this deposit is a different instrument, and inventing
+              a refund policy for it would be a term nobody agreed to.
+            */}
+            <p className="dp-polb">{t.policyBody}</p>
+            <p className="dp-polb">
+              {t.fullTerms}: <a className="dp-link" href="/terms">{t.terms}</a>
+            </p>
+          </section>
         </div>
       </main>
     </>
   )
 }
 
+// ── Line icons. Proper strokes, never emoji — an emoji lock on a payment page
+//    reads as cheaper than the thing it is trying to reassure you about. ──
+
+const IconLock = () => (
+  <svg className="dp-i" viewBox="0 0 16 18" fill="none" stroke="currentColor" strokeWidth="1.6"
+       strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false">
+    <rect x="1.6" y="7.4" width="12.8" height="9.1" rx="2.1" />
+    <path d="M4.6 7.4V5.1a3.4 3.4 0 0 1 6.8 0v2.3" />
+  </svg>
+)
+
+const IconAlert = () => (
+  <svg className="dp-i" viewBox="0 0 18 18" fill="none" stroke="currentColor" strokeWidth="1.6"
+       strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false">
+    <circle cx="9" cy="9" r="7.4" />
+    <path d="M9 5.4v4.4" />
+    <circle cx="9" cy="12.6" r=".9" fill="currentColor" stroke="none" />
+  </svg>
+)
+
+const IconCheck = () => (
+  <svg className="dp-i" viewBox="0 0 18 18" fill="none" stroke="currentColor" strokeWidth="1.9"
+       strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false">
+    <circle cx="9" cy="9" r="7.4" strokeWidth="1.5" />
+    <path d="M5.6 9.2l2.3 2.3 4.5-4.7" />
+  </svg>
+)
+
+const IconPhone = () => (
+  <svg className="dp-i" viewBox="0 0 18 18" fill="none" stroke="currentColor" strokeWidth="1.6"
+       strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false">
+    <path d="M6.1 2.6 7.5 6 6 7.4a9.4 9.4 0 0 0 4.6 4.6L12 10.5l3.4 1.4v2.6c0 .8-.7 1.5-1.5 1.4C7.2 15.4 2.6 10.8 2.1 4.1 2 3.3 2.7 2.6 3.5 2.6z" />
+  </svg>
+)
+
+const IconChat = () => (
+  <svg className="dp-i" viewBox="0 0 18 18" fill="none" stroke="currentColor" strokeWidth="1.6"
+       strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false">
+    <path d="M15.4 10.3a1.9 1.9 0 0 1-1.9 1.9H6l-3.4 3v-11a1.9 1.9 0 0 1 1.9-1.9h9a1.9 1.9 0 0 1 1.9 1.9z" />
+  </svg>
+)
+
 // ── States ──────────────────────────────────────────────────────────────────
 
 type T = (typeof COPY)['en']
 
 function PayState({
-  t, view, phase, error, canceled, onPay, fmtDate,
+  t, view, phase, error, canceled, firstName, onPay, fmtDate,
 }: {
   t: T
   view: PublicDepositView
   phase: Phase
   error: string | null
   canceled: boolean
+  firstName: string | null
   onPay: () => void
   fmtDate: (d: Date | string | null | undefined) => string | null
 }) {
@@ -320,9 +363,12 @@ function PayState({
 
   return (
     <>
+      {firstName && <p className="dp-greet">{fill(t.greeting, { name: firstName })}</p>}
+
       {canceled && (
         <p className="dp-notice" role="status">
-          <span aria-hidden="true">⚠ </span>{t.canceledNotice}
+          <IconAlert />
+          <span>{t.canceledNotice}</span>
         </p>
       )}
 
@@ -350,7 +396,7 @@ function PayState({
         {view.quoteTotalCents != null && (
           <MoneyRow label={t.quoteTotal} value={formatCents(view.quoteTotalCents)} />
         )}
-        <div className="dp-hero">
+        <div className="dp-hero2">
           <span className="dp-herolabel">{t.depositDue}</span>
           <span className="dp-heroval">{formatCents(view.depositCents)}</span>
         </div>
@@ -363,7 +409,8 @@ function PayState({
 
       {error && (
         <p className="dp-error" role="alert">
-          <span aria-hidden="true">⚠ </span>{error}
+          <IconAlert />
+          <span>{error}</span>
         </p>
       )}
 
@@ -372,9 +419,57 @@ function PayState({
       </button>
 
       <p className="dp-stripe">
-        <span aria-hidden="true">🔒 </span>{t.stripeNote}
+        <IconLock />
+        <span>{t.stripeNote}</span>
       </p>
+
+      {/* Directly below the payment action, BEFORE the policy — reassurance
+          should arrive before legal text, not after it. */}
+      <NextSteps t={t} />
     </>
+  )
+}
+
+function NextSteps({ t }: { t: T }) {
+  const steps = [t.step1, t.step2, t.step3]
+  return (
+    <section className="dp-next" aria-labelledby="dp-next-h">
+      <h2 id="dp-next-h" className="dp-nexth">{t.reassureTitle}</h2>
+      <ol className="dp-steps">
+        {steps.map((s, i) => (
+          <li key={i}>
+            <span className="dp-num" aria-hidden="true">{i + 1}</span>
+            <span>{s}</span>
+          </li>
+        ))}
+      </ol>
+    </section>
+  )
+}
+
+function TrustRow({ t, phone }: { t: T; phone: Phone }) {
+  return (
+    <section className="dp-trust" aria-labelledby="dp-trust-h">
+      <div className="dp-owner">
+        <span className="dp-ownerMark" aria-hidden="true">
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img src="/icon.svg" alt="" width={34} height={34} />
+        </span>
+        <div>
+          <p id="dp-trust-h" className="dp-ownerName">{t.ownerName}</p>
+          <p className="dp-ownerRole">{t.ownerRole}</p>
+        </div>
+      </div>
+      <div className="dp-contact">
+        <a className="dp-ghost" href={`tel:${phone.tel}`}>
+          <IconPhone /><span>{phone.display}</span>
+        </a>
+        <a className="dp-ghost" href={`sms:${phone.sms}`}>
+          <IconChat /><span>{t.textUs}</span>
+        </a>
+      </div>
+      <p className="dp-espanol">{t.seHablaEspanol}</p>
+    </section>
   )
 }
 
@@ -382,9 +477,9 @@ function PaidState({ t, view, fmtDate }: { t: T; view: PublicDepositView; fmtDat
   const paid = view.amountPaidCents ?? view.depositCents
   return (
     <>
-      <p className="dp-badge"><span aria-hidden="true">✓ </span>{t.paidBadge}</p>
+      <p className="dp-badge"><IconCheck /><span>{t.paidBadge}</span></p>
       <div className="dp-money">
-        <div className="dp-hero">
+        <div className="dp-hero2">
           <span className="dp-herolabel">{t.paidAmount}</span>
           <span className="dp-heroval">{formatCents(paid)}</span>
         </div>
@@ -394,26 +489,31 @@ function PaidState({ t, view, fmtDate }: { t: T; view: PublicDepositView; fmtDat
         )}
       </div>
       <p className="dp-applied">{t.paidApplied}</p>
+      <NextSteps t={t} />
     </>
   )
 }
 
 function ClosedState({ t, status, phone }: { t: T; status: string; phone: Phone }) {
   return (
-    <>
+    <div className="dp-status">
       <p className="dp-statush">{status === 'EXPIRED' ? t.expiredTitle : t.canceledTitle}</p>
       <p className="dp-statusb">{t.closedBody}</p>
-      <a className="dp-pay dp-paylink" href={`tel:${phone.tel}`}>{t.callUs} {phone.display}</a>
-    </>
+      <a className="dp-pay dp-paylink" href={`tel:${phone.tel}`}>
+        <IconPhone /><span>{t.callUs} {phone.display}</span>
+      </a>
+    </div>
   )
 }
 
 function UnavailableState({ t, phone }: { t: T; phone: Phone }) {
   return (
-    <div role="status" aria-live="polite">
+    <div className="dp-status" role="status" aria-live="polite">
       <p className="dp-statush">{t.unavailableTitle}</p>
       <p className="dp-statusb">{t.unavailableBody}</p>
-      <a className="dp-pay dp-paylink" href={`tel:${phone.tel}`}>{t.callUs} {phone.display}</a>
+      <a className="dp-pay dp-paylink" href={`tel:${phone.tel}`}>
+        <IconPhone /><span>{t.callUs} {phone.display}</span>
+      </a>
     </div>
   )
 }
@@ -437,137 +537,167 @@ function MoneyRow({ label, value }: { label: string; value: string }) {
 // PALETTE is the approved one, no substitutions:
 //   navy #0A1628 · deep navy #0D1F3C · orange #FF5A1F · CTA #D2450F
 //   gold #C9A961 · bone #F5F1EA · dark bone #EDE8DF · white #FFFFFF
+// TYPE: Archivo for display, Inter for body/labels/financial data — the same
+// split the landing page and the social card already use.
 const CSS = `
-.dp-page{--navy:#0A1628;--deep:#0D1F3C;--orange:#FF5A1F;--cta:#D2450F;--gold:#C9A961;
-  --bone:#F5F1EA;--dbone:#EDE8DF;--white:#FFFFFF;--ink:#1F2937;--muted:#5B6472;
-  min-height:100vh;background:linear-gradient(170deg,var(--navy) 0%,var(--deep) 100%);
-  padding:20px 16px 48px;box-sizing:border-box;
-  font-family:Inter,-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;
-  -webkit-font-smoothing:antialiased;}
-.dp-page *,.dp-page *::before,.dp-page *::after{box-sizing:border-box;}
-.dp-shell{max-width:1100px;margin:0 auto;}
-.dp-sr{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;
-  clip:rect(0,0,0,0);white-space:nowrap;border:0;}
+:root{--navy:#0A1628;--deep:#0D1F3C;--orange:#FF5A1F;--cta:#D2450F;--gold:#C9A961;
+  --bone:#F5F1EA;--dbone:#EDE8DF;--white:#FFFFFF;--ink:#1B2430;--muted:#5A6473;
+  --display:Archivo,'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;
+  --body:Inter,-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;}
+.dp-hero,.dp-body{font-family:var(--body);-webkit-font-smoothing:antialiased;}
+.dp-hero *,.dp-body *,.dp-hero *::before,.dp-body *::after{box-sizing:border-box;}
+.dp-i{width:1.05em;height:1.05em;flex:0 0 auto;}
 
-/* header */
-.dp-head{display:flex;align-items:center;justify-content:space-between;gap:12px;
-  flex-wrap:wrap;margin-bottom:22px;}
+/* ── HERO: the same photograph the social card is cut from ── */
+.dp-hero{position:relative;background:
+  linear-gradient(100deg,rgba(10,22,40,1) 0%,rgba(10,22,40,1) 26%,rgba(10,22,40,.92) 44%,
+    rgba(10,22,40,.66) 58%,rgba(10,22,40,.42) 74%,rgba(10,22,40,.46) 100%),
+  linear-gradient(to bottom,rgba(10,22,40,.55) 0%,rgba(10,22,40,.05) 40%,rgba(10,22,40,.62) 100%),
+  url('/img/move-it-clear-it-hero-poster-mobile.webp') center 28%/cover no-repeat,
+  var(--navy);
+  padding:0 0 30px;}
+.dp-hairline{height:4px;background:linear-gradient(90deg,var(--gold) 0%,var(--gold) 44%,
+  rgba(201,169,97,.5) 72%,rgba(201,169,97,0) 100%);}
+.dp-heroInner{max-width:640px;margin:0 auto;padding:16px 18px 0;}
+.dp-topbar{display:flex;align-items:center;justify-content:space-between;gap:12px;
+  flex-wrap:wrap;margin-bottom:26px;}
 .dp-brand{display:inline-flex;align-items:center;gap:11px;text-decoration:none;
-  padding:6px 2px;min-height:44px;}
-.dp-mark{display:inline-flex;align-items:center;justify-content:center;width:40px;height:40px;
-  background:var(--bone);border-radius:9px;padding:5px;flex:0 0 40px;}
-.dp-word{color:var(--bone);font-weight:700;font-size:13px;letter-spacing:.15em;
-  text-transform:uppercase;}
+  padding:5px 2px;min-height:44px;}
+/* BARE mark — icon.svg is already a navy tile with an orange chevron. */
+.dp-mark{display:block;width:44px;height:44px;border-radius:10px;
+  box-shadow:0 0 0 1px rgba(245,241,234,.14),0 6px 16px rgba(0,0,0,.34);}
+.dp-word{color:var(--bone);font-weight:700;font-size:13px;letter-spacing:.17em;
+  text-transform:uppercase;text-shadow:0 1px 3px rgba(0,0,0,.5);}
 .dp-lang{display:inline-flex;align-items:center;gap:2px;}
-.dp-langbtn{background:none;border:none;cursor:pointer;color:rgba(245,241,234,.72);
+.dp-langbtn{background:none;border:none;cursor:pointer;color:rgba(245,241,234,.76);
   font-size:15px;font-weight:600;padding:11px 10px;min-height:44px;border-radius:8px;
   font-family:inherit;}
-.dp-langbtn.is-on{color:var(--white);text-decoration:underline;text-underline-offset:5px;
+.dp-langbtn.is-on{color:var(--white);text-decoration:underline;text-underline-offset:6px;
   text-decoration-color:var(--orange);text-decoration-thickness:2px;}
-.dp-langsep{color:rgba(245,241,234,.35);}
+.dp-langsep{color:rgba(245,241,234,.32);}
 
-/* layout */
-.dp-grid{display:grid;gap:18px;}
-.dp-h1{color:var(--white);font-size:32px;line-height:1.12;font-weight:800;margin:0 0 10px;
-  letter-spacing:-.02em;}
-.dp-lede{color:rgba(245,241,234,.88);font-size:17px;line-height:1.5;margin:0 0 6px;}
-.dp-greet{color:rgba(245,241,234,.72);font-size:16px;line-height:1.5;margin:0;}
-.dp-h2{color:var(--white);font-size:19px;font-weight:700;margin:0 0 12px;}
+.dp-h1{font-family:var(--display);font-weight:800;font-size:40px;line-height:.99;
+  letter-spacing:-.022em;color:var(--bone);margin:0;text-shadow:0 2px 14px rgba(0,0,0,.45);}
+.dp-h1a{display:block;}
+.dp-h1b{display:block;color:var(--orange);}
+.dp-lede{color:rgba(245,241,234,.86);font-size:17px;line-height:1.5;margin:14px 0 0;
+  max-width:26em;text-shadow:0 1px 8px rgba(0,0,0,.5);}
 
-/* card */
-.dp-card{background:var(--white);border-radius:16px;padding:22px 18px;
-  box-shadow:0 18px 44px rgba(0,0,0,.32);}
-.dp-details{margin:0 0 16px;padding:0;}
+/* ── BODY: bone, one card lifted over the hero edge ── */
+.dp-body{background:var(--bone);padding:0 16px 44px;min-height:44vh;}
+.dp-card{max-width:640px;margin:-18px auto 0;background:var(--white);
+  border-radius:16px;padding:24px 20px;box-shadow:0 16px 40px rgba(10,22,40,.16),
+  0 2px 6px rgba(10,22,40,.06);}
+.dp-greet{color:var(--muted);font-size:16px;margin:0 0 18px;}
+
+.dp-details{margin:0 0 18px;padding:0;}
 .dp-row{display:flex;justify-content:space-between;gap:14px;padding:11px 0;
   border-bottom:1px solid var(--dbone);}
 .dp-row dt{color:var(--muted);font-size:16px;margin:0;}
 .dp-row dd{color:var(--ink);font-size:16px;font-weight:600;margin:0;text-align:right;}
 
-/* money */
-.dp-money{background:var(--bone);border-radius:13px;padding:16px;margin:0 0 14px;}
+/* money — the strongest hierarchy on the page */
+.dp-money{background:var(--bone);border-radius:13px;padding:16px 17px;margin:0 0 14px;}
 .dp-mrow{display:flex;justify-content:space-between;align-items:baseline;gap:14px;padding:7px 0;}
 .dp-mlabel{color:var(--muted);font-size:16px;}
 .dp-mval{color:var(--ink);font-size:18px;font-weight:600;font-variant-numeric:tabular-nums;}
-.dp-hero{display:flex;justify-content:space-between;align-items:baseline;gap:14px;
-  padding:13px 0;margin:6px 0;border-top:1px solid var(--dbone);border-bottom:1px solid var(--dbone);}
-.dp-herolabel{color:var(--navy);font-size:17px;font-weight:700;}
-.dp-heroval{color:var(--cta);font-size:36px;font-weight:800;line-height:1;
-  font-variant-numeric:tabular-nums;letter-spacing:-.02em;}
-.dp-applied{color:#3F4854;font-size:16px;line-height:1.5;margin:0 0 18px;}
+.dp-hero2{display:flex;justify-content:space-between;align-items:baseline;gap:14px;
+  padding:14px 0;margin:6px 0;border-top:1px solid var(--dbone);border-bottom:1px solid var(--dbone);}
+.dp-herolabel{font-family:var(--display);color:var(--navy);font-size:17px;font-weight:700;}
+.dp-heroval{font-family:var(--display);color:var(--cta);font-size:40px;font-weight:800;
+  line-height:1;font-variant-numeric:tabular-nums;letter-spacing:-.025em;}
+.dp-applied{color:#3F4854;font-size:16px;line-height:1.5;margin:0 0 20px;}
 
 /* action */
-.dp-pay{display:block;width:100%;border:none;border-radius:12px;background:var(--cta);
-  color:var(--white);font-size:19px;font-weight:700;min-height:56px;padding:16px 20px;
-  cursor:pointer;font-family:inherit;-webkit-appearance:none;text-align:center;
-  text-decoration:none;line-height:1.25;}
+.dp-pay{display:flex;align-items:center;justify-content:center;gap:9px;width:100%;
+  border:none;border-radius:12px;background:var(--cta);color:var(--white);
+  font-family:var(--display);font-size:19px;font-weight:700;min-height:56px;
+  padding:16px 20px;cursor:pointer;-webkit-appearance:none;text-decoration:none;
+  line-height:1.25;}
 .dp-pay[disabled]{opacity:.72;cursor:progress;}
-.dp-paylink{display:block;}
-.dp-secondary{margin-top:12px;border:1.5px solid var(--navy);border-radius:10px;
+.dp-secondary{margin-top:14px;border:1.5px solid var(--navy);border-radius:10px;
   background:var(--white);color:var(--navy);font-size:16px;font-weight:600;
-  min-height:44px;padding:11px 18px;cursor:pointer;font-family:inherit;width:100%;}
-.dp-stripe{color:var(--muted);font-size:15px;text-align:center;margin:14px 0 0;}
+  min-height:48px;padding:12px 18px;cursor:pointer;font-family:inherit;width:100%;}
+.dp-stripe{display:flex;align-items:center;justify-content:center;gap:7px;
+  color:var(--muted);font-size:15px;margin:14px 0 0;}
 
-/* messages — never colour alone: each carries an icon and a border */
-.dp-notice{background:#FFFBEB;border:1px solid #F1D48A;border-left:4px solid var(--gold);
-  color:#7A5A12;border-radius:10px;padding:12px 14px;font-size:15px;line-height:1.5;margin:0 0 16px;}
-.dp-error{background:#FEF2F2;border:1px solid #F5B5B5;border-left:4px solid #B42318;
-  color:#8A1C13;border-radius:10px;padding:12px 14px;font-size:15px;line-height:1.5;margin:0 0 14px;}
-.dp-status{padding:6px 0 2px;}
-.dp-statush{color:var(--navy);font-size:20px;font-weight:700;margin:0 0 8px;}
-.dp-statusb{color:#3F4854;font-size:16px;line-height:1.55;margin:0 0 8px;}
-.dp-badge{display:inline-block;background:#ECFDF5;border:1px solid #7FD9AE;color:#05603A;
-  border-radius:999px;padding:8px 15px;font-size:15px;font-weight:700;margin:0 0 14px;}
+/* messages — icon + border, never colour alone */
+.dp-notice,.dp-error{display:flex;align-items:flex-start;gap:9px;border-radius:10px;
+  padding:12px 14px;font-size:16px;line-height:1.5;margin:0 0 16px;}
+.dp-notice{background:#FFFBEB;border:1px solid #EFD08A;border-left:4px solid var(--gold);color:#71540F;}
+.dp-error{background:#FEF2F2;border:1px solid #F3B4B4;border-left:4px solid #B42318;color:#851B12;}
+.dp-status{padding:4px 0 2px;}
+.dp-statush{font-family:var(--display);color:var(--navy);font-size:23px;font-weight:700;
+  margin:0 0 10px;line-height:1.2;}
+.dp-statusb{color:#3F4854;font-size:16px;line-height:1.55;margin:0 0 16px;}
+.dp-badge{display:inline-flex;align-items:center;gap:7px;background:#ECFDF5;
+  border:1px solid #7FD9AE;color:#05603A;border-radius:999px;padding:8px 15px;
+  font-size:15px;font-weight:700;margin:0 0 16px;}
 
-/* policy */
-.dp-policy{border-top:1px solid var(--dbone);margin-top:20px;padding-top:16px;}
-.dp-polh{color:var(--navy);font-size:16px;font-weight:700;margin:0 0 8px;}
+/* what happens next — reassurance BEFORE legal text */
+.dp-next{margin-top:24px;padding-top:20px;border-top:1px solid var(--dbone);}
+.dp-nexth{font-family:var(--display);color:var(--navy);font-size:18px;font-weight:700;margin:0 0 14px;}
+.dp-steps{list-style:none;margin:0;padding:0;}
+.dp-steps li{display:flex;align-items:flex-start;gap:11px;margin-bottom:12px;
+  color:#3F4854;font-size:16px;line-height:1.5;}
+.dp-num{flex:0 0 26px;width:26px;height:26px;border-radius:50%;background:var(--navy);
+  color:var(--bone);font-size:13px;font-weight:700;display:inline-flex;
+  align-items:center;justify-content:center;margin-top:1px;}
+
+/* human trust row */
+.dp-trust{margin-top:22px;padding-top:20px;border-top:1px solid var(--dbone);}
+.dp-owner{display:flex;align-items:center;gap:12px;margin-bottom:14px;}
+.dp-ownerMark{display:inline-flex;flex:0 0 34px;}
+.dp-ownerMark img{display:block;border-radius:8px;}
+.dp-ownerName{font-family:var(--display);color:var(--navy);font-size:17px;font-weight:700;margin:0;}
+.dp-ownerRole{color:var(--muted);font-size:15px;margin:2px 0 0;}
+.dp-contact{display:flex;gap:10px;flex-wrap:wrap;}
+.dp-ghost{flex:1 1 46%;min-width:150px;display:inline-flex;align-items:center;
+  justify-content:center;gap:8px;min-height:48px;padding:12px 14px;border-radius:10px;
+  border:1.5px solid rgba(10,22,40,.22);color:var(--navy);text-decoration:none;
+  font-size:16px;font-weight:600;}
+.dp-espanol{color:var(--muted);font-size:15px;margin:12px 0 0;}
+
+/* policy — quiet, last, still readable */
+.dp-policy{margin-top:22px;padding-top:18px;border-top:1px solid var(--dbone);}
+.dp-polh{font-family:var(--display);color:var(--navy);font-size:16px;font-weight:700;margin:0 0 8px;}
 .dp-polb{color:#4A5361;font-size:16px;line-height:1.6;margin:0 0 8px;}
 .dp-link{color:var(--cta);font-weight:600;}
 
-/* reassurance */
-.dp-list{margin:0;padding:0 0 0 22px;color:rgba(245,241,234,.86);font-size:16px;line-height:1.6;}
-.dp-list li{margin-bottom:9px;}
-.dp-list li::marker{color:var(--gold);}
-.dp-help{margin-top:20px;padding-top:18px;border-top:1px solid rgba(245,241,234,.16);}
-.dp-helph{color:var(--white);font-size:16px;font-weight:700;margin:0 0 12px;}
-.dp-helpbtns{display:flex;gap:10px;flex-wrap:wrap;}
-.dp-ghost{flex:1 1 auto;min-width:140px;display:inline-flex;align-items:center;
-  justify-content:center;min-height:48px;padding:12px 16px;border-radius:10px;
-  border:1.5px solid rgba(245,241,234,.42);color:var(--bone);text-decoration:none;
-  font-size:16px;font-weight:600;text-align:center;}
-
 /* focus — visible for everyone, on every control */
-.dp-page a:focus-visible,.dp-page button:focus-visible{outline:3px solid var(--orange);
+.dp-hero a:focus-visible,.dp-hero button:focus-visible,
+.dp-body a:focus-visible,.dp-body button:focus-visible{outline:3px solid var(--orange);
   outline-offset:3px;border-radius:8px;}
 
-/* DESKTOP: a balanced two-column container, not a small card in a navy void.
-   The card spans both rows so the intro sits beside it and the reassurance
-   fills the space underneath rather than leaving it empty. */
-@media (min-width:900px){
-  .dp-page{padding:34px 24px 64px;}
-  .dp-head{margin-bottom:30px;}
-  .dp-grid{grid-template-columns:minmax(0,1fr) minmax(0,1.02fr);gap:44px;align-items:start;}
-  .dp-intro{grid-column:1;grid-row:1;}
-  .dp-reassure{grid-column:1;grid-row:2;margin-top:6px;}
-  .dp-cardcol{grid-column:2;grid-row:1 / span 2;}
-  .dp-h1{font-size:42px;margin-bottom:14px;}
+@media (min-width:700px){
+  .dp-hero{background:
+    linear-gradient(100deg,rgba(10,22,40,1) 0%,rgba(10,22,40,1) 24%,rgba(10,22,40,.93) 42%,
+      rgba(10,22,40,.6) 56%,rgba(10,22,40,.3) 72%,rgba(10,22,40,.4) 100%),
+    linear-gradient(to bottom,rgba(10,22,40,.5) 0%,rgba(10,22,40,.04) 40%,rgba(10,22,40,.6) 100%),
+    url('/img/move-it-clear-it-hero-poster.webp') center 30%/cover no-repeat,
+    var(--navy);
+    padding-bottom:42px;}
+  .dp-heroInner{padding:20px 24px 0;}
+  .dp-topbar{margin-bottom:40px;}
+  .dp-h1{font-size:54px;}
   .dp-lede{font-size:19px;}
-  .dp-card{padding:28px 26px;}
-  .dp-heroval{font-size:42px;}
+  .dp-card{margin-top:-24px;padding:30px 30px;}
+  .dp-heroval{font-size:46px;}
+  .dp-body{padding-bottom:60px;}
 }
-@media (min-width:1200px){ .dp-grid{gap:56px;} }
 
-/* Small phones: keep every price on one line and nothing clipped. */
 @media (max-width:360px){
-  .dp-page{padding:16px 12px 40px;}
-  .dp-h1{font-size:27px;}
-  .dp-heroval{font-size:31px;}
+  .dp-heroInner{padding:14px 14px 0;}
+  .dp-body{padding:0 12px 36px;}
+  .dp-card{padding:20px 16px;}
+  .dp-h1{font-size:33px;}
+  .dp-heroval{font-size:34px;}
   .dp-pay{font-size:17px;}
-  .dp-word{font-size:12px;letter-spacing:.10em;}
-  .dp-ghost{min-width:100%;}
+  .dp-word{font-size:12px;letter-spacing:.11em;}
+  .dp-ghost{flex:1 1 100%;}
 }
 
 @media (prefers-reduced-motion:reduce){
-  .dp-page *{animation:none !important;transition:none !important;}
+  .dp-hero *,.dp-body *{animation:none !important;transition:none !important;}
 }
 `

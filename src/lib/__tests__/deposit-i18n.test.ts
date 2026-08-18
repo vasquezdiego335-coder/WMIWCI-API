@@ -40,7 +40,10 @@ test('no string in either language is empty or a leftover placeholder', () => {
 
 test('Spanish is actually TRANSLATED, not copied English', () => {
   // Brand name and the two language labels are legitimately identical.
-  const allowedIdentical = new Set(['brand', 'english', 'spanish'])
+  // Brand name, the two language labels, the owner's name and "Se habla
+  // Español" are legitimately identical — translating a person's name would be
+  // wrong, and the Spanish line is already Spanish in the English page.
+  const allowedIdentical = new Set(['brand', 'english', 'spanish', 'ownerName', 'seHablaEspanol'])
   let translated = 0
   for (const key of Object.keys(COPY.en) as Array<keyof typeof COPY.en>) {
     if (allowedIdentical.has(key as string)) continue
@@ -206,8 +209,17 @@ test('status and error regions are announced, and never colour-only', () => {
   assert.match(src, /role="alert"/, 'errors must be announced')
   assert.match(src, /aria-live="polite"/, 'the confirming state must be announced')
   // Each message carries an icon as well as a colour.
-  assert.match(src, /aria-hidden="true">⚠/)
-  assert.match(src, /aria-hidden="true">✓/)
+  // Proper line icons, never emoji. An emoji lock on a payment page reads as
+  // cheaper than the thing it is trying to reassure you about.
+  assert.match(src, /const IconAlert = \(\)/, 'errors carry a drawn alert icon')
+  assert.match(src, /const IconCheck = \(\)/)
+  assert.match(src, /const IconLock = \(\)/, 'the Stripe note uses a drawn lock')
+  for (const emoji of ['⚠', '✓', '🔒', '🧪', '✅']) {
+    assert.ok(!src.includes(emoji), `emoji ${emoji} must not appear on the customer page`)
+  }
+  // Every icon is decorative and hidden from screen readers, with the meaning
+  // carried by the adjacent text.
+  assert.match(src, /aria-hidden="true" focusable="false"/)
 })
 
 test('the language control is a real control, not a decoration', () => {
@@ -224,7 +236,7 @@ test('touch targets and the pay button meet the sizes older customers need', () 
   const css = read(VIEW)
   assert.match(css, /\.dp-pay\{[^}]*min-height:56px/, 'primary button >= 56px')
   assert.match(css, /\.dp-langbtn\{[^}]*min-height:44px/, 'language buttons >= 44px')
-  assert.match(css, /\.dp-secondary\{[^}]*min-height:44px/)
+  assert.match(css, /\.dp-secondary\{[^}]*min-height:48px/)
   assert.match(css, /\.dp-ghost\{[^}]*min-height:48px/)
   assert.match(css, /:focus-visible\{outline:3px solid/, 'visible focus on every control')
   assert.match(css, /@media \(prefers-reduced-motion:reduce\)/)
@@ -233,7 +245,7 @@ test('touch targets and the pay button meet the sizes older customers need', () 
 test('body text is at least 16px and prices are substantially larger', () => {
   const css = read(VIEW)
   // The deposit figure is the number the customer must not misread.
-  assert.match(css, /\.dp-heroval\{[^}]*font-size:36px/)
+  assert.match(css, /\.dp-heroval\{[^}]*font-size:40px/)
   assert.match(css, /\.dp-mval\{[^}]*font-size:18px/)
   assert.match(css, /\.dp-mlabel\{[^}]*font-size:16px/)
   assert.match(css, /\.dp-polb\{[^}]*font-size:16px/, 'policy text is readable, not fine print')
@@ -244,17 +256,97 @@ test('body text is at least 16px and prices are substantially larger', () => {
   assert.equal(tiny.length, 0, `found text below 12px: ${tiny.join(', ')}`)
 })
 
-test('the layout is responsive, and desktop is a real two-column container', () => {
+test('the layout is responsive: one centred card on a bone page', () => {
   const css = read(VIEW)
-  assert.match(css, /@media \(min-width:900px\)/, 'desktop breakpoint')
+  assert.match(css, /@media \(min-width:700px\)/, 'desktop breakpoint')
   assert.match(css, /@media \(max-width:360px\)/, 'small-phone breakpoint')
-  assert.match(css, /max-width:1100px/, 'the balanced container, not a floating card')
-  assert.match(css, /grid-template-columns:minmax\(0,1fr\) minmax\(0,1\.02fr\)/)
-  // The card spans both rows so the reassurance fills the space under the intro
-  // instead of leaving a navy void.
-  assert.match(css, /\.dp-cardcol\{grid-column:2;grid-row:1 \/ span 2;\}/)
-  // minmax(0,…) is what stops a long price forcing horizontal scroll.
-  assert.ok(css.includes('minmax(0,'), 'grid tracks must be allowed to shrink')
+  // ONE card, centred, on BONE — not a white card floating in a navy void.
+  assert.match(css, /\.dp-body\{background:var\(--bone\)/, 'the page body is bone, not navy')
+  assert.match(css, /\.dp-card\{max-width:640px;margin:-18px auto 0/, 'one centred card, lifted over the hero edge')
+  assert.ok(!/grid-template-columns/.test(css), 'no multi-column split — a payment page has one focus')
+})
+
+test('the header is cut from the SAME photograph as the social card', () => {
+  const css = read(VIEW)
+  // The customer taps a photographic card in Messenger; landing on a flat navy
+  // screen breaks the thread. Same poster, same gold hairline, same lockup.
+  assert.match(css, /move-it-clear-it-hero-poster-mobile\.webp/, 'mobile poster')
+  assert.match(css, /move-it-clear-it-hero-poster\.webp/, 'desktop poster')
+  assert.match(css, /\.dp-hairline\{height:4px;background:linear-gradient\(90deg,var\(--gold\)/, 'the gold hairline')
+
+  const src = read(VIEW)
+  // The mark is used BARE. icon.svg is already a navy tile with an orange
+  // chevron; a bone wrapper double-tiled it and stopped it reading as the logo.
+  assert.match(src, /className="dp-mark" src="\/icon\.svg"/)
+  assert.ok(!/dp-mark\{[^}]*background:var\(--bone\)/.test(css), 'the mark must not sit in a bone tile')
+  // "Secure Your" / "Move." split so the accent word carries the orange.
+  assert.match(src, /className="dp-h1a">\{t\.titleLead\}/)
+  assert.match(src, /className="dp-h1b">\{t\.titleAccent\}/)
+  assert.match(css, /\.dp-h1b\{display:block;color:var\(--orange\)/)
+})
+
+test('Archivo carries the display type, Inter the body and the money labels', () => {
+  const css = read(VIEW)
+  assert.match(css, /--display:Archivo/, 'Archivo is the display face')
+  assert.match(css, /--body:Inter/, 'Inter is the body face')
+  for (const cls of ['dp-h1', 'dp-heroval', 'dp-pay', 'dp-statush', 'dp-nexth']) {
+    assert.match(css, new RegExp(`\\.${cls}\\{[^}]*font-family:var\\(--display\\)`), `${cls} uses Archivo`)
+  }
+  // And the font is actually loaded.
+  assert.match(read('app/layout.tsx'), /family=Archivo:wght@/, 'Archivo must be requested in the document head')
+})
+
+test('reassurance comes BEFORE the legal text, not after it', () => {
+  const src = read(VIEW)
+  // On mobile the customer previously hit the cancellation policy before
+  // "What happens next", which made a payment page feel legal-heavy.
+  // RENDER order, not source order — the sub-components are DEFINED below the
+  // main component, so raw indexOf over the whole file measures the wrong thing.
+  // Inside PayState, NextSteps must follow the pay button.
+  const payState = src.slice(src.indexOf('function PayState('), src.indexOf('function NextSteps('))
+  const payBtnIdx = payState.indexOf('className="dp-pay"')
+  const nextIdx = payState.indexOf('<NextSteps t={t} />')
+  assert.ok(payBtnIdx > -1 && nextIdx > -1, 'both must be inside PayState')
+  assert.ok(payBtnIdx < nextIdx, 'what-happens-next sits BELOW the payment action')
+
+  // And in the card, the trust row and the policy come after the state block,
+  // with the policy last.
+  const card = src.slice(src.indexOf('<main className="dp-body">'), src.indexOf('</main>'))
+  const trustIdx = card.indexOf('<TrustRow t={t}')
+  const policyIdx = card.indexOf('className="dp-policy"')
+  assert.ok(trustIdx > -1 && policyIdx > -1)
+  assert.ok(trustIdx < policyIdx, 'the human contact row precedes the legal text')
+  // The policy is the LAST thing in the card.
+  assert.ok(card.indexOf('</section>', policyIdx) > policyIdx, 'the policy closes the card')
+})
+
+test('the human, local identity is present and bilingual', () => {
+  const src = read(VIEW)
+  assert.match(src, /t\.ownerName/)
+  assert.match(src, /t\.ownerRole/)
+  assert.match(src, /t\.seHablaEspanol/)
+  assert.equal(COPY.en.ownerName, 'Diego')
+  assert.match(COPY.en.ownerRole, /Owner & Lead Mover/)
+  assert.match(COPY.en.ownerRole, /North Jersey/)
+  assert.match(COPY.es.ownerRole, /Norte de Nueva Jersey/)
+  assert.equal(COPY.en.seHablaEspanol, 'Se habla Español.')
+  // Three concrete steps, in both languages, none of them a price.
+  for (const lang of LANGS) {
+    for (const k of ['step1', 'step2', 'step3'] as const) {
+      assert.ok(COPY[lang][k].length > 30, `${lang}.${k} is too thin to reassure anyone`)
+      assert.ok(!/\$\s?\d/.test(COPY[lang][k]), `${lang}.${k} must not state a price`)
+    }
+  }
+})
+
+test('every state gets the same brand treatment, including not-found', () => {
+  const nf = read('app/deposit/[token]/not-found.tsx')
+  assert.match(nf, /move-it-clear-it-hero-poster/, 'the invalid-link page uses the same photograph')
+  assert.match(nf, /nf-hairline/, 'and the same gold hairline')
+  assert.match(nf, /Archivo/, 'and the same display face')
+  assert.match(nf, /background:#F5F1EA/, 'and the same bone body')
+  assert.match(nf, /t\.titleLead/, 'and the same headline lockup')
+  assert.match(nf, /pickLang\(headers\(\)\.get\('accept-language'\)\)/, 'and it is bilingual')
 })
 
 test('only the approved palette is used', () => {
@@ -262,7 +354,9 @@ test('only the approved palette is used', () => {
   const approved = new Set(['#0A1628','#0D1F3C','#FF5A1F','#D2450F','#C9A961','#F5F1EA','#EDE8DF','#FFFFFF'])
   const vars = Array.from(css.matchAll(/--[a-z]+:(#[0-9A-Fa-f]{6})/g), (m) => m[1].toUpperCase())
   for (const v of vars) {
-    if (['#1F2937', '#5B6472'].includes(v)) continue // neutral ink/muted greys
+    // Neutral ink/muted greys for body text. The palette rule governs BRAND
+    // colour, not the greyscale that carries paragraphs.
+    if (['#1F2937', '#1B2430', '#5B6472', '#5A6473'].includes(v)) continue
     assert.ok(approved.has(v), `${v} is not in the approved palette`)
   }
   assert.ok(vars.includes('#0A1628') && vars.includes('#D2450F') && vars.includes('#C9A961'))
