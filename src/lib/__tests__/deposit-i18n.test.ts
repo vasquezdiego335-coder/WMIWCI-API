@@ -325,9 +325,14 @@ test('the human, local identity is present and bilingual', () => {
   assert.match(src, /t\.ownerName/)
   assert.match(src, /t\.ownerRole/)
   assert.match(src, /t\.seHablaEspanol/)
-  assert.equal(COPY.en.ownerName, 'Diego')
-  assert.match(COPY.en.ownerRole, /Owner & Lead Mover/)
+  // BOTH owners — the pair is what makes this read as a family business.
+  assert.equal(COPY.en.ownerName, 'Diego & Sebastian')
+  assert.equal(COPY.es.ownerName, COPY.en.ownerName, 'names are never translated')
+  // Two people take a plural role. "Diego & Sebastian / Owner & Lead Mover"
+  // would read as a mistake on the page where they are asking to be trusted.
+  assert.match(COPY.en.ownerRole, /Owners & Lead Movers/)
   assert.match(COPY.en.ownerRole, /North Jersey/)
+  assert.match(COPY.es.ownerRole, /Dueños y jefes de mudanzas/)
   assert.match(COPY.es.ownerRole, /Norte de Nueva Jersey/)
   assert.equal(COPY.en.seHablaEspanol, 'Se habla Español.')
   // Three concrete steps, in both languages, none of them a price.
