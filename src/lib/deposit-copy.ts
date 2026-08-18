@@ -57,8 +57,10 @@ const EN = {
   step1: 'Your deposit is applied to your moving balance — it is not an extra charge.',
   step2: 'We confirm your date and send you the details. Your quoted price does not change.',
   step3: 'You pay the rest on move day, once the work is done.',
-  ownerName: 'Diego',
-  ownerRole: 'Owner & Lead Mover — North Jersey',
+  // BOTH owners. They are the two people a customer actually deals with, and
+  // the pair is what makes this read as a family business rather than a brand.
+  ownerName: 'Diego & Sebastian',
+  ownerRole: 'Owners & Lead Movers — North Jersey',
   seHablaEspanol: 'Se habla Español.',
   reassureApplied: 'Your deposit comes off the total you owe on move day.',
   reassureQuote: 'Your quoted price is locked in — we do not change it after you pay.',
@@ -139,8 +141,9 @@ const ES: Copy = {
   step1: 'Su depósito se aplica al saldo de su mudanza — no es un cargo adicional.',
   step2: 'Confirmamos su fecha y le enviamos los detalles. Su precio cotizado no cambia.',
   step3: 'Usted paga el resto el día de la mudanza, cuando el trabajo esté hecho.',
-  ownerName: 'Diego',
-  ownerRole: 'Dueño y jefe de mudanzas — Norte de Nueva Jersey',
+  // Names are never translated; the role is.
+  ownerName: 'Diego & Sebastian',
+  ownerRole: 'Dueños y jefes de mudanzas — Norte de Nueva Jersey',
   seHablaEspanol: 'Se habla Español.',
   reassureApplied: 'Su depósito se descuenta del total que debe el día de la mudanza.',
   reassureQuote: 'Su precio cotizado queda fijo — no lo cambiamos después de que usted pague.',
