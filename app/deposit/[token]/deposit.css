@@ -1,0 +1,280 @@
+/* ════════════════════════════════════════════════════════════════════════════
+   deposit.css — the whole visual layer of the public deposit page.
+   ---------------------------------------------------------------------------
+   THIS IS A REAL STYLESHEET, AND IT HAS TO BE.
+
+   These rules used to live in a template literal rendered as
+   <style>{CSS}</style> inside the client component. That is a TEXT NODE, and
+   React escapes text when it serialises on the server: every apostrophe came
+   out as &#x27;. The client's JavaScript string still held a real ', so every
+   hydration compared "Archivo,&#x27;Inter&#x27;" against "Archivo,'Inter'" and
+   failed — seven React #425s, then #418, then #423, which throws away the
+   server HTML and re-renders the entire root on the client.
+
+   It was not only a console problem. <style> is a RAW TEXT element, so the HTML
+   parser does NOT decode entities inside it. The browser read the background
+   rule as url(&#x27;/img/...&#x27;) — an unquoted URL beginning with & — and
+   requested /deposit/& , which 404'd. The hero photograph was broken on first
+   paint and only appeared once the failed hydration re-rendered the tag.
+
+   A stylesheet has no text node to mismatch and no entities to mis-decode. Do
+   not move this back inline.
+
+   PALETTE is the approved one, no substitutions:
+     navy #0A1628 · deep navy #0D1F3C · orange #FF5A1F · CTA #D2450F
+     gold #C9A961 · bone #F5F1EA · dark bone #EDE8DF · white #FFFFFF
+   TYPE: Archivo for display, Inter for body/labels/financial data — the same
+   split the landing page and the social card already use.
+   ════════════════════════════════════════════════════════════════════════════ */
+
+:root{--navy:#0A1628;--deep:#0D1F3C;--orange:#FF5A1F;--cta:#D2450F;--gold:#C9A961;
+  --bone:#F5F1EA;--dbone:#EDE8DF;--white:#FFFFFF;--ink:#1B2430;--muted:#5A6473;
+  --display:Archivo,'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;
+  --body:Inter,-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;}
+.dp-hero,.dp-body{font-family:var(--body);-webkit-font-smoothing:antialiased;}
+.dp-hero *,.dp-body *,.dp-hero *::before,.dp-body *::after{box-sizing:border-box;}
+.dp-i{width:1.05em;height:1.05em;flex:0 0 auto;}
+
+/* ── HERO: the same photograph the social card is cut from ── */
+.dp-grid{display:grid;gap:0;}
+.dp-hero{position:relative;background:
+  linear-gradient(100deg,rgba(10,22,40,1) 0%,rgba(10,22,40,1) 26%,rgba(10,22,40,.92) 44%,
+    rgba(10,22,40,.66) 58%,rgba(10,22,40,.42) 74%,rgba(10,22,40,.46) 100%),
+  linear-gradient(to bottom,rgba(10,22,40,.55) 0%,rgba(10,22,40,.05) 40%,rgba(10,22,40,.62) 100%),
+  url('/img/move-it-clear-it-hero-poster-mobile.webp') center 28%/cover no-repeat,
+  var(--navy);
+  padding:0 0 24px;}
+.dp-hairline{height:4px;background:linear-gradient(90deg,var(--gold) 0%,var(--gold) 44%,
+  rgba(201,169,97,.5) 72%,rgba(201,169,97,0) 100%);}
+.dp-heroInner{max-width:640px;margin:0 auto;padding:12px 18px 0;}
+.dp-topbar{display:flex;align-items:center;justify-content:space-between;gap:12px;
+  flex-wrap:nowrap;margin-bottom:18px;}
+.dp-brand{display:inline-flex;align-items:center;gap:11px;text-decoration:none;
+  padding:5px 2px;min-height:44px;flex:0 1 auto;min-width:0;}
+/* BARE mark — icon.svg is already a navy tile with an orange chevron. */
+.dp-mark{display:block;width:44px;height:44px;border-radius:10px;flex:0 0 auto;
+  box-shadow:0 0 0 1px rgba(245,241,234,.14),0 6px 16px rgba(0,0,0,.34);}
+.dp-word{color:var(--bone);font-weight:700;font-size:13px;letter-spacing:.17em;
+  text-transform:uppercase;text-shadow:0 1px 3px rgba(0,0,0,.5);white-space:nowrap;}
+/* The language control is the one thing in this bar that may never shrink: it
+   is how a Spanish speaker reads the page they are about to pay on. */
+.dp-lang{display:inline-flex;align-items:center;gap:2px;flex:0 0 auto;}
+.dp-langbtn{background:none;border:none;cursor:pointer;color:rgba(245,241,234,.76);
+  font-size:15px;font-weight:600;padding:11px 10px;min-height:44px;border-radius:8px;
+  font-family:inherit;white-space:nowrap;}
+.dp-langbtn.is-on{color:var(--white);text-decoration:underline;text-underline-offset:6px;
+  text-decoration-color:var(--orange);text-decoration-thickness:2px;}
+.dp-langsep{color:rgba(245,241,234,.32);}
+
+.dp-h1{font-family:var(--display);font-weight:800;font-size:36px;line-height:.99;
+  letter-spacing:-.022em;color:var(--bone);margin:0;text-shadow:0 2px 14px rgba(0,0,0,.45);}
+.dp-h1a{display:block;}
+.dp-h1b{display:block;color:var(--orange);}
+.dp-lede{color:rgba(245,241,234,.86);font-size:16px;line-height:1.45;margin:10px 0 0;
+  max-width:26em;text-shadow:0 1px 8px rgba(0,0,0,.5);}
+
+/* ── BODY: bone, one card lifted over the hero edge ── */
+.dp-body{background:var(--bone);padding:0 16px 44px;min-height:44vh;}
+.dp-card{max-width:640px;margin:-16px auto 0;background:var(--white);
+  border-radius:16px;padding:20px 18px;box-shadow:0 16px 40px rgba(10,22,40,.16),
+  0 2px 6px rgba(10,22,40,.06);}
+.dp-greet{color:var(--muted);font-size:16px;margin:0 0 14px;}
+
+.dp-details{margin:0 0 14px;padding:0;}
+.dp-row{display:flex;justify-content:space-between;gap:14px;padding:11px 0;
+  border-bottom:1px solid var(--dbone);}
+.dp-row dt{color:var(--muted);font-size:16px;margin:0;}
+.dp-row dd{color:var(--ink);font-size:16px;font-weight:600;margin:0;text-align:right;}
+
+/* money — the strongest hierarchy on the page */
+.dp-money{background:var(--bone);border-radius:13px;padding:14px 16px;margin:0 0 12px;}
+.dp-mrow{display:flex;justify-content:space-between;align-items:baseline;gap:14px;padding:7px 0;}
+.dp-mlabel{color:var(--muted);font-size:16px;}
+.dp-mval{color:var(--ink);font-size:18px;font-weight:600;font-variant-numeric:tabular-nums;}
+.dp-hero2{display:flex;justify-content:space-between;align-items:baseline;gap:14px;
+  padding:14px 0;margin:6px 0;border-top:1px solid var(--dbone);border-bottom:1px solid var(--dbone);}
+.dp-herolabel{font-family:var(--display);color:var(--navy);font-size:17px;font-weight:700;}
+.dp-heroval{font-family:var(--display);color:var(--cta);font-size:40px;font-weight:800;
+  line-height:1;font-variant-numeric:tabular-nums;letter-spacing:-.025em;}
+.dp-applied{color:#3F4854;font-size:16px;line-height:1.5;margin:0 0 16px;}
+
+/* action */
+.dp-pay{display:flex;align-items:center;justify-content:center;gap:9px;width:100%;
+  border:none;border-radius:12px;background:var(--cta);color:var(--white);
+  font-family:var(--display);font-size:19px;font-weight:700;min-height:56px;
+  padding:16px 20px;cursor:pointer;-webkit-appearance:none;text-decoration:none;
+  line-height:1.25;}
+.dp-pay[disabled]{opacity:.72;cursor:progress;}
+.dp-secondary{margin-top:14px;border:1.5px solid var(--navy);border-radius:10px;
+  background:var(--white);color:var(--navy);font-size:16px;font-weight:600;
+  min-height:48px;padding:12px 18px;cursor:pointer;font-family:inherit;width:100%;}
+.dp-stripe{display:flex;align-items:center;justify-content:center;gap:7px;
+  color:var(--muted);font-size:15px;margin:14px 0 0;}
+
+/* messages — icon + border, never colour alone */
+.dp-notice,.dp-error{display:flex;align-items:flex-start;gap:9px;border-radius:10px;
+  padding:12px 14px;font-size:16px;line-height:1.5;margin:0 0 16px;}
+.dp-notice{background:#FFFBEB;border:1px solid #EFD08A;border-left:4px solid var(--gold);color:#71540F;}
+.dp-error{background:#FEF2F2;border:1px solid #F3B4B4;border-left:4px solid #B42318;color:#851B12;}
+.dp-status{padding:4px 0 2px;}
+.dp-statush{font-family:var(--display);color:var(--navy);font-size:23px;font-weight:700;
+  margin:0 0 10px;line-height:1.2;}
+.dp-statusb{color:#3F4854;font-size:16px;line-height:1.55;margin:0 0 16px;}
+.dp-badge{display:inline-flex;align-items:center;gap:7px;background:#ECFDF5;
+  border:1px solid #7FD9AE;color:#05603A;border-radius:999px;padding:8px 15px;
+  font-size:15px;font-weight:700;margin:0 0 16px;}
+
+/* what happens next — reassurance BEFORE legal text */
+.dp-next{margin-top:20px;padding-top:18px;border-top:1px solid var(--dbone);}
+.dp-colInfo .dp-next:first-child{margin-top:0;}
+.dp-nexth{font-family:var(--display);color:var(--navy);font-size:18px;font-weight:700;margin:0 0 14px;}
+.dp-steps{list-style:none;margin:0;padding:0;}
+.dp-steps li{display:flex;align-items:flex-start;gap:11px;margin-bottom:12px;
+  color:#3F4854;font-size:16px;line-height:1.5;}
+.dp-num{flex:0 0 26px;width:26px;height:26px;border-radius:50%;background:var(--navy);
+  color:var(--bone);font-size:13px;font-weight:700;display:inline-flex;
+  align-items:center;justify-content:center;margin-top:1px;}
+
+/* human trust row */
+.dp-trust{margin-top:20px;padding-top:18px;border-top:1px solid var(--dbone);}
+.dp-owner{display:flex;align-items:center;gap:12px;margin-bottom:14px;}
+.dp-ownerMark{display:inline-flex;flex:0 0 34px;}
+.dp-ownerMark img{display:block;border-radius:8px;}
+.dp-ownerName{font-family:var(--display);color:var(--navy);font-size:17px;font-weight:700;margin:0;}
+.dp-ownerRole{color:var(--muted);font-size:15px;margin:2px 0 0;}
+/* STACKED, not side by side. Two 46% pills gave the phone number roughly 137px
+   of text room, and "(862) 250-9959" needs more than that at 16px — so the
+   number wrapped onto a second line even on a wide screen. Full-width rows give
+   it the whole column and cost nothing: they are the last thing on the page. */
+.dp-contact{display:flex;flex-direction:column;gap:10px;}
+.dp-ghost{width:100%;display:inline-flex;align-items:center;
+  justify-content:center;gap:8px;min-height:48px;padding:12px 14px;border-radius:10px;
+  border:1.5px solid rgba(10,22,40,.22);color:var(--navy);text-decoration:none;
+  font-size:16px;font-weight:600;}
+.dp-espanol{color:var(--muted);font-size:15px;margin:12px 0 0;}
+
+/* policy — quiet, last, still readable */
+.dp-policy{margin-top:22px;padding-top:18px;border-top:1px solid var(--dbone);}
+.dp-polh{font-family:var(--display);color:var(--navy);font-size:16px;font-weight:700;margin:0 0 8px;}
+.dp-polb{color:#4A5361;font-size:16px;line-height:1.6;margin:0 0 8px;}
+.dp-link{color:var(--cta);font-weight:600;}
+
+/* focus — visible for everyone, on every control */
+.dp-hero a:focus-visible,.dp-hero button:focus-visible,
+.dp-body a:focus-visible,.dp-body button:focus-visible{outline:3px solid var(--orange);
+  outline-offset:3px;border-radius:8px;}
+
+/* DESKTOP: still ONE centred card, but its CONTENTS split so a 640px column is
+   not left 1000px tall in an empty field. Money left, reassurance right. */
+@media (min-width:1024px){
+  .dp-card{max-width:980px;padding:34px 36px;}
+  .dp-heroInner{max-width:980px;}
+  .dp-grid{grid-template-columns:minmax(0,1.06fr) minmax(0,.94fr);gap:44px;align-items:start;}
+  .dp-colInfo{border-left:1px solid var(--dbone);padding-left:44px;}
+  .dp-colInfo .dp-next{margin-top:0;padding-top:0;border-top:none;}
+  .dp-colInfo .dp-trust{margin-top:26px;}
+  .dp-policy{margin-top:30px;}
+}
+@media (min-width:700px){
+  .dp-hero{background:
+    linear-gradient(100deg,rgba(10,22,40,1) 0%,rgba(10,22,40,1) 24%,rgba(10,22,40,.93) 42%,
+      rgba(10,22,40,.6) 56%,rgba(10,22,40,.3) 72%,rgba(10,22,40,.4) 100%),
+    linear-gradient(to bottom,rgba(10,22,40,.5) 0%,rgba(10,22,40,.04) 40%,rgba(10,22,40,.6) 100%),
+    url('/img/move-it-clear-it-hero-poster.webp') center 30%/cover no-repeat,
+    var(--navy);
+    padding-bottom:42px;}
+  .dp-heroInner{padding:20px 24px 0;}
+  .dp-topbar{margin-bottom:40px;}
+  .dp-h1{font-size:54px;}
+  .dp-lede{font-size:19px;}
+  .dp-card{margin-top:-24px;padding:30px 30px;}
+  .dp-heroval{font-size:46px;}
+  .dp-body{padding-bottom:60px;}
+}
+
+/* NARROW PHONES: the wordmark is the only thing in the bar that can go.
+   At 390px the bar has ~354px and wanted ~383px, so something had to give.
+   The LOGO stays (it is the identity), the HEADLINE stays, and both language
+   buttons stay at full size — a customer must never have to hunt for Español
+   on the page where they pay. The word "Move It Clear It" is already the
+   accessible name of the link (aria-label) and the first line of the <title>,
+   so hiding the glyphs costs a screen-reader user nothing. */
+@media (max-width:480px){
+  .dp-word{display:none;}
+}
+
+@media (max-width:360px){
+  .dp-heroInner{padding:14px 14px 0;}
+  .dp-body{padding:0 12px 36px;}
+  .dp-card{padding:20px 16px;}
+  .dp-h1{font-size:33px;}
+  .dp-heroval{font-size:34px;}
+  .dp-pay{font-size:17px;}
+  .dp-word{font-size:12px;letter-spacing:.11em;}
+}
+
+@media (prefers-reduced-motion:reduce){
+  .dp-hero *,.dp-body *{animation:none !important;transition:none !important;}
+}
+
+/* ════════════════════════════════════════════════════════════════════════════
+   NOT-FOUND — a bad or retired token gets the SAME brand treatment. A bare
+   error page is where trust in a payment link dies. Same escaping hazard, same
+   fix: these rules used to be a second inline <style> in not-found.tsx.
+   ════════════════════════════════════════════════════════════════════════════ */
+
+.nf-hero,.nf-body{font-family:Inter,-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;
+  -webkit-font-smoothing:antialiased;}
+.nf-hero *,.nf-body *{box-sizing:border-box;}
+.nf-hero{position:relative;background:
+  linear-gradient(100deg,rgba(10,22,40,1) 0%,rgba(10,22,40,1) 26%,rgba(10,22,40,.92) 44%,
+    rgba(10,22,40,.66) 58%,rgba(10,22,40,.44) 76%,rgba(10,22,40,.5) 100%),
+  linear-gradient(to bottom,rgba(10,22,40,.55) 0%,rgba(10,22,40,.06) 40%,rgba(10,22,40,.6) 100%),
+  url('/img/move-it-clear-it-hero-poster-mobile.webp') center 28%/cover no-repeat,#0A1628;
+  padding:0 0 30px;}
+.nf-hairline{height:4px;background:linear-gradient(90deg,#C9A961 0%,#C9A961 44%,
+  rgba(201,169,97,.5) 72%,rgba(201,169,97,0) 100%);}
+.nf-inner{max-width:640px;margin:0 auto;padding:16px 18px 0;}
+.nf-brand{display:inline-flex;align-items:center;gap:11px;margin-bottom:26px;}
+.nf-mark{display:block;width:44px;height:44px;border-radius:10px;
+  box-shadow:0 0 0 1px rgba(245,241,234,.14),0 6px 16px rgba(0,0,0,.34);}
+.nf-word{color:#F5F1EA;font-weight:700;font-size:13px;letter-spacing:.17em;
+  text-transform:uppercase;text-shadow:0 1px 3px rgba(0,0,0,.5);}
+.nf-h1{font-family:Archivo,Inter,sans-serif;font-weight:800;font-size:40px;line-height:.99;
+  letter-spacing:-.022em;color:#F5F1EA;margin:0;text-shadow:0 2px 14px rgba(0,0,0,.45);}
+.nf-h1 span{display:block;}
+.nf-accent{color:#FF5A1F;}
+.nf-body{background:#F5F1EA;padding:0 16px 48px;min-height:40vh;}
+.nf-card{max-width:640px;margin:-18px auto 0;background:#FFFFFF;border-radius:16px;
+  padding:26px 20px;box-shadow:0 16px 40px rgba(10,22,40,.16),0 2px 6px rgba(10,22,40,.06);}
+.nf-h2{font-family:Archivo,Inter,sans-serif;font-size:23px;font-weight:700;color:#0A1628;
+  margin:0 0 12px;line-height:1.2;}
+.nf-p{font-size:16px;color:#3F4854;margin:0 0 22px;line-height:1.55;}
+.nf-cta{display:flex;align-items:center;justify-content:center;background:#D2450F;
+  color:#FFFFFF;border-radius:12px;padding:16px 20px;min-height:56px;font-weight:700;
+  font-size:18px;font-family:Archivo,Inter,sans-serif;text-decoration:none;text-align:center;}
+.nf-alt{display:flex;align-items:center;justify-content:center;margin-top:10px;
+  min-height:48px;padding:12px 16px;border-radius:10px;border:1.5px solid rgba(10,22,40,.22);
+  color:#0A1628;text-decoration:none;font-size:16px;font-weight:600;}
+.nf-es{color:#5A6473;font-size:15px;margin:14px 0 0;}
+.nf-body a:focus-visible,.nf-hero a:focus-visible{outline:3px solid #FF5A1F;outline-offset:3px;border-radius:8px;}
+@media (min-width:700px){
+  .nf-hero{background:
+    linear-gradient(100deg,rgba(10,22,40,1) 0%,rgba(10,22,40,1) 24%,rgba(10,22,40,.93) 42%,
+      rgba(10,22,40,.6) 56%,rgba(10,22,40,.32) 74%,rgba(10,22,40,.42) 100%),
+    linear-gradient(to bottom,rgba(10,22,40,.5) 0%,rgba(10,22,40,.04) 40%,rgba(10,22,40,.58) 100%),
+    url('/img/move-it-clear-it-hero-poster.webp') center 30%/cover no-repeat,#0A1628;
+    padding-bottom:42px;}
+  .nf-inner{padding:20px 24px 0;}
+  .nf-h1{font-size:54px;}
+  .nf-card{margin-top:-24px;padding:32px;}
+}
+@media (max-width:480px){
+  .nf-word{display:none;}
+}
+@media (max-width:360px){
+  .nf-h1{font-size:33px;}
+  .nf-inner{padding:14px 14px 0;}
+  .nf-card{padding:22px 16px;}
+}
+@media (prefers-reduced-motion:reduce){.nf-hero *,.nf-body *{animation:none !important;transition:none !important;}}
