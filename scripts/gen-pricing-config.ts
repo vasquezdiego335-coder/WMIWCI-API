@@ -18,7 +18,7 @@
 import { writeFileSync, mkdirSync, existsSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import {
-  PACKAGES, PACKAGE_INCLUDES, BOOKING_AUTHORIZATION, TRUCK_PICKUP_RETURN,
+  PACKAGES, PACKAGE_INCLUDES, BOOKING_AUTHORIZATION,
   TRUCK_SIZE_UPGRADE,
   // ── The two-product contract (reconstructed 2026-08-15) ──
   //    The browser BUILDS UI from these: booking-form.html:3217 iterates
@@ -37,10 +37,29 @@ import {
   DISCOUNT_POLICY, DUPLICATE_CHARGE_RULES, MANUAL_REVIEW_TRIGGERS, COPY,
 } from '../src/lib/pricing-config'
 
-/** The exact object the browser receives as `window.WMIC_PRICING`. */
+/**
+ * The exact object the browser receives as `window.WMIC_PRICING`.
+ *
+ * ⚠ TRUCK PICKUP & RETURN IS DELIBERATELY ABSENT (owner decision, enforced
+ * 2026-08-18). The service is RETIRED. `TRUCK_PICKUP_RETURN` still exists in
+ * pricing-config.ts because a historical booking that genuinely bought it must
+ * keep rendering its original label and amount forever — but that is a SERVER
+ * concern. Shipping the constant to the browser is what let a retired product
+ * keep appearing in front of customers: the services page sold it, the booking
+ * form carried an estimate row for it, and the price was stamped into the DOM
+ * from this payload. A price the browser cannot see is a price the browser
+ * cannot quote. Do NOT re-add it to the mirror.
+ *
+ * `DUPLICATE_CHARGE_RULES` is filtered for the same reason — two of its rules
+ * name `truckPickupReturnFee`, and they are server-side billing policy, not
+ * anything the form needs.
+ */
 export function buildPricingPayload(): Record<string, unknown> {
+  const browserDuplicateRules = DUPLICATE_CHARGE_RULES.filter(
+    (r) => r.a !== 'truckPickupReturnFee' && r.b !== 'truckPickupReturnFee',
+  )
   return {
-    PACKAGES, PACKAGE_INCLUDES, BOOKING_AUTHORIZATION, TRUCK_PICKUP_RETURN,
+    PACKAGES, PACKAGE_INCLUDES, BOOKING_AUTHORIZATION,
     TRUCK_SIZE_UPGRADE,
     SERVICE_TYPES, TRUCK_SIZES, LABOR_ONLY, LABOR_SERVICES,
     LABOR_SERVICE_KEYS: [...LABOR_SERVICE_KEYS],
@@ -52,7 +71,7 @@ export function buildPricingPayload(): Record<string, unknown> {
     NO_OVERSIZED_FURNITURE_FEE, NO_BUILDING_AGE_FEE, NO_MATTRESS_BAG_SKU,
     ADDITIONAL_ROOMS, WEEKEND_HOLIDAY, TRAVEL, NEW_YORK, PARKING_TOLLS_DELAYS,
     WAITING_TIME, ASSEMBLY, INCLUDED_EQUIPMENT, MATERIALS, SCOPE_OVERAGE,
-    DISCOUNT_POLICY, DUPLICATE_CHARGE_RULES,
+    DISCOUNT_POLICY, DUPLICATE_CHARGE_RULES: browserDuplicateRules,
     MANUAL_REVIEW_TRIGGERS: [...MANUAL_REVIEW_TRIGGERS],
     COPY,
   }

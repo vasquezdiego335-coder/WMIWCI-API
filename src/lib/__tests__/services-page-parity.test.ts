@@ -9,12 +9,11 @@
 //  stale numbers rendering for anyone with JS blocked, and the Services
 //  page would quietly contradict the booking form.
 //
-//  It also pins the compliance wording around the rental-truck pickup and
-//  return add-on. That service does NOT yet have rental-agreement,
-//  insurance or NJ-licensing sign-off (owner confirmed 2026-07-25), so it
-//  is published REVIEW-GATED: the page must never say it is approved,
-//  guaranteed or automatic, and must never imply the fee covers the truck
-//  rental itself. If someone later softens that copy, this test fails.
+//  It also proves the RENTAL-TRUCK PICKUP AND RETURN add-on is GONE. That
+//  service was withdrawn (owner decision 2026-08-14) and the server refuses
+//  it at intake, but the page kept selling it — a schema.org Offer, an
+//  "Add Truck Pickup & Return — $49" button, a rate row and an FAQ line —
+//  until 2026-08-18. These tests now fail if any of it comes back.
 //
 //  SKIPS CLEANLY when the sibling site repo is absent.
 // ════════════════════════════════════════════════════════════════════════
@@ -155,7 +154,12 @@ test('services page: plain dollar fallbacks match the price book', { skip }, () 
       `stale amount for ${m[1]}`)
     checked++
   }
-  assert.ok(checked >= 3, `expected several data-amount hooks, saw ${checked}`)
+  // Was `>= 3`. Four of the five hooks on this page were the RETIRED truck
+  // add-on's fee (removed 2026-08-18); the survivor is the transportation
+  // per-mile rate. What matters is that whatever IS published resolves to the
+  // price book — the loop above — not that a withdrawn product keeps padding
+  // the count.
+  assert.ok(checked >= 1, `expected at least one data-amount hook, saw ${checked}`)
 })
 
 test('services page: crew lines are DERIVED, never a hand-written number', { skip }, () => {
@@ -177,37 +181,51 @@ test('services page: crew lines are DERIVED, never a hand-written number', { ski
   }
 })
 
-test('services page: truck add-on is priced from the price book, not hardcoded', { skip }, () => {
+/**
+ * ═══════════════════════════════════════════════════════════════════════
+ *  THE RETIRED TRUCK ADD-ON IS GONE FROM THE SITE — 2026-08-18.
+ *
+ *  These two tests are INVERTED from what they were. They used to require the
+ *  services page to CARRY the add-on: at least two `data-amount=
+ *  "TRUCK_PICKUP_RETURN.amount"` hooks, plus six lines of review-gated
+ *  honesty copy. That made the page structurally obliged to keep selling a
+ *  product the server refuses at intake (`checkIntake` → `service_retired`).
+ *
+ *  What was live until today: a schema.org Offer for "Rental-Truck Pickup and
+ *  Return Labor" (invisible to CSS, fully visible to crawlers), an "Add Truck
+ *  Pickup & Return — $49" button, a rate-table row, and an FAQ paragraph.
+ *  A customer who clicked it would have been refused by the API with a 422.
+ *
+ *  The honesty copy is not weakened by its removal — there is no longer an
+ *  offer for it to qualify. The constant stays SERVER-side so historical
+ *  bookings keep rendering their original line item.
+ * ═══════════════════════════════════════════════════════════════════════
+ */
+test('services page: the RETIRED truck add-on is not sold anywhere on it', { skip }, () => {
   const src = visible(html())
-  // The fee may only ever appear via the data-amount hook.
-  const hooks = src.match(/data-amount="TRUCK_PICKUP_RETURN\.amount">([^<]+)</g) ?? []
-  assert.ok(hooks.length >= 2,
-    'the truck add-on fee must render from TRUCK_PICKUP_RETURN.amount')
-  for (const h of hooks) {
-    const v = /">([^<]+)</.exec(h)![1]
-    assert.equal(decode(v), '$' + TRUCK_PICKUP_RETURN.amount,
-      'truck add-on fallback disagrees with TRUCK_PICKUP_RETURN.amount')
+  const raw = html()
+
+  // No price hook can publish the retired fee.
+  assert.equal((src.match(/data-amount="TRUCK_PICKUP_RETURN\.amount"/g) ?? []).length, 0,
+    'services.html still renders the retired truck add-on price')
+
+  // No customer-visible copy may name it, in either language.
+  for (const re of [/truck pickup\s*(?:&amp;|&|and)\s*return/i, /pickup[- ]and[- ]return labor/i, /recogida y devoluci/i]) {
+    assert.ok(!re.test(src), `services.html still advertises the retired add-on (${re})`)
   }
-  // Guard the $50 slip that appeared in a 2026-07-25 brief.
-  assert.ok(!/\$50\s*(?:pickup|truck)/i.test(src),
-    'the truck add-on is $49 in the price book; do not publish $50')
+
+  // And no structured-data Offer may keep it alive for crawlers, which CSS
+  // hiding never covered — this is how it stayed "hidden" yet published.
+  assert.ok(!/Rental-Truck Pickup and Return/i.test(raw),
+    'services.html still publishes a schema.org Offer for the retired add-on')
+
+  // The CTA that seeded a booking draft with the retired value must be gone.
+  assert.ok(!/data-truck="truck-pickup-return"/i.test(raw),
+    'services.html still carries the retired add-on CTA')
 })
 
-test('services page: truck add-on stays review-gated and never claims approval', { skip }, () => {
+test('services page: honest full/labor truck copy survives the removal', { skip }, () => {
   const src = visible(html())
-
-  // Required honesty, all of it customer-visible.
-  const required: [RegExp, string][] = [
-    [/Pending review/i,                          'must be labelled pending review'],
-    [/reservation must be in your name/i,         'must state the reservation is the customer\'s'],
-    [/must be confirmed before your move is approved/i, 'must state confirmation precedes approval'],
-    [/covers our pickup-and-return labor only/i,  'must state the fee is labor only'],
-    [/It is not the truck rental/i,               'must state the fee is not the rental'],
-    [/remain yours/i,                             'must list the costs that stay the customer\'s'],
-  ]
-  for (const [re, why] of required) {
-    assert.match(src, re, `truck add-on copy ${why}`)
-  }
 
   // Language that would over-promise a service without legal/insurance sign-off.
   const banned: [RegExp, string][] = [
