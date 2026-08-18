@@ -262,8 +262,15 @@ test('the layout is responsive: one centred card on a bone page', () => {
   assert.match(css, /@media \(max-width:360px\)/, 'small-phone breakpoint')
   // ONE card, centred, on BONE — not a white card floating in a navy void.
   assert.match(css, /\.dp-body\{background:var\(--bone\)/, 'the page body is bone, not navy')
-  assert.match(css, /\.dp-card\{max-width:640px;margin:-18px auto 0/, 'one centred card, lifted over the hero edge')
-  assert.ok(!/grid-template-columns/.test(css), 'no multi-column split — a payment page has one focus')
+  assert.match(css, /\.dp-card\{max-width:640px;margin:-16px auto 0/, 'one centred card, lifted over the hero edge')
+  // MOBILE IS THE DEFAULT: the grid is a single column until 1024px, so DOM
+  // order is visual order on a phone — payment, then reassurance, then policy.
+  assert.match(css, /\.dp-grid\{display:grid;gap:0;\}/, 'single column by default')
+  // Desktop widens the SAME card and splits its contents, rather than leaving
+  // a 640px ribbon 1000px tall in an empty field.
+  assert.match(css, /@media \(min-width:1024px\)/, 'desktop two-column breakpoint')
+  assert.match(css, /\.dp-card\{max-width:980px/, 'the card widens on desktop')
+  assert.match(css, /\.dp-grid\{grid-template-columns:minmax\(0,1\.06fr\) minmax\(0,\.94fr\)/)
 })
 
 test('the header is cut from the SAME photograph as the social card', () => {
@@ -302,22 +309,24 @@ test('reassurance comes BEFORE the legal text, not after it', () => {
   // "What happens next", which made a payment page feel legal-heavy.
   // RENDER order, not source order — the sub-components are DEFINED below the
   // main component, so raw indexOf over the whole file measures the wrong thing.
-  // Inside PayState, NextSteps must follow the pay button.
-  const payState = src.slice(src.indexOf('function PayState('), src.indexOf('function NextSteps('))
-  const payBtnIdx = payState.indexOf('className="dp-pay"')
-  const nextIdx = payState.indexOf('<NextSteps t={t} />')
-  assert.ok(payBtnIdx > -1 && nextIdx > -1, 'both must be inside PayState')
-  assert.ok(payBtnIdx < nextIdx, 'what-happens-next sits BELOW the payment action')
-
-  // And in the card, the trust row and the policy come after the state block,
-  // with the policy last.
-  const card = src.slice(src.indexOf('<main className="dp-body">'), src.indexOf('</main>'))
+  const card = src.slice(src.indexOf('<div className="dp-card">'), src.indexOf('</main>'))
+  const payColIdx = card.indexOf('className="dp-colPay"')
+  const infoColIdx = card.indexOf('className="dp-colInfo"')
+  const nextIdx = card.indexOf('<NextSteps t={t} />')
   const trustIdx = card.indexOf('<TrustRow t={t}')
   const policyIdx = card.indexOf('className="dp-policy"')
-  assert.ok(trustIdx > -1 && policyIdx > -1)
-  assert.ok(trustIdx < policyIdx, 'the human contact row precedes the legal text')
-  // The policy is the LAST thing in the card.
-  assert.ok(card.indexOf('</section>', policyIdx) > policyIdx, 'the policy closes the card')
+  assert.ok([payColIdx, infoColIdx, nextIdx, trustIdx, policyIdx].every((i) => i > -1), 'all five blocks must exist')
+
+  // The grid is ONE column until 1024px, so on a phone this DOM order IS the
+  // visual order: pay -> what happens next -> who we are -> the legal text.
+  assert.ok(payColIdx < infoColIdx, 'the payment column comes first')
+  assert.ok(infoColIdx < nextIdx, 'what-happens-next lives in the info column')
+  assert.ok(nextIdx < trustIdx, 'reassurance before the contact row')
+  assert.ok(trustIdx < policyIdx, 'and the legal text is LAST')
+
+  // The pay button is in the payment column, above everything reassuring.
+  const payCol = card.slice(payColIdx, infoColIdx)
+  assert.match(payCol, /<PayState/, 'the payment state renders in the payment column')
 })
 
 test('the human, local identity is present and bilingual', () => {
