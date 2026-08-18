@@ -29,13 +29,13 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
           <div style={{ maxWidth: '720px', margin: '0 auto', textAlign: 'center' }}>
             <nav aria-label="Legal" style={{ display: 'flex', gap: '24px', justifyContent: 'center', flexWrap: 'wrap', marginBottom: '12px' }}>
               <a href="https://moveitclearit.com/terms" style={{ color: '#FF5A1F', fontSize: '14px', fontWeight: 600, textDecoration: 'none' }}>
-                MoveItClearIt Terms of Service
+                Move It Clear It Terms of Service
               </a>
               <a href="https://moveitclearit.com/privacy" style={{ color: '#FF5A1F', fontSize: '14px', fontWeight: 600, textDecoration: 'none' }}>
-                MoveItClearIt Privacy Policy
+                Move It Clear It Privacy Policy
               </a>
             </nav>
-            <p style={{ color: '#9CA3AF', fontSize: '13px', margin: 0 }}>© 2026 MoveItClearIt</p>
+            <p style={{ color: '#9CA3AF', fontSize: '13px', margin: 0 }}>© 2026 Move It Clear It</p>
           </div>
         </footer>
       </body>

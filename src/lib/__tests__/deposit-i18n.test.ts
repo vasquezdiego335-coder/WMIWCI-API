@@ -17,6 +17,11 @@ const ROOT = resolve(__dirname, '../../..')
 const read = (p: string): string => readFileSync(resolve(ROOT, p), 'utf8')
 const VIEW = 'app/deposit/[token]/DepositView.tsx'
 const PAGE = 'app/deposit/[token]/page.tsx'
+const NOTFOUND = 'app/deposit/[token]/not-found.tsx'
+const LAYOUT = 'app/deposit/[token]/layout.tsx'
+// The styles are a REAL stylesheet, not a template literal in the view. See the
+// hydration test at the bottom of this file for why that is load-bearing.
+const STYLES = 'app/deposit/[token]/deposit.css'
 const COMMENT = '/' + '/'
 
 // ── Parity ──────────────────────────────────────────────────────────────────
@@ -233,7 +238,7 @@ test('the language control is a real control, not a decoration', () => {
 })
 
 test('touch targets and the pay button meet the sizes older customers need', () => {
-  const css = read(VIEW)
+  const css = read(STYLES)
   assert.match(css, /\.dp-pay\{[^}]*min-height:56px/, 'primary button >= 56px')
   assert.match(css, /\.dp-langbtn\{[^}]*min-height:44px/, 'language buttons >= 44px')
   assert.match(css, /\.dp-secondary\{[^}]*min-height:48px/)
@@ -243,7 +248,7 @@ test('touch targets and the pay button meet the sizes older customers need', () 
 })
 
 test('body text is at least 16px and prices are substantially larger', () => {
-  const css = read(VIEW)
+  const css = read(STYLES)
   // The deposit figure is the number the customer must not misread.
   assert.match(css, /\.dp-heroval\{[^}]*font-size:40px/)
   assert.match(css, /\.dp-mval\{[^}]*font-size:18px/)
@@ -257,7 +262,7 @@ test('body text is at least 16px and prices are substantially larger', () => {
 })
 
 test('the layout is responsive: one centred card on a bone page', () => {
-  const css = read(VIEW)
+  const css = read(STYLES)
   assert.match(css, /@media \(min-width:700px\)/, 'desktop breakpoint')
   assert.match(css, /@media \(max-width:360px\)/, 'small-phone breakpoint')
   // ONE card, centred, on BONE — not a white card floating in a navy void.
@@ -274,7 +279,7 @@ test('the layout is responsive: one centred card on a bone page', () => {
 })
 
 test('the header is cut from the SAME photograph as the social card', () => {
-  const css = read(VIEW)
+  const css = read(STYLES)
   // The customer taps a photographic card in Messenger; landing on a flat navy
   // screen breaks the thread. Same poster, same gold hairline, same lockup.
   assert.match(css, /move-it-clear-it-hero-poster-mobile\.webp/, 'mobile poster')
@@ -293,7 +298,7 @@ test('the header is cut from the SAME photograph as the social card', () => {
 })
 
 test('Archivo carries the display type, Inter the body and the money labels', () => {
-  const css = read(VIEW)
+  const css = read(STYLES)
   assert.match(css, /--display:Archivo/, 'Archivo is the display face')
   assert.match(css, /--body:Inter/, 'Inter is the body face')
   for (const cls of ['dp-h1', 'dp-heroval', 'dp-pay', 'dp-statush', 'dp-nexth']) {
@@ -354,17 +359,22 @@ test('the human, local identity is present and bilingual', () => {
 })
 
 test('every state gets the same brand treatment, including not-found', () => {
-  const nf = read('app/deposit/[token]/not-found.tsx')
-  assert.match(nf, /move-it-clear-it-hero-poster/, 'the invalid-link page uses the same photograph')
+  const nf = read(NOTFOUND)
+  // Structure lives in the component; its LOOK now lives in the shared
+  // stylesheet, same as the payment page's — which is the point: one file, one
+  // brand, no chance of the error page drifting away from the paid one.
+  const css = read(STYLES)
+  assert.match(css, /\.nf-hero\{[^}]*move-it-clear-it-hero-poster-mobile\.webp/, 'the invalid-link page uses the same photograph')
   assert.match(nf, /nf-hairline/, 'and the same gold hairline')
-  assert.match(nf, /Archivo/, 'and the same display face')
-  assert.match(nf, /background:#F5F1EA/, 'and the same bone body')
+  assert.match(css, /\.nf-hairline\{height:4px;background:linear-gradient\(90deg,#C9A961/, 'in gold')
+  assert.match(css, /\.nf-h1\{font-family:Archivo/, 'and the same display face')
+  assert.match(css, /\.nf-body\{background:#F5F1EA/, 'and the same bone body')
   assert.match(nf, /t\.titleLead/, 'and the same headline lockup')
   assert.match(nf, /pickLang\(headers\(\)\.get\('accept-language'\)\)/, 'and it is bilingual')
 })
 
 test('only the approved palette is used', () => {
-  const css = read(VIEW)
+  const css = read(STYLES)
   const approved = new Set(['#0A1628','#0D1F3C','#FF5A1F','#D2450F','#C9A961','#F5F1EA','#EDE8DF','#FFFFFF'])
   const vars = Array.from(css.matchAll(/--[a-z]+:(#[0-9A-Fa-f]{6})/g), (m) => m[1].toUpperCase())
   for (const v of vars) {
@@ -396,4 +406,100 @@ test('the view model still carries no customer contact detail', () => {
   for (const forbidden of ['customerEmail', 'customerPhone', 'bookingId', 'stripeCheckoutSessionId', 'createdById']) {
     assert.ok(!select.includes(forbidden), `${forbidden} must not be selected for the public page`)
   }
+})
+
+// ── Hydration: the styles may never be an inline text node ──────────────────
+//
+// THE BUG THIS LOCKS OUT. The CSS used to be rendered as <style>{CSS}</style>
+// inside the client component. React HTML-escapes text when it serialises on
+// the server, so `Archivo,'Inter'` shipped as `Archivo,&#x27;Inter&#x27;` while
+// the client's JS string kept the raw quote. Production logged seven React #425
+// text mismatches, then #418, then #423 — which discards the server HTML and
+// re-renders the whole root on the client.
+//
+// It was not cosmetic. <style> is a RAW TEXT element, so the HTML parser never
+// decodes entities inside it: the browser read the background rule as
+// url(&#x27;/img/...&#x27;), treated it as an unquoted URL starting with "&",
+// and requested /deposit/& — a 404. The hero photograph was BROKEN on first
+// paint and only appeared after the failed hydration rewrote the tag.
+//
+// A stylesheet has no text node to mismatch. Keep it that way.
+
+test('no view renders an inline <style> text node', () => {
+  for (const f of [VIEW, NOTFOUND]) {
+    const src = read(f)
+    assert.ok(!/<style>/.test(src), `${f} must not inline a <style> tag — it breaks hydration`)
+    assert.ok(!/^const CSS = `/m.test(src), `${f} must not carry a CSS template literal`)
+  }
+})
+
+test('the stylesheet is imported by a server component in the route segment', () => {
+  assert.match(read(LAYOUT), /import '\.\/deposit\.css'/, 'the segment layout owns the stylesheet')
+  assert.ok(!/'use client'/.test(read(LAYOUT)), 'the layout must stay a server component')
+  // not-found.tsx imports it directly too, so the error page is styled even if
+  // it is ever rendered outside this segment's layout.
+  assert.match(read(NOTFOUND), /import '\.\/deposit\.css'/)
+})
+
+test('the CSS still contains the apostrophes that made escaping unsafe', () => {
+  // If these ever disappear the test above stops being meaningful — the point is
+  // that a stylesheet can hold them safely, not that we removed them.
+  const css = read(STYLES)
+  assert.match(css, /'Segoe UI'/, 'quoted font names are fine in a real stylesheet')
+  assert.match(css, /url\('\/img\/move-it-clear-it-hero-poster-mobile\.webp'\)/, 'and so are quoted url()s')
+})
+
+// ── Narrow phones: the header must fit ──────────────────────────────────────
+
+test('below 480px the wordmark yields, but never the logo or the language control', () => {
+  const css = read(STYLES)
+  // At 390px the topbar has ~354px of room and wanted ~383px. The wordmark is
+  // the only element that can go: it is decorative there, because the link's
+  // accessible name and the page <title> both still say "Move It Clear It".
+  assert.match(css, /@media \(max-width:480px\)\{\s*\.dp-word\{display:none;\}/,
+    'the written wordmark is hidden on narrow phones')
+  assert.match(css, /@media \(max-width:480px\)\{\s*\.nf-word\{display:none;\}/,
+    'and on the not-found page too')
+  // What must NOT be hidden.
+  assert.ok(!/\.dp-mark\{display:none/.test(css), 'the logo always renders')
+  assert.ok(!/\.dp-lang(btn)?\{[^}]*display:none/.test(css), 'both language buttons always render')
+  assert.ok(!/\.dp-h1\{[^}]*display:none/.test(css), 'the headline always renders')
+  // The bar may not wrap, and the language group may not be squeezed.
+  assert.match(css, /\.dp-topbar\{[^}]*flex-wrap:nowrap/)
+  assert.match(css, /\.dp-lang\{[^}]*flex:0 0 auto/, 'the language control never shrinks')
+  assert.match(css, /\.dp-langbtn\{[^}]*white-space:nowrap/, 'and never wraps mid-word')
+  // The brand is the flexible one, and may collapse rather than overflow.
+  assert.match(css, /\.dp-brand\{[^}]*min-width:0/)
+})
+
+test('the accessible name survives hiding the wordmark', () => {
+  // Hiding glyphs is only acceptable because the name is still announced.
+  assert.match(read(VIEW), /className="dp-brand" href="\/" aria-label=\{t\.brand\}/)
+})
+
+// ── Call / Text ─────────────────────────────────────────────────────────────
+
+test('the phone number gets a full-width row instead of wrapping', () => {
+  const css = read(STYLES)
+  // Two 46% pills left the number ~137px of text room; "(862) 250-9959" needs
+  // more than that at 16px, so it wrapped onto a second line even on desktop.
+  assert.match(css, /\.dp-contact\{display:flex;flex-direction:column;gap:10px;\}/,
+    'Call and Text stack vertically')
+  assert.match(css, /\.dp-ghost\{width:100%/, 'each takes the full column width')
+  // The rejected fixes: never re-introduce the shared row, and never paper over
+  // it with nowrap on a box that cannot grow.
+  assert.ok(!/\.dp-contact\{[^}]*flex-wrap:wrap/.test(css), 'no wrapping row')
+  assert.ok(!/\.dp-ghost\{[^}]*flex:1 1 46%/.test(css), 'no 46% basis')
+  assert.ok(!/\.dp-ghost\{[^}]*white-space:nowrap/.test(css), 'nowrap here would overflow, not fix')
+})
+
+// ── Footer branding ─────────────────────────────────────────────────────────
+
+test('the footer writes the brand as three words', () => {
+  const layout = read('app/layout.tsx')
+  const footer = layout.slice(layout.indexOf('<footer'))
+  assert.ok(footer.includes('Move It Clear It Terms of Service'))
+  assert.ok(footer.includes('Move It Clear It Privacy Policy'))
+  assert.ok(footer.includes('© 2026 Move It Clear It'))
+  assert.ok(!/MoveItClearIt/.test(footer), 'the run-together spelling is not the brand')
 })
