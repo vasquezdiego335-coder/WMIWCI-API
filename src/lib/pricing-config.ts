@@ -1073,13 +1073,17 @@ export const LABOR_ONLY_EXCLUDES: readonly Bilingual[] = [
     "en": "Mileage charge",
     "es": "Cargo por millaje"
   },
+  // "Truck pickup or return" was listed here as an exclusion until 2026-08-18.
+  // It was removed because the add-on itself is RETIRED: naming it as something
+  // labor-only "does not include" implied it could be bought somewhere else,
+  // which is the impression this cleanup exists to remove. Driving the
+  // customer's rental is already covered by the line below.
   {
-    "en": "Truck pickup or return",
-    "es": "Recogida o devolución del camión"
-  },
-  {
-    "en": "Driving your rental truck unless separately approved",
-    "es": "Conducir su camión de alquiler a menos que se apruebe por separado"
+    // "unless separately approved" was removed with the add-on: there is no
+    // longer any path by which we drive a customer's rental, so the caveat
+    // described a service that cannot be bought.
+    "en": "Driving your rental truck",
+    "es": "Conducir su camión de alquiler"
   }
 ]
 export const LABOR_ONLY_EXAMPLES = [

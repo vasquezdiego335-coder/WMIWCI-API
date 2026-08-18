@@ -50,10 +50,17 @@ test('parity: every package price survives the trip into the mirror', { skip }, 
       `${pkg.key} price ${pkg.price.amount} missing from the mirror`
     )
   }
-  // The two $49s must BOTH be present as separately-keyed values.
+  // The booking authorization is the ONLY $49 the browser may know about.
   assert.ok(js.includes('"bookingAuthorizationAmount"'), 'booking authorization id missing')
-  assert.ok(js.includes('"truckPickupReturnFee"'), 'truck add-on id missing')
-  assert.equal(BOOKING_AUTHORIZATION.amount, TRUCK_PICKUP_RETURN.amount)
+  // ── INVERTED 2026-08-18. This used to require "truckPickupReturnFee" in the
+  //    mirror so "both $49s stay separate". The truck add-on is RETIRED, and a
+  //    price the browser can read is a price a page can quote — that shipped
+  //    constant is what kept a withdrawn product on the services page and in
+  //    the booking form's estimate rows. It stays SERVER-side for historical
+  //    bookings (see TRUCK_PICKUP_RETURN in pricing-config.ts) and must never
+  //    reach the mirror again.
+  assert.ok(!js.includes('"truckPickupReturnFee"'), 'RETIRED truck add-on must not ship to the browser')
+  assert.ok(!js.includes('TRUCK_PICKUP_RETURN'), 'RETIRED truck add-on must not ship to the browser')
 })
 
 test('parity: the booking form loads the mirror and defines no prices itself', { skip }, () => {

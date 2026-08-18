@@ -126,13 +126,31 @@ test('browser mirror: discount clamps at 10% and never touches the truck add-on'
   assert.equal(P.DISCOUNT_POLICY.truckAddonDiscountable, false)
 })
 
-test('browser mirror: carries both $49s as separate values', { skip }, () => {
+test('browser mirror: carries the booking authorization $49', { skip }, () => {
   const P = loadMirror()
   assert.equal(P.BOOKING_AUTHORIZATION.amount, 49)
-  assert.equal(P.TRUCK_PICKUP_RETURN.amount, 49)
-  assert.notEqual(P.BOOKING_AUTHORIZATION.id, P.TRUCK_PICKUP_RETURN.id)
-  assert.equal(P.TRUCK_PICKUP_RETURN.discountable, false)
-  assert.equal(P.TRUCK_PICKUP_RETURN.requiresReview, true)
+  assert.equal(P.BOOKING_AUTHORIZATION.id, 'bookingAuthorizationAmount')
+})
+
+/**
+ * THE RETIRED ADD-ON MUST NOT REACH A BROWSER.
+ *
+ * This assertion is inverted from what it used to be. The mirror used to ship
+ * TRUCK_PICKUP_RETURN "so both $49s stay separate" — and that shipped price is
+ * exactly what kept a withdrawn product in front of customers: services.html
+ * sold it with a schema.org Offer and an "Add Truck Pickup & Return — $49"
+ * button, and booking-form.html stamped the amount into an estimate row from
+ * this payload. The constant still exists SERVER-side (pricing-config.ts) so
+ * historical bookings render their original line item forever; it simply may
+ * never be published to a page again.
+ */
+test('browser mirror: the RETIRED truck add-on is absent entirely', { skip }, () => {
+  const P = loadMirror()
+  assert.equal('TRUCK_PICKUP_RETURN' in P, false, 'retired add-on must not ship to the browser')
+  const raw = readFileSync(MIRROR, 'utf8')
+  for (const needle of ['truckPickupReturnFee', 'Truck pickup & return', 'truck-pickup-return']) {
+    assert.equal(raw.includes(needle), false, `mirror still contains "${needle}"`)
+  }
 })
 
 test('browser mirror: no mattress-bag SKU and no building-age fee', { skip }, () => {
