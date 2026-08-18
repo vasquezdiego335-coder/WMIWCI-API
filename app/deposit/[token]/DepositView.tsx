@@ -246,24 +246,38 @@ export default function DepositView({ view, token, initialLang, returning, cance
       {/* ── BODY: bone, one card. No navy void. ── */}
       <main className="dp-body">
         <div className="dp-card">
-          {state === 'pay' && (
-            <PayState
-              t={t}
-              view={view as PublicDepositView}
-              phase={phase}
-              error={error}
-              canceled={canceled}
-              firstName={firstName}
-              onPay={pay}
-              fmtDate={fmtDate}
-            />
-          )}
-          {state === 'paid' && <PaidState t={t} view={view as PublicDepositView} fmtDate={fmtDate} />}
-          {state === 'closed' && <ClosedState t={t} status={(view as PublicDepositView).status} phone={phone} />}
-          {state === 'unavailable' && <UnavailableState t={t} phone={phone} />}
+          {/* ONE card, but on a wide screen its CONTENTS split in two. At 1512px
+              a single 640px column was 42% of the screen and 1082px tall — a
+              narrow ribbon in an empty field, which is what made the desktop
+              view feel cramped. Money on the left, reassurance on the right;
+              below 1024px it collapses back to the exact mobile order. */}
+          <div className="dp-grid">
+            <div className="dp-colPay">
+              {state === 'pay' && (
+                <PayState
+                  t={t}
+                  view={view as PublicDepositView}
+                  phase={phase}
+                  error={error}
+                  canceled={canceled}
+                  firstName={firstName}
+                  onPay={pay}
+                  fmtDate={fmtDate}
+                />
+              )}
+              {state === 'paid' && <PaidState t={t} view={view as PublicDepositView} fmtDate={fmtDate} />}
+              {state === 'closed' && <ClosedState t={t} status={(view as PublicDepositView).status} phone={phone} />}
+              {state === 'unavailable' && <UnavailableState t={t} phone={phone} />}
+            </div>
 
-          {/* Human, local, and compact — the part that says a person answers. */}
-          <TrustRow t={t} phone={phone} />
+            <aside className="dp-colInfo">
+              {/* Reassurance, and on desktop it sits BESIDE the payment rather
+                  than a screen-length below it. */}
+              {(state === 'pay' || state === 'paid') && <NextSteps t={t} />}
+              {/* Human, local, and compact — the part that says a person answers. */}
+              <TrustRow t={t} phone={phone} />
+            </aside>
+          </div>
 
           {/* Quiet, last, and still fully readable. */}
           <section className="dp-policy" aria-labelledby="dp-pol-h">
@@ -422,10 +436,6 @@ function PayState({
         <IconLock />
         <span>{t.stripeNote}</span>
       </p>
-
-      {/* Directly below the payment action, BEFORE the policy — reassurance
-          should arrive before legal text, not after it. */}
-      <NextSteps t={t} />
     </>
   )
 }
@@ -489,7 +499,6 @@ function PaidState({ t, view, fmtDate }: { t: T; view: PublicDepositView; fmtDat
         )}
       </div>
       <p className="dp-applied">{t.paidApplied}</p>
-      <NextSteps t={t} />
     </>
   )
 }
@@ -549,18 +558,19 @@ const CSS = `
 .dp-i{width:1.05em;height:1.05em;flex:0 0 auto;}
 
 /* ── HERO: the same photograph the social card is cut from ── */
+.dp-grid{display:grid;gap:0;}
 .dp-hero{position:relative;background:
   linear-gradient(100deg,rgba(10,22,40,1) 0%,rgba(10,22,40,1) 26%,rgba(10,22,40,.92) 44%,
     rgba(10,22,40,.66) 58%,rgba(10,22,40,.42) 74%,rgba(10,22,40,.46) 100%),
   linear-gradient(to bottom,rgba(10,22,40,.55) 0%,rgba(10,22,40,.05) 40%,rgba(10,22,40,.62) 100%),
   url('/img/move-it-clear-it-hero-poster-mobile.webp') center 28%/cover no-repeat,
   var(--navy);
-  padding:0 0 30px;}
+  padding:0 0 24px;}
 .dp-hairline{height:4px;background:linear-gradient(90deg,var(--gold) 0%,var(--gold) 44%,
   rgba(201,169,97,.5) 72%,rgba(201,169,97,0) 100%);}
-.dp-heroInner{max-width:640px;margin:0 auto;padding:16px 18px 0;}
+.dp-heroInner{max-width:640px;margin:0 auto;padding:12px 18px 0;}
 .dp-topbar{display:flex;align-items:center;justify-content:space-between;gap:12px;
-  flex-wrap:wrap;margin-bottom:26px;}
+  flex-wrap:nowrap;margin-bottom:18px;}
 .dp-brand{display:inline-flex;align-items:center;gap:11px;text-decoration:none;
   padding:5px 2px;min-height:44px;}
 /* BARE mark — icon.svg is already a navy tile with an orange chevron. */
@@ -576,28 +586,28 @@ const CSS = `
   text-decoration-color:var(--orange);text-decoration-thickness:2px;}
 .dp-langsep{color:rgba(245,241,234,.32);}
 
-.dp-h1{font-family:var(--display);font-weight:800;font-size:40px;line-height:.99;
+.dp-h1{font-family:var(--display);font-weight:800;font-size:36px;line-height:.99;
   letter-spacing:-.022em;color:var(--bone);margin:0;text-shadow:0 2px 14px rgba(0,0,0,.45);}
 .dp-h1a{display:block;}
 .dp-h1b{display:block;color:var(--orange);}
-.dp-lede{color:rgba(245,241,234,.86);font-size:17px;line-height:1.5;margin:14px 0 0;
+.dp-lede{color:rgba(245,241,234,.86);font-size:16px;line-height:1.45;margin:10px 0 0;
   max-width:26em;text-shadow:0 1px 8px rgba(0,0,0,.5);}
 
 /* ── BODY: bone, one card lifted over the hero edge ── */
 .dp-body{background:var(--bone);padding:0 16px 44px;min-height:44vh;}
-.dp-card{max-width:640px;margin:-18px auto 0;background:var(--white);
-  border-radius:16px;padding:24px 20px;box-shadow:0 16px 40px rgba(10,22,40,.16),
+.dp-card{max-width:640px;margin:-16px auto 0;background:var(--white);
+  border-radius:16px;padding:20px 18px;box-shadow:0 16px 40px rgba(10,22,40,.16),
   0 2px 6px rgba(10,22,40,.06);}
-.dp-greet{color:var(--muted);font-size:16px;margin:0 0 18px;}
+.dp-greet{color:var(--muted);font-size:16px;margin:0 0 14px;}
 
-.dp-details{margin:0 0 18px;padding:0;}
+.dp-details{margin:0 0 14px;padding:0;}
 .dp-row{display:flex;justify-content:space-between;gap:14px;padding:11px 0;
   border-bottom:1px solid var(--dbone);}
 .dp-row dt{color:var(--muted);font-size:16px;margin:0;}
 .dp-row dd{color:var(--ink);font-size:16px;font-weight:600;margin:0;text-align:right;}
 
 /* money — the strongest hierarchy on the page */
-.dp-money{background:var(--bone);border-radius:13px;padding:16px 17px;margin:0 0 14px;}
+.dp-money{background:var(--bone);border-radius:13px;padding:14px 16px;margin:0 0 12px;}
 .dp-mrow{display:flex;justify-content:space-between;align-items:baseline;gap:14px;padding:7px 0;}
 .dp-mlabel{color:var(--muted);font-size:16px;}
 .dp-mval{color:var(--ink);font-size:18px;font-weight:600;font-variant-numeric:tabular-nums;}
@@ -606,7 +616,7 @@ const CSS = `
 .dp-herolabel{font-family:var(--display);color:var(--navy);font-size:17px;font-weight:700;}
 .dp-heroval{font-family:var(--display);color:var(--cta);font-size:40px;font-weight:800;
   line-height:1;font-variant-numeric:tabular-nums;letter-spacing:-.025em;}
-.dp-applied{color:#3F4854;font-size:16px;line-height:1.5;margin:0 0 20px;}
+.dp-applied{color:#3F4854;font-size:16px;line-height:1.5;margin:0 0 16px;}
 
 /* action */
 .dp-pay{display:flex;align-items:center;justify-content:center;gap:9px;width:100%;
@@ -635,7 +645,8 @@ const CSS = `
   font-size:15px;font-weight:700;margin:0 0 16px;}
 
 /* what happens next — reassurance BEFORE legal text */
-.dp-next{margin-top:24px;padding-top:20px;border-top:1px solid var(--dbone);}
+.dp-next{margin-top:20px;padding-top:18px;border-top:1px solid var(--dbone);}
+.dp-colInfo .dp-next:first-child{margin-top:0;}
 .dp-nexth{font-family:var(--display);color:var(--navy);font-size:18px;font-weight:700;margin:0 0 14px;}
 .dp-steps{list-style:none;margin:0;padding:0;}
 .dp-steps li{display:flex;align-items:flex-start;gap:11px;margin-bottom:12px;
@@ -645,7 +656,7 @@ const CSS = `
   align-items:center;justify-content:center;margin-top:1px;}
 
 /* human trust row */
-.dp-trust{margin-top:22px;padding-top:20px;border-top:1px solid var(--dbone);}
+.dp-trust{margin-top:20px;padding-top:18px;border-top:1px solid var(--dbone);}
 .dp-owner{display:flex;align-items:center;gap:12px;margin-bottom:14px;}
 .dp-ownerMark{display:inline-flex;flex:0 0 34px;}
 .dp-ownerMark img{display:block;border-radius:8px;}
@@ -669,6 +680,17 @@ const CSS = `
 .dp-body a:focus-visible,.dp-body button:focus-visible{outline:3px solid var(--orange);
   outline-offset:3px;border-radius:8px;}
 
+/* DESKTOP: still ONE centred card, but its CONTENTS split so a 640px column is
+   not left 1000px tall in an empty field. Money left, reassurance right. */
+@media (min-width:1024px){
+  .dp-card{max-width:980px;padding:34px 36px;}
+  .dp-heroInner{max-width:980px;}
+  .dp-grid{grid-template-columns:minmax(0,1.06fr) minmax(0,.94fr);gap:44px;align-items:start;}
+  .dp-colInfo{border-left:1px solid var(--dbone);padding-left:44px;}
+  .dp-colInfo .dp-next{margin-top:0;padding-top:0;border-top:none;}
+  .dp-colInfo .dp-trust{margin-top:26px;}
+  .dp-policy{margin-top:30px;}
+}
 @media (min-width:700px){
   .dp-hero{background:
     linear-gradient(100deg,rgba(10,22,40,1) 0%,rgba(10,22,40,1) 24%,rgba(10,22,40,.93) 42%,
