@@ -10,8 +10,14 @@ import {
   depositUrl,
   effectiveStatus,
   remainingAfterCents,
+  formatMoveWhenEn,
+  cleanCustomerText,
+  parseMoveDetails,
   MAX_DEPOSIT_CENTS,
+  MAX_SERVICE_SUMMARY_LEN,
+  MAX_CUSTOMER_NOTE_LEN,
 } from '@/lib/deposit-links'
+import { parseCalendarDate, parseMoveTime } from '@/lib/move-date'
 import { createDepositRequest } from '@/lib/deposit-service'
 import { depositNotifyConfig } from '@/lib/discord-payments'
 
@@ -45,8 +51,21 @@ const CreateSchema = z.object({
   customerEmail: z.string().trim().email().max(200).optional().or(z.literal('')).nullable(),
   customerPhone: z.string().trim().max(40).optional().nullable(),
   quoteTotal: z.union([z.string(), z.number()]).optional().nullable(),
+  // ── The job text, split by AUDIENCE ──
+  // `serviceSummary`, `moveDetails` and `customerNote` are shown to the
+  // CUSTOMER. `internalNote` is not, and there is no code path below that lets
+  // one become the other.
   serviceSummary: z.string().trim().max(200).optional().nullable(),
+  moveDetails: z.union([z.string(), z.array(z.string())]).optional().nullable(),
+  customerNote: z.string().trim().max(300).optional().nullable(),
+  internalNote: z.string().trim().max(2000).optional().nullable(),
+  // A CALENDAR DATE ("2026-08-22") and, separately, a wall-clock time
+  // ("07:00"). They are never combined into one timestamp — see move-date.ts.
   moveDate: z.string().trim().max(40).optional().nullable(),
+  moveTime: z.string().trim().max(20).optional().nullable(),
+  // The DEPOSIT LINK's expiry. Unrelated to the move date, and the two are
+  // deliberately far apart in this schema for the same reason they are now far
+  // apart in the form: they were being confused.
   expiresAt: z.string().trim().max(40).optional().nullable(),
 })
 
@@ -80,7 +99,8 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     select: {
       id: true, publicToken: true, status: true, amountCents: true, quoteTotalCents: true,
       balanceBeforeCents: true, amountPaidCents: true, customerName: true, serviceSummary: true,
-      moveDate: true, expiresAt: true, paidAt: true, createdAt: true, createdByName: true,
+      moveDetails: true, customerNote: true, internalNote: true,
+      moveDate: true, moveTimeMinutes: true, expiresAt: true, paidAt: true, createdAt: true, createdByName: true,
       bookingId: true, discordStatus: true, discordNotifiedAt: true, discordRetryCount: true,
       discordError: true,
       booking: { select: { bookingReference: true, displayId: true } },
@@ -104,7 +124,18 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
       }),
       customerName: r.customerName,
       serviceSummary: r.serviceSummary,
+      moveDetails: r.moveDetails ?? [],
+      customerNote: r.customerNote,
+      // ADMIN-ONLY. This route is behind an OWNER/MANAGER session and the
+      // `deposit.view` permission; the PUBLIC page's projection
+      // (app/deposit/[token]/page.tsx PUBLIC_SELECT) does not list this column
+      // at all, so it cannot reach a customer.
+      internalNote: r.internalNote,
       moveDate: r.moveDate?.toISOString() ?? null,
+      moveTimeMinutes: r.moveTimeMinutes,
+      // Pre-rendered by the ONE safe formatter, so the owner's list can never
+      // disagree with the customer's page about which day the move is.
+      moveWhenLabel: formatMoveWhenEn(r.moveDate, r.moveTimeMinutes),
       expiresAt: r.expiresAt?.toISOString() ?? null,
       paidAt: r.paidAt?.toISOString() ?? null,
       createdAt: r.createdAt.toISOString(),
@@ -148,11 +179,28 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   const expiry = parseExpiry(d.expiresAt ?? null)
   if (!expiry.ok) return NextResponse.json({ error: expiry.error }, { status: 422 })
 
+  // A CALENDAR DATE, anchored at noon UTC. `new Date(d.moveDate)` used to be
+  // here: it parses "2026-08-22" as midnight UTC, which reads back as the 21st
+  // in Eastern and is the reason a customer was shown the day before their move.
+  // parseCalendarDate also rejects impossible dates (Feb 31, Feb 29 in a
+  // non-leap year) that Date silently rolls over into the next month.
   let moveDate: Date | null = null
   if (d.moveDate) {
-    const parsedDate = new Date(d.moveDate)
-    if (Number.isNaN(parsedDate.getTime())) return NextResponse.json({ error: 'Invalid move date' }, { status: 422 })
-    moveDate = parsedDate
+    moveDate = parseCalendarDate(d.moveDate)
+    if (!moveDate) return NextResponse.json({ error: 'Invalid move date' }, { status: 422 })
+  }
+
+  // The move TIME is stored on its own, as minutes after midnight Eastern —
+  // never folded into the timestamp above, where a timezone could move it.
+  let moveTimeMinutes: number | null = null
+  if (d.moveTime) {
+    moveTimeMinutes = parseMoveTime(d.moveTime)
+    if (moveTimeMinutes == null) return NextResponse.json({ error: 'Invalid move time' }, { status: 422 })
+  }
+  // A time with no date is a time for nothing. Refuse it rather than store an
+  // orphan the page can never render.
+  if (moveTimeMinutes != null && !moveDate) {
+    return NextResponse.json({ error: 'Add a move date before a move time' }, { status: 422 })
   }
 
   const result = await createDepositRequest({
@@ -163,8 +211,16 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     customerEmail: d.customerEmail || null,
     customerPhone: d.customerPhone || null,
     quoteTotalCents,
-    serviceSummary: d.serviceSummary || null,
+    // CUSTOMER-FACING, and normalised here so a paste out of Messenger cannot
+    // put newlines or control bytes into the layout.
+    serviceSummary: cleanCustomerText(d.serviceSummary, MAX_SERVICE_SUMMARY_LEN),
+    moveDetails: parseMoveDetails(d.moveDetails),
+    customerNote: cleanCustomerText(d.customerNote, MAX_CUSTOMER_NOTE_LEN),
+    // PRIVATE. Kept verbatim (newlines and all) because the crew reads it in the
+    // admin, and it is never selected by the public page's projection.
+    internalNote: d.internalNote?.trim() || null,
     moveDate,
+    moveTimeMinutes,
     expiresAt: expiry.at,
     createdById: session.userId,
     createdByName: session.name,

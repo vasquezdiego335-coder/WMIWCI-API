@@ -103,9 +103,12 @@ test('checkout reads the amount from the DATABASE and never from the request', (
 test('the pay button sends no amount at all', () => {
   const panel = code('app/deposit/[token]/DepositView.tsx')
   assert.match(panel, /body: '\{\}'/, 'the client posts an empty body')
-  const payFn = panel.split('const pay = useCallback')[1]?.split('}, [token, t])')[0] ?? ''
+  const payFn = panel.split('const pay = useCallback')[1]?.split('}, [token, t, lang])')[0] ?? ''
   assert.ok(payFn.length > 0, 'the pay handler must exist')
   assert.ok(!/amountCents|amount:/i.test(payFn), 'the pay call must not send an amount')
+  // The ONLY thing that rides along is the display language, in the query
+  // string — never the body, which stays literally '{}'.
+  assert.match(payFn, /checkout\?lang=\$\{lang\}/, 'the language rides in the query string')
 })
 
 test('the deposit URL carries a token only — no amount, no ids', () => {
@@ -267,7 +270,9 @@ test('a link that cannot take money is refused BEFORE any Stripe call', () => {
   assert.ok(refusalIdx > -1 && createIdx > -1, 'both must exist')
   assert.ok(refusalIdx < claimIdx, 'the refusal precedes the session claim')
   assert.ok(refusalIdx < createIdx, 'the refusal precedes the Stripe call')
-  assert.match(src, /if \(refusal\) return NextResponse\.json\(\{ error: refusal \}, \{ status: 409 \}\)/)
+  // The refusal carries a CODE as well as a sentence, so the customer's page can
+  // say it in Spanish instead of falling out of Spanish at the moment of refusal.
+  assert.match(src, /if \(refusal\) return NextResponse\.json\(\{ error: refusal\.message, code: refusal\.code \}, \{ status: 409 \}\)/)
 })
 
 test('the session claim itself refuses a paid or inactive link', () => {
@@ -456,8 +461,16 @@ test('the public routes are rate limited', () => {
 
 test('the public checkout POST refuses a cross-site origin', () => {
   const src = code(CHECKOUT)
-  assert.match(src, /sec-fetch-site/)
+  // The RULE now lives in src/lib/deposit-origin.ts and is exercised for real in
+  // deposit-origin.test.ts. This assertion used to be
+  // `assert.match(src, /sec-fetch-site/)`, which passes whether the comparison
+  // is right or wrong — and it was wrong: the guard compared the browser Origin
+  // against the PROXIED host, so it 403'd the Pay button for every browser that
+  // omits Sec-Fetch-Site. All that belongs here is that the route still consults
+  // the guard and still answers 403.
+  assert.match(src, /isSameOrigin\(req\.headers\)/, 'the route consults the origin guard')
   assert.match(src, /status: 403/)
+  assert.ok(!/sec-fetch-site/.test(src), 'the header logic belongs in deposit-origin.ts, not inline here')
 })
 
 test('a Stripe error is never echoed to the customer', () => {

@@ -3,7 +3,8 @@ import { prisma } from '@/lib/db'
 import { createDepositCheckout } from '@/lib/stripe'
 import { apiLogger } from '@/lib/logger'
 import { rateLimit, tooManyRequests, clientIp, LIMITS } from '@/lib/rate-limit'
-import { isValidPublicToken, depositUrl } from '@/lib/deposit-links'
+import { isValidPublicToken, depositBaseUrl } from '@/lib/deposit-links'
+import { isSameOrigin, depositReturnBase } from '@/lib/deposit-origin'
 import { claimCheckoutSession, recordCheckoutSession, payableOrReason } from '@/lib/deposit-service'
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -32,25 +33,29 @@ export const dynamic = 'force-dynamic'
 
 const log = apiLogger.child({ mod: 'deposit-checkout' })
 
+// The origin rules live in src/lib/deposit-origin.ts so they can be tested
+// directly. A Next route file may not export helpers, and a guard this route
+// depends on for a 403 is not something to verify by grepping the source.
+//
+// This route is PUBLIC (no session, no CSRF cookie -- the middleware matcher
+// does not cover /api/deposit), so `isSameOrigin` is the only origin check
+// there is. It compares the browser Origin against the FORWARDED host: the
+// customer reaches this app through a Vercel rewrite, so the proxied Host is
+// not the host the browser believes it is on, and comparing the two 403d the
+// Pay button for every browser that omits Sec-Fetch-Site.
+
 /**
- * Cross-site POST guard.
+ * 'en' | 'es' from the QUERY STRING. Anything else is English.
  *
- * This route is public (no session, no CSRF cookie — the middleware matcher
- * does not cover /api/deposit). The worst a forged cross-site POST could do is
- * create an unused Checkout Session, but "harmless today" is not a reason to
- * leave a state-changing endpoint open to any origin. Same-origin requests set
- * either Sec-Fetch-Site or an Origin we can compare; anything else is refused.
+ * Deliberately NOT from the request body. This route's standing guarantee is
+ * that it never reads a body at all — that is what makes "no field a tampered
+ * client could change" checkable in one line rather than argued about. A
+ * two-value enum in the query string carries the language without reopening
+ * that door, and it cannot reach the amount: the charge is built from
+ * `row.amountCents` and nothing else.
  */
-function sameOriginOk(req: NextRequest): boolean {
-  const fetchSite = req.headers.get('sec-fetch-site')
-  if (fetchSite) return fetchSite === 'same-origin' || fetchSite === 'none'
-  const origin = req.headers.get('origin')
-  if (!origin) return true // non-browser client (curl, health check) — allowed
-  try {
-    return new URL(origin).host === new URL(req.url).host
-  } catch {
-    return false
-  }
+function readLang(req: NextRequest): 'en' | 'es' {
+  return req.nextUrl.searchParams.get('lang') === 'es' ? 'es' : 'en'
 }
 
 export async function POST(req: NextRequest, { params }: { params: { token: string } }): Promise<NextResponse> {
@@ -59,10 +64,10 @@ export async function POST(req: NextRequest, { params }: { params: { token: stri
   // Shape-check before touching the database — a malformed token is never a
   // query, so this route is not a way to probe the table.
   if (!isValidPublicToken(token)) {
-    return NextResponse.json({ error: 'This payment link is not valid.' }, { status: 404 })
+    return NextResponse.json({ error: 'This payment link is not valid.', code: 'not_valid' }, { status: 404 })
   }
 
-  if (!sameOriginOk(req)) {
+  if (!isSameOrigin(req.headers)) {
     return NextResponse.json({ error: 'Invalid request origin' }, { status: 403 })
   }
 
@@ -87,10 +92,11 @@ export async function POST(req: NextRequest, { params }: { params: { token: stri
       booking: { select: { bookingReference: true, displayId: true } },
     },
   })
-  if (!row) return NextResponse.json({ error: 'This payment link is not valid.' }, { status: 404 })
+  if (!row) return NextResponse.json({ error: 'This payment link is not valid.', code: 'not_valid' }, { status: 404 })
 
+  // Refused BEFORE any Stripe call. `code` is what the page localizes.
   const refusal = payableOrReason(row)
-  if (refusal) return NextResponse.json({ error: refusal }, { status: 409 })
+  if (refusal) return NextResponse.json({ error: refusal.message, code: refusal.code }, { status: 409 })
 
   const claim = await claimCheckoutSession(row.id)
   if (claim.kind === 'reuse') {
@@ -103,10 +109,15 @@ export async function POST(req: NextRequest, { params }: { params: { token: stri
       select: { stripeCheckoutUrl: true },
     })
     if (fresh?.stripeCheckoutUrl) return NextResponse.json({ url: fresh.stripeCheckoutUrl, reused: true })
-    return NextResponse.json({ error: 'Please try again in a moment.' }, { status: 409 })
+    return NextResponse.json({ error: 'Please try again in a moment.', code: 'busy' }, { status: 409 })
   }
 
-  const base = depositUrl(row.publicToken)
+  // Same host the customer is actually on (validated), not a bare env var.
+  const base = `${depositReturnBase(req.headers, depositBaseUrl())}/deposit/${row.publicToken}`
+  // The language they were reading in, so Stripe speaks it and the return URL
+  // comes back in it. Read from the body ONLY — there is no money in the body,
+  // and an unrecognised value simply falls back to English.
+  const lang = readLang(req)
   try {
     const session = await createDepositCheckout({
       depositRequestId: row.id,
@@ -120,8 +131,9 @@ export async function POST(req: NextRequest, { params }: { params: { token: stri
       serviceSummary: row.serviceSummary,
       // `return=1` means only "the browser came back". Confirmation is the
       // webhook's job; the page polls the server before it says anything.
-      successUrl: `${base}?return=1`,
-      cancelUrl: `${base}?canceled=1`,
+      successUrl: `${base}?return=1&lang=${lang}`,
+      cancelUrl: `${base}?canceled=1&lang=${lang}`,
+      locale: lang,
       idempotencyKey: `deposit_${row.id}_${claim.attempt}`,
     })
 

@@ -2,6 +2,9 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { COPY, fill, formatCents, intlLocale, type Lang } from '@/lib/deposit-copy'
+// PURE and browser-safe: move-date.ts uses only Date and Intl. It is THE reason
+// this page can no longer print the wrong day — see the file header.
+import { formatMoveWhen } from '@/lib/move-date'
 // TYPE-ONLY: deposit-links imports node:crypto, which cannot be bundled for a
 // browser. A type import is erased at compile time, so nothing follows it here.
 import type { PublicDepositView } from '@/lib/deposit-links'
@@ -46,6 +49,19 @@ const STRIPE_CHECKOUT_ORIGIN = 'https://checkout.stripe.com'
 
 type Phone = { display: string; tel: string; sms: string }
 
+/**
+ * The copyright year, PINNED TO EASTERN.
+ *
+ * `new Date().getFullYear()` would be read on the server (UTC) and again on the
+ * client (the customer's own zone). On the evening of 31 December those two
+ * disagree, and this is a file with a long history of hydration mismatches —
+ * see the stylesheet's header. Pinning the timezone makes both sides compute
+ * the same string.
+ */
+function easternYear(): string {
+  return new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', year: 'numeric' }).format(new Date())
+}
+
 type Props = {
   /** null = the record could not be loaded (outage), NOT "does not exist". */
   view: PublicDepositView | null
@@ -57,6 +73,26 @@ type Props = {
 }
 
 type Phase = 'ready' | 'starting' | 'confirming' | 'slow'
+
+/**
+ * A server refusal, in the customer's language.
+ *
+ * The checkout route answers with a stable `code` alongside its English
+ * sentence. Everything the page can name, it says in Spanish; anything it
+ * cannot, it lets the server's own words through rather than inventing a
+ * reason. HTTP 429 has no body code of its own, so the status carries it.
+ */
+function localizedApiError(t: (typeof COPY)['en'], code: string | undefined, status: number): string | null {
+  if (status === 429) return t.errorTooMany
+  switch (code) {
+    case 'already_paid': return t.errorAlreadyPaid
+    case 'expired': return t.errorExpired
+    case 'inactive': return t.errorInactive
+    case 'not_valid': return t.errorNotValid
+    case 'busy': return t.errorBusy
+    default: return null
+  }
+}
 
 export default function DepositView({ view, token, initialLang, returning, canceled, phone }: Props) {
   const [lang, setLang] = useState<Lang>(initialLang)
@@ -128,17 +164,23 @@ export default function DepositView({ view, token, initialLang, returning, cance
     setError(null)
     setPhase('starting')
     try {
-      const res = await fetch(`/api/deposit/${encodeURIComponent(token)}/checkout`, {
+      // The language rides in the QUERY STRING, never the body: the route's
+      // guarantee is that it reads no body at all, and that is worth keeping
+      // literal. It affects only which words Stripe shows and which language
+      // the customer is returned in — never the amount.
+      const res = await fetch(`/api/deposit/${encodeURIComponent(token)}/checkout?lang=${lang}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         // NO AMOUNT IS SENT. The server reads it from the deposit record; there
         // is deliberately nothing here for a tampered client to change.
         body: '{}',
       })
-      const data = (await res.json().catch(() => ({}))) as { url?: string; error?: string }
+      const data = (await res.json().catch(() => ({}))) as { url?: string; error?: string; code?: string }
 
       if (!res.ok || !data.url) {
-        setError(data.error ?? t.errorGeneric)
+        // Prefer OUR translation of the server's code; fall back to the
+        // server's English sentence only when the code is unknown to us.
+        setError(localizedApiError(t, data.code, res.status) ?? data.error ?? t.errorGeneric)
         setPhase('ready') // recoverable — the button comes back
         return
       }
@@ -166,24 +208,69 @@ export default function DepositView({ view, token, initialLang, returning, cance
       setError(t.errorNetwork)
       setPhase('ready')
     }
-  }, [token, t])
+  }, [token, t, lang])
 
   // ── What state are we in? ─────────────────────────────────────────────────
-  const state: 'unavailable' | 'paid' | 'closed' | 'pay' =
+  const serverState: 'unavailable' | 'paid' | 'closed' | 'pay' =
     view == null ? 'unavailable'
     : view.status === 'PAID' ? 'paid'
     : view.status === 'ACTIVE' ? 'pay'
     : 'closed'
 
-  const dateFmt = useMemo(
-    () => new Intl.DateTimeFormat(intlLocale(lang), { month: 'long', day: 'numeric', year: 'numeric', timeZone: 'America/New_York' }),
+  // THE PAGE MAY NEVER SAY "NOTHING WAS CHARGED" TO SOMEONE WHO JUST PAID.
+  //
+  // `?return=1` means the customer came back from Stripe Checkout. The webhook
+  // that marks the deposit PAID is asynchronous, so for the first few seconds
+  // the row still reads whatever it was — and two live paths make that "not
+  // ACTIVE": the link's own `expiresAt` passing while they typed their card, or
+  // the owner cancelling the link while they were inside Checkout. Both then
+  // rendered ClosedState, whose copy is "Nothing was charged." The money had in
+  // fact moved: markDepositPaid deliberately records a capture on an expired or
+  // cancelled link, because refusing it would lose money already in the account.
+  // The outage path told the same lie via unavailableBody.
+  //
+  // So a returning customer sees the confirming panel until the SERVER says
+  // paid, whatever the stored status is. The one thing this page is certain of
+  // on a `?return=1` load is that it is NOT certain nothing was charged.
+  const state = returning && serverState !== 'paid' ? 'confirming' : serverState
+
+  // ── Two different kinds of "date", formatted two different ways ───────────
+  //
+  // A MOVE DATE is a CALENDAR DATE. It goes through move-date.ts, which decides
+  // the calendar day first and only then spells it — so no timezone can shift
+  // it. Formatting it with `timeZone: 'America/New_York'`, as this page used to,
+  // is exactly what printed "August 21" for a move booked on Saturday the 22nd.
+  //
+  // A PAYMENT TIME is a real INSTANT — the moment Stripe took the money. That
+  // one genuinely belongs in the customer's local business timezone, so it keeps
+  // an Eastern formatter.
+  const fmtWhen = useCallback(
+    (d: Date | string | null | undefined, timeMinutes: number | null | undefined): string | null => {
+      if (!d) return null
+      const dt = typeof d === 'string' ? new Date(d) : d
+      return Number.isNaN(dt.getTime()) ? null : formatMoveWhen(dt, timeMinutes ?? null, lang)
+    },
     [lang]
   )
-  const fmtDate = (d: Date | string | null | undefined): string | null => {
-    if (!d) return null
-    const dt = typeof d === 'string' ? new Date(d) : d
-    return Number.isNaN(dt.getTime()) ? null : dateFmt.format(dt)
-  }
+
+  const instantFmt = useMemo(
+    () =>
+      new Intl.DateTimeFormat(intlLocale(lang), {
+        month: 'long',
+        day: 'numeric',
+        year: 'numeric',
+        timeZone: 'America/New_York',
+      }),
+    [lang]
+  )
+  const fmtInstant = useCallback(
+    (d: Date | string | null | undefined): string | null => {
+      if (!d) return null
+      const dt = typeof d === 'string' ? new Date(d) : d
+      return Number.isNaN(dt.getTime()) ? null : instantFmt.format(dt)
+    },
+    [instantFmt]
+  )
 
   const firstName = view?.firstName ?? null
 
@@ -197,7 +284,14 @@ export default function DepositView({ view, token, initialLang, returning, cance
 
       {/* ── HERO: the same photograph the social card is cut from, so tapping
           the preview and landing here is one continuous moment. ── */}
-      <header className="dp-hero">
+      {/* LANG ON THE CONTENT, not just on <html>.
+          The root layout hard-codes <html lang="en"> and cannot know this
+          page's language — it is chosen per request from Accept-Language or
+          ?lang=. The effect above corrects documentElement AFTER hydration, but
+          a screen reader has already begun announcing Spanish copy with English
+          pronunciation by then. Tagging the two top-level landmarks is
+          server-rendered, correct on the FIRST paint, and costs nothing. */}
+      <header className="dp-hero" lang={lang}>
         <div className="dp-hairline" aria-hidden="true" />
         <div className="dp-heroInner">
           <div className="dp-topbar">
@@ -248,7 +342,7 @@ export default function DepositView({ view, token, initialLang, returning, cance
       </header>
 
       {/* ── BODY: bone, one card. No navy void. ── */}
-      <main className="dp-body">
+      <main className="dp-body" lang={lang}>
         <div className="dp-card">
           {/* ONE card, but on a wide screen its CONTENTS split in two. At 1512px
               a single 640px column was 42% of the screen and 1082px tall — a
@@ -257,6 +351,7 @@ export default function DepositView({ view, token, initialLang, returning, cance
               below 1024px it collapses back to the exact mobile order. */}
           <div className="dp-grid">
             <div className="dp-colPay">
+              {state === 'confirming' && <ConfirmingState t={t} phase={phase} />}
               {state === 'pay' && (
                 <PayState
                   t={t}
@@ -266,10 +361,12 @@ export default function DepositView({ view, token, initialLang, returning, cance
                   canceled={canceled}
                   firstName={firstName}
                   onPay={pay}
-                  fmtDate={fmtDate}
+                  fmtWhen={fmtWhen}
                 />
               )}
-              {state === 'paid' && <PaidState t={t} view={view as PublicDepositView} fmtDate={fmtDate} />}
+              {state === 'paid' && (
+                <PaidState t={t} view={view as PublicDepositView} fmtWhen={fmtWhen} fmtInstant={fmtInstant} />
+              )}
               {state === 'closed' && <ClosedState t={t} status={(view as PublicDepositView).status} phone={phone} />}
               {state === 'unavailable' && <UnavailableState t={t} phone={phone} />}
             </div>
@@ -277,7 +374,7 @@ export default function DepositView({ view, token, initialLang, returning, cance
             <aside className="dp-colInfo">
               {/* Reassurance, and on desktop it sits BESIDE the payment rather
                   than a screen-length below it. */}
-              {(state === 'pay' || state === 'paid') && <NextSteps t={t} />}
+              {(state === 'pay' || state === 'paid' || state === 'confirming') && <NextSteps t={t} />}
               {/* Human, local, and compact — the part that says a person answers. */}
               <TrustRow t={t} phone={phone} />
             </aside>
@@ -292,9 +389,28 @@ export default function DepositView({ view, token, initialLang, returning, cance
               not repeated: this deposit is a different instrument, and inventing
               a refund policy for it would be a term nobody agreed to.
             */}
-            <p className="dp-polb">{t.policyBody}</p>
+            {/*
+              ONE link, INSIDE the sentence. There used to be a second
+              "Full terms: Terms of Service" paragraph directly beneath this
+              one — two links, same destination, stacked, in the quietest part
+              of the page. The Terms page carries the legal language.
+            */}
             <p className="dp-polb">
-              {t.fullTerms}: <a className="dp-link" href="/terms">{t.terms}</a>
+              {t.policyBody}{' '}
+              {t.policySeePre}
+              <a className="dp-link" href="/terms">
+                {t.terms}
+              </a>
+              {t.policySeePost}
+            </p>
+
+            {/* The whole site footer is suppressed on this route (deposit.css),
+                so the Privacy Policy is kept reachable here — one quiet line,
+                localized, instead of a second navy block repeating the Terms
+                link that is already in the sentence above. */}
+            <p className="dp-legal">
+              <span>© {easternYear()} {t.brand}</span>
+              <a href="/privacy">{t.privacy}</a>
             </p>
           </section>
         </div>
@@ -349,8 +465,72 @@ const IconChat = () => (
 
 type T = (typeof COPY)['en']
 
+/**
+ * The appointment block: WHO, WHEN, WHAT — in that order, left-aligned, and
+ * scannable in one glance.
+ *
+ * It is a <dl> whose labels are visually hidden. A sighted customer does not
+ * need "Move date:" printed in front of a date — that was half the clutter the
+ * old two-column rows created — but a screen reader announcing two unlabelled
+ * lines in a row genuinely cannot tell which is which.
+ */
+function Appointment({
+  t, when, service,
+}: {
+  t: T
+  when: string | null
+  service: string | null
+}) {
+  if (!when && !service) return null
+  return (
+    <dl className="dp-appt">
+      {when && (
+        <div className="dp-apptItem">
+          <dt className="dp-vh">{t.moveDate}</dt>
+          <dd className="dp-when">{when}</dd>
+        </div>
+      )}
+      {service && (
+        <div className="dp-apptItem">
+          <dt className="dp-vh">{t.service}</dt>
+          <dd className="dp-service">{service}</dd>
+        </div>
+      )}
+    </dl>
+  )
+}
+
+/**
+ * The short bullet list. A LIST, structurally — so it can never again become the
+ * single wrapped paragraph that was clipping on a phone.
+ */
+function MoveDetails({ t, details }: { t: T; details: string[] }) {
+  if (details.length === 0) return null
+  return (
+    <section className="dp-md" aria-labelledby="dp-md-h">
+      <h3 id="dp-md-h" className="dp-mdh">{t.moveDetailsTitle}</h3>
+      <ul className="dp-mdlist">
+        {details.map((d, i) => (
+          <li key={i}>{d}</li>
+        ))}
+      </ul>
+    </section>
+  )
+}
+
+/** The customer's own to-do, called out so it is not skimmed past. */
+function NeedFromYou({ t, note }: { t: T; note: string | null }) {
+  if (!note) return null
+  return (
+    <section className="dp-need" aria-labelledby="dp-need-h">
+      <h3 id="dp-need-h" className="dp-needh">{t.needFromYou}</h3>
+      <p className="dp-needb">{note}</p>
+    </section>
+  )
+}
+
 function PayState({
-  t, view, phase, error, canceled, firstName, onPay, fmtDate,
+  t, view, phase, error, canceled, firstName, onPay, fmtWhen,
 }: {
   t: T
   view: PublicDepositView
@@ -359,29 +539,18 @@ function PayState({
   canceled: boolean
   firstName: string | null
   onPay: () => void
-  fmtDate: (d: Date | string | null | undefined) => string | null
+  fmtWhen: (d: Date | string | null | undefined, timeMinutes: number | null | undefined) => string | null
 }) {
-  const moveDate = fmtDate(view.moveDate)
+  const when = fmtWhen(view.moveDate, view.moveTimeMinutes)
   const busy = phase === 'starting'
-
-  if (phase === 'confirming' || phase === 'slow') {
-    const slow = phase === 'slow'
-    return (
-      <div className="dp-status" role="status" aria-live="polite">
-        <p className="dp-statush">{slow ? t.slowTitle : t.confirmingTitle}</p>
-        <p className="dp-statusb">{slow ? t.slowBody : t.confirmingBody}</p>
-        {slow && (
-          <button type="button" className="dp-secondary" onClick={() => window.location.reload()}>
-            {t.refresh}
-          </button>
-        )}
-      </div>
-    )
-  }
 
   return (
     <>
-      {firstName && <p className="dp-greet">{fill(t.greeting, { name: firstName })}</p>}
+      {/* The greeting is the card's HEADING, not a muted aside. It is the first
+          thing the customer reads and it tells them the page is about them. */}
+      <h2 className="dp-greet">
+        {firstName ? fill(t.greeting, { name: firstName }) : t.greetingNoName}
+      </h2>
 
       {canceled && (
         <p className="dp-notice" role="status">
@@ -390,22 +559,9 @@ function PayState({
         </p>
       )}
 
-      {(moveDate || view.serviceSummary) && (
-        <dl className="dp-details">
-          {moveDate && (
-            <div className="dp-row">
-              <dt>{t.moveDate}</dt>
-              <dd>{moveDate}</dd>
-            </div>
-          )}
-          {view.serviceSummary && (
-            <div className="dp-row">
-              <dt>{t.service}</dt>
-              <dd>{view.serviceSummary}</dd>
-            </div>
-          )}
-        </dl>
-      )}
+      <Appointment t={t} when={when} service={view.serviceSummary} />
+      <MoveDetails t={t} details={view.moveDetails} />
+      <NeedFromYou t={t} note={view.customerNote} />
 
       <div className="dp-money">
         {/* Quote total and remaining balance are HIDDEN, not zeroed, when the
@@ -413,6 +569,13 @@ function PayState({
             than saying nothing. */}
         {view.quoteTotalCents != null && (
           <MoneyRow label={t.quoteTotal} value={formatCents(view.quoteTotalCents)} />
+        )}
+        {/* Without this row the three figures do not subtract: on an approved
+            booking the $49 hold has already been captured, so quote total minus
+            today's deposit is NOT the remaining balance. Naming the money that
+            is already in turns an apparent arithmetic error into a fact. */}
+        {view.alreadyPaidCents != null && (
+          <MoneyRow label={t.alreadyPaid} value={`- ${formatCents(view.alreadyPaidCents)}`} />
         )}
         <div className="dp-hero2">
           <span className="dp-herolabel">{t.depositDue}</span>
@@ -469,35 +632,56 @@ function TrustRow({ t, phone }: { t: T; phone: Phone }) {
           {/* eslint-disable-next-line @next/next/no-img-element */}
           <img src="/icon.svg" alt="" width={34} height={34} />
         </span>
-        <div>
+        <div className="dp-ownerText">
           <p id="dp-trust-h" className="dp-ownerName">{t.ownerName}</p>
-          <p className="dp-ownerRole">{t.ownerRole}</p>
+          {/* The role and the Spanish badge sit on ONE line and wrap together.
+              "Se habla Español." used to occupy a whole row of its own at the
+              bottom of the card — a full row of vertical space to say one
+              thing, on the page with the least room to spare. As a badge beside
+              the role it says the same thing and costs nothing. */}
+          <p className="dp-ownerRole">
+            {t.ownerRole}
+            <span className="dp-esBadge" lang="es">{t.seHablaEspanol}</span>
+          </p>
         </div>
       </div>
+      <p className="dp-helpTitle">{t.helpTitle}</p>
       <div className="dp-contact">
-        <a className="dp-ghost" href={`tel:${phone.tel}`}>
+        <a className="dp-ghost" href={`tel:${phone.tel}`} aria-label={`${t.callUs} ${phone.display}`}>
           <IconPhone /><span>{phone.display}</span>
         </a>
         <a className="dp-ghost" href={`sms:${phone.sms}`}>
           <IconChat /><span>{t.textUs}</span>
         </a>
       </div>
-      <p className="dp-espanol">{t.seHablaEspanol}</p>
     </section>
   )
 }
 
-function PaidState({ t, view, fmtDate }: { t: T; view: PublicDepositView; fmtDate: (d: Date | string | null | undefined) => string | null }) {
+function PaidState({
+  t, view, fmtWhen, fmtInstant,
+}: {
+  t: T
+  view: PublicDepositView
+  fmtWhen: (d: Date | string | null | undefined, timeMinutes: number | null | undefined) => string | null
+  fmtInstant: (d: Date | string | null | undefined) => string | null
+}) {
   const paid = view.amountPaidCents ?? view.depositCents
+  const when = fmtWhen(view.moveDate, view.moveTimeMinutes)
   return (
     <>
       <p className="dp-badge"><IconCheck /><span>{t.paidBadge}</span></p>
+      {/* A customer who comes back to a paid link is checking their date, not
+          their receipt. Show it. */}
+      <Appointment t={t} when={when} service={view.serviceSummary} />
       <div className="dp-money">
         <div className="dp-hero2">
           <span className="dp-herolabel">{t.paidAmount}</span>
           <span className="dp-heroval">{formatCents(paid)}</span>
         </div>
-        {view.paidAt && <MoneyRow label={t.paidDate} value={fmtDate(view.paidAt) ?? ''} />}
+        {/* A real instant — the moment Stripe took the money — so this one IS
+            formatted in Eastern, unlike the move date above. */}
+        {view.paidAt && <MoneyRow label={t.paidDate} value={fmtInstant(view.paidAt) ?? ''} />}
         {view.remainingCents != null && (
           <MoneyRow label={t.paidRemaining} value={formatCents(view.remainingCents)} />
         )}
@@ -507,14 +691,54 @@ function PaidState({ t, view, fmtDate }: { t: T; view: PublicDepositView; fmtDat
   )
 }
 
-function ClosedState({ t, status, phone }: { t: T; status: string; phone: Phone }) {
+/**
+ * The holding screen for a customer who has come back from Stripe.
+ *
+ * Rendered for EVERY non-paid status on a `?return=1` load — active, expired,
+ * cancelled, or "we could not reach the database" — because none of those
+ * states knows whether the customer's card was charged, and three of the four
+ * used to answer that question with "Nothing was charged."
+ *
+ * The `slow` copy is the honest end state: it says the payment may still be
+ * confirming, tells them explicitly NOT to pay again, and offers a refresh.
+ */
+function ConfirmingState({ t, phase }: { t: T; phase: Phase }) {
+  const slow = phase === 'slow'
   return (
-    <div className="dp-status">
-      <p className="dp-statush">{status === 'EXPIRED' ? t.expiredTitle : t.canceledTitle}</p>
-      <p className="dp-statusb">{t.closedBody}</p>
+    <div className="dp-status" role="status" aria-live="polite">
+      <h2 className="dp-statush">{slow ? t.slowTitle : t.confirmingTitle}</h2>
+      <p className="dp-statusb">{slow ? t.slowBody : t.confirmingBody}</p>
+      {slow && (
+        <button type="button" className="dp-secondary" onClick={() => window.location.reload()}>
+          {t.refresh}
+        </button>
+      )}
+    </div>
+  )
+}
+
+/** Call AND text. The copy says "Call or text us"; only one of them was there. */
+function ReachUs({ t, phone }: { t: T; phone: Phone }) {
+  return (
+    <>
       <a className="dp-pay dp-paylink" href={`tel:${phone.tel}`}>
         <IconPhone /><span>{t.callUs} {phone.display}</span>
       </a>
+      <a className="dp-secondary dp-secondarylink" href={`sms:${phone.sms}`}>
+        <IconChat /><span>{t.textUs}</span>
+      </a>
+    </>
+  )
+}
+
+function ClosedState({ t, status, phone }: { t: T; status: string; phone: Phone }) {
+  return (
+    <div className="dp-status">
+      {/* A real heading. These were 23px bold PARAGRAPHS, so a screen-reader
+          user landing on an expired link found no heading to orient by. */}
+      <h2 className="dp-statush">{status === 'EXPIRED' ? t.expiredTitle : t.canceledTitle}</h2>
+      <p className="dp-statusb">{t.closedBody}</p>
+      <ReachUs t={t} phone={phone} />
     </div>
   )
 }
@@ -522,11 +746,9 @@ function ClosedState({ t, status, phone }: { t: T; status: string; phone: Phone 
 function UnavailableState({ t, phone }: { t: T; phone: Phone }) {
   return (
     <div className="dp-status" role="status" aria-live="polite">
-      <p className="dp-statush">{t.unavailableTitle}</p>
+      <h2 className="dp-statush">{t.unavailableTitle}</h2>
       <p className="dp-statusb">{t.unavailableBody}</p>
-      <a className="dp-pay dp-paylink" href={`tel:${phone.tel}`}>
-        <IconPhone /><span>{t.callUs} {phone.display}</span>
-      </a>
+      <ReachUs t={t} phone={phone} />
     </div>
   )
 }

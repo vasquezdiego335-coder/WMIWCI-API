@@ -138,6 +138,19 @@ export async function createBookingCheckout(params: {
 //  amount parameter reachable from a browser, and no processing fee is added —
 //  the customer is charged the deposit and nothing but the deposit.
 // ════════════════════════════════════════════════════════════════════════
+/** The Stripe line item, in the customer's language. */
+function depositLineItem(serviceSummary: string | null | undefined, locale?: 'en' | 'es') {
+  const es = locale === 'es'
+  const name = es ? 'Move It Clear It — Depósito de mudanza' : 'Move It Clear It — Move Deposit'
+  const base = es
+    ? 'Depósito aplicado al saldo de su mudanza'
+    : 'Deposit applied toward your moving balance'
+  return {
+    name,
+    description: serviceSummary ? `${base} — ${serviceSummary}`.slice(0, 200) : base,
+  }
+}
+
 export async function createDepositCheckout(params: {
   depositRequestId: string
   /** THE authoritative amount, read from the database by the caller. */
@@ -150,6 +163,8 @@ export async function createDepositCheckout(params: {
   serviceSummary?: string | null
   successUrl: string
   cancelUrl: string
+  /** The customer's language. Stripe renders its own Checkout page in it. */
+  locale?: 'en' | 'es'
   /** Collapses retries of the SAME attempt into one session at Stripe's end. */
   idempotencyKey?: string
 }): Promise<Stripe.Checkout.Session> {
@@ -172,6 +187,11 @@ export async function createDepositCheckout(params: {
   return getStripeClient().checkout.sessions.create(
     {
       mode: 'payment',
+      // STRIPE'S OWN PAGE, IN THE CUSTOMER'S LANGUAGE. Our page is fully
+      // bilingual and then handed a Spanish speaker an English card form —
+      // the one screen where "CVC" and "postal code" have to be understood.
+      // Omitted (Stripe's own auto-detect) when we were not told.
+      ...(params.locale ? { locale: params.locale } : {}),
       // The internal deposit-request id, so a Stripe-side reconciliation can
       // always name the row this session belongs to without parsing metadata.
       client_reference_id: params.depositRequestId,
@@ -189,12 +209,11 @@ export async function createDepositCheckout(params: {
             unit_amount: params.amountCents,
             // Inline price data — no Product/Price object is created per deposit,
             // so the Stripe product catalogue does not fill up with one-offs.
-            product_data: {
-              name: 'Move It Clear It — Move Deposit',
-              description: params.serviceSummary
-                ? `Deposit applied toward your moving balance — ${params.serviceSummary}`.slice(0, 200)
-                : 'Deposit applied toward your moving balance',
-            },
+            // The line item the customer reads on Stripe's page and on the
+            // emailed receipt, in their language. `serviceSummary` is the
+            // CUSTOMER-FACING summary — never the internal note, which is a
+            // different column and is not selected on this path at all.
+            product_data: depositLineItem(params.serviceSummary, params.locale),
           },
         },
       ],

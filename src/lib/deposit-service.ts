@@ -23,6 +23,7 @@
 import { prisma } from './db'
 import { apiLogger } from './logger'
 import { customerBalance, JOB_MONEY_PAYMENT_SELECT } from './job-money'
+import { anchorFromInstant, easternTimeMinutes } from './move-date'
 import {
   checkDepositAgainstBalance,
   effectiveStatus,
@@ -107,7 +108,14 @@ export type CreateDepositInput = {
   customerPhone?: string | null
   quoteTotalCents?: number | null
   serviceSummary?: string | null
+  /** CUSTOMER-FACING bullets. */
+  moveDetails?: string[] | null
+  /** CUSTOMER-FACING to-do. */
+  customerNote?: string | null
+  /** PRIVATE crew note. Never reaches the public projection or Stripe. */
+  internalNote?: string | null
   moveDate?: Date | null
+  moveTimeMinutes?: number | null
   expiresAt?: Date | null
   createdById?: string | null
   createdByName?: string | null
@@ -122,6 +130,7 @@ export async function createDepositRequest(input: CreateDepositInput): Promise<C
   let balanceBeforeCents: number | null = null
   let warning: string | undefined
   let moveDate = input.moveDate ?? null
+  let moveTimeMinutes = input.moveTimeMinutes ?? null
   let customerName = input.customerName ?? null
   let customerEmail = input.customerEmail ?? null
   let customerPhone = input.customerPhone ?? null
@@ -140,8 +149,20 @@ export async function createDepositRequest(input: CreateDepositInput): Promise<C
     customerName = customerName ?? ctx.customerName ?? null
     customerEmail = customerEmail ?? ctx.customerEmail ?? null
     customerPhone = customerPhone ?? ctx.customerPhone ?? null
-    moveDate = moveDate ?? ctx.requestedDate
-    serviceSummary = serviceSummary ?? null
+    // INHERITING A DATE FROM A BOOKING IS A CONVERSION, NOT A COPY.
+    // `requestedDate` is a real INSTANT carrying an Eastern wall-clock time.
+    // A move date is a CALENDAR DATE. Storing the instant verbatim left the
+    // deposit holding a value whose meaning depended on how it was read, which
+    // is the whole class of bug this feature was reported for. Take the Eastern
+    // calendar day and the Eastern time, then store each in its own column.
+    if (!moveDate && ctx.requestedDate) {
+      moveDate = anchorFromInstant(ctx.requestedDate)
+      moveTimeMinutes = moveTimeMinutes ?? easternTimeMinutes(ctx.requestedDate)
+    }
+    // serviceSummary is deliberately NOT inherited. A booking's
+    // `itemsDescription` is written for the crew and the owner; publishing it
+    // on a payment page unread is exactly how an internal note reached a
+    // customer. The owner types the customer-facing line himself.
 
     const check = checkDepositAgainstBalance(input.amountCents, {
       unpaidBalanceCents: ctx.unpaidBalanceCents,
@@ -176,7 +197,11 @@ export async function createDepositRequest(input: CreateDepositInput): Promise<C
           balanceBeforeCents,
           amountCents: input.amountCents,
           serviceSummary,
+          moveDetails: input.moveDetails ?? [],
+          customerNote: input.customerNote ?? null,
+          internalNote: input.internalNote ?? null,
           moveDate,
+          moveTimeMinutes,
           expiresAt: input.expiresAt ?? null,
           createdById: input.createdById ?? null,
           createdByName: input.createdByName ?? null,
@@ -500,13 +525,22 @@ export async function cancelDepositRequest(
   return { ok: true, status: 200 }
 }
 
-/** Guard used by the public checkout route before any Stripe call. */
-export function payableOrReason(row: { status: string; expiresAt: Date | null; paidAt: Date | null }): string | null {
+/**
+ * Guard used by the public checkout route before any Stripe call.
+ *
+ * Returns a CODE as well as an English sentence. The code is what the page
+ * translates: a Spanish customer was previously shown these strings in English
+ * at the exact moment their payment was refused. The sentence stays as the
+ * fallback for any client that does not know the code.
+ */
+export type PayRefusal = { code: 'already_paid' | 'expired' | 'inactive'; message: string }
+
+export function payableOrReason(row: { status: string; expiresAt: Date | null; paidAt: Date | null }): PayRefusal | null {
   if (isPayable(row as never)) return null
   const s = effectiveStatus(row as never)
-  if (s === 'PAID') return 'This deposit has already been paid.'
-  if (s === 'EXPIRED') return 'This payment link has expired. Ask us for a new one.'
-  return 'This payment link is no longer active. Ask us for a new one.'
+  if (s === 'PAID') return { code: 'already_paid', message: 'This deposit has already been paid.' }
+  if (s === 'EXPIRED') return { code: 'expired', message: 'This payment link has expired. Ask us for a new one.' }
+  return { code: 'inactive', message: 'This payment link is no longer active. Ask us for a new one.' }
 }
 
 // ── small helpers ───────────────────────────────────────────────────────────

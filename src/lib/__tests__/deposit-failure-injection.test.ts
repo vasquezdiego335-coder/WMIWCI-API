@@ -347,13 +347,20 @@ test('a PAID link can never mint another session', async () => {
   const { claimCheckoutSession, payableOrReason } = await import('../deposit-service')
   assert.equal((await claimCheckoutSession('dep_1')).kind, 'busy', 'the claim guard refuses a paid row')
   const reason = payableOrReason({ status: 'PAID', expiresAt: null, paidAt: new Date() })
-  assert.match(reason ?? '', /already been paid/i)
+  assert.match(reason?.message ?? '', /already been paid/i)
+  // The CODE is what the customer-facing page translates; the English sentence
+  // is only the fallback for a client that does not know the code.
+  assert.equal(reason?.code, 'already_paid')
 })
 
 test('expired and canceled links are refused before any Stripe call', async () => {
   const { payableOrReason } = await import('../deposit-service')
-  assert.match(payableOrReason({ status: 'ACTIVE', expiresAt: new Date('2020-01-01'), paidAt: null }) ?? '', /expired/i)
-  assert.match(payableOrReason({ status: 'CANCELED', expiresAt: null, paidAt: null }) ?? '', /no longer active/i)
+  const expired = payableOrReason({ status: 'ACTIVE', expiresAt: new Date('2020-01-01'), paidAt: null })
+  assert.match(expired?.message ?? '', /expired/i)
+  assert.equal(expired?.code, 'expired')
+  const canceled = payableOrReason({ status: 'CANCELED', expiresAt: null, paidAt: null })
+  assert.match(canceled?.message ?? '', /no longer active/i)
+  assert.equal(canceled?.code, 'inactive')
   assert.equal(payableOrReason({ status: 'ACTIVE', expiresAt: null, paidAt: null }), null, 'an active link is payable')
 })
 

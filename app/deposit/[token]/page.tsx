@@ -126,25 +126,75 @@ async function loadView(token: string): Promise<LoadResult> {
   return { kind: 'ok', view: publicDepositView(row) }
 }
 
-function fetchRow(token: string) {
-  return prisma.depositRequest.findUnique({
-    where: { publicToken: token },
-    // Explicit select — the projection can never widen by accident when a
-    // column is added to the model later.
-    select: {
-      publicToken: true,
-      customerName: true,
-      quoteTotalCents: true,
-      balanceBeforeCents: true,
-      amountCents: true,
-      amountPaidCents: true,
-      serviceSummary: true,
-      moveDate: true,
-      status: true,
-      expiresAt: true,
-      paidAt: true,
-    },
-  })
+// Explicit select — the projection can never widen by accident when a column is
+// added to the model later.
+//
+// NOTE WHAT IS NOT HERE: customerEmail, customerPhone, bookingId, leadId, any
+// Stripe id, createdBy*, and — deliberately — `internalNote`. The crew note is
+// unreachable from this page by CONSTRUCTION, not by remembering to strip it.
+const PUBLIC_SELECT = {
+  publicToken: true,
+  customerName: true,
+  quoteTotalCents: true,
+  balanceBeforeCents: true,
+  amountCents: true,
+  amountPaidCents: true,
+  serviceSummary: true,
+  moveDetails: true,
+  customerNote: true,
+  moveDate: true,
+  moveTimeMinutes: true,
+  status: true,
+  expiresAt: true,
+  paidAt: true,
+} as const
+
+/** Everything above that existed before 20260820120000_deposit_move_time_and_notes. */
+const LEGACY_SELECT = {
+  publicToken: true,
+  customerName: true,
+  quoteTotalCents: true,
+  balanceBeforeCents: true,
+  amountCents: true,
+  amountPaidCents: true,
+  serviceSummary: true,
+  moveDate: true,
+  status: true,
+  expiresAt: true,
+  paidAt: true,
+} as const
+
+/** Postgres 42703 / Prisma P2022: "the column does not exist in the current database". */
+function isMissingColumn(err: unknown): boolean {
+  const e = err as { code?: string; meta?: { column?: string } } | null
+  if (e?.code === 'P2022') return true
+  const text = err instanceof Error ? err.message : String(err)
+  return /column .* does not exist|42703/i.test(text)
+}
+
+/**
+ * Read the row, tolerating a database that has not had the new migration
+ * applied yet.
+ *
+ * THIS REPO DOES NOT RUN MIGRATIONS ON DEPLOY — nixpacks.toml says so out loud,
+ * because build-time connections to Neon are flaky. So there is always a window
+ * where new code is live against an old schema. On every other page that window
+ * is an admin seeing an error; on THIS page it is a customer holding a payment
+ * link that 500s. The fallback turns that into "no move time, no bullets" and
+ * the deposit is still payable. Once the migration is applied it never fires.
+ */
+async function fetchRow(token: string) {
+  try {
+    return await prisma.depositRequest.findUnique({ where: { publicToken: token }, select: PUBLIC_SELECT })
+  } catch (err) {
+    if (!isMissingColumn(err)) throw err
+    console.error(
+      '[deposit] move_time_minutes/move_details/customer_note are missing — run `prisma migrate deploy` ' +
+        '(migration 20260820120000_deposit_move_time_and_notes). Serving the page without them.'
+    )
+    const legacy = await prisma.depositRequest.findUnique({ where: { publicToken: token }, select: LEGACY_SELECT })
+    return legacy && { ...legacy, moveDetails: [] as string[], customerNote: null, moveTimeMinutes: null }
+  }
 }
 
 export default async function DepositPage({
