@@ -135,3 +135,25 @@ test(
     assert.match(raw, /ning[uú]n cargo adicional/i)
   }
 )
+
+// ── The self-service reschedule threshold matches the published notice ──────
+
+test('the self-service reschedule gate is not stricter than the Terms (48h)', () => {
+  // The Terms promise "at least 48 hours' notice". The customer self-service
+  // portal must not refuse a customer who is within that promise: it was 72h,
+  // which turned a 60-hour-notice reschedule the Terms allow into a 422.
+  const scheduling = read('src/lib/scheduling.ts')
+  assert.match(
+    scheduling,
+    /export const RESCHEDULE_MIN_NOTICE_HOURS\s*=\s*48\b/,
+    'the shared reschedule-notice constant must be 48 hours',
+  )
+
+  // Both routes must use the shared constant, and neither may hardcode 72 again.
+  const patch = read('app/api/customer/booking/[token]/route.ts')
+  const slots = read('app/api/customer/booking/[token]/slots/route.ts')
+  for (const [name, src] of [['route', patch], ['slots', slots]] as const) {
+    assert.match(src, /RESCHEDULE_MIN_NOTICE_HOURS/, `${name} must use the shared constant`)
+    assert.ok(!/\b72\b/.test(src), `${name} must not reference the retired 72-hour threshold`)
+  }
+})

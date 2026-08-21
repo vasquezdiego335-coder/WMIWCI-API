@@ -7,6 +7,21 @@ const BUFFER_MINS = parseInt(process.env.TRAVEL_BUFFER_MINUTES ?? '60', 10)
 // only to derive scheduledEnd — the schedule keys off scheduledStart.
 const DEFAULT_JOB_HOURS = parseFloat(process.env.DEFAULT_JOB_HOURS ?? '3')
 
+/**
+ * The minimum notice a customer must give to reschedule THEMSELVES from the
+ * self-service portal.
+ *
+ * MATCHES THE PUBLISHED TERMS. The Terms of Service state "reschedule once
+ * within 90 days at no extra cost with at least 48 hours' notice", so the
+ * self-service gate must not be stricter than what a customer was promised —
+ * it was 72h, which would refuse a customer at 60h notice who is within their
+ * rights. Lives here as ONE constant so the PATCH guard
+ * (app/api/customer/booking/[token]/route.ts) and the slot search
+ * (…/slots/route.ts) can never drift apart again. Anything tighter than 48h is
+ * still handled by a human — the customer is routed to call.
+ */
+export const RESCHEDULE_MIN_NOTICE_HOURS = 48
+
 // ════════════════════════════════════════════════════════════════════════
 //  Timezone-correct date math (America/New_York, DST-aware)
 //  ----------------------------------------------------------------------

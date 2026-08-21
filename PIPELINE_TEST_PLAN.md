@@ -144,7 +144,7 @@ curl -s -X PATCH localhost:3000/api/customer/booking/<TOKEN> \
 | Case | Expect |
 |---|---|
 | `<TOKEN>` expired/invalid | `401` "Invalid token" |
-| new date < 72h away | `422` "Reschedule requires at least 72 hours notice" |
+| new date < 48h away | `422` "Reschedule requires at least 48 hours notice" |
 | **Hold expired** (>7 days) | PATCH still succeeds; on Approve, capture fails gracefully → card shows "⚠️ capture failed — re-collect" (log: "hold may have expired") |
 
 > ⚠️ **Stripe authorization holds expire (~7 days).** The `customerToken` also lives 7 days, so they're aligned — but a slow customer means re-collecting the $49. This is handled, not silent.
