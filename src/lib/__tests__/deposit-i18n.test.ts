@@ -106,22 +106,29 @@ test('the pay button takes its amount from a placeholder, in both languages', ()
 
 test('the cancellation policy states the SAME terms in both languages', () => {
   // A translated policy that changed a number would be a second, unagreed policy.
-  assert.match(COPY.en.policyBody, /72 hours/)
-  assert.match(COPY.es.policyBody, /72 horas/)
+  // These are the PUBLISHED terms (WMIWCI-SITE/public/terms sections 4 and 7),
+  // which is the document `/terms` actually serves to a customer and therefore
+  // the one they agreed to. Owner decision, 2026-08-20.
+  assert.match(COPY.en.policyBody, /48 hours/)
+  assert.match(COPY.es.policyBody, /48 horas/)
+  assert.match(COPY.en.policyBody, /90 days/)
+  assert.match(COPY.es.policyBody, /90 d[ií]as/)
+  assert.match(COPY.en.policyBody, /no additional charge/i)
+  assert.match(COPY.es.policyBody, /ning[uú]n cargo adicional/i)
 
-  // THE SUMMARY DOES NOT QUANTIFY THE FEE, in either language.
-  // This page is a summary with the Terms one tap away, and the two Terms
-  // documents reachable from it did not agree on the amount (this app's
-  // app/terms says 2 hours of labor; the marketing site's, which is what
-  // `/terms` actually resolves to on www.moveitclearit.com, says the $49 hold
-  // is forfeited and no additional charge applies). Printing a figure here that
-  // the linked Terms contradict is worse than describing the fee and letting
-  // the Terms be the Terms. Neither language may reintroduce one.
+  // THE OLD, CONTRADICTORY FIGURE MAY NOT COME BACK. This page printed
+  // "a cancellation fee equal to 2 hours of labor" directly above a link to the
+  // document stating that no additional charge applies.
   for (const lang of LANGS) {
     assert.ok(
       !/\d+\s*(hours? of labor|horas de mano de obra)/i.test(COPY[lang].policyBody),
-      `${lang}.policyBody must not quantify the cancellation fee`
+      `${lang}.policyBody must not quantify a cancellation fee`
     )
+    assert.ok(!/\b72\b/.test(COPY[lang].policyBody), `${lang}.policyBody must not state the retired 72-hour notice`)
+    // NO DOLLAR FIGURE either. Copy here may never state a price -- every amount
+    // is interpolated from the record -- and on this page a literal "$49" would
+    // sit beside a deposit that is often a different number, reading as though
+    // the deposit itself were the forfeited booking fee. Separate instruments.
     assert.ok(!/\$\s?\d/.test(COPY[lang].policyBody), `${lang}.policyBody must not state a price`)
   }
 

@@ -214,6 +214,42 @@ The admin form renders a live **"What the customer sees"** preview built only
 from the customer-facing fields. The surest way to keep them separate is to show
 the owner the result before he sends it.
 
+## The cancellation policy (resolved 2026-08-20)
+
+There were TWO Terms of Service documents saying different things, and the
+deposit page summarised the one customers cannot reach:
+
+| | `app/terms/page.tsx` (this repo) | `WMIWCI-SITE/public/terms` (PUBLISHED) |
+| --- | --- | --- |
+| Reschedule notice | 72 hours | **48 hours** |
+| Free reschedule | not mentioned | **once within 90 days** |
+| Same-day cancellation | fee = 2 hours of labor | **hold forfeited, no additional charge** |
+
+`/terms` is root-relative, and on moveitclearit.com only `/deposit`,
+`/api/deposit` and `/_next` are rewritten to this app — so a customer tapping
+the link from the deposit page lands on the MARKETING SITE's document. The page
+was therefore printing a cancellation fee directly above a link to the document
+saying no such fee applies.
+
+**The published document is the one customers agreed to, so it is the truth**
+(owner decision). `app/terms/page.tsx` section 3 was corrected to match it, and
+the deposit page now summarises 48 hours / 90 days / no additional charge in both
+languages. `src/lib/__tests__/deposit-terms-parity.test.ts` fails if the three
+surfaces drift apart again; it reads the marketing site when it is checked out
+beside this repo and skips those assertions when it is not.
+
+NO DOLLAR FIGURE appears in the page summary, deliberately. Copy in
+`deposit-copy.ts` may never state a price, and on this page a literal `$49` would
+sit beside a deposit that is often a different number — reading as though the
+deposit itself were the forfeited booking fee. They are separate instruments; the
+Terms name the figure in context.
+
+STILL ENFORCED AT 72 HOURS: `app/api/customer/booking/[token]/route.ts` refuses a
+self-service reschedule inside 72 hours. That is an OPERATIONAL threshold, not a
+document, and was deliberately left alone — but it now allows less than the Terms
+promise, so it is the owner's call whether to relax it to 48.
+
+
 ## Deployment checklist
 
 - [ ] `npx prisma migrate deploy` — applies

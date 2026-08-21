@@ -138,15 +138,28 @@ const EN = {
   // the quietest part of the page. One sentence, one link, and the Terms page
   // carries the legal language.
   //
-  // IT INVENTS NOTHING. app/terms/page.tsx §3 reads: "Rescheduling requests
-  // must be submitted at least 72 hours before the scheduled service time.
-  // Same-day cancellations may result in a cancellation fee equal to 2 hours of
-  // labor." The 72 hours is stated here verbatim because it is the number a
-  // customer needs to act on; the fee is described but not quantified, and the
-  // Terms link is one tap away. Nothing here is a term the Terms do not carry.
+  // IT INVENTS NOTHING, AND IT MATCHES THE DOCUMENT IT LINKS TO.
+  //
+  // `/terms` is root-relative, and on moveitclearit.com only /deposit,
+  // /api/deposit and /_next are proxied to this app -- so the Terms a customer
+  // reaches from here are the MARKETING SITE's
+  // (WMIWCI-SITE/public/terms/index.html), not this repo's. Those say 48 hours'
+  // notice, one free reschedule within 90 days, and that cancellation forfeits
+  // the booking hold with NO additional charge.
+  //
+  // This page used to print "a cancellation fee equal to 2 hours of labor"
+  // directly above a link to the document saying no additional charge applies.
+  // The published Terms are what customers agreed to, so they are the truth
+  // (owner decision, 2026-08-20); app/terms/page.tsx was corrected to match.
+  //
+  // NO DOLLAR FIGURE HERE, deliberately. Copy in this file may never state a
+  // price -- every amount is interpolated from the record -- and on THIS page a
+  // literal "$49" would sit beside a deposit that is often a different number,
+  // reading as if the deposit itself were the forfeited fee. They are two
+  // separate instruments. The Terms name the figure, in context, one tap away.
   policyTitle: 'Cancellation & rescheduling',
   policyBody:
-    'Rescheduling requires at least 72 hours’ notice. Same-day cancellations may be subject to a cancellation fee.',
+    'Reschedule free once within 90 days with at least 48 hours’ notice. If you cancel, your booking fee is not refunded — there is no additional charge.',
   policySeePre: 'See our ',
   policySeePost: ' for full details.',
   terms: 'Terms of Service',
@@ -239,9 +252,9 @@ const ES: Copy = {
 
   policyTitle: 'Cancelación y reprogramación',
   // The English policy is the approved one; this states the SAME terms, with the
-  // same number. It is a translation, never a second policy.
+  // same numbers. It is a translation, never a second policy.
   policyBody:
-    'La reprogramación requiere un aviso de al menos 72 horas. Las cancelaciones el mismo día pueden generar un cargo por cancelación.',
+    'Reprograme gratis una vez dentro de 90 días con al menos 48 horas de aviso. Si cancela, su tarifa de reserva no se reembolsa: no se aplica ningún cargo adicional.',
   policySeePre: 'Consulte nuestros ',
   policySeePost: ' para conocer todos los detalles.',
   terms: 'Términos del servicio',
