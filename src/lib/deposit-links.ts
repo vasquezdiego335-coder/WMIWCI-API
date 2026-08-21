@@ -427,6 +427,10 @@ export const MAX_MOVE_DETAILS = 6
 export const MAX_MOVE_DETAIL_LEN = 90
 export const MAX_SERVICE_SUMMARY_LEN = 80
 export const MAX_CUSTOMER_NOTE_LEN = 160
+/** How long a LEGACY serviceSummary may be when DISPLAYED. Long enough for a
+ *  real one-line summary, short enough that an old multi-line note stored here
+ *  can never render as a paragraph. Display-only; the stored row is untouched. */
+export const LEGACY_SERVICE_SUMMARY_DISPLAY_MAX = 120
 
 /**
  * Free text (one bullet per line, as typed in the admin textarea) → the stored
@@ -471,7 +475,17 @@ export function publicDepositView(row: DepositRowLike, now: Date = new Date()): 
     token: row.publicToken,
     status,
     firstName: firstNameOf(row.customerName),
-    serviceSummary: row.serviceSummary?.trim() || null,
+    // LEGACY-SAFE. Before the audience split, `serviceSummary` was the ONLY
+    // free-text field, so old rows may hold a whole multi-line internal note
+    // here (this is exactly the "Job Note: Saturday, 7:00 AM — 2 workers…" that
+    // shipped clipped). We cannot know which part of an old note was meant to be
+    // private, so we do not guess — but we DO render it as a clean, bounded line
+    // instead of a wall of text: newlines and control bytes collapsed, capped at
+    // a length that is comfortably a headline and never a paragraph. This is a
+    // DISPLAY transform only; the stored row is never rewritten, and no payment
+    // or balance is touched. New rows are already short, so this is a no-op for
+    // them.
+    serviceSummary: cleanCustomerText(row.serviceSummary, LEGACY_SERVICE_SUMMARY_DISPLAY_MAX),
     // Re-cleaned on the way OUT as well as on the way in. Rows written before
     // the bullets existed hold whatever the single free-text field held, and a
     // projection that trusts its input is how the paragraph got onto the page
@@ -502,6 +516,14 @@ export function publicDepositView(row: DepositRowLike, now: Date = new Date()): 
 export type SessionLike = {
   payment_status?: string | null
   amount_total?: number | null
+  currency?: string | null
+}
+
+/** What the DepositRequest row says this payment SHOULD be, for cross-checking. */
+export type ExpectedPayment = {
+  amountCents: number
+  /** Lower-cased ISO currency; defaults to 'usd' when the row stored none. */
+  currency?: string | null
 }
 
 export type ConfirmedSession =
@@ -509,7 +531,7 @@ export type ConfirmedSession =
   | { confirmed: false; reason: string }
 
 /**
- * Is this Checkout Session a CONFIRMED payment?
+ * Is this Checkout Session a CONFIRMED payment for the EXPECTED deposit?
  *
  * `checkout.session.completed` does NOT mean paid. For a delayed payment method
  * (ACH and friends) Stripe fires it with payment_status `unpaid` and confirms
@@ -519,9 +541,16 @@ export type ConfirmedSession =
  *
  * `no_payment_required` is refused too: a zero-amount session is not a deposit.
  *
+ * DEFENSE IN DEPTH: when `expected` is supplied (from the DepositRequest row),
+ * the session's amount and currency must MATCH it. The amount and currency are
+ * fixed server-side when the session is created, so a mismatch means tampering,
+ * a Stripe misconfiguration, or a bug — none of which may quietly credit a
+ * customer's balance. A mismatch is refused with a specific reason so the caller
+ * can flag it for a human rather than write an unverified figure to the ledger.
+ *
  * Pure, so this rule is testable without Stripe, a database or a network.
  */
-export function isConfirmedDepositSession(session: SessionLike): ConfirmedSession {
+export function isConfirmedDepositSession(session: SessionLike, expected?: ExpectedPayment): ConfirmedSession {
   if (session.payment_status !== 'paid') {
     return { confirmed: false, reason: `payment_status=${session.payment_status ?? 'missing'}` }
   }
@@ -531,7 +560,29 @@ export function isConfirmedDepositSession(session: SessionLike): ConfirmedSessio
     // report one would put an unverified number in the ledger.
     return { confirmed: false, reason: 'missing amount_total' }
   }
+  if (expected) {
+    if (amount !== expected.amountCents) {
+      return {
+        confirmed: false,
+        reason: `amount_mismatch: stripe=${amount} expected=${expected.amountCents}`,
+      }
+    }
+    const stripeCurrency = (session.currency ?? '').toLowerCase()
+    const expectedCurrency = (expected.currency ?? 'usd').toLowerCase()
+    if (stripeCurrency && stripeCurrency !== expectedCurrency) {
+      return {
+        confirmed: false,
+        reason: `currency_mismatch: stripe=${stripeCurrency} expected=${expectedCurrency}`,
+      }
+    }
+  }
   return { confirmed: true, amountCents: amount }
+}
+
+/** True when a refusal reason is a money-shape mismatch worth a human's eyes,
+ *  rather than the ordinary "not paid yet" of a delayed payment method. */
+export function isAmountOrCurrencyMismatch(reason: string): boolean {
+  return reason.startsWith('amount_mismatch') || reason.startsWith('currency_mismatch')
 }
 
 // ── Display helpers (shared by the page, the admin list and the embed) ──────

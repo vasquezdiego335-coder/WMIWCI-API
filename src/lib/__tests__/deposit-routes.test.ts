@@ -200,24 +200,33 @@ test('a rapid double-tap cannot create two usable payment sessions', () => {
   assert.match(code(STRIPE), /params\.idempotencyKey \? \{ idempotencyKey: params\.idempotencyKey \}/)
 })
 
-test('expires_at is QUANTIZED, or the idempotency key silently does nothing', () => {
+test('expires_at is delegated to depositSessionExpiresAt (quantized + clamped)', () => {
   const src = code(STRIPE)
   const fn = src.slice(src.indexOf('export async function createDepositCheckout'))
   const line = /expires_at:[^\n]+/.exec(fn)?.[0] ?? ''
 
-  // Stripe honours an idempotency key only when EVERY parameter matches the
-  // first use. A raw Date.now() differs by milliseconds between two calls, so
-  // the retry the key exists to collapse comes back as StripeIdempotencyError
-  // and the customer is told "We could not start the payment" instead of being
-  // handed the session that already exists. Verified against real test-mode
-  // Stripe: unquantized -> error, quantized -> same session id returned.
-  assert.ok(line.includes('60 * 60 * 1000'), 'expires_at must be quantized to the hour, not raw Date.now()')
+  // The expiry expression moved into the pure `depositSessionExpiresAt` helper,
+  // which is exercised directly in deposit-stripe-safety.test.ts (quantization,
+  // the 24h default, the clamp to the deposit link's own expiry, and Stripe's
+  // 30-min / 24-h bounds). Here we only pin the WIRING: the call site delegates
+  // to that helper and passes the deposit link's expiry, so a session can never
+  // outlive the link.
+  assert.match(line, /expires_at:\s*depositSessionExpiresAt\(params\.depositExpiresAt\)/,
+    'expires_at must delegate to depositSessionExpiresAt(params.depositExpiresAt)')
   assert.ok(!/expires_at:\s*Math\.floor\(Date\.now\(\) \/ 1000\)/.test(fn),
     'a raw per-millisecond expires_at breaks the idempotency key')
 
-  // And it must still actually expire — an unbounded session is a payable page
-  // loose on the internet forever.
-  assert.ok(line.includes('24 * 60 * 60'), 'the session must still expire within a day')
+  // The helper itself still quantizes to the hour (idempotency) and caps at 24h.
+  const helper = src.slice(src.indexOf('export function depositSessionExpiresAt'))
+  assert.ok(helper.includes('3_600_000') || helper.includes('60 * 60 * 1000'),
+    'the helper must quantize the default to the hour')
+  assert.ok(helper.includes('24 * 60 * 60'), 'the session must still expire within a day')
+})
+
+test('the deposit checkout route passes the link expiry into the Stripe session', () => {
+  const route = code(CHECKOUT)
+  assert.match(route, /depositExpiresAt:\s*row\.expiresAt/,
+    'the route must hand the deposit link expiry to createDepositCheckout')
 })
 
 test('the database enforces one session and one payment intent per deposit', () => {

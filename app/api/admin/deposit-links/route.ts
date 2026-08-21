@@ -18,7 +18,7 @@ import {
   MAX_CUSTOMER_NOTE_LEN,
 } from '@/lib/deposit-links'
 import { parseCalendarDate, parseMoveTime } from '@/lib/move-date'
-import { createDepositRequest } from '@/lib/deposit-service'
+import { createDepositRequest, isMissingColumnError } from '@/lib/deposit-service'
 import { depositNotifyConfig } from '@/lib/discord-payments'
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -78,34 +78,52 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
   const statusFilter = req.nextUrl.searchParams.get('status')
   const take = Math.min(Number(req.nextUrl.searchParams.get('limit')) || 50, 200)
 
-  const rows = await prisma.depositRequest.findMany({
-    where: {
-      ...(statusFilter && statusFilter !== 'ALL' ? { status: statusFilter as never } : {}),
-      ...(q
-        ? {
-            OR: [
-              { customerName: { contains: q, mode: 'insensitive' as const } },
-              { customerEmail: { contains: q, mode: 'insensitive' as const } },
-              { customerPhone: { contains: q } },
-              { publicToken: { contains: q.toUpperCase() } },
-              { serviceSummary: { contains: q, mode: 'insensitive' as const } },
-              { booking: { bookingReference: { contains: q, mode: 'insensitive' as const } } },
-            ],
-          }
-        : {}),
-    },
-    orderBy: { createdAt: 'desc' },
-    take,
-    select: {
-      id: true, publicToken: true, status: true, amountCents: true, quoteTotalCents: true,
-      balanceBeforeCents: true, amountPaidCents: true, customerName: true, serviceSummary: true,
-      moveDetails: true, customerNote: true, internalNote: true,
-      moveDate: true, moveTimeMinutes: true, expiresAt: true, paidAt: true, createdAt: true, createdByName: true,
-      bookingId: true, discordStatus: true, discordNotifiedAt: true, discordRetryCount: true,
-      discordError: true,
-      booking: { select: { bookingReference: true, displayId: true } },
-    },
-  })
+  const where = {
+    ...(statusFilter && statusFilter !== 'ALL' ? { status: statusFilter as never } : {}),
+    ...(q
+      ? {
+          OR: [
+            { customerName: { contains: q, mode: 'insensitive' as const } },
+            { customerEmail: { contains: q, mode: 'insensitive' as const } },
+            { customerPhone: { contains: q } },
+            { publicToken: { contains: q.toUpperCase() } },
+            { serviceSummary: { contains: q, mode: 'insensitive' as const } },
+            { booking: { bookingReference: { contains: q, mode: 'insensitive' as const } } },
+          ],
+        }
+      : {}),
+  }
+
+  // The new-schema columns are split out so the whole list still loads if the
+  // production database has not had migration 20260820120000 applied yet — this
+  // repo does not run migrations at build time, so new code can briefly run
+  // against the old schema. Without the fallback the entire Deposit Links admin
+  // page would 500 in that window; with it, it degrades to "no move time /
+  // details / notes" and every existing link and payment is still visible.
+  const NEW_COLS = { moveDetails: true, customerNote: true, internalNote: true, moveTimeMinutes: true } as const
+  const BASE_COLS = {
+    id: true, publicToken: true, status: true, amountCents: true, quoteTotalCents: true,
+    balanceBeforeCents: true, amountPaidCents: true, customerName: true, serviceSummary: true,
+    moveDate: true, expiresAt: true, paidAt: true, createdAt: true, createdByName: true,
+    bookingId: true, discordStatus: true, discordNotifiedAt: true, discordRetryCount: true,
+    discordError: true,
+    booking: { select: { bookingReference: true, displayId: true } },
+  } as const
+
+  let rows
+  try {
+    rows = await prisma.depositRequest.findMany({
+      where, orderBy: { createdAt: 'desc' }, take,
+      select: { ...BASE_COLS, ...NEW_COLS },
+    })
+  } catch (err) {
+    if (!isMissingColumnError(err)) throw err
+    log.warn('deposit_requests is missing the new columns — listing without them (run prisma migrate deploy)')
+    const legacy = await prisma.depositRequest.findMany({
+      where, orderBy: { createdAt: 'desc' }, take, select: BASE_COLS,
+    })
+    rows = legacy.map((r) => ({ ...r, moveDetails: [] as string[], customerNote: null, internalNote: null, moveTimeMinutes: null }))
+  }
 
   return NextResponse.json({
     notifications: depositNotifyConfig(),

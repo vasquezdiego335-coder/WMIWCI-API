@@ -180,8 +180,25 @@ export async function createDepositRequest(input: CreateDepositInput): Promise<C
     }
   }
 
+  // THE FIVE NEW COLUMNS ARE SPLIT OUT so the create can drop them and retry if
+  // the production database has not had migration 20260820120000 applied yet.
+  // This repo does not run migrations at build time (nixpacks.toml), so there is
+  // always a window where new code runs against the old schema. On the PUBLIC
+  // page that window is a P2022 fallback; here it is this one. Without it, the
+  // admin "create deposit link" flow would 500 the instant the code deploys
+  // ahead of the migration — an outage on the owner's most-used button. With it,
+  // deploy order genuinely does not matter: a link still mints (without the move
+  // time / details / notes), and once the migration lands every field works.
+  const newSchemaFields = {
+    moveDetails: input.moveDetails ?? [],
+    customerNote: input.customerNote ?? null,
+    internalNote: input.internalNote ?? null,
+    moveTimeMinutes,
+  }
+
   // A token collision at 60 bits is not a real event, but a retry costs nothing
   // and turns an impossible-but-fatal 500 into a no-op.
+  let schemaHasNewColumns = true
   for (let attempt = 0; attempt < 3; attempt++) {
     const publicToken = newPublicToken()
     try {
@@ -197,11 +214,8 @@ export async function createDepositRequest(input: CreateDepositInput): Promise<C
           balanceBeforeCents,
           amountCents: input.amountCents,
           serviceSummary,
-          moveDetails: input.moveDetails ?? [],
-          customerNote: input.customerNote ?? null,
-          internalNote: input.internalNote ?? null,
+          ...(schemaHasNewColumns ? newSchemaFields : {}),
           moveDate,
-          moveTimeMinutes,
           expiresAt: input.expiresAt ?? null,
           createdById: input.createdById ?? null,
           createdByName: input.createdByName ?? null,
@@ -229,14 +243,48 @@ export async function createDepositRequest(input: CreateDepositInput): Promise<C
         })
         .catch((err) => log.warn({ err: msg(err) }, 'deposit audit write failed (non-fatal)'))
 
-      return { ok: true, id: row.id, publicToken: row.publicToken, warning }
+      const okWarning =
+        schemaHasNewColumns
+          ? warning
+          : [
+              warning,
+              'Saved without move time / details / notes: the deposit-fields migration is not applied to this database yet. Run `prisma migrate deploy`.',
+            ]
+              .filter(Boolean)
+              .join(' ')
+
+      return { ok: true, id: row.id, publicToken: row.publicToken, warning: okWarning || undefined }
     } catch (err) {
       if (isUniqueViolation(err) && attempt < 2) continue
+      // The database predates migration 20260820120000. Drop the new columns
+      // and retry ONCE so the owner still gets a working link instead of a 500.
+      if (isMissingColumnError(err) && schemaHasNewColumns) {
+        schemaHasNewColumns = false
+        log.warn(
+          { err: msg(err) },
+          'deposit_requests is missing the move-time/details/notes columns — creating the link without them (run prisma migrate deploy)'
+        )
+        continue
+      }
       log.error({ err: msg(err) }, 'deposit link create failed')
       return { ok: false, status: 500, error: 'Could not create the deposit link' }
     }
   }
   return { ok: false, status: 500, error: 'Could not create the deposit link' }
+}
+
+/**
+ * Postgres 42703 / Prisma P2022: "the column does not exist in the current
+ * database". THE signal that new code is running against a schema that has not
+ * had a migration applied yet. Shared by every deposit read/write path so that
+ * — since this repo does not run migrations at build time — deploy order never
+ * causes an outage.
+ */
+export function isMissingColumnError(err: unknown): boolean {
+  const e = err as { code?: string; message?: string } | null
+  if (e?.code === 'P2022') return true
+  const text = err instanceof Error ? err.message : String(err)
+  return /column .* does not exist|42703/i.test(text)
 }
 
 // ── Checkout session (double-click safety) ──────────────────────────────────
@@ -499,7 +547,10 @@ export async function cancelDepositRequest(
 ): Promise<{ ok: boolean; status: number; error?: string }> {
   const row = await prisma.depositRequest.findUnique({
     where: { id },
-    select: { id: true, status: true, paidAt: true, bookingId: true, expiresAt: true },
+    select: {
+      id: true, status: true, paidAt: true, bookingId: true, expiresAt: true,
+      stripeCheckoutSessionId: true, checkoutSessionExpiresAt: true,
+    },
   })
   if (!row) return { ok: false, status: 404, error: 'Deposit link not found' }
   if (effectiveStatus(row as never) === 'PAID') {
@@ -510,6 +561,26 @@ export async function cancelDepositRequest(
     data: { status: 'CANCELED' },
   })
   if (claim.count === 0) return { ok: false, status: 409, error: 'This deposit link can no longer be canceled' }
+
+  // KILL THE OPEN STRIPE SESSION. Our link is now CANCELED, but a customer who
+  // opened Checkout minutes ago could still have a payable Stripe page. Expiring
+  // the session closes that door. It runs AFTER the DB cancel (the source of
+  // truth) and is fully guarded: a session that is already paid is left for the
+  // webhook to record — we never expire our way into losing money. Best-effort
+  // and non-fatal: the cancel succeeds regardless of what Stripe says.
+  if (row.stripeCheckoutSessionId) {
+    const stillOpen =
+      !row.checkoutSessionExpiresAt || row.checkoutSessionExpiresAt.getTime() > Date.now()
+    if (stillOpen) {
+      try {
+        const { expireDepositCheckoutSession } = await import('./stripe')
+        const res = await expireDepositCheckoutSession(row.stripeCheckoutSessionId)
+        log.info({ depositRequestId: id, sessionId: row.stripeCheckoutSessionId, ...res }, 'expired Stripe session on cancel')
+      } catch (err) {
+        log.warn({ err: msg(err) }, 'could not expire the Stripe session on cancel (link is still canceled)')
+      }
+    }
+  }
 
   await prisma.auditLog
     .create({

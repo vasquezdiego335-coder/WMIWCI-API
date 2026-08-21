@@ -134,6 +134,8 @@ export async function POST(req: NextRequest, { params }: { params: { token: stri
       successUrl: `${base}?return=1&lang=${lang}`,
       cancelUrl: `${base}?canceled=1&lang=${lang}`,
       locale: lang,
+      // The Stripe session may not outlive the deposit link itself.
+      depositExpiresAt: row.expiresAt,
       idempotencyKey: `deposit_${row.id}_${claim.attempt}`,
     })
 
