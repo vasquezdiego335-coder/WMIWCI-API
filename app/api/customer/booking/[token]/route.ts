@@ -3,7 +3,7 @@ import { prisma } from '@/lib/db'
 import { z } from 'zod'
 import { discordQueue } from '@/lib/queues'
 import { apiLogger } from '@/lib/logger'
-import { isDayAvailable, formatEastern } from '@/lib/scheduling'
+import { isDayAvailable, formatEastern, RESCHEDULE_MIN_NOTICE_HOURS } from '@/lib/scheduling'
 import { BIZ_PHONE } from '@/lib/i18n'
 import { outboxEnabled, emitNewDatePicked } from '@/outbox/integration'
 import { customerBookingProjection } from '@/lib/booking-projections'
@@ -78,10 +78,14 @@ export async function PATCH(req: NextRequest, { params }: { params: { token: str
   const { requestedDate, notes } = parsed.data
   const newDate = new Date(requestedDate)
 
-  // Minimum 72h notice.
+  // Minimum notice, matching the published Terms (48h). Tighter than that and
+  // the customer is routed to a human rather than refused outright.
   const hoursDiff = (newDate.getTime() - Date.now()) / (1000 * 60 * 60)
-  if (hoursDiff < 72) {
-    return NextResponse.json({ error: 'Reschedule requires at least 72 hours notice' }, { status: 422 })
+  if (hoursDiff < RESCHEDULE_MIN_NOTICE_HOURS) {
+    return NextResponse.json(
+      { error: `Reschedule requires at least ${RESCHEDULE_MIN_NOTICE_HOURS} hours notice` },
+      { status: 422 }
+    )
   }
 
   // Validate the chosen day still has capacity (no admin block, under MAX_JOBS).

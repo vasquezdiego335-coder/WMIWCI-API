@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { prisma } from '@/lib/db'
-import { findAvailableSlots, formatEastern } from '@/lib/scheduling'
+import { findAvailableSlots, formatEastern, RESCHEDULE_MIN_NOTICE_HOURS } from '@/lib/scheduling'
 
 // GET /api/customer/booking/[token]/slots
 // Returns the next open slots a customer can reschedule into. Token-gated (the
@@ -25,9 +25,10 @@ export async function GET(
     return NextResponse.json({ error: 'This booking cannot be rescheduled', slots: [] }, { status: 422 })
   }
 
-  // Reschedules require ≥72h notice (mirrors the PATCH guard); start searching
-  // from 72h out so every returned slot is actually selectable.
-  const from = new Date(Date.now() + 72 * 60 * 60 * 1000)
+  // Reschedules require the published minimum notice (mirrors the PATCH guard
+  // via the shared constant); start searching from that far out so every
+  // returned slot is actually selectable.
+  const from = new Date(Date.now() + RESCHEDULE_MIN_NOTICE_HOURS * 60 * 60 * 1000)
   const dates = await findAvailableSlots(from, 6)
 
   const slots = dates.map((d) => ({ iso: d.toISOString(), display: formatEastern(d) }))
