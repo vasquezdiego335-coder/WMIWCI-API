@@ -115,7 +115,11 @@ test('the card carries the owner-specified layout and the brand accent', () => {
   assert.equal(fieldValue(e, 'Deposit received'), '$49.00')
   assert.equal(fieldValue(e, 'Quote total'), '$495.00')
   assert.equal(fieldValue(e, 'Remaining balance'), '$446.00')
-  assert.equal(fieldValue(e, 'Move date'), 'August 16, 2026')
+  // THE DAY THE OWNER TYPED, and the weekday with it. This card used to print
+  // "August 15, 2026" for a move stored as the 16th, because a date-only value
+  // saved at 00:00 UTC is the previous evening in Eastern. It now goes through
+  // the same formatter as the customer's page, so the two cannot disagree.
+  assert.equal(fieldValue(e, 'Move'), 'Sunday, August 16, 2026')
   assert.equal(fieldValue(e, 'Booking'), 'WMIC-1019')
   assert.equal(fieldValue(e, 'Payment status'), 'Confirmed')
   assert.match(fieldValue(e, 'Payment time') ?? '', /ET$/, 'the time is in the company timezone')

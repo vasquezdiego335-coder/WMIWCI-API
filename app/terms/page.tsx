@@ -33,8 +33,28 @@ export default function TermsPage() {
           <p>Pricing is based on hourly labor rates. Additional charges may apply for extra crew members, long carries, stair fees, or other factors agreed upon at time of booking.</p>
         </Section>
 
+        {/*
+          THIS SECTION MUST MATCH THE PUBLISHED TERMS, WORD FOR WORD.
+
+          The customer-facing Terms live in the marketing site
+          (WMIWCI-SITE/public/terms/index.html, sections 4 and 7) and are what
+          `moveitclearit.com/terms` actually serves — only /deposit, /api/deposit
+          and /_next are proxied to this app, so a customer following a link from
+          the deposit page reaches THAT document, not this one.
+
+          The two disagreed until 2026-08-20: this page said 72 hours' notice and
+          a cancellation fee of 2 hours of labor, while the published Terms said
+          48 hours and that no additional charge applies. A deposit page printed
+          the stricter figure directly above a link to the document contradicting
+          it. The published Terms are the ones customers agreed to, so they are
+          the truth and this page was corrected to them (owner decision).
+
+          `src/lib/__tests__/deposit-terms-parity.test.ts` fails if this section
+          and the deposit page's summary drift apart again.
+        */}
         <Section title="3. Cancellations and Rescheduling">
-          <p>Once captured (after approval), the $49 booking fee is non-refundable. Rescheduling requests must be submitted at least 72 hours before the scheduled service time. Same-day cancellations may result in a cancellation fee equal to 2 hours of labor.</p>
+          <p>Once captured (after approval), the $49 booking fee is non-refundable and is applied toward your total. You may reschedule once within 90 days at no extra cost with at least 48 hours&apos; notice.</p>
+          <p>The $49 authorization hold is forfeited on cancellation, but no additional charge applies. If the crew arrives and cannot perform the move due to lack of a truck, lack of access, or unsafe conditions, the captured $49 reservation payment is forfeited and the move is treated as cancelled.</p>
         </Section>
 
         <Section title="4. Arrival Windows, Late Arrival &amp; Waiting Time">

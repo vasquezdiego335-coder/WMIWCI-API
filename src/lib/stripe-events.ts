@@ -179,13 +179,49 @@ async function handleDepositSession(event: Stripe.Event, session: Stripe.Checkou
   const depositRequestId = session.metadata?.depositRequestId as string
   const log = webhookLogger.child({ depositRequestId, sessionId: session.id, eventId: event.id })
 
+  // Load what THIS deposit is supposed to cost, so the webhook can cross-check
+  // the money Stripe reports against the money we asked for. A read failure here
+  // must not credit anything, so it is treated as "cannot confirm".
+  const { isConfirmedDepositSession, isAmountOrCurrencyMismatch } = await import('./deposit-links')
+  let expected: { amountCents: number; currency: string | null } | undefined
+  try {
+    const { prisma } = await import('./db')
+    const row = await prisma.depositRequest.findUnique({
+      where: { id: depositRequestId },
+      select: { amountCents: true, currency: true },
+    })
+    if (row) expected = { amountCents: row.amountCents, currency: row.currency }
+  } catch (err) {
+    log.error({ err: err instanceof Error ? err.message : String(err) }, 'could not load the deposit row to verify the amount — not crediting')
+    return
+  }
+
   // THE gate, and it is a pure function so the rule is unit-tested rather than
   // inferred from this call site. `checkout.session.completed` fires for delayed
   // payment methods BEFORE the money is confirmed — only 'paid' with a real
-  // amount_total may touch the ledger or notify anyone.
-  const { isConfirmedDepositSession } = await import('./deposit-links')
-  const gate = isConfirmedDepositSession(session)
+  // amount_total that MATCHES the expected deposit amount and currency may touch
+  // the ledger or notify anyone.
+  const gate = isConfirmedDepositSession(session, expected)
   if (!gate.confirmed) {
+    if (isAmountOrCurrencyMismatch(gate.reason)) {
+      // A paid session whose amount or currency does not match what we asked
+      // for. Do NOT mark paid; flag it loudly with everything a human needs to
+      // reconcile it by hand. Money that really moved is still safe on Stripe's
+      // side; we are refusing to write an UNVERIFIED figure to our ledger.
+      log.error(
+        {
+          reason: gate.reason,
+          expectedAmountCents: expected?.amountCents,
+          stripeAmountTotal: session.amount_total,
+          expectedCurrency: expected?.currency ?? 'usd',
+          stripeCurrency: session.currency,
+          eventId: event.id,
+          sessionId: session.id,
+        },
+        'DEPOSIT AMOUNT/CURRENCY MISMATCH — payment NOT applied, needs manual reconciliation'
+      )
+      return
+    }
     log.info({ reason: gate.reason }, 'deposit session is NOT a confirmed payment — no ledger write, no notification')
     return
   }

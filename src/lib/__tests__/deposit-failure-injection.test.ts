@@ -347,13 +347,20 @@ test('a PAID link can never mint another session', async () => {
   const { claimCheckoutSession, payableOrReason } = await import('../deposit-service')
   assert.equal((await claimCheckoutSession('dep_1')).kind, 'busy', 'the claim guard refuses a paid row')
   const reason = payableOrReason({ status: 'PAID', expiresAt: null, paidAt: new Date() })
-  assert.match(reason ?? '', /already been paid/i)
+  assert.match(reason?.message ?? '', /already been paid/i)
+  // The CODE is what the customer-facing page translates; the English sentence
+  // is only the fallback for a client that does not know the code.
+  assert.equal(reason?.code, 'already_paid')
 })
 
 test('expired and canceled links are refused before any Stripe call', async () => {
   const { payableOrReason } = await import('../deposit-service')
-  assert.match(payableOrReason({ status: 'ACTIVE', expiresAt: new Date('2020-01-01'), paidAt: null }) ?? '', /expired/i)
-  assert.match(payableOrReason({ status: 'CANCELED', expiresAt: null, paidAt: null }) ?? '', /no longer active/i)
+  const expired = payableOrReason({ status: 'ACTIVE', expiresAt: new Date('2020-01-01'), paidAt: null })
+  assert.match(expired?.message ?? '', /expired/i)
+  assert.equal(expired?.code, 'expired')
+  const canceled = payableOrReason({ status: 'CANCELED', expiresAt: null, paidAt: null })
+  assert.match(canceled?.message ?? '', /no longer active/i)
+  assert.equal(canceled?.code, 'inactive')
   assert.equal(payableOrReason({ status: 'ACTIVE', expiresAt: null, paidAt: null }), null, 'an active link is payable')
 })
 
@@ -479,4 +486,55 @@ test('cancelling twice is refused the second time', async () => {
   const { cancelDepositRequest } = await import('../deposit-service')
   assert.equal((await cancelDepositRequest('dep_1', {})).ok, true)
   assert.equal((await cancelDepositRequest('dep_1', {})).ok, false)
+})
+
+test('creating a link against a PRE-MIGRATION schema still mints a link', async () => {
+  // This repo does not run migrations at build time, so new code can briefly run
+  // against a database that lacks move_time_minutes / move_details / etc. The
+  // first create throws Postgres 42703 ("column does not exist"); the service
+  // must drop those columns and retry so the owner still gets a working link,
+  // not a 500 on his most-used button.
+  const db = seedDb([])
+  db.failNextWrite = 'column "move_time_minutes" of relation "deposit_requests" does not exist'
+  const { createDepositRequest } = await import('../deposit-service')
+  const r = await createDepositRequest({
+    amountCents: 4900,
+    customerName: 'Rosey Alvarez',
+    moveDetails: ['Apartment next door'],
+    customerNote: 'Bring the hardware',
+    internalNote: 'gate code 4417',
+    moveTimeMinutes: 420,
+  })
+  assert.equal(r.ok, true, 'the link is created despite the missing columns')
+  assert.equal(db.deposits.length, 1, 'exactly one row, on the retry')
+  const row = db.deposits[0]
+  // The new columns were dropped from the retried write...
+  assert.ok(!('moveTimeMinutes' in row), 'move time was not written to the old schema')
+  assert.ok(!('moveDetails' in row), 'move details were not written to the old schema')
+  assert.ok(!('internalNote' in row), 'the note was not written to the old schema')
+  // ...but the money-critical fields are intact.
+  assert.equal(row.amountCents, 4900)
+  assert.equal(row.status, 'ACTIVE')
+  assert.ok((r as { warning?: string }).warning?.includes('migrate deploy'), 'the owner is told the migration is pending')
+})
+
+test('cancelling a link WITH an open Stripe session still succeeds when Stripe is unreachable', async () => {
+  // The cancel path now tries to expire the open Stripe Checkout Session so a
+  // customer who already opened Checkout cannot pay a killed link. That call is
+  // best-effort: here there is no Stripe key, so it fails internally — and the
+  // cancel must STILL succeed, because the database is the source of truth and
+  // the money guard is "never expire our way into losing a payment", not "never
+  // cancel if Stripe is down".
+  const db = seedDb([
+    depositRow({
+      stripeCheckoutSessionId: 'cs_live_1',
+      stripeCheckoutUrl: 'https://checkout.stripe.com/c/pay/cs_live_1',
+      checkoutSessionExpiresAt: new Date(Date.now() + 60 * 60 * 1000),
+    }),
+  ])
+  const { cancelDepositRequest } = await import('../deposit-service')
+  const r = await cancelDepositRequest('dep_1', { userId: 'u1', name: 'Diego' })
+  assert.equal(r.ok, true, 'the cancel is not blocked by a Stripe outage')
+  assert.equal(paid(db).status, 'CANCELED')
+  assert.equal(db.audits.filter((a) => a.action === 'DEPOSIT_LINK_CANCELED').length, 1)
 })

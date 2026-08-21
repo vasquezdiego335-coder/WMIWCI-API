@@ -17,6 +17,7 @@
 // ════════════════════════════════════════════════════════════════════════════
 
 import { randomBytes } from 'node:crypto'
+import { formatMoveDateLong, formatMoveWhen, parseEtDateTimeLocal } from './move-date'
 
 // ── Amount bounds ───────────────────────────────────────────────────────────
 // $1 floor: a $0 (or negative) "payment" is not a deposit, and Stripe rejects
@@ -215,6 +216,35 @@ export function remainingAfterCents(b: BalanceInput): number | null {
   return Math.max(0, base - b.amountCents)
 }
 
+/**
+ * What the customer has ALREADY paid toward this job before today's deposit.
+ *
+ * WHY THIS EXISTS: `quoteTotalCents` is the booking's final billed total, while
+ * `balanceBeforeCents` is what was still OUTSTANDING when the link was made —
+ * and `outstanding = finalBilled - collected`. On any approved booking the $49
+ * hold has already been captured, so the two differ, and the page was printing
+ * three numbers that did not subtract:
+ *
+ *     Quote total              $495.00
+ *     Deposit due today         $49.00
+ *     Remaining after deposit  $397.00      <- $495 - $49 = $446, not $397
+ *
+ * The missing $49 was real money the customer had already paid, with nothing on
+ * the page to account for it. Naming it turns an apparent arithmetic error into
+ * a statement of fact.
+ *
+ * Returns null when there is nothing to state: no quote, no recorded balance, or
+ * the two agree (nothing collected yet). Never negative — a balance LARGER than
+ * the total is a data problem, not a payment, and inventing a negative "already
+ * paid" row would be worse than staying quiet.
+ */
+export function alreadyPaidCents(b: BalanceInput): number | null {
+  const { quoteTotalCents: total, balanceBeforeCents: before } = b
+  if (total == null || before == null) return null
+  const diff = total - before
+  return diff > 0 ? diff : null
+}
+
 /** Can the customer be shown a quote total / remaining balance at all? */
 export function showsBalance(b: BalanceInput): boolean {
   return remainingAfterCents(b) != null
@@ -310,12 +340,25 @@ export function customerDepositMessage(opts: {
 
 // ── Expiry ──────────────────────────────────────────────────────────────────
 
-/** Parse an admin-supplied expiry. Must be in the future and within a year. */
+/**
+ * Parse an admin-supplied DEPOSIT LINK expiry. Must be in the future and within
+ * a year.
+ *
+ * THIS IS THE LINK'S EXPIRY, NOT THE MOVE DATE. The two are independent facts
+ * and are deliberately parsed by different functions with different rules: a
+ * move date is a CALENDAR DATE (`parseCalendarDate`), while an expiry is a real
+ * INSTANT — a moment at which the link stops taking money.
+ *
+ * The wall clock is EASTERN, because that is the clock the owner is reading
+ * when he picks it. `new Date(input)` used to be used here, which parses an
+ * offset-less "2026-08-22T23:00" in the SERVER's timezone — UTC in production —
+ * and killed links four to five hours early. See move-date.ts.
+ */
 export function parseExpiry(input: unknown, now: Date = new Date()): { ok: true; at: Date | null } | { ok: false; error: string } {
   if (input == null || input === '') return { ok: true, at: null }
   if (typeof input !== 'string') return { ok: false, error: 'Invalid expiration' }
-  const at = new Date(input)
-  if (Number.isNaN(at.getTime())) return { ok: false, error: 'Invalid expiration' }
+  const at = parseEtDateTimeLocal(input)
+  if (!at || Number.isNaN(at.getTime())) return { ok: false, error: 'Invalid expiration' }
   if (at.getTime() <= now.getTime()) return { ok: false, error: 'Expiration must be in the future' }
   if (at.getTime() > now.getTime() + 365 * 24 * 60 * 60 * 1000) return { ok: false, error: 'Expiration cannot be more than a year out' }
   return { ok: true, at }
@@ -331,7 +374,10 @@ export type DepositRowLike = {
   amountCents: number
   amountPaidCents?: number | null
   serviceSummary?: string | null
+  moveDetails?: string[] | null
+  customerNote?: string | null
   moveDate?: Date | null
+  moveTimeMinutes?: number | null
   status: string
   expiresAt?: Date | null
   paidAt?: Date | null
@@ -341,15 +387,72 @@ export type PublicDepositView = {
   token: string
   status: DepositStatus
   firstName: string | null
+  /** One short customer-facing line, e.g. "Labor-Only Move · 2 Movers". */
   serviceSummary: string | null
+  /** Short customer-facing bullets. ALWAYS an array — never a paragraph. */
+  moveDetails: string[]
+  /** The one thing the customer has to do before move day, or null. */
+  customerNote: string | null
   moveDate: Date | null
+  /** Minutes after midnight Eastern, or null when no time was recorded. */
+  moveTimeMinutes: number | null
   /** null ⇒ the section is HIDDEN, never rendered as $0.00. */
   quoteTotalCents: number | null
+  /** Money already collected on this job before today's deposit, or null. */
+  alreadyPaidCents: number | null
   depositCents: number
   remainingCents: number | null
   amountPaidCents: number | null
   paidAt: Date | null
   showsBalance: boolean
+}
+
+// ── Customer-facing text hygiene ────────────────────────────────────────────
+//
+// The owner types these into an admin form on a phone, mid-conversation. What
+// arrives can carry newlines, tabs, doubled spaces and stray control bytes from
+// a paste out of Messenger — none of which belong in a layout that has to hold
+// together at 320px.
+
+/** Collapse whitespace, strip control bytes, trim. Empty ⇒ null. */
+export function cleanCustomerText(value: unknown, maxLen: number): string | null {
+  if (typeof value !== 'string') return null
+  const flat = value.replace(/[\x00-\x1f\x7f]/g, ' ').replace(/\s+/g, ' ').trim()
+  if (!flat) return null
+  return flat.length > maxLen ? flat.slice(0, maxLen).trimEnd() : flat
+}
+
+/** How many bullets the customer-facing detail list may hold, and how long each may be. */
+export const MAX_MOVE_DETAILS = 6
+export const MAX_MOVE_DETAIL_LEN = 90
+export const MAX_SERVICE_SUMMARY_LEN = 80
+export const MAX_CUSTOMER_NOTE_LEN = 160
+/** How long a LEGACY serviceSummary may be when DISPLAYED. Long enough for a
+ *  real one-line summary, short enough that an old multi-line note stored here
+ *  can never render as a paragraph. Display-only; the stored row is untouched. */
+export const LEGACY_SERVICE_SUMMARY_DISPLAY_MAX = 120
+
+/**
+ * Free text (one bullet per line, as typed in the admin textarea) → the stored
+ * array. Bounded on BOTH axes so no admin entry can produce the wall of text
+ * this feature was reported for: at most `MAX_MOVE_DETAILS` bullets, each at
+ * most `MAX_MOVE_DETAIL_LEN` characters. Leading "-" / "*" / "•" bullets people
+ * type by hand are stripped so the page does not render a double bullet.
+ */
+export function parseMoveDetails(value: unknown): string[] {
+  const lines =
+    Array.isArray(value) ? value
+    : typeof value === 'string' ? value.split(/\r?\n/)
+    : []
+  const out: string[] = []
+  for (const line of lines) {
+    if (typeof line !== 'string') continue
+    const stripped = line.replace(/^\s*[-*•·]\s*/, '')
+    const clean = cleanCustomerText(stripped, MAX_MOVE_DETAIL_LEN)
+    if (clean) out.push(clean)
+    if (out.length >= MAX_MOVE_DETAILS) break
+  }
+  return out
 }
 
 /**
@@ -372,9 +475,34 @@ export function publicDepositView(row: DepositRowLike, now: Date = new Date()): 
     token: row.publicToken,
     status,
     firstName: firstNameOf(row.customerName),
-    serviceSummary: row.serviceSummary?.trim() || null,
+    // LEGACY-SAFE. Before the audience split, `serviceSummary` was the ONLY
+    // free-text field, so old rows may hold a whole multi-line internal note
+    // here (this is exactly the "Job Note: Saturday, 7:00 AM — 2 workers…" that
+    // shipped clipped). We cannot know which part of an old note was meant to be
+    // private, so we do not guess — but we DO render it as a clean, bounded line
+    // instead of a wall of text: newlines and control bytes collapsed, capped at
+    // a length that is comfortably a headline and never a paragraph. This is a
+    // DISPLAY transform only; the stored row is never rewritten, and no payment
+    // or balance is touched. New rows are already short, so this is a no-op for
+    // them.
+    serviceSummary: cleanCustomerText(row.serviceSummary, LEGACY_SERVICE_SUMMARY_DISPLAY_MAX),
+    // Re-cleaned on the way OUT as well as on the way in. Rows written before
+    // the bullets existed hold whatever the single free-text field held, and a
+    // projection that trusts its input is how the paragraph got onto the page
+    // the first time.
+    moveDetails: parseMoveDetails(row.moveDetails ?? []),
+    customerNote: cleanCustomerText(row.customerNote, MAX_CUSTOMER_NOTE_LEN),
     moveDate: row.moveDate ?? null,
+    moveTimeMinutes:
+      row.moveTimeMinutes != null && Number.isInteger(row.moveTimeMinutes) && row.moveTimeMinutes >= 0 && row.moveTimeMinutes <= 1439
+        ? row.moveTimeMinutes
+        : null,
     quoteTotalCents: row.quoteTotalCents ?? null,
+    alreadyPaidCents: alreadyPaidCents({
+      quoteTotalCents: row.quoteTotalCents,
+      balanceBeforeCents: row.balanceBeforeCents,
+      amountCents: applied,
+    }),
     depositCents: row.amountCents,
     remainingCents: remaining,
     amountPaidCents: row.amountPaidCents ?? null,
@@ -388,6 +516,14 @@ export function publicDepositView(row: DepositRowLike, now: Date = new Date()): 
 export type SessionLike = {
   payment_status?: string | null
   amount_total?: number | null
+  currency?: string | null
+}
+
+/** What the DepositRequest row says this payment SHOULD be, for cross-checking. */
+export type ExpectedPayment = {
+  amountCents: number
+  /** Lower-cased ISO currency; defaults to 'usd' when the row stored none. */
+  currency?: string | null
 }
 
 export type ConfirmedSession =
@@ -395,7 +531,7 @@ export type ConfirmedSession =
   | { confirmed: false; reason: string }
 
 /**
- * Is this Checkout Session a CONFIRMED payment?
+ * Is this Checkout Session a CONFIRMED payment for the EXPECTED deposit?
  *
  * `checkout.session.completed` does NOT mean paid. For a delayed payment method
  * (ACH and friends) Stripe fires it with payment_status `unpaid` and confirms
@@ -405,9 +541,16 @@ export type ConfirmedSession =
  *
  * `no_payment_required` is refused too: a zero-amount session is not a deposit.
  *
+ * DEFENSE IN DEPTH: when `expected` is supplied (from the DepositRequest row),
+ * the session's amount and currency must MATCH it. The amount and currency are
+ * fixed server-side when the session is created, so a mismatch means tampering,
+ * a Stripe misconfiguration, or a bug — none of which may quietly credit a
+ * customer's balance. A mismatch is refused with a specific reason so the caller
+ * can flag it for a human rather than write an unverified figure to the ledger.
+ *
  * Pure, so this rule is testable without Stripe, a database or a network.
  */
-export function isConfirmedDepositSession(session: SessionLike): ConfirmedSession {
+export function isConfirmedDepositSession(session: SessionLike, expected?: ExpectedPayment): ConfirmedSession {
   if (session.payment_status !== 'paid') {
     return { confirmed: false, reason: `payment_status=${session.payment_status ?? 'missing'}` }
   }
@@ -417,17 +560,54 @@ export function isConfirmedDepositSession(session: SessionLike): ConfirmedSessio
     // report one would put an unverified number in the ledger.
     return { confirmed: false, reason: 'missing amount_total' }
   }
+  if (expected) {
+    if (amount !== expected.amountCents) {
+      return {
+        confirmed: false,
+        reason: `amount_mismatch: stripe=${amount} expected=${expected.amountCents}`,
+      }
+    }
+    const stripeCurrency = (session.currency ?? '').toLowerCase()
+    const expectedCurrency = (expected.currency ?? 'usd').toLowerCase()
+    if (stripeCurrency && stripeCurrency !== expectedCurrency) {
+      return {
+        confirmed: false,
+        reason: `currency_mismatch: stripe=${stripeCurrency} expected=${expectedCurrency}`,
+      }
+    }
+  }
   return { confirmed: true, amountCents: amount }
+}
+
+/** True when a refusal reason is a money-shape mismatch worth a human's eyes,
+ *  rather than the ordinary "not paid yet" of a delayed payment method. */
+export function isAmountOrCurrencyMismatch(reason: string): boolean {
+  return reason.startsWith('amount_mismatch') || reason.startsWith('currency_mismatch')
 }
 
 // ── Display helpers (shared by the page, the admin list and the embed) ──────
 
 const TIMEZONE = 'America/New_York'
 
-/** "August 16, 2026" in the company's local timezone. */
-export function formatMoveDate(d: Date | null | undefined, timeZone = TIMEZONE): string | null {
-  if (!d) return null
-  return d.toLocaleDateString('en-US', { timeZone, month: 'long', day: 'numeric', year: 'numeric' })
+/**
+ * "Saturday, August 22, 2026".
+ *
+ * DELEGATES to move-date.ts, which is THE authority on what calendar day a
+ * stored move date is. This function used to do
+ * `d.toLocaleDateString('en-US', { timeZone: 'America/New_York', … })`, which
+ * is what printed "August 21" for a move booked on Saturday the 22nd: a
+ * date-only value stored at 00:00 UTC is the previous evening in Eastern.
+ *
+ * Every surface that shows a move date — this page, the Discord card, the admin
+ * list — goes through here, so they cannot disagree about the day.
+ */
+export function formatMoveDate(d: Date | null | undefined, _timeZone = TIMEZONE): string | null {
+  return formatMoveDateLong(d, 'en')
+}
+
+/** "Saturday, August 22 · 7:00 AM" when a time is known, the long date when not. */
+export function formatMoveWhenEn(d: Date | null | undefined, timeMinutes?: number | null): string | null {
+  return formatMoveWhen(d, timeMinutes ?? null, 'en')
 }
 
 /** "Aug 15, 2026 at 3:04 PM ET" — used for the confirmed-payment time. */

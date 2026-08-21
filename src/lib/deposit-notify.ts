@@ -30,7 +30,7 @@
 // ════════════════════════════════════════════════════════════════════════════
 import { botLogger } from './logger'
 import { discordSafe } from './booking-display'
-import { formatCents, formatMoveDate, formatPaymentTime, firstNameOf } from './deposit-links'
+import { formatCents, formatMoveWhenEn, formatPaymentTime, firstNameOf } from './deposit-links'
 
 const log = botLogger.child({ mod: 'deposit-notify' })
 
@@ -99,6 +99,14 @@ export type DepositPaidEmbedInput = {
   quoteTotalCents?: number | null
   remainingCents?: number | null
   moveDate?: Date | null
+  /** Minutes after midnight Eastern, or null when no time was recorded. */
+  moveTimeMinutes?: number | null
+  /** The CUSTOMER-FACING service line, so the owner's card and the customer's
+   *  page describe the same job. */
+  serviceSummary?: string | null
+  /** The PRIVATE crew note. This channel is owner-only, which is the whole
+   *  reason the note now has somewhere to go other than the customer's page. */
+  internalNote?: string | null
   bookingReference?: string | null
   paidAt?: Date | null
   /** false ⇒ Stripe test mode ⇒ the card says so, loudly. */
@@ -134,8 +142,15 @@ export function buildDepositPaidEmbed(input: DepositPaidEmbedInput): EmbedJson {
   if (input.remainingCents != null) {
     fields.push({ name: 'Remaining balance', value: formatCents(input.remainingCents), inline: true })
   }
-  const moveDate = formatMoveDate(input.moveDate)
-  if (moveDate) fields.push({ name: 'Move date', value: moveDate, inline: true })
+  // ONE formatter, shared with the customer's page. This card printed the day
+  // BEFORE the move for every date the admin form stored — and this is the copy
+  // a crew gets dispatched from.
+  const moveWhen = formatMoveWhenEn(input.moveDate, input.moveTimeMinutes)
+  if (moveWhen) fields.push({ name: 'Move', value: moveWhen, inline: true })
+
+  if (input.serviceSummary) {
+    fields.push({ name: 'Service', value: discordSafe(input.serviceSummary, 200), inline: true })
+  }
 
   if (input.bookingReference) {
     fields.push({ name: 'Booking', value: discordSafe(input.bookingReference, 40), inline: true })
@@ -145,6 +160,11 @@ export function buildDepositPaidEmbed(input: DepositPaidEmbedInput): EmbedJson {
 
   const paidAt = formatPaymentTime(input.paidAt)
   if (paidAt) fields.push({ name: 'Payment time', value: paidAt, inline: true })
+
+  // LAST, and full width: it is the longest field and the only private one.
+  if (input.internalNote) {
+    fields.push({ name: 'Internal note', value: discordSafe(input.internalNote, 900), inline: false })
+  }
 
   if (input.adminUrl) {
     fields.push({ name: 'Open booking', value: `[View in admin](${input.adminUrl})`, inline: false })

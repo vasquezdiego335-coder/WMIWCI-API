@@ -3941,8 +3941,42 @@ model DepositRequest {
   amountCents Int    @map("amount_cents")
   currency    String @default("usd")
 
+  // ── What the job IS, split by AUDIENCE (owner spec 2026-08-20) ───────────
+  //    One free-text field could not hold both a customer's summary and the
+  //    crew's instructions, so the crew's instructions ended up on the payment
+  //    page: a live link rendered "Job Note: Saturday, 7:00 AM - 2 workers,
+  //    labor-only move..." inside the customer's Service row, wrapped badly and
+  //    clipped. Same split, same reasoning as Booking.internalNotes vs
+  //    itemsDescription above: the audience is a property of the COLUMN, not a
+  //    thing the writer has to remember at the call site.
+
+  /// CUSTOMER-FACING headline for the job, one short line.
+  /// e.g. "Labor-Only Move - 2 Movers". Rendered on the public deposit page.
   serviceSummary String?   @map("service_summary")
+  /// CUSTOMER-FACING detail bullets, short and scannable, rendered as a list.
+  /// e.g. ["Apartment next door", "15 stairs at pickup - 7 stairs at drop-off"].
+  /// A LIST, not a paragraph, so the page can never grow a wall of text again.
+  /// Modelled on Booking.reviewReasons (String[]), the existing precedent here.
+  moveDetails    String[]  @map("move_details")
+  /// CUSTOMER-FACING, and the one thing on the page they must ACT on:
+  /// "Customer to provide all necessary hardware/screws." One short line, kept
+  /// out of `moveDetails` because a to-do buried in a list of facts gets
+  /// skimmed past and then argued about on move day.
+  customerNote   String?   @map("customer_note")
+  /// PRIVATE. The crew/dispatch note. NEVER selected by the public projection
+  /// in deposit-links.ts, and there is no code path that copies it into any
+  /// customer-facing column.
+  internalNote   String?   @map("internal_note")
+
+  /// THE MOVE DATE, as a CALENDAR DATE — stored anchored at 12:00 UTC of that
+  /// day, never as an arbitrary instant. See src/lib/move-date.ts for why:
+  /// a date-only value written with `new Date("2026-08-22")` lands on
+  /// 00:00:00.000Z and reads back a day early in America/New_York.
   moveDate       DateTime? @map("move_date")
+  /// The move's start time as MINUTES AFTER MIDNIGHT EASTERN (0-1439), or null
+  /// when no time is known. Deliberately NOT folded into `moveDate`: a time
+  /// that never enters a Date can never be shifted by a timezone or by DST.
+  moveTimeMinutes Int?     @map("move_time_minutes")
 
   status    DepositRequestStatus @default(ACTIVE)
   expiresAt DateTime?            @map("expires_at")

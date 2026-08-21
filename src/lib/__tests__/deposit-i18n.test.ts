@@ -67,7 +67,7 @@ test('the owner-specified wording is present, verbatim, in both languages', () =
   assert.equal(COPY.es.quoteTotal, 'Total de la cotización')
   assert.equal(COPY.en.depositDue, 'Deposit due today')
   assert.equal(COPY.es.depositDue, 'Depósito a pagar hoy')
-  assert.equal(COPY.en.remaining, 'Remaining balance after deposit')
+  assert.equal(COPY.en.remaining, 'Remaining after deposit')
   assert.equal(COPY.es.remaining, 'Saldo restante después del depósito')
   assert.equal(COPY.en.appliedNote, 'This deposit is applied to the total balance of your move.')
   assert.equal(COPY.es.appliedNote, 'Este depósito se aplica al saldo total de su mudanza.')
@@ -106,10 +106,40 @@ test('the pay button takes its amount from a placeholder, in both languages', ()
 
 test('the cancellation policy states the SAME terms in both languages', () => {
   // A translated policy that changed a number would be a second, unagreed policy.
-  assert.match(COPY.en.policyBody, /72 hours/)
-  assert.match(COPY.es.policyBody, /72 horas/)
-  assert.match(COPY.en.policyBody, /2 hours of labor/)
-  assert.match(COPY.es.policyBody, /2 horas de mano de obra/)
+  // These are the PUBLISHED terms (WMIWCI-SITE/public/terms sections 4 and 7),
+  // which is the document `/terms` actually serves to a customer and therefore
+  // the one they agreed to. Owner decision, 2026-08-20.
+  assert.match(COPY.en.policyBody, /48 hours/)
+  assert.match(COPY.es.policyBody, /48 horas/)
+  assert.match(COPY.en.policyBody, /90 days/)
+  assert.match(COPY.es.policyBody, /90 d[ií]as/)
+  assert.match(COPY.en.policyBody, /no additional charge/i)
+  assert.match(COPY.es.policyBody, /ning[uú]n cargo adicional/i)
+
+  // THE OLD, CONTRADICTORY FIGURE MAY NOT COME BACK. This page printed
+  // "a cancellation fee equal to 2 hours of labor" directly above a link to the
+  // document stating that no additional charge applies.
+  for (const lang of LANGS) {
+    assert.ok(
+      !/\d+\s*(hours? of labor|horas de mano de obra)/i.test(COPY[lang].policyBody),
+      `${lang}.policyBody must not quantify a cancellation fee`
+    )
+    assert.ok(!/\b72\b/.test(COPY[lang].policyBody), `${lang}.policyBody must not state the retired 72-hour notice`)
+    // NO DOLLAR FIGURE either. Copy here may never state a price -- every amount
+    // is interpolated from the record -- and on this page a literal "$49" would
+    // sit beside a deposit that is often a different number, reading as though
+    // the deposit itself were the forfeited booking fee. Separate instruments.
+    assert.ok(!/\$\s?\d/.test(COPY[lang].policyBody), `${lang}.policyBody must not state a price`)
+  }
+
+  // ONE link, inside the sentence. The page used to carry this paragraph and
+  // then a second, stacked "Full terms: Terms of Service" line pointing at the
+  // same destination — plus a third copy in the site-wide footer.
+  for (const lang of LANGS) {
+    assert.ok(COPY[lang].policySeePre.trim().length > 0, `${lang} needs the lead-in to the Terms link`)
+    assert.ok(COPY[lang].policySeePost.trim().length > 0, `${lang} needs the tail after the Terms link`)
+    assert.ok(COPY[lang].terms.trim().length > 0, `${lang} needs the Terms link label`)
+  }
 })
 
 // ── fill() ──────────────────────────────────────────────────────────────────
@@ -348,7 +378,9 @@ test('the human, local identity is present and bilingual', () => {
   assert.match(COPY.en.ownerRole, /North Jersey/)
   assert.match(COPY.es.ownerRole, /Dueños y jefes de mudanzas/)
   assert.match(COPY.es.ownerRole, /Norte de Nueva Jersey/)
-  assert.equal(COPY.en.seHablaEspanol, 'Se habla Español.')
+  // A BADGE beside the role now, not a sentence on a row of its own — hence no
+  // full stop. It used to occupy a whole row at the bottom of the card.
+  assert.equal(COPY.en.seHablaEspanol, 'Se habla Español')
   // Three concrete steps, in both languages, none of them a price.
   for (const lang of LANGS) {
     for (const k of ['step1', 'step2', 'step3'] as const) {

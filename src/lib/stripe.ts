@@ -138,6 +138,55 @@ export async function createBookingCheckout(params: {
 //  amount parameter reachable from a browser, and no processing fee is added —
 //  the customer is charged the deposit and nothing but the deposit.
 // ════════════════════════════════════════════════════════════════════════
+/** The Stripe line item, in the customer's language. */
+function depositLineItem(serviceSummary: string | null | undefined, locale?: 'en' | 'es') {
+  const es = locale === 'es'
+  const name = es ? 'Move It Clear It — Depósito de mudanza' : 'Move It Clear It — Move Deposit'
+  const base = es
+    ? 'Depósito aplicado al saldo de su mudanza'
+    : 'Deposit applied toward your moving balance'
+  return {
+    name,
+    description: serviceSummary ? `${base} — ${serviceSummary}`.slice(0, 200) : base,
+  }
+}
+
+/**
+ * The Unix timestamp a deposit Checkout Session should expire at.
+ *
+ * THE RULE: a Stripe session must never stay payable materially beyond the
+ * Move It Clear It deposit link itself. Stripe allows a session to live up to
+ * 24h; if the link expires in 3h, a 24h session would let a customer pay 21h
+ * after the link went dead. So the session expiry is the SOONER of our 24h
+ * default and the deposit link's own expiry.
+ *
+ * Stripe's own bounds are absolute (expires_at must be 30 min - 24 h out), so
+ * the result is clamped into that window. A link with under ~31 min left is at
+ * end of life anyway — the `payableOrReason` gate refuses a new session once it
+ * actually expires — so the 30-min floor is an acceptable, unavoidable overhang.
+ *
+ * The 24h default stays hour-quantized so two calls that legitimately reuse one
+ * idempotency key produce byte-identical bodies (see the comment at the call
+ * site); a real deposit expiry is a fixed stored timestamp and is stable by
+ * construction.
+ */
+export function depositSessionExpiresAt(
+  depositExpiresAt: Date | null | undefined,
+  now: number = Date.now()
+): number {
+  const nowSec = Math.floor(now / 1000)
+  const hourQuantized24h = Math.floor(now / 3_600_000) * 3600 + 24 * 60 * 60
+  const stripeFloor = nowSec + 31 * 60 // Stripe minimum is 30 min; 31 for margin
+  const stripeCeil = nowSec + 24 * 60 * 60
+
+  let target = hourQuantized24h
+  if (depositExpiresAt) {
+    const dep = Math.floor(depositExpiresAt.getTime() / 1000)
+    target = Math.min(target, dep) // never beyond the deposit link's own expiry
+  }
+  return Math.min(Math.max(target, stripeFloor), stripeCeil)
+}
+
 export async function createDepositCheckout(params: {
   depositRequestId: string
   /** THE authoritative amount, read from the database by the caller. */
@@ -150,6 +199,10 @@ export async function createDepositCheckout(params: {
   serviceSummary?: string | null
   successUrl: string
   cancelUrl: string
+  /** The customer's language. Stripe renders its own Checkout page in it. */
+  locale?: 'en' | 'es'
+  /** The deposit link's own expiry. The Stripe session may not outlive it. */
+  depositExpiresAt?: Date | null
   /** Collapses retries of the SAME attempt into one session at Stripe's end. */
   idempotencyKey?: string
 }): Promise<Stripe.Checkout.Session> {
@@ -172,6 +225,11 @@ export async function createDepositCheckout(params: {
   return getStripeClient().checkout.sessions.create(
     {
       mode: 'payment',
+      // STRIPE'S OWN PAGE, IN THE CUSTOMER'S LANGUAGE. Our page is fully
+      // bilingual and then handed a Spanish speaker an English card form —
+      // the one screen where "CVC" and "postal code" have to be understood.
+      // Omitted (Stripe's own auto-detect) when we were not told.
+      ...(params.locale ? { locale: params.locale } : {}),
       // The internal deposit-request id, so a Stripe-side reconciliation can
       // always name the row this session belongs to without parsing metadata.
       client_reference_id: params.depositRequestId,
@@ -189,12 +247,11 @@ export async function createDepositCheckout(params: {
             unit_amount: params.amountCents,
             // Inline price data — no Product/Price object is created per deposit,
             // so the Stripe product catalogue does not fill up with one-offs.
-            product_data: {
-              name: 'Move It Clear It — Move Deposit',
-              description: params.serviceSummary
-                ? `Deposit applied toward your moving balance — ${params.serviceSummary}`.slice(0, 200)
-                : 'Deposit applied toward your moving balance',
-            },
+            // The line item the customer reads on Stripe's page and on the
+            // emailed receipt, in their language. `serviceSummary` is the
+            // CUSTOMER-FACING summary — never the internal note, which is a
+            // different column and is not selected on this path at all.
+            product_data: depositLineItem(params.serviceSummary, params.locale),
           },
         },
       ],
@@ -210,9 +267,11 @@ export async function createDepositCheckout(params: {
       // not start the payment" for a customer who should simply have been handed
       // the session that already existed. Found by a real test-mode call, not by
       // reading the code. Rounding the base to the hour makes two calls in the
-      // same hour byte-identical, so the key does what its name says; expiry
-      // lands 24-25h out, which is the same promise as before.
-      expires_at: Math.floor(Date.now() / (60 * 60 * 1000)) * (60 * 60) + 24 * 60 * 60,
+      // same hour byte-identical, so the key does what its name says.
+      //
+      // AND it is the SOONER of that 24h default and the deposit link's own
+      // expiry, so the session can never stay payable materially past the link.
+      expires_at: depositSessionExpiresAt(params.depositExpiresAt),
       success_url: params.successUrl,
       cancel_url: params.cancelUrl,
       allow_promotion_codes: false,
@@ -221,6 +280,36 @@ export async function createDepositCheckout(params: {
     },
     params.idempotencyKey ? { idempotencyKey: params.idempotencyKey } : undefined
   )
+}
+
+/**
+ * Expire an open deposit Checkout Session, so a cancelled link cannot be paid.
+ *
+ * When the owner cancels an unpaid deposit link, its Stripe session may still be
+ * open — a customer who opened Checkout minutes earlier could otherwise still
+ * pay a link the owner just killed. Stripe's `sessions.expire` closes it.
+ *
+ * DELIBERATELY BEST-EFFORT AND NON-THROWING. A session that is already expired,
+ * already completed, or unknown returns a Stripe error we swallow: the DB cancel
+ * has already happened and is the source of truth, and — crucially — if the
+ * customer completed payment in the race between our read and this call, the
+ * webhook still records that money. We never expire our way into losing a
+ * payment. Returns whether the session is now closed, for logging only.
+ */
+export async function expireDepositCheckoutSession(sessionId: string): Promise<{ expired: boolean; reason?: string }> {
+  try {
+    const session = await getStripeClient().checkout.sessions.retrieve(sessionId)
+    // Never touch a session that already took money; that is the webhook's to
+    // record, not this button's to unwind.
+    if (session.payment_status === 'paid' || session.status === 'complete') {
+      return { expired: false, reason: `already ${session.status}/${session.payment_status}` }
+    }
+    if (session.status === 'expired') return { expired: true, reason: 'already expired' }
+    await getStripeClient().checkout.sessions.expire(sessionId)
+    return { expired: true }
+  } catch (err) {
+    return { expired: false, reason: err instanceof Error ? err.message : String(err) }
+  }
 }
 
 // Capture the held $49 (used when a booking is APPROVED).

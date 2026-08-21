@@ -35,16 +35,29 @@ const EN = {
   titleLead: 'Secure Your',
   titleAccent: 'Move.',
   intro: 'Review your quote and pay the deposit to reserve your move.',
-  greeting: 'Hi {name} — here are your details.',
+  greeting: 'Hi {name} — here are your move details.',
+  /** Same line when we do not know the customer's name. */
+  greetingNoName: 'Here are your move details.',
 
   // ── Details ──
+  // `moveDate` and `service` stay as the ACCESSIBLE names of the two lines at
+  // the top of the card. Sighted customers read the date and the service
+  // directly — a visible "Move date:" label in front of a date is noise — but a
+  // screen reader announcing two unlabelled lines is not.
   moveDate: 'Move date',
   service: 'Service',
+  moveDetailsTitle: 'Move details',
+  /** The customer's own to-do. Kept separate from the details LIST because it
+   *  is a thing they must act on, and a bullet in a list of facts gets skimmed. */
+  needFromYou: 'What we need from you',
 
   // ── Money ──
   quoteTotal: 'Quote total',
+  /** Money already collected on this job. Shown ONLY when there is some, so the
+   *  three figures on the page subtract to each other. */
+  alreadyPaid: 'Already paid',
   depositDue: 'Deposit due today',
-  remaining: 'Remaining balance after deposit',
+  remaining: 'Remaining after deposit',
   appliedNote: 'This deposit is applied to the total balance of your move.',
 
   // ── Action ──
@@ -55,16 +68,19 @@ const EN = {
   // ── Reassurance ──
   reassureTitle: 'What happens next',
   step1: 'Your deposit is applied to your moving balance — it is not an extra charge.',
-  step2: 'We confirm your date and send you the details. Your quoted price does not change.',
-  step3: 'You pay the rest on move day, once the work is done.',
+  // NO PROMISE THAT THE PRICE CAN NEVER CHANGE. The previous wording said
+  // "Your quoted price does not change", which is a guarantee this business
+  // cannot keep: a scope change on move day (more stairs, more items, a second
+  // stop) is reviewed and re-quoted. Saying otherwise on the page where money
+  // changes hands is the kind of promise that turns into a dispute.
+  step2: 'We confirm your appointment and send your confirmation details.',
+  step3: 'You pay the remaining balance on move day once the work is completed.',
   // BOTH owners. They are the two people a customer actually deals with, and
   // the pair is what makes this read as a family business rather than a brand.
   ownerName: 'Diego & Sebastian',
-  ownerRole: 'Owners & Lead Movers — North Jersey',
-  seHablaEspanol: 'Se habla Español.',
-  reassureApplied: 'Your deposit comes off the total you owe on move day.',
-  reassureQuote: 'Your quoted price is locked in — we do not change it after you pay.',
-  reassureHelp: 'A real person answers. Call or text us any time.',
+  ownerRole: 'Owners & Lead Movers · North Jersey',
+  // A BADGE, not a sentence on its own row — hence no full stop.
+  seHablaEspanol: 'Se habla Español',
   helpTitle: 'Need help? Call or text us.',
 
   // ── Confirming ──
@@ -85,7 +101,11 @@ const EN = {
 
   expiredTitle: 'This payment link has expired',
   canceledTitle: 'This payment link is no longer active',
-  closedBody: 'Nothing was charged. Call or text us and we will send you a new one.',
+  // THE LINK EXPIRED, NOT THE MOVE. A customer who reads "expired" on a payment
+  // page reasonably fears their appointment is gone. It is not, and the first
+  // sentence has to say so before anything else.
+  closedBody:
+    'Your move is still on our books — only this payment link expired. Nothing was charged. Call or text Move It Clear It and we will send you a new one right away.',
 
   invalidTitle: 'Payment link not found',
   invalidBody: 'This link is not valid. Nothing was charged. Call or text us and we will send you a new one.',
@@ -97,14 +117,53 @@ const EN = {
   canceledNotice: 'Payment was not completed. Nothing was charged — you can try again below.',
   errorGeneric: 'We could not start the payment. Please try again, or contact us and we will help.',
   errorNetwork: 'We could not reach the payment page. Check your connection and try again.',
+  // ── Server refusals, localized ──
+  // The API answers with a CODE as well as an English sentence; the page shows
+  // the customer's own language and keeps the English only as a last resort.
+  // A Spanish speaker used to be dropped into English at the exact moment the
+  // payment failed — the one moment the page most needs to be understood.
+  errorAlreadyPaid: 'This deposit has already been paid. Nothing more is owed today.',
+  errorExpired: 'This payment link has expired. Call or text us and we will send you a new one.',
+  errorInactive: 'This payment link is no longer active. Call or text us and we will send you a new one.',
+  errorNotValid: 'This payment link is not valid. Call or text us and we will send you a new one.',
+  errorBusy: 'Please try again in a moment.',
+  errorTooMany: 'Too many attempts. Please wait a moment and try again.',
   tryAgain: 'Try again',
 
   // ── Legal ──
+  //
+  // SHORT ON PURPOSE, and the link is INSIDE the sentence. The page previously
+  // carried the full policy paragraph and then a second "Full terms: Terms of
+  // Service" line underneath — two links to the same destination, stacked, on
+  // the quietest part of the page. One sentence, one link, and the Terms page
+  // carries the legal language.
+  //
+  // IT INVENTS NOTHING, AND IT MATCHES THE DOCUMENT IT LINKS TO.
+  //
+  // `/terms` is root-relative, and on moveitclearit.com only /deposit,
+  // /api/deposit and /_next are proxied to this app -- so the Terms a customer
+  // reaches from here are the MARKETING SITE's
+  // (WMIWCI-SITE/public/terms/index.html), not this repo's. Those say 48 hours'
+  // notice, one free reschedule within 90 days, and that cancellation forfeits
+  // the booking hold with NO additional charge.
+  //
+  // This page used to print "a cancellation fee equal to 2 hours of labor"
+  // directly above a link to the document saying no additional charge applies.
+  // The published Terms are what customers agreed to, so they are the truth
+  // (owner decision, 2026-08-20); app/terms/page.tsx was corrected to match.
+  //
+  // NO DOLLAR FIGURE HERE, deliberately. Copy in this file may never state a
+  // price -- every amount is interpolated from the record -- and on THIS page a
+  // literal "$49" would sit beside a deposit that is often a different number,
+  // reading as if the deposit itself were the forfeited fee. They are two
+  // separate instruments. The Terms name the figure, in context, one tap away.
   policyTitle: 'Cancellation & rescheduling',
   policyBody:
-    'Rescheduling requests must be submitted at least 72 hours before the scheduled service time. Same-day cancellations may result in a cancellation fee equal to 2 hours of labor.',
-  fullTerms: 'Full terms',
+    'Reschedule free once within 90 days with at least 48 hours’ notice. If you cancel, your booking fee is not refunded — there is no additional charge.',
+  policySeePre: 'See our ',
+  policySeePost: ' for full details.',
   terms: 'Terms of Service',
+  privacy: 'Privacy Policy',
 
   callUs: 'Call us',
   textUs: 'Text us',
@@ -123,12 +182,16 @@ const ES: Copy = {
   titleLead: 'Asegure su',
   titleAccent: 'mudanza.',
   intro: 'Revise su cotización y pague el depósito para reservar su mudanza.',
-  greeting: 'Hola {name} — estos son sus detalles.',
+  greeting: 'Hola {name} — estos son los detalles de su mudanza.',
+  greetingNoName: 'Estos son los detalles de su mudanza.',
 
   moveDate: 'Fecha de la mudanza',
   service: 'Servicio',
+  moveDetailsTitle: 'Detalles de la mudanza',
+  needFromYou: 'Lo que necesitamos de usted',
 
   quoteTotal: 'Total de la cotización',
+  alreadyPaid: 'Ya pagado',
   depositDue: 'Depósito a pagar hoy',
   remaining: 'Saldo restante después del depósito',
   appliedNote: 'Este depósito se aplica al saldo total de su mudanza.',
@@ -139,15 +202,13 @@ const ES: Copy = {
 
   reassureTitle: 'Qué sigue',
   step1: 'Su depósito se aplica al saldo de su mudanza — no es un cargo adicional.',
-  step2: 'Confirmamos su fecha y le enviamos los detalles. Su precio cotizado no cambia.',
-  step3: 'Usted paga el resto el día de la mudanza, cuando el trabajo esté hecho.',
+  // Same restraint as the English: no promise that the price can never change.
+  step2: 'Confirmamos su cita y le enviamos los detalles de su confirmación.',
+  step3: 'Usted paga el saldo restante el día de la mudanza, una vez terminado el trabajo.',
   // Names are never translated; the role is.
   ownerName: 'Diego & Sebastian',
-  ownerRole: 'Dueños y jefes de mudanzas — Norte de Nueva Jersey',
-  seHablaEspanol: 'Se habla Español.',
-  reassureApplied: 'Su depósito se descuenta del total que debe el día de la mudanza.',
-  reassureQuote: 'Su precio cotizado queda fijo — no lo cambiamos después de que usted pague.',
-  reassureHelp: 'Le contesta una persona real. Llámenos o escríbanos cuando quiera.',
+  ownerRole: 'Dueños y jefes de mudanzas · Norte de Nueva Jersey',
+  seHablaEspanol: 'Se habla Español',
   helpTitle: '¿Necesita ayuda? Llámenos o envíenos un mensaje.',
 
   confirmingTitle: 'Confirmando su pago…',
@@ -166,7 +227,9 @@ const ES: Copy = {
 
   expiredTitle: 'Este enlace de pago ha vencido',
   canceledTitle: 'Este enlace de pago ya no está activo',
-  closedBody: 'No se realizó ningún cobro. Llámenos o escríbanos y le enviaremos uno nuevo.',
+  // El enlace venció, NO la mudanza.
+  closedBody:
+    'Su mudanza sigue reservada — lo único que venció fue este enlace de pago. No se realizó ningún cobro. Llame o escriba a Move It Clear It y le enviaremos uno nuevo de inmediato.',
 
   invalidTitle: 'Enlace de pago no encontrado',
   invalidBody:
@@ -179,15 +242,23 @@ const ES: Copy = {
   canceledNotice: 'El pago no se completó. No se realizó ningún cobro — puede intentarlo de nuevo abajo.',
   errorGeneric: 'No pudimos iniciar el pago. Inténtelo de nuevo, o comuníquese con nosotros y le ayudamos.',
   errorNetwork: 'No pudimos conectar con la página de pago. Revise su conexión e inténtelo de nuevo.',
+  errorAlreadyPaid: 'Este depósito ya fue pagado. Hoy no debe nada más.',
+  errorExpired: 'Este enlace de pago ha vencido. Llámenos o escríbanos y le enviaremos uno nuevo.',
+  errorInactive: 'Este enlace de pago ya no está activo. Llámenos o escríbanos y le enviaremos uno nuevo.',
+  errorNotValid: 'Este enlace de pago no es válido. Llámenos o escríbanos y le enviaremos uno nuevo.',
+  errorBusy: 'Inténtelo de nuevo en un momento.',
+  errorTooMany: 'Demasiados intentos. Espere un momento e inténtelo de nuevo.',
   tryAgain: 'Intentar de nuevo',
 
   policyTitle: 'Cancelación y reprogramación',
   // The English policy is the approved one; this states the SAME terms, with the
   // same numbers. It is a translation, never a second policy.
   policyBody:
-    'Las solicitudes de reprogramación deben enviarse al menos 72 horas antes de la hora de servicio programada. Las cancelaciones el mismo día pueden generar un cargo por cancelación equivalente a 2 horas de mano de obra.',
-  fullTerms: 'Términos completos',
-  terms: 'Términos del Servicio',
+    'Reprograme gratis una vez dentro de 90 días con al menos 48 horas de aviso. Si cancela, su tarifa de reserva no se reembolsa: no se aplica ningún cargo adicional.',
+  policySeePre: 'Consulte nuestros ',
+  policySeePost: ' para conocer todos los detalles.',
+  terms: 'Términos del servicio',
+  privacy: 'Política de privacidad',
 
   callUs: 'Llamar',
   textUs: 'Enviar mensaje',

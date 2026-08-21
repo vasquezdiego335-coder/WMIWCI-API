@@ -1,0 +1,5 @@
+{
+  "//": "Preview-only. The app builds with Next's `jsx: preserve`; rendering the same components directly under tsx needs the automatic runtime instead. Nothing in the app or the test suite reads this file.",
+  "extends": "../tsconfig.json",
+  "compilerOptions": { "jsx": "react-jsx" }
+}

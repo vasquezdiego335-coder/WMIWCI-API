@@ -25,7 +25,16 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       </head>
       <body style={{ margin: 0, padding: 0, fontFamily: 'Inter, -apple-system, BlinkMacSystemFont, sans-serif' }}>
         {children}
-        <footer style={{ backgroundColor: '#0A1628', padding: '32px 24px', marginTop: '40px' }}>
+        {/*
+          THE SITE-WIDE LEGAL FOOTER.
+
+          `data-site-footer` exists so a route segment can suppress it and render
+          its own. The deposit page does exactly that (see deposit.css): this
+          footer repeated a "Move It Clear It Terms of Service" link directly
+          under the deposit page's OWN Terms link, in English, on a page that is
+          otherwise fully bilingual — two links to one destination, stacked.
+        */}
+        <footer data-site-footer style={{ backgroundColor: '#0A1628', padding: '32px 24px', marginTop: '40px' }}>
           <div style={{ maxWidth: '720px', margin: '0 auto', textAlign: 'center' }}>
             <nav aria-label="Legal" style={{ display: 'flex', gap: '24px', justifyContent: 'center', flexWrap: 'wrap', marginBottom: '12px' }}>
               <a href="https://moveitclearit.com/terms" style={{ color: '#FF5A1F', fontSize: '14px', fontWeight: 600, textDecoration: 'none' }}>

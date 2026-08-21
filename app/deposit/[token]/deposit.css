@@ -29,11 +29,42 @@
 
 :root{--navy:#0A1628;--deep:#0D1F3C;--orange:#FF5A1F;--cta:#D2450F;--gold:#C9A961;
   --bone:#F5F1EA;--dbone:#EDE8DF;--white:#FFFFFF;--ink:#1B2430;--muted:#5A6473;
+  /* A deeper CTA orange, for small text on a tinted ground where #D2450F is
+     only 4.2:1. Also the pressed state of the pay button. */
+  --cta-deep:#B93C0C;
   --display:Archivo,'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;
   --body:Inter,-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;}
 .dp-hero,.dp-body{font-family:var(--body);-webkit-font-smoothing:antialiased;}
 .dp-hero *,.dp-body *,.dp-hero *::before,.dp-body *::after{box-sizing:border-box;}
 .dp-i{width:1.05em;height:1.05em;flex:0 0 auto;}
+
+/* NOTHING THE OWNER TYPES MAY BREAK THE CARD.
+   Every customer-facing string on this page comes out of an admin form filled
+   in one-handed on a phone: a service line, a bullet, a note. Any of them can
+   arrive longer than expected or as one unbroken token (a URL, an address with
+   no spaces, a run of hyphens). `overflow-wrap:anywhere` makes a long word wrap
+   INSIDE the card instead of widening it; `min-width:0` is what lets a flex or
+   grid child actually shrink to allow that — without it the child keeps its
+   max-content width and pushes the layout sideways, which is how the service
+   text ended up clipped. Applied broadly and on purpose. */
+.dp-body{overflow-x:hidden;}
+.dp-card p,.dp-card li,.dp-card dd,.dp-card dt,.dp-card h1,.dp-card h2,.dp-card h3,.dp-card span,.dp-card a{
+  overflow-wrap:anywhere;word-break:normal;min-width:0;}
+
+/* THE SITE FOOTER IS NOT PART OF THIS PAGE.
+   The root layout renders a navy legal footer after {children} on every route.
+   On the deposit page it duplicated the Terms of Service link that the policy
+   section already carries, in English only, and its `marginTop:40px` sat on an
+   unpainted <body> — a 40px WHITE band between the bone card area and the navy
+   footer. The footer is a following SIBLING of the page's <main>, so a plain
+   general-sibling selector removes it with no :has() support needed.
+   This stylesheet is imported by the /deposit segment layout, so these two
+   rules apply to that segment ONLY. */
+.dp-body ~ [data-site-footer],
+.nf-body ~ [data-site-footer]{display:none;}
+/* ...and with the footer gone, the page canvas underneath must be bone rather
+   than the browser's default white. */
+html{background:var(--bone);}
 
 /* ── HERO: the same photograph the social card is cut from ── */
 .dp-grid{display:grid;gap:0;}
@@ -78,25 +109,67 @@
 .dp-card{max-width:640px;margin:-16px auto 0;background:var(--white);
   border-radius:16px;padding:20px 18px;box-shadow:0 16px 40px rgba(10,22,40,.16),
   0 2px 6px rgba(10,22,40,.06);}
-.dp-greet{color:var(--muted);font-size:16px;margin:0 0 14px;}
+/* ── The appointment block ──────────────────────────────────────────────────
+   LEFT-ALIGNED AND STACKED, replacing the old label-left / value-right rows.
+   Those rows were a flex pair with `text-align:right` on the value: a short
+   value looked fine, and anything longer than a few words became a
+   right-ragged block squeezed into half a phone's width, wrapping badly and —
+   with no min-width:0 to let it shrink — clipping. A move summary is not a
+   spec sheet; it reads top-to-bottom like a sentence. */
+.dp-greet{font-family:var(--display);color:var(--navy);font-size:19px;font-weight:700;
+  line-height:1.3;margin:0 0 12px;letter-spacing:-.01em;}
 
-.dp-details{margin:0 0 14px;padding:0;}
-.dp-row{display:flex;justify-content:space-between;gap:14px;padding:11px 0;
-  border-bottom:1px solid var(--dbone);}
-.dp-row dt{color:var(--muted);font-size:16px;margin:0;}
-.dp-row dd{color:var(--ink);font-size:16px;font-weight:600;margin:0;text-align:right;}
+/* Screen-reader-only label. The date and the service are self-evident on
+   sight; they are not self-evident when announced one after the other. */
+.dp-vh{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;
+  clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap;border:0;}
+
+.dp-appt{margin:0 0 16px;padding:0 0 14px;border-bottom:1px solid var(--dbone);}
+.dp-apptItem{margin:0;}
+.dp-apptItem+.dp-apptItem{margin-top:4px;}
+/* THE line the customer came to check. Biggest non-money type on the card. */
+.dp-when{font-family:var(--display);color:var(--navy);font-size:21px;font-weight:700;
+  line-height:1.22;margin:0;letter-spacing:-.015em;}
+.dp-service{color:var(--ink);font-size:16px;font-weight:600;line-height:1.4;margin:0;}
+
+/* ── Move details: a real list, so it can never be a wall of text ── */
+.dp-md{margin:0 0 16px;}
+.dp-mdh{font-family:var(--display);color:var(--navy);font-size:14px;font-weight:700;
+  letter-spacing:.05em;text-transform:uppercase;margin:0 0 7px;}
+.dp-mdlist{list-style:none;margin:0;padding:0;}
+.dp-mdlist li{position:relative;padding-left:16px;margin:0 0 5px;color:#3F4854;
+  font-size:16px;line-height:1.45;}
+.dp-mdlist li:last-child{margin-bottom:0;}
+.dp-mdlist li::before{content:'';position:absolute;left:2px;top:.62em;width:5px;height:5px;
+  border-radius:50%;background:var(--orange);}
+
+/* ── What we need from you: the customer's own to-do, called out quietly ── */
+.dp-need{margin:0 0 16px;padding:11px 13px;border-radius:10px;background:var(--bone);
+  border-left:3px solid var(--gold);}
+.dp-needh{font-family:var(--display);color:var(--navy);font-size:14px;font-weight:700;
+  letter-spacing:.05em;text-transform:uppercase;margin:0 0 4px;}
+.dp-needb{color:#3F4854;font-size:16px;line-height:1.45;margin:0;}
 
 /* money — the strongest hierarchy on the page */
 .dp-money{background:var(--bone);border-radius:13px;padding:14px 16px;margin:0 0 12px;}
-.dp-mrow{display:flex;justify-content:space-between;align-items:baseline;gap:14px;padding:7px 0;}
-.dp-mlabel{color:var(--muted);font-size:16px;}
-.dp-mval{color:var(--ink);font-size:18px;font-weight:600;font-variant-numeric:tabular-nums;}
-.dp-hero2{display:flex;justify-content:space-between;align-items:baseline;gap:14px;
-  padding:14px 0;margin:6px 0;border-top:1px solid var(--dbone);border-bottom:1px solid var(--dbone);}
-.dp-herolabel{font-family:var(--display);color:var(--navy);font-size:17px;font-weight:700;}
+.dp-mrow{display:flex;justify-content:space-between;align-items:baseline;gap:12px;padding:6px 0;}
+/* THE LABEL SHRINKS, THE AMOUNT NEVER DOES. Both were unshrinkable flex items,
+   so at 320px "Saldo restante después del depósito" + "$446.00" overflowed the
+   card and scrolled the page sideways. The label may wrap to two lines; the
+   amount is the one thing that must stay whole and on one line. */
+.dp-mlabel{color:var(--muted);font-size:16px;line-height:1.35;min-width:0;flex:1 1 auto;}
+.dp-mval{color:var(--ink);font-size:18px;font-weight:600;font-variant-numeric:tabular-nums;
+  flex:0 0 auto;white-space:nowrap;}
+.dp-hero2{display:flex;justify-content:space-between;align-items:baseline;gap:12px;
+  padding:13px 0;margin:5px 0;border-top:1px solid var(--dbone);border-bottom:1px solid var(--dbone);}
+.dp-herolabel{font-family:var(--display);color:var(--navy);font-size:17px;font-weight:700;
+  min-width:0;flex:1 1 auto;line-height:1.25;}
 .dp-heroval{font-family:var(--display);color:var(--cta);font-size:40px;font-weight:800;
-  line-height:1;font-variant-numeric:tabular-nums;letter-spacing:-.025em;}
-.dp-applied{color:#3F4854;font-size:16px;line-height:1.5;margin:0 0 16px;}
+  /* 1.05, not 1: at 40px Archivo the glyph box is ~42px tall, so a line-height
+     of exactly 1 left the number overshooting its own line box. */
+  line-height:1.05;font-variant-numeric:tabular-nums;letter-spacing:-.025em;
+  flex:0 0 auto;white-space:nowrap;}
+.dp-applied{color:#3F4854;font-size:16px;line-height:1.45;margin:0 0 14px;}
 
 /* action */
 .dp-pay{display:flex;align-items:center;justify-content:center;gap:9px;width:100%;
@@ -105,9 +178,12 @@
   padding:16px 20px;cursor:pointer;-webkit-appearance:none;text-decoration:none;
   line-height:1.25;}
 .dp-pay[disabled]{opacity:.72;cursor:progress;}
-.dp-secondary{margin-top:14px;border:1.5px solid var(--navy);border-radius:10px;
+.dp-secondary{margin-top:10px;border:1.5px solid var(--navy);border-radius:10px;
   background:var(--white);color:var(--navy);font-size:16px;font-weight:600;
   min-height:48px;padding:12px 18px;cursor:pointer;font-family:inherit;width:100%;}
+/* The same control as an anchor (Text us) rather than a button. */
+.dp-secondarylink{display:flex;align-items:center;justify-content:center;gap:8px;
+  text-decoration:none;}
 .dp-stripe{display:flex;align-items:center;justify-content:center;gap:7px;
   color:var(--muted);font-size:15px;margin:14px 0 0;}
 
@@ -129,35 +205,83 @@
 .dp-colInfo .dp-next:first-child{margin-top:0;}
 .dp-nexth{font-family:var(--display);color:var(--navy);font-size:18px;font-weight:700;margin:0 0 14px;}
 .dp-steps{list-style:none;margin:0;padding:0;}
-.dp-steps li{display:flex;align-items:flex-start;gap:11px;margin-bottom:12px;
-  color:#3F4854;font-size:16px;line-height:1.5;}
-.dp-num{flex:0 0 26px;width:26px;height:26px;border-radius:50%;background:var(--navy);
+/* Tighter than before: the three steps were 12px apart with a 14px heading gap,
+   which on a phone pushed the owner/contact block most of a screen further
+   down. The numbers still lead the eye; they just do it in less space. */
+.dp-steps li{display:flex;align-items:flex-start;gap:10px;margin-bottom:9px;
+  color:#3F4854;font-size:16px;line-height:1.45;}
+.dp-steps li:last-child{margin-bottom:0;}
+.dp-num{flex:0 0 24px;width:24px;height:24px;border-radius:50%;background:var(--navy);
   color:var(--bone);font-size:13px;font-weight:700;display:inline-flex;
   align-items:center;justify-content:center;margin-top:1px;}
 
 /* human trust row */
-.dp-trust{margin-top:20px;padding-top:18px;border-top:1px solid var(--dbone);}
-.dp-owner{display:flex;align-items:center;gap:12px;margin-bottom:14px;}
+.dp-trust{margin-top:18px;padding-top:16px;border-top:1px solid var(--dbone);}
+.dp-owner{display:flex;align-items:center;gap:11px;margin-bottom:10px;}
 .dp-ownerMark{display:inline-flex;flex:0 0 34px;}
 .dp-ownerMark img{display:block;border-radius:8px;}
+.dp-ownerText{min-width:0;}
 .dp-ownerName{font-family:var(--display);color:var(--navy);font-size:17px;font-weight:700;margin:0;}
-.dp-ownerRole{color:var(--muted);font-size:15px;margin:2px 0 0;}
+/* The role and the Español badge share one wrapping line. */
+.dp-ownerRole{color:var(--muted);font-size:15px;line-height:1.35;margin:2px 0 0;}
+.dp-esBadge{display:inline-block;margin-left:7px;padding:1px 8px;border-radius:999px;
+  /* --cta-deep, not --cta: at 12px on this peach ground the standard CTA orange
+     measures 4.2:1, under the 4.5:1 AA needs for normal-size text. */
+  background:#FFF3EE;border:1px solid rgba(185,60,12,.32);color:var(--cta-deep);
+  font-size:12px;font-weight:700;white-space:nowrap;vertical-align:1px;}
+.dp-helpTitle{color:var(--ink);font-size:15px;font-weight:600;margin:0 0 9px;}
 /* STACKED, not side by side. Two 46% pills gave the phone number roughly 137px
    of text room, and "(862) 250-9959" needs more than that at 16px — so the
    number wrapped onto a second line even on a wide screen. Full-width rows give
    it the whole column and cost nothing: they are the last thing on the page. */
+/* STACKED, not side by side — unchanged, and deliberately so. Two 46% pills
+   gave the phone number ~137px of text room and "(862) 640-0625" needs more,
+   so it wrapped even on a wide screen; in Spanish "Enviar mensaje" overflows a
+   half-width pill outright. Full-width rows give each the whole column. The
+   vertical space this section owed came from deleting the "Se habla Español."
+   row above it and tightening the margins, not from squeezing the tap targets
+   older customers have to hit. */
 .dp-contact{display:flex;flex-direction:column;gap:10px;}
 .dp-ghost{width:100%;display:inline-flex;align-items:center;
   justify-content:center;gap:8px;min-height:48px;padding:12px 14px;border-radius:10px;
   border:1.5px solid rgba(10,22,40,.22);color:var(--navy);text-decoration:none;
   font-size:16px;font-weight:600;}
-.dp-espanol{color:var(--muted);font-size:15px;margin:12px 0 0;}
+
+/* One compact legal line replacing the whole suppressed footer. Quiet, but the
+   Privacy Policy stays reachable from the page where money changes hands. */
+.dp-legal{display:flex;flex-wrap:wrap;align-items:center;gap:4px 10px;
+  margin:16px 0 0;padding-top:14px;border-top:1px solid var(--dbone);
+  color:var(--muted);font-size:13px;}
+.dp-legal a{color:var(--muted);text-decoration:underline;text-underline-offset:2px;
+  padding-block:10px;}
 
 /* policy — quiet, last, still readable */
-.dp-policy{margin-top:22px;padding-top:18px;border-top:1px solid var(--dbone);}
-.dp-polh{font-family:var(--display);color:var(--navy);font-size:16px;font-weight:700;margin:0 0 8px;}
-.dp-polb{color:#4A5361;font-size:16px;line-height:1.6;margin:0 0 8px;}
-.dp-link{color:var(--cta);font-weight:600;}
+.dp-policy{margin-top:20px;padding-top:16px;border-top:1px solid var(--dbone);}
+.dp-polh{font-family:var(--display);color:var(--navy);font-size:16px;font-weight:700;
+  letter-spacing:.03em;margin:0 0 6px;}
+/* One paragraph now, so no bottom margin stacking a second one. The section is
+   quieter through spacing and colour, NOT through smaller type: this page is
+   read by customers who are not going to zoom in. */
+.dp-polb{color:#4A5361;font-size:16px;line-height:1.55;margin:0;}
+/* Underlined, not colour alone — the link has to be findable without colour
+   vision, and it is the only link in this section.
+   VERTICAL PADDING ON AN INLINE LINK grows the touch area without growing the
+   line box, so the Terms link is a ~33px target instead of a 17px one for a
+   customer tapping with a thumb. */
+.dp-link{color:var(--cta);font-weight:600;text-decoration:underline;text-underline-offset:2px;
+  padding-block:8px;}
+
+/* PRESS FEEDBACK. There was none anywhere: on a phone the Pay button gave no
+   response to a tap, which reads as "it didn't work" and invites a second tap
+   on a payment control. Transform only — no layout, no colour flash. */
+.dp-pay,.dp-secondary,.dp-ghost,.dp-langbtn{transition:transform .08s ease,background-color .12s ease,border-color .12s ease;}
+.dp-pay:active:not([disabled]){transform:scale(.985);background:var(--cta-deep);}
+.dp-secondary:active,.dp-ghost:active{transform:scale(.99);background:var(--bone);}
+.dp-ghost:hover,.dp-secondary:hover{border-color:rgba(10,22,40,.42);}
+@media (prefers-reduced-motion:reduce){
+  .dp-pay,.dp-secondary,.dp-ghost,.dp-langbtn{transition:none;}
+  .dp-pay:active:not([disabled]),.dp-secondary:active,.dp-ghost:active{transform:none;}
+}
 
 /* focus — visible for everyone, on every control */
 .dp-hero a:focus-visible,.dp-hero button:focus-visible,

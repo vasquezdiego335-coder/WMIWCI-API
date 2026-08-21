@@ -103,9 +103,12 @@ test('checkout reads the amount from the DATABASE and never from the request', (
 test('the pay button sends no amount at all', () => {
   const panel = code('app/deposit/[token]/DepositView.tsx')
   assert.match(panel, /body: '\{\}'/, 'the client posts an empty body')
-  const payFn = panel.split('const pay = useCallback')[1]?.split('}, [token, t])')[0] ?? ''
+  const payFn = panel.split('const pay = useCallback')[1]?.split('}, [token, t, lang])')[0] ?? ''
   assert.ok(payFn.length > 0, 'the pay handler must exist')
   assert.ok(!/amountCents|amount:/i.test(payFn), 'the pay call must not send an amount')
+  // The ONLY thing that rides along is the display language, in the query
+  // string — never the body, which stays literally '{}'.
+  assert.match(payFn, /checkout\?lang=\$\{lang\}/, 'the language rides in the query string')
 })
 
 test('the deposit URL carries a token only — no amount, no ids', () => {
@@ -197,24 +200,33 @@ test('a rapid double-tap cannot create two usable payment sessions', () => {
   assert.match(code(STRIPE), /params\.idempotencyKey \? \{ idempotencyKey: params\.idempotencyKey \}/)
 })
 
-test('expires_at is QUANTIZED, or the idempotency key silently does nothing', () => {
+test('expires_at is delegated to depositSessionExpiresAt (quantized + clamped)', () => {
   const src = code(STRIPE)
   const fn = src.slice(src.indexOf('export async function createDepositCheckout'))
   const line = /expires_at:[^\n]+/.exec(fn)?.[0] ?? ''
 
-  // Stripe honours an idempotency key only when EVERY parameter matches the
-  // first use. A raw Date.now() differs by milliseconds between two calls, so
-  // the retry the key exists to collapse comes back as StripeIdempotencyError
-  // and the customer is told "We could not start the payment" instead of being
-  // handed the session that already exists. Verified against real test-mode
-  // Stripe: unquantized -> error, quantized -> same session id returned.
-  assert.ok(line.includes('60 * 60 * 1000'), 'expires_at must be quantized to the hour, not raw Date.now()')
+  // The expiry expression moved into the pure `depositSessionExpiresAt` helper,
+  // which is exercised directly in deposit-stripe-safety.test.ts (quantization,
+  // the 24h default, the clamp to the deposit link's own expiry, and Stripe's
+  // 30-min / 24-h bounds). Here we only pin the WIRING: the call site delegates
+  // to that helper and passes the deposit link's expiry, so a session can never
+  // outlive the link.
+  assert.match(line, /expires_at:\s*depositSessionExpiresAt\(params\.depositExpiresAt\)/,
+    'expires_at must delegate to depositSessionExpiresAt(params.depositExpiresAt)')
   assert.ok(!/expires_at:\s*Math\.floor\(Date\.now\(\) \/ 1000\)/.test(fn),
     'a raw per-millisecond expires_at breaks the idempotency key')
 
-  // And it must still actually expire — an unbounded session is a payable page
-  // loose on the internet forever.
-  assert.ok(line.includes('24 * 60 * 60'), 'the session must still expire within a day')
+  // The helper itself still quantizes to the hour (idempotency) and caps at 24h.
+  const helper = src.slice(src.indexOf('export function depositSessionExpiresAt'))
+  assert.ok(helper.includes('3_600_000') || helper.includes('60 * 60 * 1000'),
+    'the helper must quantize the default to the hour')
+  assert.ok(helper.includes('24 * 60 * 60'), 'the session must still expire within a day')
+})
+
+test('the deposit checkout route passes the link expiry into the Stripe session', () => {
+  const route = code(CHECKOUT)
+  assert.match(route, /depositExpiresAt:\s*row\.expiresAt/,
+    'the route must hand the deposit link expiry to createDepositCheckout')
 })
 
 test('the database enforces one session and one payment intent per deposit', () => {
@@ -267,7 +279,9 @@ test('a link that cannot take money is refused BEFORE any Stripe call', () => {
   assert.ok(refusalIdx > -1 && createIdx > -1, 'both must exist')
   assert.ok(refusalIdx < claimIdx, 'the refusal precedes the session claim')
   assert.ok(refusalIdx < createIdx, 'the refusal precedes the Stripe call')
-  assert.match(src, /if \(refusal\) return NextResponse\.json\(\{ error: refusal \}, \{ status: 409 \}\)/)
+  // The refusal carries a CODE as well as a sentence, so the customer's page can
+  // say it in Spanish instead of falling out of Spanish at the moment of refusal.
+  assert.match(src, /if \(refusal\) return NextResponse\.json\(\{ error: refusal\.message, code: refusal\.code \}, \{ status: 409 \}\)/)
 })
 
 test('the session claim itself refuses a paid or inactive link', () => {
@@ -456,8 +470,16 @@ test('the public routes are rate limited', () => {
 
 test('the public checkout POST refuses a cross-site origin', () => {
   const src = code(CHECKOUT)
-  assert.match(src, /sec-fetch-site/)
+  // The RULE now lives in src/lib/deposit-origin.ts and is exercised for real in
+  // deposit-origin.test.ts. This assertion used to be
+  // `assert.match(src, /sec-fetch-site/)`, which passes whether the comparison
+  // is right or wrong — and it was wrong: the guard compared the browser Origin
+  // against the PROXIED host, so it 403'd the Pay button for every browser that
+  // omits Sec-Fetch-Site. All that belongs here is that the route still consults
+  // the guard and still answers 403.
+  assert.match(src, /isSameOrigin\(req\.headers\)/, 'the route consults the origin guard')
   assert.match(src, /status: 403/)
+  assert.ok(!/sec-fetch-site/.test(src), 'the header logic belongs in deposit-origin.ts, not inline here')
 })
 
 test('a Stripe error is never echoed to the customer', () => {
