@@ -32,6 +32,7 @@
 import { postToChannels, type AlertLine, type AlertResult } from './ops-alert'
 import { apiLogger } from './logger'
 import { PACKAGES } from './pricing-config'
+import { notificationQuoteOf, reviewReasonsOf, type LeadSnapshotRow } from './quote-snapshot'
 
 const log = apiLogger.child({ mod: 'lead-alert' })
 
@@ -50,13 +51,19 @@ export type LeadAlertInput = {
   originZip?: string | null
   destinationZip?: string | null
   estimatedValue?: number | null // cents — LIVE, may be raised later
-  // ── The frozen quote snapshot. Optional: a lead captured before these
-  //    columns existed renders exactly as it always did. ──
-  /** CENTS, written once at capture. Wins over estimatedValue when present. */
+  // ── The frozen quote snapshot, exactly as stored. Optional: a lead captured
+  //    before these columns existed renders as it always did. Every field is
+  //    supplied by `toLeadAlertInput()`, which BOTH production paths call. ──
   quoteTotalCents?: number | null
-  /** 'pending' → the routed mileage is not priced and must be disclosed. */
+  quoteBaseCents?: number | null
+  quoteTruckCents?: number | null
+  quoteIncludedTruck?: string | null
   quoteMileageStatus?: string | null
-  /** Server-calculated reasons this quote needs a human. */
+  quotePriceBookVersion?: string | null
+  quoteMileageCents?: number | null
+  quoteBillableMiles?: number | null
+  quoteRequiresReview?: boolean | null
+  /** Already split out of the stored newline-joined text. */
   reviewReasons?: string[] | null
   emailMarketingConsent?: boolean | null
   landingPage?: string | null
@@ -126,6 +133,68 @@ export function consentLine(consent?: boolean | null): string {
 }
 
 /**
+ * THE ONE mapping from a stored `leads` row to a plain-notice input.
+ *
+ * WHY IT IS EXPORTED. The previous round tested `formatLeadAlert()` with a
+ * hand-assembled ideal object, while BOTH production callers
+ * (leads.notifyOwnerOfNewLead and quote-capture's postLeadNoticeDirect) passed
+ * a row with no `quote_*` fields at all — one path did not even SELECT them.
+ * The formatter was correct, the wiring was missing, and no test could tell
+ * the difference because no test used the wiring.
+ *
+ * Both callers now go through this function, and so do the tests. If it stops
+ * carrying a field, every one of them notices at once.
+ */
+export function toLeadAlertInput(
+  row: {
+    id: string
+    name?: string | null
+    email?: string | null
+    phone?: string | null
+    source?: unknown
+    moveSize?: string | null
+    moveDate?: Date | string | null
+    originZip?: string | null
+    destinationZip?: string | null
+    emailMarketingConsent?: boolean | null
+    landingPage?: string | null
+    utmSource?: string | null
+    utmCampaign?: string | null
+    formStep?: string | null
+  } & LeadSnapshotRow,
+): LeadAlertInput {
+  return {
+    id: row.id,
+    name: row.name ?? null,
+    email: row.email ?? null,
+    phone: row.phone ?? null,
+    source: row.source == null ? null : String(row.source),
+    moveSize: row.moveSize ?? null,
+    moveDate: row.moveDate ?? null,
+    originZip: row.originZip ?? null,
+    destinationZip: row.destinationZip ?? null,
+    emailMarketingConsent: row.emailMarketingConsent ?? null,
+    landingPage: row.landingPage ?? null,
+    utmSource: row.utmSource ?? null,
+    utmCampaign: row.utmCampaign ?? null,
+    formStep: row.formStep ?? null,
+    // The whole frozen snapshot, verbatim. Missing ONE of these is how a
+    // disclosure silently disappears from the notice nobody watches.
+    estimatedValue: row.estimatedValue ?? null,
+    quoteTotalCents: row.quoteTotalCents ?? null,
+    quoteBaseCents: row.quoteBaseCents ?? null,
+    quoteTruckCents: row.quoteTruckCents ?? null,
+    quoteIncludedTruck: row.quoteIncludedTruck ?? null,
+    quoteMileageStatus: row.quoteMileageStatus ?? null,
+    quotePriceBookVersion: row.quotePriceBookVersion ?? null,
+    quoteMileageCents: row.quoteMileageCents ?? null,
+    quoteBillableMiles: row.quoteBillableMiles ?? null,
+    quoteRequiresReview: row.quoteRequiresReview ?? null,
+    reviewReasons: reviewReasonsOf(row),
+  }
+}
+
+/**
  * Build the card. PURE -- no network, no clock beyond the passed date, so the
  * wording is testable without Discord.
  */
@@ -165,24 +234,48 @@ export function formatLeadAlert(lead: LeadAlertInput): { title: string; lines: A
   //  price — while the rich card, for the same lead, says the drive is not in
   //  that number yet. Two notices for one lead must not disagree.
   //
-  //  The FROZEN snapshot wins over the mutable estimatedValue, for the same
-  //  reason it does everywhere else (see quote-capture.quotedCentsOf).
-  const quotedCents =
-    typeof lead.quoteTotalCents === 'number' && lead.quoteTotalCents > 0
-      ? lead.quoteTotalCents
-      : lead.estimatedValue
-  const est = money(quotedCents)
-  const mileagePending = lead.quoteMileageStatus === 'pending'
-  if (est) job.push(mileagePending ? `${est} package subtotal` : `est. ${est}`)
+  //  Derived through notificationQuoteOf, the SAME mapping every other surface
+  //  uses, so the frozen snapshot beats the mutable estimatedValue here for
+  //  exactly the reason it does everywhere else.
+  const q = notificationQuoteOf(lead)
+  const est = money(q.quotedCents)
+
+  if (est) {
+    if (!q.hasSnapshot) {
+      // A HISTORICAL lead, captured before the snapshot columns existed. It
+      // keeps exactly the wording it always had.
+      job.push(`est. ${est}`)
+    } else if (q.mileageStatus === 'pending') {
+      // A subtotal, said plainly. The drive is disclosed on the next line.
+      job.push(`${est} package subtotal`)
+    } else if (q.mileageStatus === 'calculated') {
+      job.push(`est. ${est}`)
+    }
+    // A snapshot whose mileage state we cannot read is the one case where the
+    // amount is SUPPRESSED rather than captioned: calling it final would be a
+    // guess, and calling it a subtotal would be one too.
+  }
   if (job.length) lines.push({ message: job.join('  ·  ') })
-  if (est && mileagePending) {
+
+  if (est && q.mileagePending) {
     lines.push({ message: 'Transportation pending — $3 per routed mile, fuel included.' })
+  }
+  if (est && q.mileageStatus === 'calculated' && q.billableMiles && q.mileageCents !== null) {
+    lines.push({
+      message: `Includes transportation: ${q.billableMiles} routed miles at $3/mile = ${money(q.mileageCents)}.`,
+    })
   }
 
   //  WHY IT NEEDS A HUMAN, on the notice the owner actually reads. The flag
   //  was computed server-side and then never shown anywhere.
-  if (lead.reviewReasons && lead.reviewReasons.length > 0) {
-    lines.push({ message: `⚠️ Manual review: ${lead.reviewReasons.join(' ')}` })
+  //
+  //  `toLeadAlertInput` hands these over ALREADY SPLIT, so prefer that; the
+  //  derived form is the fallback for a caller passing a raw row. Reading only
+  //  the derived form silently dropped every reason, because the split array
+  //  and the joined column are different fields.
+  const reasons = lead.reviewReasons?.length ? lead.reviewReasons : q.reviewReasons
+  if (reasons.length > 0) {
+    lines.push({ message: `⚠️ Manual review: ${reasons.join(' ')}` })
   }
 
   lines.push({ message: consentLine(lead.emailMarketingConsent) })

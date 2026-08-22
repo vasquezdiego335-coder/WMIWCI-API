@@ -26,6 +26,7 @@ import { LeadSource, LeadStatus, LeadLifecycle } from '@prisma/client'
 import { prisma } from './db'
 import { apiLogger } from './logger'
 import { CONSENT_VERSION, decideConsent, normaliseConsentSource, type ConsentSource } from './consent'
+import { snapshotColumns, reviewOnlyColumns, QUOTE_SNAPSHOT_SELECT, type QuoteSnapshot } from './quote-snapshot'
 
 const OPEN_STATUSES: LeadStatus[] = [LeadStatus.NEW, LeadStatus.CONTACTED, LeadStatus.QUOTE_SENT, LeadStatus.FOLLOW_UP]
 
@@ -346,13 +347,21 @@ function notifyOwnerOfNewLead(leadId: string, context: string): void {
         where: { id: leadId },
         select: {
           id: true, name: true, email: true, phone: true, source: true, moveSize: true,
-          moveDate: true, originZip: true, destinationZip: true, estimatedValue: true,
+          moveDate: true, originZip: true, destinationZip: true,
           emailMarketingConsent: true, landingPage: true, utmSource: true, utmCampaign: true,
+          formStep: true,
+          // ── THE SNAPSHOT COLUMNS ────────────────────────────────────────
+          //  This projection asked for `estimatedValue` and nothing else about
+          //  money, so the notice could not know a total was a SUBTOTAL with
+          //  the drive unpriced, nor that the quote needed review — it printed
+          //  a bare figure that read as final. Spread from the shared constant
+          //  so a new column cannot be forgotten here.
+          ...QUOTE_SNAPSHOT_SELECT,
         },
       })
       if (!lead) return
-      const { notifyNewLead } = await import('./lead-alert')
-      await notifyNewLead({ ...lead, source: lead.source ? String(lead.source) : null })
+      const { notifyNewLead, toLeadAlertInput } = await import('./lead-alert')
+      await notifyNewLead(toLeadAlertInput(lead))
     } catch (err) {
       apiLogger.warn({ err: String(err).slice(0, 200), leadId, context }, 'new-lead notice failed (non-fatal)')
     }
@@ -652,22 +661,11 @@ export type PartialLeadInput = {
    * including saying "transportation pending" rather than presenting a package
    * subtotal as a finished estimate.
    */
-  quoteSnapshot?: {
-    baseCents: number
-    truckCents: number
-    totalCents: number
-    includedTruck: string | null
-    /** 'pending' until a routed mileage is actually measured. */
-    mileageStatus: 'pending' | 'calculated'
-    priceBookVersion: string
-    /** Set ONLY with mileageStatus 'calculated': the drive, and the whole
-     *  miles that produced it, so a total containing a drive can explain it. */
-    mileageCents?: number | null
-    billableMiles?: number | null
-    /** Server-calculated review requirement, and WHY. */
-    requiresReview?: boolean
-    reviewReasons?: string[]
-  } | null
+  quoteSnapshot?: QuoteSnapshot | null
+  /** Review reasons when there is NO numeric quote (in-person, 5BR manual
+   *  plan). Persisted on their own so the leads most needing a human are not
+   *  the ones that record nothing. */
+  reviewReasonsOnly?: string[]
   // ── Move details (owner spec 2026-07-28) ──────────────────────────────
   // A quick-quote or homepage estimate carries real intent. Without these a
   // captured lead is a bare address, and the follow-up email cannot say
@@ -807,23 +805,18 @@ function partialConsentPatch(input: PartialLeadInput, now: Date): Record<string,
  * what keeps a later partial save from blanking a snapshot already recorded.
  */
 function quoteSnapshotColumns(input: PartialLeadInput): Record<string, unknown> {
-  const q = input.quoteSnapshot
-  if (!q) return {}
-  return {
-    quoteBaseCents: q.baseCents,
-    quoteTruckCents: q.truckCents,
-    quoteTotalCents: q.totalCents,
-    quoteIncludedTruck: q.includedTruck ?? null,
-    quoteMileageStatus: q.mileageStatus,
-    quotePriceBookVersion: q.priceBookVersion,
-    quoteMileageCents: q.mileageCents ?? null,
-    quoteBillableMiles: q.billableMiles ?? null,
-    quoteRequiresReview: q.requiresReview ?? false,
-    //  One reason per line: readable in psql, and trivially split for display.
-    //  Null rather than an empty string when there is nothing to review.
-    quoteReviewReasons:
-      q.reviewReasons && q.reviewReasons.length ? q.reviewReasons.join('\n') : null,
+  //  A NUMERIC quote writes the whole snapshot, review state included.
+  if (input.quoteSnapshot) return snapshotColumns(input.quoteSnapshot)
+
+  //  REVIEW WITHOUT A NUMBER. An in-person request and a 5BR manual plan both
+  //  need a human and both deliberately have NO total, so review state used to
+  //  be lost on exactly the leads most needing attention — it only travelled
+  //  inside the snapshot. Inventing a total merely to have somewhere to put
+  //  the flag would be worse than losing it, so the flag travels alone.
+  if (input.reviewReasonsOnly && input.reviewReasonsOnly.length) {
+    return reviewOnlyColumns(input.reviewReasonsOnly)
   }
+  return {}
 }
 
 export function buildPartialLeadCreate(input: PartialLeadInput, now: Date) {
@@ -912,6 +905,14 @@ export function buildPartialLeadUpdate(
     //  A repeat submission that carries a fresh server-computed quote replaces
     //  the snapshot; one that carries none leaves the stored snapshot intact.
     ...quoteSnapshotColumns(input),
+    //  ── THE CURRENT SELECTION (fix 2026-08-22) ──────────────────────────
+    //  `moveSize` was written on CREATE only, so a visitor who changed their
+    //  mind — or whose first ping arrived before they picked a size — kept the
+    //  original value forever, and the CRM disagreed with the quote beside it.
+    //  Only ever a CANONICAL key: callers pass the value the price book
+    //  returned, and `undefined` for a refused one, which leaves the stored
+    //  value untouched rather than blanking it.
+    ...(clean(input.moveSize) ? { moveSize: clean(input.moveSize) } : {}),
     // Always keep the LATEST step + estimate (they move forward as the form fills).
     formStep: clean(input.formStep) ?? existing.formStep,
     bookingSessionId: existing.bookingSessionId ?? clean(input.bookingSessionId),

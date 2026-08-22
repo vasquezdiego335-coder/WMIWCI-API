@@ -416,3 +416,102 @@ test('browser: a CURRENT mirror does send its version', { skip }, async () => {
   assert.equal(body.priceBookVersion, PRICE_BOOK_VERSION, 'a current client must declare its price book')
   h.dom.window.close()
 })
+
+// ══════════════════════════════════════════════════════════════════════
+//  6. DRIVEN BY THE **REAL** ROUTE RESPONSE
+//
+//  Every browser test above answers with a response this file wrote. That
+//  assumes the API produces it — and the assumption was wrong twice: once
+//  when the flag short-circuited to a bare 200, and once when an old mirror
+//  was 422'd on shape. So these call the ACTUAL handler and feed the browser
+//  exactly what it returns, in each state of the capture feature flag.
+// ══════════════════════════════════════════════════════════════════════
+test('browser: a retired Studio never reveals a price — using the REAL API response', { skip }, async () => {
+  const { POST } = (await import('../../../app/api/leads/quote-capture/route')) as unknown as {
+    POST: (req: Request) => Promise<Response>
+  }
+
+  for (const flag of ['true', 'false', undefined] as const) {
+    if (flag === undefined) delete process.env.QUOTE_LEAD_CAPTURE_ENABLED
+    else process.env.QUOTE_LEAD_CAPTURE_ENABLED = flag
+    const label = `flag=${flag ?? 'UNSET'}`
+
+    // A stub fetch that PROXIES to the real route handler.
+    const posted: any[] = []
+    const viaRealRoute: any = async (url: string, init?: any) => {
+      if (!url.includes('/api/leads/quote-capture')) {
+        return { ok: true, status: 200, json: async () => ({}) }
+      }
+      posted.push(JSON.parse(init.body))
+      const res = await POST(
+        new Request('https://api.example.com/api/leads/quote-capture', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', origin: 'https://moveitclearit.com' },
+          body: init.body,
+        }) as never,
+      )
+      const json = await res.json()
+      return { ok: res.status < 400, status: res.status, json: async () => json }
+    }
+    viaRealRoute.__posted = posted
+
+    // A PREVIOUS mirror: no version field, no retirement flags.
+    const h = await loadPage(viaRealRoute, asPreviousMirror)
+
+    // Inject the retired option the way a stale bundle would have rendered it.
+    const sizes = h.doc.getElementById('qSizes')!
+    const stale = h.doc.createElement('label')
+    stale.className = 'q-size'
+    stale.innerHTML =
+      '<input type="radio" name="qSize" value="little-studio">' +
+      '<span><b>Small Studio</b><em class="q-size-price">$379</em></span>'
+    sizes.insertBefore(stale, sizes.firstChild)
+
+    await submitWith(h, 'little-studio')
+
+    assert.ok(
+      !(h.doc.getElementById('quoteForm') as HTMLElement).classList.contains('q-unlocked'),
+      `${label}: the estimate was unlocked despite the real API refusing to price it`,
+    )
+    assert.ok(!/\$\s?379\b/.test(h.doc.getElementById('qPriceNum')?.textContent ?? ''), `${label}: $379 rendered`)
+    assert.ok(!h.tracked.includes('generate_lead'), `${label}: a conversion fired on a refused quote`)
+    assert.ok(!h.tracked.includes('quote_lead_captured'), `${label}: a capture event fired`)
+    assert.equal(h.doc.querySelector('input[name="qSize"]:checked'), null, `${label}: selection not cleared`)
+    assert.match(h.doc.getElementById('qStatus')?.textContent ?? '', /no longer available/i, label)
+    h.dom.window.close()
+  }
+  process.env.QUOTE_LEAD_CAPTURE_ENABLED = 'true'
+})
+
+test('browser: a 3BR shows the SERVER review language, from the REAL response', { skip }, async () => {
+  // The page must not decide "subject to review" from its own mirror. This
+  // drives the real route so the wording comes from the server that computed it.
+  process.env.QUOTE_LEAD_CAPTURE_ENABLED = 'false' // priced, not persisted
+  const { POST } = (await import('../../../app/api/leads/quote-capture/route')) as unknown as {
+    POST: (req: Request) => Promise<Response>
+  }
+  const viaRealRoute: any = async (url: string, init?: any) => {
+    if (!url.includes('/api/leads/quote-capture')) return { ok: true, status: 200, json: async () => ({}) }
+    const res = await POST(
+      new Request('https://api.example.com/api/leads/quote-capture', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', origin: 'https://moveitclearit.com' },
+        body: init.body,
+      }) as never,
+    )
+    const json = await res.json()
+    return { ok: res.status < 400, status: res.status, json: async () => json }
+  }
+  viaRealRoute.__posted = []
+
+  const h = await loadPage(viaRealRoute)
+  await submitWith(h, '3br')
+
+  const shown = h.doc.body.textContent ?? ''
+  assert.match(h.doc.getElementById('qPriceNum')?.textContent ?? '', /\$1,049/, '3BR is the published floor')
+  assert.ok(!/\$1,199/.test(shown), 'the retired truck surcharge is back on screen')
+  assert.match(shown, /subject to review/i, 'the server said this needs a human; the page must say so')
+  assert.match(shown, /inventory|access|truck plan/i, 'and give the reason')
+  h.dom.window.close()
+  process.env.QUOTE_LEAD_CAPTURE_ENABLED = 'true'
+})

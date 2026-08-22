@@ -1,14 +1,14 @@
-# Release — quick-quote pricing parity (price book `2026-08-22.2`)
+# Release — quick-quote pricing parity (price book `2026-08-22.3`)
 
-**Status: NOT DEPLOYED.** This document is the order to deploy in, not a record
-that anyone did. Nothing in this release has been applied to production.
+**Status: NOT DEPLOYED.** This is the order to deploy in, not a record that
+anyone did. No migration has been applied and no branch merged.
 
 Branches (both `fix/quick-quote-pricing-parity`):
 
 | Repo | Contains |
 |---|---|
 | WMIWCI-API | price book, routes, snapshot columns, two migrations, CI |
-| WMIWCI-SITE | regenerated mirror, quote page, `?v=8` cache key |
+| WMIWCI-SITE | regenerated mirror, quote page, `?v=9` cache key |
 
 ---
 
@@ -24,6 +24,7 @@ Branches (both `fix/quick-quote-pricing-parity`):
 | 5 Bedrooms | manual plan | manual plan, with a stated reason |
 | Larger truck | applied automatically | only when explicitly chosen, review-gated |
 | The figure shown | "your estimate" | "package subtotal", transportation pending |
+| 3BR/4BR wording | looked like a flat rate | "subject to review", with the reason |
 
 **2BR/3BR/4BR quotes drop by $100/$150/$150.** That is the correction, not a
 side effect: the site has always published the base price and the server was
@@ -31,20 +32,50 @@ adding a surcharge for the truck the package already includes.
 
 ---
 
+## Environment flags — verify BEFORE and AFTER deploying
+
+`QUOTE_LEAD_CAPTURE_ENABLED` used to short-circuit the whole handler, so with
+the flag unset — its default — a retired Studio got a bare `200` and the page
+revealed the stale price. **The flag now gates PERSISTENCE ONLY.** Retired
+pricing is refused in every state of it.
+
+| Variable | Value | What it does now |
+|---|---|---|
+| `QUOTE_LEAD_CAPTURE_ENABLED` | `true` to store quick-quote leads | Off/unset ⇒ the quote is still PRICED and a retired package is still refused; nothing is written and the response says `captured:false, reason:'feature_disabled'` |
+| `PARTIAL_BOOKING_EMAIL_CAPTURE_ENABLED` | `true` to store booking-form step-1 leads | Off/unset ⇒ that route writes nothing |
+
+Verify on the deployed API, in **both** directions:
+
+```bash
+# 1. A retired package is refused whatever the flag says.
+curl -s -o /dev/null -w '%{http_code}\n' -X POST "$API/api/leads/quote-capture" \
+  -H 'Content-Type: application/json' \
+  -d '{"firstName":"A","lastName":"B","phone":"8625550000","email":"a@b.com","moveSize":"little-studio"}'
+# expect: 409   (NOT 200 — a 200 here means the flag is gating pricing again)
+
+# 2. Capture is actually on, if you intend it to be.
+curl -s -X POST "$API/api/leads/quote-capture" -H 'Content-Type: application/json' \
+  -d '{"firstName":"A","lastName":"B","phone":"8625550000","email":"a@b.com","moveSize":"1br"}' \
+  | grep -o '"captured":[a-z]*'
+# expect: "captured":true   ("captured":false means QUOTE_LEAD_CAPTURE_ENABLED is not 'true'
+#                            — the price is still correct, the lead is simply not stored)
+```
+
+---
+
 ## Order of operations
 
-Each step is independently reversible until the one after it. Do them in
-order — the API must be able to refuse retired keys *before* the SITE starts
-handing out a new mirror.
+Each step is independently reversible until the one after it. The API must be
+able to refuse retired keys *before* the SITE starts handing out a new mirror.
 
 ### 0 · A restore point you have actually verified
 
 ```bash
-pg_dump "$DATABASE_URL" --format=custom --file=pre-2026-08-22.2.dump
-pg_restore --list pre-2026-08-22.2.dump | head          # proves it is readable
+pg_dump "$DATABASE_URL" --format=custom --file=pre-2026-08-22.3.dump
+pg_restore --list pre-2026-08-22.3.dump | head          # proves it is readable
 ```
 
-A dump you have not listed is not a backup. Note the byte size and the row
+A dump you have not listed is not a backup. Note its byte size and the row
 count of `leads` so the post-migration check has something to compare against.
 
 ### 1 · Apply the migrations, then verify them
@@ -78,42 +109,72 @@ SELECT count(*) AS total,
 If `with_snapshot` is anything but 0, stop: something wrote during the
 migration and this document's assumptions no longer hold.
 
-### 2 · Deploy the API
+### 2 · Deploy the API, with the flags verified
 
-The API must go first. From this moment a retired key is refused with
+The API goes first. From this moment a retired key is refused with
 `409 pricing_expired` — which is what protects every browser still holding an
-old mirror, including all of them until step 3 propagates.
+old mirror, which is all of them until step 4. **Run both flag checks above.**
 
-Smoke it before continuing:
+### 3 · Retired-package API smoke, BEFORE the SITE moves
 
 ```bash
-curl -s -o /dev/null -w '%{http_code}\n' -X POST "$API/api/leads/quote-capture" \
-  -H 'Content-Type: application/json' \
-  -d '{"firstName":"A","lastName":"B","phone":"8625550000","email":"a@b.com","moveSize":"little-studio"}'
-# expect: 409
+for body in \
+  '{"moveSize":"little-studio"}' \
+  '{"moveSize":"little-studio","priceBookVersion":null}' \
+  '{"moveSize":"half-studio"}' ; do
+  curl -s -X POST "$API/api/leads/quote-capture" -H 'Content-Type: application/json' \
+    -d "$(node -e 'const e=JSON.parse(process.argv[1]);console.log(JSON.stringify({firstName:"A",lastName:"B",phone:"8625550000",email:"a@b.com",...e}))' "$body")"
+  echo
+done
+# expect every line: {"ok":false,...,"error":"pricing_expired","priceBookVersion":"2026-08-22.3"}
+# and NO occurrence of 379, 439, 549 or 649 anywhere in the output.
 ```
 
-### 3 · Deploy the SITE
+### 4 · Deploy the SITE — the branch Vercel actually serves
 
-Ships the regenerated mirror and moves every consumer to
-`pricing-config.js?v=8`. The new URL is what actually evicts the cached price
-book; the file alone would keep being served from cache.
+**Deploy `fix/quick-quote-pricing-parity` into whatever branch Vercel builds.**
+Verified 2026-08-22 by fetching production and byte-comparing:
 
-### 4 · Smoke the deployed pair
+```
+live https://www.moveitclearit.com/quote.html          sha256 18280974ba106413…
+     == origin/claude/quick-quote-email-flow           sha256 18280974ba106413…
+     != origin/master                                  (no public/quote.html at all)
+
+live https://www.moveitclearit.com/js/pricing-config.js sha256 8a6dd7baabaa8318…
+     == origin/claude/quick-quote-email-flow            sha256 8a6dd7baabaa8318…
+```
+
+The live page currently requests `pricing-config.js?v=6` and the live mirror
+carries **no `PRICE_BOOK_VERSION` and zero `legacy` flags** — i.e. production is
+still serving the pre-fix price book in which the studios are sellable.
+
+Note: `fix/retire-truck-addon` and `fix/brand-palette` hold byte-identical
+copies of both files, so the hashes cannot single out one of those three by
+themselves. What they DO establish conclusively is that **`master` is not the
+deployed tree.**
+
+### 5 · Cache, pricing, review, notification and page smoke
 
 ```bash
 # the mirror the browser will really load
-curl -s "$SITE/js/pricing-config.js?v=8" | grep -o '"PRICE_BOOK_VERSION": "[^"]*"'
-# expect: "PRICE_BOOK_VERSION": "2026-08-22.2"
+curl -s "$SITE/js/pricing-config.js?v=9" | grep -o '"PRICE_BOOK_VERSION": "[^"]*"'
+# expect: "PRICE_BOOK_VERSION": "2026-08-22.3"
 
-# every page asks for v=8
-for p in quote booking-form pricing services; do
-  curl -s "$SITE/$p.html" | grep -o 'pricing-config\.js?v=[0-9]*'
-done
+# EVERY page moved together — no page may still ask for an older token
+grep -rho 'pricing-config\.js?v=[0-9]*' public/ | sort | uniq -c
+# expect: one line, ?v=9
 ```
 
-Then, by hand on the live quote page: pick 2 Bedrooms and confirm it reads
-**$779**, labelled a package subtotal, with transportation stated as pending.
+By hand on the live quote page:
+
+- **2 Bedrooms** reads **$779**, labelled a package subtotal, transportation
+  stated as pending at $3 per routed mile.
+- **3 Bedrooms** reads **$1,049** and says **subject to review**, with the
+  inventory/access/truck-plan reason.
+- Submitting a retired Studio (via a cached bundle, or by hand) reveals **no**
+  price and fires **no** conversion.
+- The owner's Discord card for a new 3BR lead shows the subtotal caption, the
+  pending-transportation line, and the manual-review reasons.
 
 ### Rollback
 
@@ -132,14 +193,14 @@ Then, by hand on the live quote page: pick 2 Bedrooms and confirm it reads
 SITE branch and running the tests against it. It **fails rather than skips**
 when the mirror cannot be verified.
 
-- **Requires a repository secret `SITE_REPO_TOKEN`** — a fine-grained PAT with
-  *Contents: read* on WMIWCI-SITE. WMIWCI-SITE is private and WMIWCI-API is
-  public, so the default `GITHUB_TOKEN` cannot read it. **Until this secret
-  exists, CI fails by design.**
-- The fallback branch is pinned to `claude/quick-quote-email-flow`, the branch
-  Vercel actually deploys — *not* `master`, which is a different tree.
-  **If the deployed branch changes in Vercel, change `PRODUCTION_SITE_BRANCH`
-  in the workflow in the same breath**, or CI will verify a tree nobody ships.
+- **Requires a repository secret `SITE_REPO_TOKEN`** — a fine-grained,
+  read-only PAT (*Contents: read*) on WMIWCI-SITE. WMIWCI-SITE is private and
+  WMIWCI-API is public, so the default `GITHUB_TOKEN` cannot read it.
+  **Until this secret exists, CI fails by design.**
+- The fallback branch is pinned to `claude/quick-quote-email-flow` — see the
+  byte evidence in step 4. **If the deployed branch changes in Vercel, change
+  `PRODUCTION_SITE_BRANCH` in the workflow in the same breath**, or CI will
+  verify a tree nobody ships and call it green.
 
 ---
 
@@ -149,8 +210,8 @@ when the mirror cannot be verified.
   automated review flag for leads; flagging it is a manual admin action
   (status → `FOLLOW_UP` with a note).
 - No historical lead is recalculated. Retired packages keep their original
-  label and amount everywhere history is displayed.
-- `mileageStatus: 'calculated'` is supported by the schema
-  (`quote_mileage_cents`, `quote_billable_miles`) but nothing writes it yet:
-  the quick quote has ZIP codes, and a routed mile needs full addresses. Every
-  quote this release produces is `'pending'`.
+  label and amount everywhere history is displayed, and a lead with no snapshot
+  keeps its original notification wording.
+- `mileageStatus: 'calculated'` is fully implemented and invariant-checked, but
+  **nothing writes it yet**: the quick quote has ZIP codes, and a routed mile
+  needs full addresses. Every quote this release produces is `'pending'`.

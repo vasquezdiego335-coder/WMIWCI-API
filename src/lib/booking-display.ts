@@ -1275,6 +1275,15 @@ export function buildLeadCard(data: LeadCardData): { embeds: EmbedJson[]; compon
   //  the same line as the money, and calls the figure what it is.
   const money = (n: number): string => `$${Math.round(n).toLocaleString('en-US')}`
   const mileagePending = data.quoteMileageStatus === 'pending'
+  /** Base + any approved truck upgrade + which truck the price already covers. */
+  const breakdownLine = (d: LeadCardData): string[] =>
+    typeof d.quoteBaseDollars === 'number'
+      ? [
+          `Base ${money(d.quoteBaseDollars)}` +
+            (d.quoteTruckDollars ? ` · Truck upgrade ${money(d.quoteTruckDollars)}` : '') +
+            (d.quoteIncludedTruck ? ` · ${d.quoteIncludedTruck} truck included` : ''),
+        ]
+      : []
   const estimate = inPersonEstimate
     // Not "we could not price it" — we deliberately did not.
     ? '_In-person estimate requested_'
@@ -1282,14 +1291,20 @@ export function buildLeadCard(data: LeadCardData): { embeds: EmbedJson[]; compon
       ? mileagePending
         ? [
             `**${money(data.estimateDollars)}** _package subtotal_`,
-            ...(typeof data.quoteBaseDollars === 'number'
-              ? [`Base ${money(data.quoteBaseDollars)}` +
-                 (data.quoteTruckDollars ? ` · Truck upgrade ${money(data.quoteTruckDollars)}` : '') +
-                 (data.quoteIncludedTruck ? ` · ${data.quoteIncludedTruck} truck included` : '')]
-              : []),
+            ...breakdownLine(data),
             '⚠️ Transportation pending — billed at $3 per routed mile, fuel included',
           ].join('\n')
-        : `**${money(data.estimateDollars)}**`
+        : data.quoteMileageStatus === 'calculated'
+          ? [
+              // A total that CONTAINS the drive must be able to explain it —
+              // otherwise it is just a bigger unexplained number.
+              `**${money(data.estimateDollars)}**`,
+              ...breakdownLine(data),
+              typeof data.quoteBillableMiles === 'number' && typeof data.quoteMileageDollars === 'number'
+                ? `Transportation: ${data.quoteBillableMiles} routed miles × $3 = ${money(data.quoteMileageDollars)}`
+                : 'Transportation: included',
+            ].join('\n')
+          : `**${money(data.estimateDollars)}**`
       : '_no estimate yet_'
 
   // null, not "Not given" — the field is omitted entirely when there is no

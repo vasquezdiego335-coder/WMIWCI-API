@@ -584,7 +584,13 @@ test('13b. the route rejects invalid payloads with the right status and leaks no
 test('13c. the route hands the owner-notification to quote-capture (no double ping)', () => {
   const s = routeSrc()
   assert.match(s, /\{ notifyOwner: false \}/, 'capture must not also post the plain notice')
-  assert.match(s, /onQuoteRequestCaptured\(result\.lead\.id/, 'the rich card comes from the side-effect module')
+  // The rich card still comes from the side-effect module; it is now resolved
+  // through `quote-capture-deps` so a test can drive the REAL route and read
+  // what it actually persisted. Production wires that seam to
+  // `onQuoteRequestCaptured` — see quote-capture-deps.ts.
+  assert.match(s, /onCaptured\(result\.lead\.id/, 'the rich card comes from the side-effect module')
+  const deps = readFileSync(resolve(__dirname, '../quote-capture-deps.ts'), 'utf8')
+  assert.match(deps, /onCaptured:\s*onQuoteRequestCaptured/, 'and production resolves it to the real one')
   assert.match(s, /normaliseConsentSource\(d\.consentSource\) \?\? 'QUICK_QUOTE_FORM'/)
   assert.match(s, /consentVersion: d\.consentVersion \|\| CONSENT_VERSION/)
   // The marketing outcome is logged, never returned.

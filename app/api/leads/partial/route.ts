@@ -3,7 +3,7 @@ import { z } from 'zod'
 import { normaliseConsentSource } from '@/lib/consent'
 import { apiLogger } from '@/lib/logger'
 import { rateLimit, tooManyRequests, LIMITS, clientIp } from '@/lib/rate-limit'
-import { capturePartialLeadSafe } from '@/lib/leads'
+import { quoteCaptureRouteDeps } from '@/lib/quote-capture-deps'
 import { PRICE_BOOK_VERSION } from '@/lib/pricing-config'
 import { pricePartialLead } from '@/lib/partial-lead-pricing'
 
@@ -146,6 +146,10 @@ const PartialSchema = z.object({
      priced, because the same '1br' means a $550 flat full-service job or
      nothing at all on an hourly labor-only job. */
   serviceType: str(40),
+  /* The booking form already sends this spelling to /api/bookings. Accepting
+     only one of the two names is how the labor-only hole stays open for the
+     surface that happens to use the other. */
+  serviceTypeKey: str(40),
   /* Structured labor-only inputs. An hourly figure needs BOTH, and is refused
      below the published two-hour minimum rather than silently billed up. */
   laborWorkers: z.number().int().min(1).max(20).nullish(),
@@ -222,6 +226,7 @@ async function handle(req: NextRequest): Promise<NextResponse> {
     moveSize: d.moveSize,
     estimateTotal: d.estimateTotal,
     serviceType: d.serviceType,
+    serviceTypeKey: d.serviceTypeKey,
     serviceInterest: d.serviceInterest,
     laborWorkers: d.laborWorkers,
     laborMinutes: d.laborMinutes,
@@ -244,7 +249,7 @@ async function handle(req: NextRequest): Promise<NextResponse> {
     apiLogger.warn(pricing.mismatch, 'partial-lead estimate mismatch — server value used')
   }
 
-  const result = await capturePartialLeadSafe(
+  const result = await quoteCaptureRouteDeps().partialCapture(
     {
       email: d.email,
       firstName: d.firstName,
@@ -307,7 +312,24 @@ async function handle(req: NextRequest): Promise<NextResponse> {
       )
   }
 
-  return NextResponse.json({ ok: true, captured: !!result, isNew: result?.isNew ?? false })
+  // ── SERVER-DERIVED PRICING INFORMATION CARRIES ITS VERSION ─────────────
+  //  This endpoint now prices server-side, so the response says which price
+  //  book it used and what it concluded the product was. A client that gets a
+  //  version it does not recognise knows its own copy is stale — the same
+  //  signal the quick quote gets, on the endpoint that had no signal at all.
+  //  Nothing here is a price the browser may display: the figure is on the
+  //  lead, not in this body.
+  return NextResponse.json({
+    ok: true,
+    captured: !!result,
+    isNew: result?.isNew ?? false,
+    priceBookVersion: PRICE_BOOK_VERSION,
+    serviceType: pricing.serviceType,
+    /** True when the submitted package key was withdrawn or unrecognised, so a
+     *  caller can tell "we saved you but not your selection" from a clean save. */
+    packageRefused: pricing.refusedSize,
+    requiresReview: pricing.requiresReview,
+  })
 }
 
 // Reject other verbs explicitly.

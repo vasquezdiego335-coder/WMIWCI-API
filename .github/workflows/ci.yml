@@ -35,7 +35,7 @@ on:
   workflow_dispatch:
     inputs:
       site_ref:
-        description: 'WMIWCI-SITE ref to verify against (defaults to the matching branch, then master)'
+        description: 'WMIWCI-SITE ref to verify against (defaults to the matching branch name, then PRODUCTION_SITE_BRANCH — NOT master)'
         required: false
         type: string
 
@@ -47,6 +47,13 @@ env:
   # Prisma only needs a syntactically valid URL to validate + generate. No
   # database is contacted anywhere in this workflow.
   DATABASE_URL: postgresql://ci:ci@127.0.0.1:5432/ci?schema=public
+  # `next build` collects page data, which imports src/lib/auth.ts, which
+  # refuses to load without a JWT secret in production. A THROWAWAY value: it
+  # signs nothing, verifies nothing and never leaves the runner — but without
+  # it the build step fails on every run, which is how a "green" CI that never
+  # actually built anything would look.
+  JWT_SECRET: ci-build-only-not-a-real-secret-0000000000000000000000000000
+  NODE_ENV: production
 
 jobs:
   verify:

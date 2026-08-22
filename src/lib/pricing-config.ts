@@ -1312,11 +1312,14 @@ export const LEGACY_PACKAGE_KEYS = [
  *   2026-08-22.2  the included truck stops being charged (2BR $879 -> $779,
  *                 3BR $1,199 -> $1,049, 4BR $1,599 -> $1,449); quote snapshot
  *                 persisted; mileage disclosed as pending
+ *   2026-08-22.3  review state (3BR/4BR floors, approved truck upgrades) is
+ *                 returned, persisted and displayed; retired-package refusal
+ *                 no longer depends on the capture feature flag
  *
  * `pricing-release.test.ts` fingerprints the material price book and fails if
  * it moves without this value AND the browser asset cache key moving with it.
  */
-export const PRICE_BOOK_VERSION = '2026-08-22.2'
+export const PRICE_BOOK_VERSION = '2026-08-22.3'
 
 /**
  * The cache-busting token on every `<script src="js/pricing-config.js?v=…">`.
@@ -1329,7 +1332,7 @@ export const PRICE_BOOK_VERSION = '2026-08-22.2'
  * The value is the TOKEN ITSELF (the `8` in `?v=8`), so pricing-release.test.ts
  * can compare it to the pages byte-for-byte rather than reconstructing it.
  */
-export const PRICING_ASSET_CACHE_KEY = '8'
+export const PRICING_ASSET_CACHE_KEY = '9'
 
 //  NO NEW "is it sellable?" HELPER LIVES HERE. `LEGACY_PACKAGE_KEYS` above is
 //  the one list, and product-catalog.ts already derives the whole retirement

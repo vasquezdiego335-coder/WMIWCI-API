@@ -29,6 +29,7 @@
 //  cheapest correct answer to "which product is this?" is silence.
 // ════════════════════════════════════════════════════════════════════════
 import { quoteEstimate } from './quote-estimate'
+import { pendingSnapshot, type QuoteSnapshot } from './quote-snapshot'
 import { isRetiredPackage } from './product-catalog'
 import {
   PRICE_BOOK_VERSION,
@@ -45,6 +46,10 @@ export type PartialLeadPricingInput = {
   estimateTotal?: number | null
   /** An explicit product: 'full_service' | 'labor_only'. Trusted over inference. */
   serviceType?: string | null
+  /** The booking form's own spelling of the same thing (it already sends
+   *  `serviceTypeKey` to /api/bookings). A field the server quietly ignores is
+   *  a field that silently reopens the labor-only hole. */
+  serviceTypeKey?: string | null
   /** Free-text service the visitor picked, e.g. 'loading_and_unloading'. */
   serviceInterest?: string | null
   /** Structured labor-only inputs. Both required before an hourly figure exists. */
@@ -55,14 +60,11 @@ export type PartialLeadPricingInput = {
 /** What the server concluded the product is. `unknown` is a real answer. */
 export type ResolvedServiceType = ServiceTypeKey | 'unknown'
 
-export type PartialLeadQuoteSnapshot = {
-  baseCents: number
-  truckCents: number
-  totalCents: number
-  includedTruck: string | null
-  mileageStatus: 'pending' | 'calculated'
-  priceBookVersion: string
-}
+/** The frozen record. Defined once in quote-snapshot.ts so the pricing layer,
+ *  the database columns and the notifications cannot drift apart — and so
+ *  review state travels INSIDE it rather than beside it, which is how a
+ *  3BR/4BR partial capture used to lose its review metadata entirely. */
+export type PartialLeadQuoteSnapshot = QuoteSnapshot
 
 export type PartialLeadPricing = {
   /** CENTS to store on the lead, or null to store nothing. Always server-computed. */
@@ -109,8 +111,12 @@ const NOTHING = (
  * Everything else is UNKNOWN — deliberately not "probably full service".
  */
 export function resolveServiceType(input: PartialLeadPricingInput): ResolvedServiceType {
-  const explicit = (input.serviceType ?? '').trim().toLowerCase()
-  if (isServiceTypeKey(explicit)) return explicit
+  // Both spellings, and a couple of hyphenated variants, because the surfaces
+  // that send this do not agree with each other and never have.
+  for (const raw of [input.serviceType, input.serviceTypeKey]) {
+    const v = (raw ?? '').trim().toLowerCase().replace(/-/g, '_')
+    if (isServiceTypeKey(v)) return v
+  }
   if (normalizeLaborService(input.serviceInterest)) return 'labor_only'
   const interest = (input.serviceInterest ?? '').trim().toLowerCase()
   if (interest === 'labor_only' || interest === 'labor-only') return 'labor_only'
@@ -193,18 +199,40 @@ export function pricePartialLead(input: PartialLeadPricingInput): PartialLeadPri
     serviceType: 'full_service',
     refusedSize: false,
     refusedReason: null,
-    snapshot: {
-      baseCents: Math.round(priced.baseDollars * 100),
-      truckCents: Math.round(priced.truckUpgrade * 100),
-      totalCents: priced.totalCents,
-      includedTruck: priced.includedTruck,
-      // A partial capture never has full addresses either, so the drive is
-      // unmeasured here for the same reason it is on the quick quote.
-      mileageStatus: 'pending',
-      priceBookVersion: PRICE_BOOK_VERSION,
-    },
+    // Built through the VALIDATING constructor, which refuses a total that is
+    // not the sum of its parts and a review flag with no reason. Review state
+    // lives INSIDE the snapshot now — it used to sit beside it, and the route
+    // passed only the snapshot, so a 3BR/4BR partial lost its review metadata.
+    snapshot: buildPendingSnapshot(priced),
     requiresReview: priced.requiresReview,
     reviewReasons: priced.reviewReasons,
     mismatch,
   }
+}
+
+/** The pending snapshot for a priced full-service capture. Throws only on a
+ *  programming error — the arithmetic comes straight from the price book, so a
+ *  refusal here means the price book itself is inconsistent and shipping a
+ *  silently-wrong snapshot would be worse than failing loudly. */
+function buildPendingSnapshot(priced: {
+  baseDollars: number
+  truckUpgrade: number
+  totalCents: number
+  includedTruck: string | null
+  requiresReview: boolean
+  reviewReasons: string[]
+}): QuoteSnapshot {
+  const built = pendingSnapshot({
+    baseCents: Math.round(priced.baseDollars * 100),
+    truckCents: Math.round(priced.truckUpgrade * 100),
+    totalCents: priced.totalCents,
+    includedTruck: priced.includedTruck,
+    // A partial capture never has full addresses either, so the drive is
+    // unmeasured here for the same reason it is on the quick quote.
+    priceBookVersion: PRICE_BOOK_VERSION,
+    requiresReview: priced.requiresReview,
+    reviewReasons: priced.reviewReasons,
+  })
+  if (!built.ok) throw new Error(`inconsistent quote snapshot: ${built.reason}`)
+  return built.snapshot
 }

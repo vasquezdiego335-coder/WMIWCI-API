@@ -2,10 +2,11 @@ import { NextRequest, NextResponse } from 'next/server'
 import { z } from 'zod'
 import { apiLogger } from '@/lib/logger'
 import { rateLimit, tooManyRequests, LIMITS, clientIp } from '@/lib/rate-limit'
-import { capturePartialLeadSafe } from '@/lib/leads'
-import { onQuoteRequestCaptured } from '@/lib/quote-capture'
+import { quoteCaptureRouteDeps } from '@/lib/quote-capture-deps'
+
 import { quoteEstimate, compareClientTotal } from '@/lib/quote-estimate'
 import { PRICE_BOOK_VERSION } from '@/lib/pricing-config'
+import { pendingSnapshot } from '@/lib/quote-snapshot'
 import { isValidMoveDate, parseMoveDate } from '@/lib/quote-date'
 import { composeAccessDetails } from '@/lib/quote-access-details'
 import { CONSENT_VERSION, normaliseConsentSource } from '@/lib/consent'
@@ -220,8 +221,23 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 const json = (body: QuoteLeadCaptureResponse, status = 200) => NextResponse.json(body, { status })
 
 async function handle(req: NextRequest): Promise<NextResponse> {
-  if (!enabled()) return json({ ok: true, captured: false, reason: 'feature_disabled' })
-
+  // ── THE FEATURE FLAG NO LONGER SHORT-CIRCUITS PRICING SAFETY ───────────
+  //  This used to be the FIRST line of the handler: flag off ⇒ HTTP 200
+  //  `feature_disabled`, before parsing and before pricing. So with the flag
+  //  unset — which is its default — a cached bundle submitting a withdrawn
+  //  Studio got a 200 with no error, quote.html saw no `pricing_expired`, and
+  //  fell straight through to unlock() showing the retired price out of its
+  //  own stale mirror. A flag whose job is "do not WRITE leads yet" had
+  //  quietly become "do not ENFORCE pricing either".
+  //
+  //  The flag now gates PERSISTENCE ONLY, and is checked after the request has
+  //  been parsed and priced. See the `capture is disabled` branch below for
+  //  what an ACTIVE package receives.
+  //
+  //  DELIBERATE TRADE: a disabled endpoint now consumes rate limit and parses
+  //  bodies where it previously did neither. That is the cost of refusing a
+  //  retired price in every configuration, and it is worth it — the rate limit
+  //  still protects the endpoint, and nothing is written either way.
   const rl = await rateLimit(LIMITS.quoteLead, [clientIp(req)])
   if (!rl.ok) {
     const res = json({ ok: false, captured: false, error: 'rate_limited' }, 429)
@@ -256,7 +272,7 @@ async function handle(req: NextRequest): Promise<NextResponse> {
   // around the trap. Nothing is written and nothing is queued.
   if (d.company && d.company.length > 0) {
     apiLogger.info({ trap: 'company' }, 'quote lead discarded (honeypot)')
-    return json({ ok: true, captured: false, reason: 'spam_discarded' })
+    return json({ ok: true, captured: false, reason: 'spam_discarded', priceBookVersion: PRICE_BOOK_VERSION })
   }
 
   // ── MOVE DATE ───────────────────────────────────────────────────────────
@@ -330,6 +346,102 @@ async function handle(req: NextRequest): Promise<NextResponse> {
   // automatic estimate.
   const manualPlan = !priced.ok && priced.reason === 'manual_plan'
 
+  // ══════════════════════════════════════════════════════════════════════
+  //  REVIEW STATE — computed ONCE, returned, persisted and displayed.
+  //
+  //  `manualReview` used to be `inPerson || manualPlan`, which is false for a
+  //  priced 3BR, a priced 4BR and any explicit larger-truck upgrade — exactly
+  //  the cases where the server HAD decided a human must look. The flag was
+  //  computed in quoteEstimate and then thrown away at the response boundary.
+  // ══════════════════════════════════════════════════════════════════════
+  const manualReview = inPerson || manualPlan || (priced.ok && priced.requiresReview)
+  const reviewReasons: string[] = inPerson
+    ? ['An in-person estimate was requested — the price is set after the visit.']
+    : manualPlan
+      ? ['This move may need more than one truck or more than one trip, so it is planned by hand.']
+      : priced.ok
+        ? priced.reviewReasons
+        : []
+
+  /** The estimate block, shared by every response that carries one. */
+  const estimatePayload = priced.ok
+    ? {
+        totalDollars: priced.totalDollars,
+        isStarting: priced.isStarting,
+        packageLabel: priced.packageLabel,
+        // The breakdown the owner asked the page to show: base package,
+        // required truck upgrade, then routed mileage (calculated later,
+        // separately) and any other add-ons.
+        baseDollars: priced.baseDollars,
+        truckSize: priced.truckSize,
+        truckMinimum: priced.truckMinimum,
+        truckUpgrade: priced.truckUpgrade,
+        truckCorrected: priced.truckCorrected,
+        /* The truck the package price already covers, so the page can say
+           "15 ft truck included" instead of leaving a $0 line unexplained. */
+        includedTruck: priced.includedTruck,
+        /* A quick quote has ZIP codes only, so the routed mileage is NOT in
+           this figure and the page must not present it as a finished price. */
+        mileageStatus: 'pending' as const,
+        priceBookVersion: priced.priceBookVersion,
+        /* Server-authoritative. The page must NOT decide "starting at" from
+           its own mirror's `price.kind`: a stale mirror would then hedge, or
+           fail to hedge, according to a rule book we have since changed. */
+        requiresReview: priced.requiresReview,
+        reviewReasons: priced.reviewReasons,
+      }
+    : null
+
+  // ══════════════════════════════════════════════════════════════════════
+  //  CAPTURE DISABLED — PRICE HONESTLY, PERSIST NOTHING.
+  //
+  //  The flag means "do not write leads yet". It must never mean "do not
+  //  enforce pricing": every refusal above has already run, so a withdrawn
+  //  package is a 409 in EVERY configuration of this flag.
+  //
+  //  An ACTIVE package still gets the SERVER's price. That is strictly safer
+  //  than the old behaviour, which returned a bare 200 and left the browser to
+  //  display whatever its own cached mirror said. Nothing is stored, nothing is
+  //  emailed, and the response says so — `captured: false`.
+  // ══════════════════════════════════════════════════════════════════════
+  if (!enabled()) {
+    return json({
+      ok: true,
+      captured: false,
+      reason: 'feature_disabled',
+      priceBookVersion: PRICE_BOOK_VERSION,
+      estimate: estimatePayload,
+      manualReview,
+      reviewReasons,
+    })
+  }
+
+  /** The frozen record, or null when there is deliberately no number. */
+  const capturedSnapshot = priced.ok
+    ? (() => {
+        const built = pendingSnapshot({
+          baseCents: Math.round(priced.baseDollars * 100),
+          truckCents: Math.round(priced.truckUpgrade * 100),
+          totalCents: priced.totalCents,
+          includedTruck: priced.includedTruck,
+          // ALWAYS 'pending' here: the quick quote collects ZIP codes, and a
+          // routed-mile charge needs real addresses. It is settled later, when
+          // the booking supplies them.
+          priceBookVersion: priced.priceBookVersion,
+          requiresReview: priced.requiresReview,
+          reviewReasons: priced.reviewReasons,
+        })
+        if (!built.ok) {
+          // The arithmetic comes straight from the price book, so this means
+          // the price book itself is inconsistent. Store nothing rather than
+          // something that cannot be explained.
+          apiLogger.error({ reason: built.reason }, 'refusing to store an inconsistent quote snapshot')
+          return null
+        }
+        return built.snapshot
+      })()
+    : null
+
   const serverCents = priced.ok ? priced.totalCents : null
   if (priced.ok) {
     const cmp = compareClientTotal(priced.totalDollars, d.estimateTotal)
@@ -343,7 +455,7 @@ async function handle(req: NextRequest): Promise<NextResponse> {
     }
   }
 
-  const result = await capturePartialLeadSafe(
+  const result = await quoteCaptureRouteDeps().capture(
     {
       email: d.email,
       firstName: d.firstName,
@@ -400,21 +512,15 @@ async function handle(req: NextRequest): Promise<NextResponse> {
       //  mileageStatus is ALWAYS 'pending' here: the quick quote collects ZIP
       //  codes only, and a routed-mile charge needs real addresses. It is
       //  settled later, when the booking supplies them.
-      quoteSnapshot: priced.ok
-        ? {
-            baseCents: Math.round(priced.baseDollars * 100),
-            truckCents: Math.round(priced.truckUpgrade * 100),
-            totalCents: priced.totalCents,
-            includedTruck: priced.includedTruck,
-            mileageStatus: 'pending' as const,
-            priceBookVersion: priced.priceBookVersion,
-            //  Server-calculated, and finally carried somewhere it can be
-            //  ACTED on: the flag used to be computed and then discarded, so
-            //  a 3BR floor price reached the owner looking like a flat rate.
-            requiresReview: priced.requiresReview,
-            reviewReasons: priced.reviewReasons,
-          }
-        : null,
+      //  Built through the VALIDATING constructor, so a total that is not the
+      //  sum of its parts, or a review flag with no reason, cannot be stored.
+      quoteSnapshot: capturedSnapshot,
+      //  REVIEW WITHOUT A NUMBER. An in-person request and a 5BR manual plan
+      //  both need a human and both deliberately have NO total. Review state
+      //  used to live only inside the snapshot, so exactly the leads that most
+      //  needed attention recorded none — and inventing a total merely to have
+      //  somewhere to put the flag would be worse than losing it.
+      reviewReasonsOnly: capturedSnapshot ? undefined : reviewReasons,
     },
     'quote-lead',
     undefined,
@@ -432,7 +538,7 @@ async function handle(req: NextRequest): Promise<NextResponse> {
 
   // Side effects. Awaited so a serverless invocation cannot freeze before they
   // run; neither throws, and neither can change `captured`.
-  const outcome = await onQuoteRequestCaptured(result.lead.id, { locale: d.locale })
+  const outcome = await quoteCaptureRouteDeps().onCaptured(result.lead.id, { locale: d.locale })
 
   apiLogger.info(
     {
@@ -465,33 +571,17 @@ async function handle(req: NextRequest): Promise<NextResponse> {
     //  staleness absent from exactly the responses a stale client might get.
     priceBookVersion: PRICE_BOOK_VERSION,
     // The server's own number, so a browser showing a stale price can correct
-    // itself. Safe to expose: it is the price we publish.
-    estimate: priced.ok
-      ? {
-          totalDollars: priced.totalDollars,
-          isStarting: priced.isStarting,
-          packageLabel: priced.packageLabel,
-          // The breakdown the owner asked the page to show: base package,
-          // required truck upgrade, then routed mileage (calculated later,
-          // separately) and any other add-ons.
-          baseDollars: priced.baseDollars,
-          truckSize: priced.truckSize,
-          truckMinimum: priced.truckMinimum,
-          truckUpgrade: priced.truckUpgrade,
-          truckCorrected: priced.truckCorrected,
-          /* The truck the package price already covers, so the page can say
-             "15 ft truck included" instead of leaving a $0 line unexplained. */
-          includedTruck: priced.includedTruck,
-          /* A quick quote has ZIP codes only, so the routed mileage is NOT in
-             this figure and the page must not present it as a finished price. */
-          mileageStatus: 'pending' as const,
-          priceBookVersion: priced.priceBookVersion,
-        }
-      : null,
-    /** True when this move is quoted by a human rather than automatically:
-     *  5+ bedrooms, or the customer asked for an in-person visit. The lead is
-     *  captured either way; it simply carries no number. */
-    manualReview: inPerson || manualPlan,
+    // itself. Safe to expose: it is the price we publish. Built ONCE above, so
+    // the disabled-capture path and this one cannot describe the same quote
+    // two different ways.
+    estimate: estimatePayload,
+    /** True when this move is quoted by a human rather than automatically: an
+     *  in-person visit, a 5BR manual truck plan, OR a priced package the server
+     *  flagged (a 3BR/4BR floor, an explicit larger truck). That last case is
+     *  the one `inPerson || manualPlan` missed entirely. */
+    manualReview,
+    /** WHY, so neither the page nor the owner has to guess. */
+    reviewReasons,
   })
 }
 

@@ -36,7 +36,7 @@ import { alertFingerprint, shouldRealert } from './leads'
 import { businessPhone } from './business-contact'
 import { MOVE_SIZES } from './estimate'
 import type { LeadCardData } from './booking-display'
-import { isInPersonRequest, notifyNewLead } from './lead-alert'
+import { isInPersonRequest, notifyNewLead, toLeadAlertInput } from './lead-alert'
 import { fireLeadTrigger, type LeadTriggerResult } from './email-automation-runtime'
 
 const log = apiLogger.child({ mod: 'quote-capture' })
@@ -120,32 +120,40 @@ export type QuoteLeadCaptureResponse =
        *  always detect it needs to reload. */
       priceBookVersion: string
       /** The SERVER's price, so a stale browser can correct itself. */
-      estimate: {
-        totalDollars: number
-        baseDollars: number
-        isStarting: boolean
-        packageLabel: string
-        truckSize: string
-        truckMinimum: string
-        truckUpgrade: number
-        truckCorrected: boolean
-        /** The truck the package price already covers, so the page can explain
-         *  a $0 truck line instead of leaving it bare. */
-        includedTruck: string | null
-        /** 'pending' — the quick quote has ZIP codes only, so the routed-mile
-         *  charge is NOT inside totalDollars and no surface may present the
-         *  figure as a finished estimate. */
-        mileageStatus: 'pending' | 'calculated'
-        /** The price book that produced these numbers. */
-        priceBookVersion: string
-      } | null
-      /** True when this move is quoted by a human rather than automatically:
-       *  5+ bedrooms, or the customer asked for an in-person visit. The lead
-       *  is captured either way; it simply carries no number. */
-      manualReview?: boolean
+      estimate: QuoteEstimatePayload | null
+      /** Quoted by a human rather than automatically: an in-person visit, a
+       *  5BR manual truck plan, OR a priced package the server flagged (a
+       *  3BR/4BR floor, an explicit larger truck). That last case is the one
+       *  `inPerson || manualPlan` missed entirely, so a priced 3BR was
+       *  reported as needing no review at all. */
+      manualReview: boolean
+      /** WHY it needs a human, in the owner's words. Empty when it does not. */
+      reviewReasons: string[]
       leadId?: never
     }
-  | { ok: true; captured: false; reason: 'spam_discarded' | 'feature_disabled' }
+  | {
+      ok: true
+      captured: false
+      reason: 'spam_discarded'
+      /** Present on every variant — see the note on the captured one. */
+      priceBookVersion: string
+    }
+  | {
+      // ── CAPTURE IS OFF; PRICING ENFORCEMENT IS NOT ─────────────────────
+      //  The flag means "do not write leads yet". It must never mean "do not
+      //  enforce pricing": a withdrawn package is refused with
+      //  `pricing_expired` in EVERY configuration of the flag, and an active
+      //  one still receives the SERVER's price — so the browser is never left
+      //  to display whatever its own cached mirror happens to say. Nothing is
+      //  persisted, nothing is emailed, and `captured: false` says so.
+      ok: true
+      captured: false
+      reason: 'feature_disabled'
+      priceBookVersion: string
+      estimate: QuoteEstimatePayload | null
+      manualReview: boolean
+      reviewReasons: string[]
+    }
   | {
       ok: false
       captured: false
@@ -158,10 +166,42 @@ export type QuoteLeadCaptureResponse =
       error: 'validation_error' | 'pricing_expired' | 'rate_limited' | 'server_error'
       /** Our own field NAMES only — never submitted values. */
       fields?: string[]
-      /** Set for `pricing_expired`: the price book the server is quoting from,
-       *  so a stale client can detect it needs to reload. */
+      /** The price book the server is quoting from, so a stale client can tell
+       *  it needs to reload. Always set on `pricing_expired`; optional on the
+       *  others, which can be produced before the price book is consulted
+       *  (a rate limit, an unparseable body). */
       priceBookVersion?: string
     }
+
+/**
+ * The estimate block. ONE shape, whether capture is enabled or not — so the
+ * disabled path and the captured path can never describe the same quote two
+ * different ways.
+ */
+export type QuoteEstimatePayload = {
+  totalDollars: number
+  baseDollars: number
+  isStarting: boolean
+  packageLabel: string
+  truckSize: string
+  truckMinimum: string
+  truckUpgrade: number
+  truckCorrected: boolean
+  /** The truck the package price already covers, so the page can explain a $0
+   *  truck line instead of leaving it bare. */
+  includedTruck: string | null
+  /** 'pending' — the quick quote has ZIP codes only, so the routed-mile charge
+   *  is NOT inside totalDollars and no surface may present the figure as a
+   *  finished estimate. */
+  mileageStatus: 'pending' | 'calculated'
+  /** The price book that produced these numbers. */
+  priceBookVersion: string
+  /** SERVER-AUTHORITATIVE review state. The page must NOT decide "starting at"
+   *  from its own mirror's `price.kind`: a stale mirror would hedge, or fail to
+   *  hedge, according to a rule book we have since changed. */
+  requiresReview: boolean
+  reviewReasons: string[]
+}
 
 /**
  * The lead columns the side effects need. One read, three decisions.
@@ -448,23 +488,16 @@ export function defaultQuoteCaptureDeps(): QuoteCaptureDeps {
       })
     },
     async postLeadNoticeDirect(lead) {
-      const res = await notifyNewLead({
-        id: lead.id,
-        name: lead.name,
-        email: lead.email,
-        phone: lead.phone,
-        source: lead.source,
-        moveSize: lead.moveSize,
-        moveDate: lead.moveDate,
-        originZip: lead.originZip ?? lead.zip,
-        destinationZip: lead.destinationZip,
-        estimatedValue: lead.estimatedValue,
-        emailMarketingConsent: lead.emailMarketingConsent,
-        landingPage: lead.landingPage,
-        utmSource: lead.utmSource,
-        utmCampaign: lead.utmCampaign,
-        formStep: lead.formStep,
-      })
+      // ── THE FALLBACK NOTICE, WITH THE SNAPSHOT ────────────────────────
+      //  This hand-written mapping used to list fifteen fields and NONE of the
+      //  quote_* ones, so the queue-down notice printed a bare total with no
+      //  subtotal caption and no pending-transportation line — disagreeing
+      //  with the rich card for the same lead. It now goes through the one
+      //  shared mapper, which every test also uses, so a dropped field cannot
+      //  hide here again.
+      const res = await notifyNewLead(
+        toLeadAlertInput({ ...lead, originZip: lead.originZip ?? lead.zip }),
+      )
       return res.delivered
     },
     async recordAlertDelivered(leadId) {
