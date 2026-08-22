@@ -5,7 +5,7 @@ import { apiLogger } from '@/lib/logger'
 import { rateLimit, tooManyRequests, LIMITS, clientIp } from '@/lib/rate-limit'
 import { capturePartialLeadSafe } from '@/lib/leads'
 import { PRICE_BOOK_VERSION } from '@/lib/pricing-config'
-import { isRetiredPackage } from '@/lib/product-catalog'
+import { pricePartialLead } from '@/lib/partial-lead-pricing'
 
 // ════════════════════════════════════════════════════════════════════════
 //  POST /api/leads/partial — PUBLIC, cross-origin (called from the static
@@ -167,27 +167,39 @@ async function handle(req: NextRequest): Promise<NextResponse> {
   // Honeypot tripped → pretend success, drop silently.
   if (d.company && d.company.length > 0) return NextResponse.json({ ok: true, skipped: 'honeypot' })
 
-  // ── A RETIRED PACKAGE MAY NOT CARRY ITS RETIRED PRICE (fix 2026-08-22) ───
-  //  `estimateTotal` is the BROWSER's live figure. That is tolerable for the
-  //  booking form, whose estimate legitimately includes add-ons this route
-  //  never receives — and `mayWriteEstimate` already stops it undercutting a
-  //  quote we have emailed. What is NOT tolerable is persisting the price of a
-  //  package we withdrew: a cached bundle offering "Small Studio $379" would
-  //  otherwise store $379 on a brand-new lead, which is precisely what the
-  //  Discord card then displayed.
+  // ══════════════════════════════════════════════════════════════════════
+  //  THE BROWSER'S TOTAL IS NEVER STORED (blocker fix 2026-08-22)
   //
-  //  The lead is still captured — saving the contact is this route's entire
-  //  purpose and the visitor did nothing wrong. It simply carries NO estimate,
-  //  so the owner quotes it from the current book by hand.
-  const retiredSelection = isRetiredPackage((d.moveSize ?? '').trim().toLowerCase())
-  if (retiredSelection) {
+  //  This route used to write `estimateTotal` — a number the browser chose —
+  //  straight into Lead.estimatedValue. That column is read by the Discord
+  //  card, the customer email, the admin list, lifecycle automation and the
+  //  booking hand-over, so a forged or stale figure propagated into all of
+  //  them. Dropping it only for RETIRED keys (the first pass at this fix) was
+  //  not enough: an active key or an unrecognised one carried the browser
+  //  number through untouched.
+  //
+  //  The server now prices it, from the one canonical price book, or stores
+  //  NOTHING. `estimateTotal` survives in the schema purely as a DIAGNOSTIC —
+  //  it is compared and logged, never persisted.
+  //
+  //  WHAT THIS ROUTE CAN HONESTLY PRICE. It receives a package key and nothing
+  //  else — no truck, no stairs, no heavy items, no mileage. So the figure it
+  //  can vouch for is the PACKAGE SUBTOTAL, and it is marked authoritative
+  //  because the server computed it. Anything richer (add-ons, routed miles)
+  //  is settled later by /api/bookings, which has the full picture.
+  // ══════════════════════════════════════════════════════════════════════
+  const pricing = pricePartialLead({ moveSize: d.moveSize, estimateTotal: d.estimateTotal })
+
+  if (pricing.refusedSize) {
     apiLogger.warn(
-      { moveSize: d.moveSize, priceBookVersion: PRICE_BOOK_VERSION },
-      'POST /api/leads/partial — dropped the estimate for a retired package (stale client price book)'
+      { reason: pricing.refusedReason, priceBookVersion: PRICE_BOOK_VERSION },
+      'POST /api/leads/partial — refused the submitted move size; lead saved without a service or an estimate'
     )
   }
-  const estimateCents =
-    !retiredSelection && typeof d.estimateTotal === 'number' ? Math.round(d.estimateTotal * 100) : null
+  //  DIAGNOSTIC ONLY. Two numbers and a delta — never the payload, never stored.
+  if (pricing.mismatch) {
+    apiLogger.warn(pricing.mismatch, 'partial-lead estimate mismatch — server value used')
+  }
 
   const result = await capturePartialLeadSafe(
     {
@@ -212,12 +224,18 @@ async function handle(req: NextRequest): Promise<NextResponse> {
       landingPage: d.landingPage,
       referrer: d.referrer,
       promoCode: d.utmCampaign, // door-hanger/QR campaign code doubles as the promo code slot
-      estimatedValue: estimateCents,
+      estimatedValue: pricing.estimateCents,
+      //  Set because the SERVER computed the figure from the price book. It is
+      //  what stops the booking form's own browser number overwriting it later
+      //  (see leads.mayWriteEstimate).
+      estimateAuthoritative: pricing.estimateCents != null,
       moveDate: parseMoveDate(d.moveDate),
       pickupZip: d.pickupZip,
       destinationZip: d.destinationZip,
       serviceInterest: d.serviceInterest,
-      moveSize: d.moveSize,
+      //  A refused key is dropped rather than recorded, so no new lead can end
+      //  up with a withdrawn package as its official service.
+      moveSize: pricing.moveSizeToStore,
     },
     'partial-lead',
   )

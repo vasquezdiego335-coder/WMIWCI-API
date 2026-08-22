@@ -2116,6 +2116,32 @@ model Lead {
   /// A SHORT sanitized failure category — never a stack trace, never a provider
   /// payload, never anything carrying customer data.
   quoteConfirmationLastError   String?   @map("quote_confirmation_last_error")
+
+  // ── THE QUOTE SNAPSHOT (owner spec 2026-08-22) ────────────────────────
+  //  `estimatedValue` is ONE ambiguous number. It cannot say whether it is a
+  //  complete price or a package subtotal with the drive still unmeasured, and
+  //  it is a live CRM value that later writes may raise — so it can never be
+  //  the auditable record of what was quoted. These columns are that record:
+  //  every component the server computed, plus the price book that produced
+  //  them, written once at capture and never re-derived for display.
+  //
+  //  A quick quote has ZIP codes only, so it genuinely cannot price the routed
+  //  mileage. `quoteMileageStatus` says so out loud instead of letting a
+  //  subtotal masquerade as a finished estimate.
+  /// CENTS. The package price alone, before any truck line or mileage.
+  quoteBaseCents         Int?      @map("quote_base_cents")
+  /// CENTS. An APPROVED larger-truck upgrade. $0/absent for the truck the
+  /// package already includes — that one is never charged.
+  quoteTruckCents        Int?      @map("quote_truck_cents")
+  /// CENTS. base + truck. NOT a final price while mileage is pending.
+  quoteTotalCents        Int?      @map("quote_total_cents")
+  /// The truck the package price already covers ('10ft' | '15ft' | '26ft').
+  quoteIncludedTruck     String?   @map("quote_included_truck")
+  /// 'pending' — the drive is not measured yet and is billed at $3 per routed
+  /// mile; 'calculated' — a real routed figure is included in the total.
+  quoteMileageStatus     String?   @map("quote_mileage_status")
+  /// The price book that produced the numbers above, e.g. '2026-08-22'.
+  quotePriceBookVersion  String?   @map("quote_price_book_version")
   /// Send count. Also the `version` in the guard's idempotency key, so an owner
   /// resend is a NEW key rather than a refused duplicate.
   quoteConfirmationCount       Int       @default(0) @map("quote_confirmation_count")

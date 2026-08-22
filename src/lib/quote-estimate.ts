@@ -142,8 +142,16 @@ export function quoteEstimate(input: QuoteEstimateInput): QuoteEstimateResult {
     totalDollars,
     totalCents: Math.round(totalDollars * 100),
     isStarting: est.baseIsStarting,
-    includedTruck: null,
-    requiresReview: est.requiresReview,
+    /* The truck this package's price ALREADY covers. This was hardcoded to
+       null, so every surface downstream had to guess what the customer was
+       getting — and the quote could not explain why the truck line was $0. */
+    includedTruck: truck.included,
+    /* A larger truck than the package includes is an APPROVED upgrade, never
+       an automatic one — TRUCK_SIZE_UPGRADE.requiresReview says so. Asking for
+       one therefore sends the quote to review, so the charge cannot be settled
+       without an owner confirming the inventory actually needs the bigger
+       truck. A standard package with its included truck is unaffected. */
+    requiresReview: est.requiresReview || truck.upgradeAmount > 0,
     truckSize: truck.assigned,
     truckMinimum: truck.minimum,
     truckUpgrade: truck.upgradeAmount,

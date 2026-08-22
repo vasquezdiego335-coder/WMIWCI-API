@@ -29,7 +29,7 @@ import {
   SERVICE_TYPES, TRUCK_SIZES, LABOR_ONLY, LABOR_SERVICES, LABOR_SERVICE_KEYS,
   LABOR_ONLY_INCLUDES, LABOR_ONLY_EXCLUDES, LABOR_ONLY_EXAMPLES,
   TRANSPORTATION_MILEAGE, LEGACY_TRAVEL, SERVICE_AREA, ANALYTICS_IDS,
-  PRICED_PACKAGE_KEYS, LEGACY_PACKAGE_KEYS,
+  PRICED_PACKAGE_KEYS, LEGACY_PACKAGE_KEYS, PRICE_BOOK_VERSION,
   STAIRS, LONG_CARRY, ELEVATOR, ADDITIONAL_LOCATION, HEAVY_ITEM,
   NO_OVERSIZED_FURNITURE_FEE, NO_BUILDING_AGE_FEE, NO_MATTRESS_BAG_SKU,
   ADDITIONAL_ROOMS, WEEKEND_HOLIDAY, TRAVEL, NEW_YORK, PARKING_TOLLS_DELAYS,
@@ -59,6 +59,13 @@ export function buildPricingPayload(): Record<string, unknown> {
     (r) => r.a !== 'truckPickupReturnFee' && r.b !== 'truckPickupReturnFee',
   )
   return {
+    // ── PRICE BOOK VERSION ────────────────────────────────────────────────
+    //  The browser reads this and sends it back on every submission, so the
+    //  server can tell a CURRENT client from one running a cached copy, and so
+    //  a stored quote can always be traced to the rules that produced it.
+    //  Without it in the mirror, `window.WMIC_PRICING.PRICE_BOOK_VERSION` was
+    //  `undefined` and the round-trip proved nothing.
+    PRICE_BOOK_VERSION,
     PACKAGES, PACKAGE_INCLUDES, BOOKING_AUTHORIZATION,
     TRUCK_SIZE_UPGRADE,
     SERVICE_TYPES, TRUCK_SIZES, LABOR_ONLY, LABOR_SERVICES,

@@ -642,6 +642,25 @@ export type PartialLeadInput = {
    * undercutting a price we already emailed.
    */
   estimateAuthoritative?: boolean
+  /**
+   * The SERVER's structured quote, written once at capture.
+   *
+   * `estimatedValue` is a single number that later writes may raise, so it
+   * cannot say what was actually quoted or whether the drive was priced. This
+   * carries every component the server computed, so Discord, the email and the
+   * admin can each describe the quote honestly instead of re-deriving it —
+   * including saying "transportation pending" rather than presenting a package
+   * subtotal as a finished estimate.
+   */
+  quoteSnapshot?: {
+    baseCents: number
+    truckCents: number
+    totalCents: number
+    includedTruck: string | null
+    /** 'pending' until a routed mileage is actually measured. */
+    mileageStatus: 'pending' | 'calculated'
+    priceBookVersion: string
+  } | null
   // ── Move details (owner spec 2026-07-28) ──────────────────────────────
   // A quick-quote or homepage estimate carries real intent. Without these a
   // captured lead is a bare address, and the follow-up email cannot say
@@ -772,6 +791,27 @@ function partialConsentPatch(input: PartialLeadInput, now: Date): Record<string,
 /** Row to CREATE for a fresh partial lead. Pure. Status NEW keeps it an OPEN,
  *  dedup-able CRM row; `lifecycle` marks it as a partial-booking lead. On CREATE
  *  the consent columns are set explicitly (null when the box was never touched). */
+/**
+ * The quote-snapshot columns, or nothing at all.
+ *
+ * Returns an EMPTY object when there is no snapshot, so a capture that carries
+ * one (the quick quote) writes all six columns and a capture that does not (the
+ * booking form's step-1 ping) leaves every one of them alone. Spreading `{}` is
+ * what keeps a later partial save from blanking a snapshot already recorded.
+ */
+function quoteSnapshotColumns(input: PartialLeadInput): Record<string, unknown> {
+  const q = input.quoteSnapshot
+  if (!q) return {}
+  return {
+    quoteBaseCents: q.baseCents,
+    quoteTruckCents: q.truckCents,
+    quoteTotalCents: q.totalCents,
+    quoteIncludedTruck: q.includedTruck ?? null,
+    quoteMileageStatus: q.mileageStatus,
+    quotePriceBookVersion: q.priceBookVersion,
+  }
+}
+
 export function buildPartialLeadCreate(input: PartialLeadInput, now: Date) {
   const consented = typeof input.marketingConsent === 'boolean'
   return {
@@ -792,6 +832,7 @@ export function buildPartialLeadCreate(input: PartialLeadInput, now: Date) {
     originZip: clean(input.pickupZip) ?? undefined,
     destinationZip: clean(input.destinationZip) ?? undefined,
     moveSize: clean(input.moveSize) ?? undefined,
+    ...quoteSnapshotColumns(input),
     utmSource: clean(input.utmSource),
     utmMedium: clean(input.utmMedium),
     utmCampaign: clean(input.utmCampaign),
@@ -854,6 +895,9 @@ export function buildPartialLeadUpdate(
   const data: Record<string, unknown> = {
     lastActivityAt: now,
     lifecycle: nextLifecycle,
+    //  A repeat submission that carries a fresh server-computed quote replaces
+    //  the snapshot; one that carries none leaves the stored snapshot intact.
+    ...quoteSnapshotColumns(input),
     // Always keep the LATEST step + estimate (they move forward as the form fills).
     formStep: clean(input.formStep) ?? existing.formStep,
     bookingSessionId: existing.bookingSessionId ?? clean(input.bookingSessionId),

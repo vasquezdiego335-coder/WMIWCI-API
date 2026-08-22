@@ -26,6 +26,7 @@ import assert from 'node:assert/strict'
 import { readFileSync, existsSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { runInNewContext } from 'node:vm'
+import { spawnSync } from 'node:child_process'
 
 import {
   PACKAGES,
@@ -39,6 +40,8 @@ import {
 } from '../pricing-config'
 import { ACTIVE_PACKAGE_KEYS, isPackageActiveForNewIntake, isRetiredPackage } from '../product-catalog'
 import { quoteEstimate, compareClientTotal } from '../quote-estimate'
+import { pricePartialLead } from '../partial-lead-pricing'
+import { buildLeadCard } from '../booking-display'
 import { computeQuote } from '../booking-quote'
 import { formatLeadAlert } from '../lead-alert'
 
@@ -163,14 +166,61 @@ test('3b. the quote route stores the SERVER cents, never the submitted ones', ()
   )
 })
 
-test('3c. the partial-lead route refuses to bank a retired price', () => {
-  // /api/leads/partial legitimately accepts the booking form's richer browser
-  // figure (it includes add-ons this route never receives). What it must never
-  // do is persist the price of a package we withdrew.
-  const route = readFileSync(resolve(__dirname, '../../../app/api/leads/partial/route.ts'), 'utf8')
-  assert.match(route, /isRetiredPackage\(/, 'the retired-package guard must be present')
-  assert.match(route, /const estimateCents =\s*\n?\s*!retiredSelection/,
-    'a retired selection must null the estimate rather than store it')
+// ── /api/leads/partial, tested by BEHAVIOUR ───────────────────────────────
+//  These used to match the route's source with a regex, which proves the code
+//  was written, not that it does anything. The decision now lives in a pure
+//  module (partial-lead-pricing.ts) precisely so it can be run with real
+//  inputs — a Next route file may not export helpers, which is why it could
+//  not simply be exported from there.
+test('3c. the partial route stores the SERVER price, never the submitted one', () => {
+  const r = pricePartialLead({ moveSize: '2br', estimateTotal: 1 })
+  assert.equal(r.estimateCents, 77900, 'the stored figure is the server package subtotal')
+  assert.notEqual(r.estimateCents, 100, 'the browser $1 must not survive')
+  assert.deepEqual(r.mismatch, { serverDollars: 779, clientDollars: 1, deltaDollars: -778 })
+})
+
+test('3d. a retired key stores no price AND no service', () => {
+  for (const key of LEGACY_PACKAGE_KEYS) {
+    const r = pricePartialLead({ moveSize: key, estimateTotal: 379 })
+    assert.equal(r.estimateCents, null, `${key} must bank nothing`)
+    assert.equal(r.moveSizeToStore, undefined,
+      `${key} must not become the official service on a NEW lead`)
+    assert.equal(r.refusedSize, true)
+    assert.equal(r.refusedReason, 'retired_package')
+  }
+})
+
+test('3e. an unknown key is refused too — an active key is not', () => {
+  const bogus = pricePartialLead({ moveSize: 'penthouse', estimateTotal: 9999 })
+  assert.equal(bogus.estimateCents, null)
+  assert.equal(bogus.moveSizeToStore, undefined)
+  assert.equal(bogus.refusedReason, 'unknown_package')
+
+  // A real selection we simply do not auto-price is still worth recording.
+  const manual = pricePartialLead({ moveSize: '5br', estimateTotal: 5000 })
+  assert.equal(manual.estimateCents, null, '5BR is quoted by hand — no number')
+  assert.equal(manual.moveSizeToStore, '5br', 'but it IS a real thing the customer chose')
+  assert.equal(manual.refusedSize, false)
+})
+
+test('3f. a contact-only capture banks nothing and refuses nothing', () => {
+  const r = pricePartialLead({ estimateTotal: 12345 })
+  assert.equal(r.estimateCents, null, 'no package means no price, whatever the browser says')
+  assert.equal(r.moveSizeToStore, undefined)
+  assert.equal(r.refusedSize, false, 'typing an email is not an error')
+})
+
+test('3g. a forged $1 is discarded by BOTH capture paths', () => {
+  // quick quote (/api/leads/quote-capture) — via the shared estimator
+  const quick = quoteEstimate({ moveSize: '1br' })
+  assert.ok(quick.ok)
+  if (quick.ok) {
+    assert.equal(quick.totalCents, 55000)
+    assert.equal(compareClientTotal(quick.totalDollars, 1).matched, false)
+  }
+  // booking form (/api/leads/partial)
+  const partial = pricePartialLead({ moveSize: '1br', estimateTotal: 1 })
+  assert.equal(partial.estimateCents, 55000)
 })
 
 // ════════════════════════════════════════════════════════════════════════
@@ -466,4 +516,72 @@ test('REGRESSION: the 2026-08-22 lead cannot be produced again', { skip: skipSit
   )
   assert.equal(cheapestSellable, 550, 'the least a new full-service quote can start at')
   assert.ok(SUBMITTED.estimateTotal < cheapestSellable, 'the reported amount is below every sellable price')
+})
+
+// ════════════════════════════════════════════════════════════════════════
+//  14. THE OWNER'S CARD CALLS A SUBTOTAL A SUBTOTAL
+//      (blocker fix 2026-08-22 — a quick quote has ZIPs, not addresses, so
+//       the routed mileage is genuinely unknown at capture time.)
+// ════════════════════════════════════════════════════════════════════════
+test('14. the Discord card discloses that transportation is still pending', () => {
+  const card = buildLeadCard({
+    leadId: 'lead_1',
+    name: 'Sam Rivera',
+    estimateDollars: 779,
+    quoteBaseDollars: 779,
+    quoteTruckDollars: 0,
+    quoteIncludedTruck: '15ft',
+    quoteMileageStatus: 'pending',
+    moveSize: '2 Bedrooms',
+    adminUrl: 'https://example.com/admin',
+  } as never)
+  const text = JSON.stringify(card)
+  assert.match(text, /package subtotal/i, 'the figure must not be presented as a finished estimate')
+  assert.match(text, /Transportation pending/i)
+  assert.match(text, /\$3 per routed mile/i, 'at the published rate')
+  assert.match(text, /fuel included/i)
+  assert.match(text, /15ft truck included/i, 'and it must say which truck the price covers')
+})
+
+test('14b. a settled quote is NOT hedged — the disclosure is conditional', () => {
+  const card = buildLeadCard({
+    leadId: 'lead_2',
+    name: 'Sam Rivera',
+    estimateDollars: 900,
+    quoteMileageStatus: 'calculated',
+    adminUrl: 'https://example.com/admin',
+  } as never)
+  const text = JSON.stringify(card)
+  assert.ok(!/Transportation pending/i.test(text),
+    'a priced drive must not still claim to be pending')
+  assert.match(text, /\$900/)
+})
+
+// ════════════════════════════════════════════════════════════════════════
+//  15. THE PARITY GATE FAILS — IT DOES NOT SKIP — WHEN THE SITE IS MISSING
+// ════════════════════════════════════════════════════════════════════════
+test('15. an explicitly-pointed but missing SITE checkout FAILS the parity gate', () => {
+  // The gate used to resolve the sibling directory and skip silently when it
+  // was absent, so a release run could go green having verified nothing. A
+  // release now sets WMIWCI_SITE_DIR, and a wrong value must be fatal.
+  const missing = resolve(__dirname, '__no_such_site_checkout__')
+  //  NODE_TEST_CONTEXT must NOT be inherited. Node's test runner sets it, and a
+  //  child that sees it reports itself as a subtest of the parent instead of
+  //  exiting non-zero — so the child would "fail" while still returning 0, and
+  //  this test would pass for the wrong reason.
+  const childEnv = { ...process.env, WMIWCI_SITE_DIR: missing }
+  delete (childEnv as Record<string, string | undefined>).NODE_TEST_CONTEXT
+
+  const res = spawnSync(
+    process.execPath,
+    ['--import', 'tsx', '--test', resolve(__dirname, 'pricing-parity.test.ts')],
+    { encoding: 'utf8', env: childEnv },
+  )
+  const output = `${res.stdout ?? ''}${res.stderr ?? ''}`
+  assert.notEqual(
+    res.status,
+    0,
+    `a missing SITE checkout must FAIL the run, never skip it (exit ${res.status})\n${output.slice(-800)}`,
+  )
+  assert.match(output, /does not exist — parity cannot be proven/, 'and it must say why')
 })

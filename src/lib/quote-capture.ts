@@ -125,6 +125,15 @@ export type QuoteLeadCaptureResponse =
         truckMinimum: string
         truckUpgrade: number
         truckCorrected: boolean
+        /** The truck the package price already covers, so the page can explain
+         *  a $0 truck line instead of leaving it bare. */
+        includedTruck: string | null
+        /** 'pending' — the quick quote has ZIP codes only, so the routed-mile
+         *  charge is NOT inside totalDollars and no surface may present the
+         *  figure as a finished estimate. */
+        mileageStatus: 'pending' | 'calculated'
+        /** The price book that produced these numbers. */
+        priceBookVersion: string
       } | null
       /** True when this move is quoted by a human rather than automatically:
        *  5+ bedrooms, or the customer asked for an in-person visit. The lead
@@ -170,6 +179,16 @@ const CAPTURE_SELECT = {
   email: true,
   phone: true,
   estimatedValue: true,
+  // The structured quote snapshot — read back so the owner card and the
+  // customer email can DESCRIBE the quote (subtotal vs finished, which truck
+  // is included, whether the drive is still to be measured) instead of
+  // presenting one bare number as a complete price.
+  quoteBaseCents: true,
+  quoteTruckCents: true,
+  quoteTotalCents: true,
+  quoteIncludedTruck: true,
+  quoteMileageStatus: true,
+  quotePriceBookVersion: true,
   moveDate: true,
   moveSize: true,
   zip: true,
@@ -199,6 +218,18 @@ export type CaptureLead = {
   email: string | null
   phone: string | null
   estimatedValue: number | null
+  // ── The structured quote snapshot (owner spec 2026-08-22) ──────────────
+  //  Read back so the owner card and the customer email can DESCRIBE what was
+  //  quoted — subtotal vs finished, which truck is included, whether the drive
+  //  is still to be measured — rather than presenting one number as a price.
+  //  All nullable: a lead captured before the snapshot existed renders exactly
+  //  as it did before.
+  quoteBaseCents: number | null
+  quoteTruckCents: number | null
+  quoteTotalCents: number | null
+  quoteIncludedTruck: string | null
+  quoteMileageStatus: string | null
+  quotePriceBookVersion: string | null
   moveDate: Date | null
   moveSize: string | null
   zip: string | null
@@ -498,6 +529,12 @@ async function queueConfirmationEmail(
         // ABSENT, not empty — the template drops the whole paragraph when the
         // key is missing (owner rule: never display an empty value).
         ...(estimatedPrice ? { estimatedPrice } : {}),
+        // The drive is not priced yet, so the number above is a PACKAGE
+        // SUBTOTAL. Saying so is the difference between a customer who expects
+        // a mileage line on move day and one who feels overcharged by it.
+        ...(estimatedPrice && lead.quoteMileageStatus === 'pending'
+          ? { transportationPending: true }
+          : {}),
         ...(inPerson ? { inPerson: true } : {}),
         ...(lead.moveDate ? { moveDate: lead.moveDate.toISOString() } : {}),
         ...(packageLabelOf(lead.moveSize) ? { moveSize: packageLabelOf(lead.moveSize) } : {}),
@@ -571,6 +608,12 @@ async function queueInternalAlert(
     phone: lead.phone,
     email: lead.email,
     estimateDollars: typeof lead.estimatedValue === 'number' ? lead.estimatedValue / 100 : null,
+    // The snapshot, so the card can say "package subtotal · transportation
+    // pending" rather than printing a bold total the drive is not inside.
+    quoteMileageStatus: lead.quoteMileageStatus ?? null,
+    quoteBaseDollars: typeof lead.quoteBaseCents === 'number' ? lead.quoteBaseCents / 100 : null,
+    quoteTruckDollars: typeof lead.quoteTruckCents === 'number' ? lead.quoteTruckCents / 100 : null,
+    quoteIncludedTruck: lead.quoteIncludedTruck ?? null,
     moveDate: lead.moveDate,
     moveSize: packageLabelOf(lead.moveSize),
     pickup: routeLabel(lead.originCity, lead.originZip ?? lead.zip),

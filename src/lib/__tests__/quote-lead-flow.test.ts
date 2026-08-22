@@ -59,6 +59,14 @@ function captureLead(over: Partial<CaptureLead> = {}): CaptureLead {
     email: 'customer@example.com',
     phone: '5555550142',
     estimatedValue: 87900,
+    // The structured snapshot the quick quote now writes. Defaults describe a
+    // real capture: a package subtotal with the drive not yet measured.
+    quoteBaseCents: 77900,
+    quoteTruckCents: 0,
+    quoteTotalCents: 77900,
+    quoteIncludedTruck: '15ft',
+    quoteMileageStatus: 'pending',
+    quotePriceBookVersion: '2026-08-22',
     moveDate: new Date('2026-08-28T00:00:00.000Z'),
     moveSize: '2br',
     zip: null,
@@ -597,28 +605,31 @@ test('13d. CAPTURE_SELECT names only real Lead columns', () => {
 // ════════════════════════════════════════════════════════════════════════
 //  PRICING: the number the customer is told, in every place we tell them
 //  ---------------------------------------------------------------------
-//  Owner decision 2026-08-05: the published base is the site's number, the
-//  truck fee is added ON TOP, and the confirmation email prints the FULL
-//  price. The three numbers below are the owner's table, written out so a
-//  price-book edit that breaks the relationship fails here rather than in
-//  somebody's inbox.
+//  SUPERSEDED — owner ruling 2026-08-22. The previous rule here ("the truck
+//  fee is added ON TOP") is retired: the published package price INCLUDES the
+//  standard truck, so the included truck adds $0 and the total the customer is
+//  told IS the published price. A truck charge exists only for an explicitly
+//  requested, review-approved LARGER truck, which the quick quote does not
+//  offer. The table below is the owner's published price list, written out so
+//  a price-book edit that breaks it fails here rather than in somebody's inbox.
 // ════════════════════════════════════════════════════════════════════════
 
 const OWNER_PRICE_TABLE: Array<[key: string, base: number, fee: number, total: number]> = [
   ['1br', 550, 0, 550],
-  ['2br', 779, 100, 879],
-  ['3br', 1049, 150, 1199],
-  ['4br', 1449, 150, 1599],
+  ['2br', 779, 0, 779],
+  ['3br', 1049, 0, 1049],
+  ['4br', 1449, 0, 1449],
 ]
 
-test('pricing: base + truck fee = the total, for every auto-quoted package', () => {
+test('pricing: the total IS the published price — the included truck adds nothing', () => {
   for (const [key, base, fee, total] of OWNER_PRICE_TABLE) {
     const priced = quoteEstimate({ moveSize: key })
     assert.ok(priced.ok, `${key} must be auto-quotable`)
     assert.equal(priced.baseDollars, base, `${key} base must match the published site price`)
-    assert.equal(priced.truckUpgrade, fee, `${key} truck fee`)
-    assert.equal(priced.totalDollars, total, `${key} total must be base + fee`)
-    assert.equal(priced.baseDollars + priced.truckUpgrade, priced.totalDollars, `${key}: the fee must be ON TOP, never folded in`)
+    assert.equal(priced.truckUpgrade, fee, `${key}: no automatic truck charge`)
+    assert.equal(priced.totalDollars, total, `${key} total must equal the published price`)
+    assert.equal(priced.baseDollars + priced.truckUpgrade, priced.totalDollars, `${key}: the lines must still add up`)
+    assert.ok(priced.includedTruck, `${key}: the quote must name the truck the price covers`)
     assert.equal(priced.totalCents, total * 100, `${key} cents is what gets stored on the lead`)
   }
   // 5BR is quoted by a human — no number is produced, stored or emailed.
@@ -626,7 +637,7 @@ test('pricing: base + truck fee = the total, for every auto-quoted package', () 
   assert.equal(manual.ok, false)
 })
 
-test('pricing: the confirmation email prints the FULL price, not the base', async () => {
+test('pricing: the confirmation email prints the SERVER total, to the dollar', async () => {
   for (const [key, base, , total] of OWNER_PRICE_TABLE) {
     const priced = quoteEstimate({ moveSize: key })
     assert.ok(priced.ok)

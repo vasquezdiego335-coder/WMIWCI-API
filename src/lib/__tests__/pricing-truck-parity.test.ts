@@ -112,15 +112,24 @@ const cases: Array<[string, '10ft' | '15ft' | '26ft', number]> = [
   ['4br', '26ft', 150],
 ]
 
-test('each move size assigns its required minimum truck and fee', () => {
-  for (const [pkg, truck, fee] of cases) {
+// ── OWNER RULING 2026-08-22: THE INCLUDED TRUCK COSTS NOTHING ─────────────
+//  The published package prices INCLUDE the standard truck (1BR/10ft,
+//  2BR/15ft, 3BR-5BR/26ft). These tests used to assert the opposite — that a
+//  plain 2BR was charged $100 for the 15ft truck already inside its $779 — so
+//  they pinned the very defect they were meant to guard. `cases` above records
+//  each package's REQUIRED truck; the fee column is now what an upgrade to
+//  that size WOULD cost, and is asserted only on genuine upgrades below.
+test('each move size assigns its included truck and is charged NOTHING for it', () => {
+  for (const [pkg, truck] of cases) {
     const a = assignTruck(pkg)
     assert.equal(a.ok, true, `${pkg} must assign`)
     if (!a.ok) continue
-    assert.equal(a.assigned, truck, `${pkg} minimum truck`)
+    assert.equal(a.assigned, truck, `${pkg} required truck`)
     assert.equal(a.minimum, truck)
-    assert.equal(a.upgradeAmount, fee, `${pkg} truck fee`)
+    assert.equal(a.included, truck, `${pkg}: the required truck IS the included truck`)
+    assert.equal(a.upgradeAmount, 0, `${pkg}: the included truck must add $0`)
     assert.equal(a.corrected, false)
+    assert.equal(a.upgraded, false, 'no upgrade was requested, so none may be recorded')
   }
 })
 
@@ -140,30 +149,36 @@ test('"not sure" is also a manual plan', () => {
 //  4. THE CUSTOMER CANNOT DOWNGRADE TO DODGE THE FEE
 // ══════════════════════════════════════════════════════════════════════
 
-test('a 3BR asking for a 10ft truck is CORRECTED to 26ft and still charged $150', () => {
+//  Downgrading is still refused — the customer is CORRECTED back up to the
+//  truck the job needs. What they are not is BILLED for it: being corrected to
+//  the truck the package already includes is not an upgrade, so it costs $0.
+//  The dodge these guard against is getting a smaller/cheaper JOB, not a
+//  cheaper truck line.
+test('a 3BR asking for a 10ft truck is CORRECTED to 26ft, at no extra charge', () => {
   const a = assignTruck('3br', '10ft')
   assert.equal(a.ok, true)
   if (!a.ok) return
-  assert.equal(a.assigned, '26ft')
-  assert.equal(a.upgradeAmount, 150)
+  assert.equal(a.assigned, '26ft', 'the job still gets the truck it needs')
+  assert.equal(a.upgradeAmount, 0, 'the 26ft is already inside the 3BR price')
   assert.equal(a.corrected, true, 'the UI must be able to say the size was raised')
+  assert.equal(a.upgraded, false, 'a correction is not an upgrade')
 })
 
-test('a 4BR asking for a 15ft truck is corrected to 26ft at $150', () => {
+test('a 4BR asking for a 15ft truck is corrected to 26ft, at no extra charge', () => {
   const a = assignTruck('4br', '15ft')
   assert.equal(a.ok, true)
   if (!a.ok) return
   assert.equal(a.assigned, '26ft')
-  assert.equal(a.upgradeAmount, 150)
+  assert.equal(a.upgradeAmount, 0)
   assert.equal(a.corrected, true)
 })
 
-test('a 2BR claiming a 10ft truck still pays the $100 15ft fee', () => {
+test('a 2BR claiming a 10ft truck still gets the 15ft, and still pays $0 for it', () => {
   const a = assignTruck('2br', '10ft')
   assert.equal(a.ok, true)
   if (!a.ok) return
-  assert.equal(a.assigned, '15ft')
-  assert.equal(a.upgradeAmount, 100, 'claiming a smaller truck must not zero the fee')
+  assert.equal(a.assigned, '15ft', 'claiming a smaller truck must not shrink the truck')
+  assert.equal(a.upgradeAmount, 0, 'nor may it invent a charge for the included one')
 })
 
 // ══════════════════════════════════════════════════════════════════════
@@ -197,12 +212,14 @@ test('a retired truck request is REJECTED, never swapped for another size', () =
 //  6. THE SERVER TOTAL IS AUTHORITATIVE
 // ══════════════════════════════════════════════════════════════════════
 
-test('quoteEstimate totals = published base + required truck', () => {
+test('quoteEstimate totals ARE the published prices — no truck surcharge', () => {
+  // These are the owner's published numbers, exactly. Any drift here means a
+  // customer is being quoted something other than what the site advertises.
   const expect: Array<[string, number]> = [
-    ['1br', 550 + 0],
-    ['2br', 779 + 100],
-    ['3br', 1049 + 150],
-    ['4br', 1449 + 150],
+    ['1br', 550],
+    ['2br', 779],
+    ['3br', 1049],
+    ['4br', 1449],
   ]
   for (const [key, total] of expect) {
     const q = quoteEstimate({ moveSize: key })
@@ -210,6 +227,7 @@ test('quoteEstimate totals = published base + required truck', () => {
     if (!q.ok) continue
     assert.equal(q.totalDollars, total, `${key} total`)
     assert.equal(q.totalCents, total * 100)
+    assert.equal(q.truckUpgrade, 0, `${key}: the included truck must never be charged`)
   }
 })
 
@@ -218,20 +236,38 @@ test('the breakdown separates the base package from the truck line', () => {
   assert.equal(q.ok, true)
   if (!q.ok) return
   assert.equal(q.baseDollars, 779, 'base package')
-  assert.equal(q.truckUpgrade, 100, 'required truck upgrade')
+  assert.equal(q.truckUpgrade, 0, 'the 15ft is included in the 2BR price')
+  assert.equal(q.includedTruck, '15ft', 'and the quote must SAY which truck that is')
   assert.equal(q.baseDollars + q.truckUpgrade, q.totalDollars,
     'routed mileage is calculated separately and is NOT folded into either line')
 })
 
 test('a manipulated browser truck cannot lower the server total', () => {
-  // "3 bedroom, but I picked the 10ft truck so I owe no upgrade"
+  // "3 bedroom, but I picked the 10ft truck so I get a smaller job"
   const q = quoteEstimate({ moveSize: '3br', truckSize: '10ft' })
   assert.equal(q.ok, true)
   if (!q.ok) return
-  assert.equal(q.truckSize, '26ft')
-  assert.equal(q.truckUpgrade, 150)
-  assert.equal(q.totalDollars, 1049 + 150)
+  assert.equal(q.truckSize, '26ft', 'the server assigns the truck the job needs')
+  assert.equal(q.truckUpgrade, 0)
+  assert.equal(q.totalDollars, 1049, 'and the published price is unchanged')
   assert.equal(q.truckCorrected, true)
+})
+
+test('an EXPLICIT upgrade is charged once, and sends the quote to review', () => {
+  // The only path that may ever add a truck charge.
+  const up = quoteEstimate({ moveSize: '2br', truckSize: '26ft' })
+  assert.equal(up.ok, true)
+  if (!up.ok) return
+  assert.equal(up.truckUpgrade, 150, 'the 26ft upgrade fee, charged once')
+  assert.equal(up.totalDollars, 779 + 150)
+  assert.equal(up.requiresReview, true,
+    'a larger truck is an APPROVED upgrade — it may not settle automatically')
+
+  const same = quoteEstimate({ moveSize: '2br', truckSize: '15ft' })
+  assert.equal(same.ok, true)
+  if (!same.ok) return
+  assert.equal(same.truckUpgrade, 0, 'asking for the truck you already have is not an upgrade')
+  assert.equal(same.requiresReview, false)
 })
 
 test('5BR through quoteEstimate is a manual plan, not a silent price', () => {
@@ -322,21 +358,31 @@ test('the mirror is GENERATED — a hand edit is what let the two drift', skipSi
 // ══════════════════════════════════════════════════════════════════════
 
 /** What a step-1 card shows, computed the way the page computes it. */
+/** What the step-1 card actually shows. booking-form.html renders
+ *  `PRICING.formatCharge(pkg.price)` — the BASE — and states the included
+ *  truck in its own badge. This used to return base + the required truck's
+ *  fee, a number no page has ever displayed. */
 function cardTotal(pkgKey: string): number {
   const pkg = (PACKAGES as Record<string, { price: { amount: number } }>)[pkgKey]
   assert.ok(pkg, `${pkgKey} missing from the price book`)
   const truck = (MIN_TRUCK_BY_PACKAGE as Record<string, string>)[pkgKey]
   assert.ok(truck, `${pkgKey} has no required truck`)
-  const fee = (TRUCK_SIZE_UPGRADE.amountByTruck as Record<string, number>)[truck]
-  assert.equal(typeof fee, 'number', `no fee recorded for ${truck}`)
-  return pkg.price.amount + fee
+  return pkg.price.amount
 }
 
+// ── THE PUBLISHED CARD PRICES (owner ruling 2026-08-22) ───────────────────
+//  These are what booking-form.html actually renders — it prints
+//  formatCharge(pkg.price), i.e. the BASE, and shows the included truck as a
+//  separate "15 ft truck included" badge. This fixture previously read
+//  { 2br: 879, 3br: 1199, 4br: 1599 } — base PLUS the required truck — which
+//  never matched any page: cardTotal() computes from the price book rather
+//  than reading the HTML, so the fixture and the site drifted apart unnoticed
+//  while the SERVER quietly charged the surcharge.
 const APPROVED_CARD_PRICES: Record<string, number> = {
   '1br': 550,
-  '2br': 879,
-  '3br': 1199,
-  '4br': 1599,
+  '2br': 779,
+  '3br': 1049,
+  '4br': 1449,
 }
 
 test('every priced card shows the approved starting amount', () => {
@@ -345,16 +391,18 @@ test('every priced card shows the approved starting amount', () => {
   }
 })
 
-test('the card amount INCLUDES the required truck adjustment', () => {
+test('the card amount adds NO truck surcharge — the truck is included', () => {
   for (const key of Object.keys(APPROVED_CARD_PRICES)) {
     const base = (PACKAGES as Record<string, { price: { amount: number } }>)[key].price.amount
-    const truck = (MIN_TRUCK_BY_PACKAGE as Record<string, string>)[key]
-    const fee = (TRUCK_SIZE_UPGRADE.amountByTruck as Record<string, number>)[truck]
-    assert.equal(cardTotal(key) - base, fee, `${key}: the card must add the ${truck} fee, not the base alone`)
+    assert.equal(cardTotal(key) - base, 0, `${key}: the card is the base price; the truck is included in it`)
   }
-  // The one that would hide a bug: 2br's fee is non-zero, so a card showing
-  // the base price would be $100 light and nobody would notice from 1br.
-  assert.equal(cardTotal('2br') - (PACKAGES as any)['2br'].price.amount, 100)
+  // The one that would hide the regression: 2BR's truck has a non-zero UPGRADE
+  // fee ($100), so if the surcharge ever creeps back it shows up here first.
+  const twoBr = (TRUCK_SIZE_UPGRADE.amountByTruck as Record<string, number>)[
+    (MIN_TRUCK_BY_PACKAGE as Record<string, string>)['2br']
+  ]
+  assert.equal(twoBr, 100, 'the 15ft upgrade fee still exists — it is simply not applied automatically')
+  assert.equal(cardTotal('2br'), 779, 'and the 2BR card stays the published $779')
 })
 
 test('5+ bedrooms has no card price to show', () => {
@@ -385,10 +433,15 @@ test('the browser mirror can produce those same card amounts', skipSite, () => {
   // The page derives from the MIRROR, not from this file. If the mirror
   // drifts, the cards advertise something the server will not honour.
   const m = loadMirror()
-  const pkgs = m.PACKAGES as Record<string, { price: { amount: number } }>
-  const fees = (m.TRUCK_SIZE_UPGRADE as { amountByTruck: Record<string, number> }).amountByTruck
-  const MIN: Record<string, string> = { '1br': '10ft', '2br': '15ft', '3br': '26ft', '4br': '26ft' }
+  const pkgs = m.PACKAGES as Record<string, { price: { amount: number; kind: string } }>
+  const INCLUDED: Record<string, string> = { '1br': '10ft', '2br': '15ft', '3br': '26ft', '4br': '26ft' }
   for (const [key, expected] of Object.entries(APPROVED_CARD_PRICES)) {
-    assert.equal(pkgs[key].price.amount + fees[MIN[key]], expected, `${key} in the browser mirror`)
+    // The card is formatCharge(pkg.price) — the base. No fee is added, which is
+    // exactly what booking-form.html renders.
+    assert.equal(pkgs[key].price.amount, expected, `${key} in the browser mirror`)
+    // And the mirror must be able to NAME the truck that price covers, or the
+    // "15 ft truck included" badge silently disappears.
+    assert.equal((pkgs[key] as { includedTruck?: string }).includedTruck, INCLUDED[key],
+      `${key}: the mirror must carry the included truck`)
   }
 })

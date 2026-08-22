@@ -48,6 +48,15 @@ interface Props {
    *  whole subject and body change, rather than the estimate paragraph being
    *  quietly dropped from an email that still says "here is your estimate". */
   inPerson?: boolean
+  /** TRUE when the routed mileage has not been calculated yet — which is
+   *  always the case for a quick quote, because it collects ZIP codes and a
+   *  per-routed-mile charge needs real addresses.
+   *
+   *  When set, the amount is labelled a PACKAGE SUBTOTAL rather than an
+   *  estimate, and the transportation line is stated outright. Calling a
+   *  subtotal an estimate is how a customer comes to believe the drive is
+   *  already inside the number. */
+  transportationPending?: boolean
   /** Echoed back so the customer can see what we based the number on. */
   moveDate?: string
   moveSize?: string
@@ -72,6 +81,7 @@ export default function QuoteRequestReceivedEmail({
   firstName = 'there',
   estimatedPrice,
   inPerson = false,
+  transportationPending = false,
   moveDate,
   moveSize,
   businessPhone = '862-640-0625',
@@ -109,8 +119,10 @@ export default function QuoteRequestReceivedEmail({
         thanks: inPerson
           ? 'Su solicitud de estimado en persona ha sido recibida. Nuestro equipo local se comunicará con usted para coordinar una hora conveniente.'
           : 'Gracias por solicitar un estimado a Move It Clear It.',
-        estimate: `Según la información que nos dio, su estimado preliminar es de aproximadamente ${estimatedPrice}.`,
-        estimateLabel: 'Su estimado preliminar',
+        estimate: transportationPending
+          ? `Según la información que nos dio, el subtotal de su paquete es de aproximadamente ${estimatedPrice}. Transporte pendiente — se cobra a $3 por milla de ruta, combustible incluido.`
+          : `Según la información que nos dio, su estimado preliminar es de aproximadamente ${estimatedPrice}.`,
+        estimateLabel: transportationPending ? 'Subtotal del paquete' : 'Su estimado preliminar',
         speak: 'Con gusto hablamos con usted para confirmar los detalles de la mudanza y darle su precio final.',
         reply: `Puede responder a este correo con la mejor hora para llamarle, o llamarnos o enviarnos un mensaje directamente al ${businessPhone}.`,
         detailsTitle: 'Lo que nos dio',
@@ -141,8 +153,10 @@ export default function QuoteRequestReceivedEmail({
         thanks: inPerson
           ? 'Your in-person estimate request has been received. Our local team will contact you to arrange a convenient time.'
           : 'Thank you for requesting an estimate from Move It Clear It.',
-        estimate: `Based on the information you provided, your preliminary estimate is approximately ${estimatedPrice}.`,
-        estimateLabel: 'Your preliminary estimate',
+        estimate: transportationPending
+          ? `Based on the information you provided, your package subtotal is approximately ${estimatedPrice}. Transportation pending — billed at $3 per routed mile, fuel included.`
+          : `Based on the information you provided, your preliminary estimate is approximately ${estimatedPrice}.`,
+        estimateLabel: transportationPending ? 'Package subtotal' : 'Your preliminary estimate',
         speak: 'We would be happy to speak with you to confirm the move details and provide your final price.',
         reply: `You can reply to this email with the best time to call, or call or text us directly at ${businessPhone}.`,
         detailsTitle: 'What you told us',

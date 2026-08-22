@@ -146,6 +146,11 @@ const QuoteLeadSchema = z.object({
    * stored, never emailed, never shown to the owner. See lib/quote-estimate.ts.
    */
   estimateTotal: z.number().nonnegative().max(1_000_000).optional(),
+  /* The price book the BROWSER is running, echoed from the generated mirror.
+     Diagnostic only — it can never influence a price. It exists so a stale
+     client is visible in the logs as a version mismatch rather than being
+     inferred from a wrong total after the fact. */
+  priceBookVersion: str(40),
 
   // ── Identity / consent ──
   bookingSessionId: str(80),
@@ -266,6 +271,18 @@ async function handle(req: NextRequest): Promise<NextResponse> {
   //  Answering 422 validation_error blames them; answering with the retired
   //  price (which is what happened on 2026-08-22) is far worse. Say the
   //  selection expired, name the current price book, write NOTHING.
+  // ── STALE CLIENT, VISIBLE BEFORE IT MISPRICES ANYTHING ─────────────────
+  //  A version mismatch means somebody is running a cached price book. That is
+  //  worth knowing on EVERY request, not only the ones that happen to name a
+  //  withdrawn package — a client can be stale and still pick a key that is
+  //  coincidentally still active, which is silent by nature.
+  if (d.priceBookVersion && d.priceBookVersion !== PRICE_BOOK_VERSION) {
+    apiLogger.warn(
+      { clientPriceBookVersion: d.priceBookVersion, serverPriceBookVersion: PRICE_BOOK_VERSION },
+      'POST /api/leads/quote-capture — client is running a stale price book'
+    )
+  }
+
   if (!priced.ok && priced.reason === 'retired_package') {
     apiLogger.warn(
       { packageKey: priced.packageKey ?? '(unrecognised)', priceBookVersion: PRICE_BOOK_VERSION },
@@ -355,6 +372,25 @@ async function handle(req: NextRequest): Promise<NextResponse> {
       // cannot later overwrite the number we are about to email. See
       // leads.mayWriteEstimate.
       estimateAuthoritative: true,
+      // ── THE STRUCTURED RECORD (owner spec 2026-08-22) ──────────────────
+      //  One number cannot say whether it is a finished price or a package
+      //  subtotal with the drive still unmeasured. This writes the components
+      //  the server actually computed, so every downstream surface can be
+      //  honest about what is and is not included.
+      //
+      //  mileageStatus is ALWAYS 'pending' here: the quick quote collects ZIP
+      //  codes only, and a routed-mile charge needs real addresses. It is
+      //  settled later, when the booking supplies them.
+      quoteSnapshot: priced.ok
+        ? {
+            baseCents: Math.round(priced.baseDollars * 100),
+            truckCents: Math.round(priced.truckUpgrade * 100),
+            totalCents: priced.totalCents,
+            includedTruck: priced.includedTruck,
+            mileageStatus: 'pending' as const,
+            priceBookVersion: priced.priceBookVersion,
+          }
+        : null,
     },
     'quote-lead',
     undefined,
@@ -413,6 +449,13 @@ async function handle(req: NextRequest): Promise<NextResponse> {
           truckMinimum: priced.truckMinimum,
           truckUpgrade: priced.truckUpgrade,
           truckCorrected: priced.truckCorrected,
+          /* The truck the package price already covers, so the page can say
+             "15 ft truck included" instead of leaving a $0 line unexplained. */
+          includedTruck: priced.includedTruck,
+          /* A quick quote has ZIP codes only, so the routed mileage is NOT in
+             this figure and the page must not present it as a finished price. */
+          mileageStatus: 'pending' as const,
+          priceBookVersion: priced.priceBookVersion,
         }
       : null,
     /** True when this move is quoted by a human rather than automatically:

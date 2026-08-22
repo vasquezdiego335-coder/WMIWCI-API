@@ -304,7 +304,12 @@ export type TruckAssignment =
       assigned: SelectableTruckSize
       /** The minimum this package requires, for honest UI copy. */
       minimum: SelectableTruckSize
-      /** DOLLARS. The assigned size's fee. REPLACES, never stacks. */
+      /** The truck the package's published price ALREADY includes. Charging
+       *  for this one is the bug fixed on 2026-08-22 — it costs $0. */
+      included: SelectableTruckSize
+      /** DOLLARS. $0 unless the customer explicitly asked for a LARGER truck
+       *  than the package includes, in which case it is the difference.
+       *  REPLACES, never stacks, and is never applied automatically. */
       upgradeAmount: number
       /** True when the customer asked for something below the minimum and we
        *  corrected it upward. The UI should say so rather than silently differ. */
@@ -349,22 +354,28 @@ export function assignTruck(packageKey?: string | null, requested?: string | nul
     }
   }
 
-  // The assigned size's own fee — a REPLACEMENT, so upgrading 10ft -> 26ft is
-  // $150 and never the sum of the intermediate steps.
+  // ── THE INCLUDED TRUCK IS INCLUDED (owner ruling 2026-08-22) ────────────
+  //  This was the assigned size's ABSOLUTE fee, so the truck a package already
+  //  ships with was charged on top of a price that already contains it: a
+  //  plain 2BR came out at $779 + $100 = $879, a 3BR at $1,049 + $150 =
+  //  $1,199, a 4BR at $1,449 + $150 = $1,599. Nobody had chosen an upgrade.
   //
-  // ⚠ UNRESOLVED (raised 2026-08-22, needs an owner decision — do not "fix"
-  //   this without one). This fee is ABSOLUTE, so the minimum truck a package
-  //   requires is charged even though PACKAGES[key].includedTruck says that
-  //   same truck is included in the flat price: a plain 2BR prices at
-  //   $779 + $100 = $879. That figure is deliberate and approved — it is what
-  //   booking-form.html prints and what APPROVED_CARD_PRICES in
-  //   pricing-truck-parity.test.ts pins ($879 / $1,199 / $1,599). But it reads
-  //   as a contradiction against `includedTruck`, and against a published base
-  //   price of $779. Either the base prices or the card prices are the real
-  //   published numbers; changing this line moves revenue on every 2BR+ job,
-  //   so it stays as approved until the owner says which.
-  const upgradeAmount = truckUpgradeAmount(assigned) ?? 0
-  return { ok: true, assigned, minimum, upgradeAmount, corrected, upgraded }
+  //  The published prices INCLUDE the standard truck (1BR/10ft, 2BR/15ft,
+  //  3BR-5BR/26ft), so the included truck must add $0 and no upgrade may ever
+  //  be applied automatically. A charge appears only when the customer
+  //  EXPLICITLY asks for a larger truck than the package includes, and it is
+  //  the difference — still a REPLACEMENT, never a sum of the steps.
+  //
+  //  `corrected` is the anti-dodge path (someone asked for a truck SMALLER
+  //  than the package needs). That is a correction back to what is included,
+  //  not an upgrade, so it costs nothing.
+  //  The fee for a genuine upgrade is the TARGET SIZE'S published fee
+  //  (15ft +$100, 26ft +$150) — charged ONCE. It is a replacement, not a sum
+  //  of the steps, so 10ft -> 26ft is $150 and never $100 + $150.
+  const included = includedTruckForPackage(key) ?? minimum
+  const explicitlyUpgraded = rank(assigned) > rank(included) && !corrected
+  const upgradeAmount = explicitlyUpgraded ? truckUpgradeAmount(assigned) ?? 0 : 0
+  return { ok: true, assigned, minimum, included, upgradeAmount, corrected, upgraded: explicitlyUpgraded }
 }
 
 /** The truck sizes a NEW booking may choose. 20ft is retired and excluded. */

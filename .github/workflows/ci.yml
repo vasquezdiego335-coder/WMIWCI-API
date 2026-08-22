@@ -1,0 +1,188 @@
+# ════════════════════════════════════════════════════════════════════════
+#  CI — and, specifically, CROSS-REPOSITORY PRICING PARITY.
+#
+#  WHY THIS FILE EXISTS. The price book lives in this repo
+#  (src/lib/pricing-config.ts) and is generated into the SITE repo as
+#  public/js/pricing-config.js. The parity tests compare the two. They used to
+#  resolve the site from a hard-wired sibling directory and SKIP silently when
+#  it was absent — so on any machine without that directory (every CI runner,
+#  had there been one) the suite went green having verified nothing. That is
+#  how a mirror missing its `legacy` flags reached production and offered a
+#  retired "Small Studio $379" to customers.
+#
+#  So: the site is checked out HERE, its path is handed to the tests through
+#  WMIWCI_SITE_DIR, and the tests THROW rather than skip when that path is set
+#  and wrong. Parity is verified or the run fails. There is no third outcome.
+#
+#  ── CREDENTIAL REQUIRED ────────────────────────────────────────────────
+#  WMIWCI-SITE is a PRIVATE repository and WMIWCI-API is PUBLIC, so the
+#  default GITHUB_TOKEN cannot read it. Add a repository secret:
+#
+#      SITE_REPO_TOKEN — a fine-grained PAT with Contents: read on
+#                        vasquezdiego335-coder/WMIWCI-SITE
+#
+#  Without it the parity job FAILS with a named error rather than skipping —
+#  an unverifiable release must never look like a passing one. Note this repo
+#  is public, so workflow logs are public: the token is never echoed, and only
+#  branch names appear in output.
+# ════════════════════════════════════════════════════════════════════════
+name: CI
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      site_ref:
+        description: 'WMIWCI-SITE ref to verify against (defaults to the matching branch, then master)'
+        required: false
+        type: string
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Prisma only needs a syntactically valid URL to validate + generate. No
+  # database is contacted anywhere in this workflow.
+  DATABASE_URL: postgresql://ci:ci@127.0.0.1:5432/ci?schema=public
+
+jobs:
+  verify:
+    name: typecheck · lint · tests · build
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Check out WMIWCI-API
+        uses: actions/checkout@v4
+        with:
+          path: api
+
+      # ── THE MATCHING SITE BRANCH ────────────────────────────────────────
+      #  Resolution order, most specific first:
+      #    1. the workflow_dispatch input, when given
+      #    2. a SITE branch with the SAME NAME as this one — so a paired change
+      #       (price book here, regenerated mirror there) is verified together
+      #    3. master
+      #  Whatever is chosen is PRINTED, so a green run always says which mirror
+      #  it proved. A release must never have to guess.
+      - name: Resolve the SITE ref
+        id: siteref
+        env:
+          GH_TOKEN: ${{ secrets.SITE_REPO_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "::error::SITE_REPO_TOKEN is not set. WMIWCI-SITE is private, so pricing parity cannot be verified. Add a fine-grained PAT with Contents: read on WMIWCI-SITE. Refusing to pass a run that proves nothing."
+            exit 1
+          fi
+          BRANCH="${{ github.head_ref || github.ref_name }}"
+          WANTED="${{ inputs.site_ref }}"
+          if [ -z "$WANTED" ]; then
+            if git ls-remote --exit-code --heads \
+                 "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository_owner }}/WMIWCI-SITE.git" \
+                 "$BRANCH" >/dev/null 2>&1; then
+              WANTED="$BRANCH"
+            else
+              WANTED="master"
+            fi
+          fi
+          echo "ref=$WANTED" >> "$GITHUB_OUTPUT"
+          echo "Verifying pricing parity against WMIWCI-SITE@$WANTED"
+
+      - name: Check out WMIWCI-SITE
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/WMIWCI-SITE
+          ref: ${{ steps.siteref.outputs.ref }}
+          token: ${{ secrets.SITE_REPO_TOKEN }}
+          path: site
+
+      # A checkout that "succeeded" but produced no mirror would let the tests
+      # fall back to skipping. Prove the file is there before trusting the run.
+      - name: Confirm the mirror is present
+        run: |
+          set -euo pipefail
+          test -f site/public/js/pricing-config.js \
+            || { echo "::error::WMIWCI-SITE@${{ steps.siteref.outputs.ref }} has no public/js/pricing-config.js — pricing parity cannot be proven."; exit 1; }
+          test -f site/public/quote.html \
+            || { echo "::error::WMIWCI-SITE@${{ steps.siteref.outputs.ref }} has no public/quote.html — the browser regression tests cannot run."; exit 1; }
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: api/package-lock.json
+
+      - name: Install
+        working-directory: api
+        run: npm ci
+
+      - name: Prisma validate + generate
+        working-directory: api
+        run: |
+          npx prisma validate
+          npx prisma generate
+
+      # ── MIGRATIONS ARE CHECKED, NOT APPLIED ─────────────────────────────
+      #  No database is reachable here by design. What CI can prove is that
+      #  every migration is present and the schema is coherent; applying them
+      #  is a deploy step with its own review.
+      - name: Migration files are readable and named consistently
+        working-directory: api
+        run: |
+          set -euo pipefail
+          for d in prisma/migrations/*/; do
+            [ "$d" = "prisma/migrations/*/" ] && continue
+            test -f "$d/migration.sql" || { echo "::error::$d has no migration.sql"; exit 1; }
+            base=$(basename "$d")
+            echo "$base" | grep -Eq '^[0-9]{14}_[a-z0-9_]+$' \
+              || { echo "::error::migration $base does not match <14-digit timestamp>_<snake_case>"; exit 1; }
+          done
+
+      - name: Typecheck
+        working-directory: api
+        run: npx tsc --noEmit
+
+      - name: Lint
+        working-directory: api
+        run: npm run lint
+
+      # THE PARITY GATE. WMIWCI_SITE_DIR is absolute and points at the checkout
+      # above; the tests throw if it is set and wrong, so this step cannot pass
+      # by skipping.
+      - name: Pricing parity (cross-repository)
+        working-directory: api
+        env:
+          WMIWCI_SITE_DIR: ${{ github.workspace }}/site
+        run: npm run test:parity
+
+      - name: Full test suite
+        working-directory: api
+        env:
+          WMIWCI_SITE_DIR: ${{ github.workspace }}/site
+        run: npm test
+
+      - name: Production build
+        working-directory: api
+        run: npm run build
+
+      # A last look at what would actually ship. Admin surfaces legitimately
+      # render historical labels, so they are allowlisted BY PATH and the
+      # reason is stated; anything else carrying a retired label is a defect.
+      - name: No retired package reaches a customer-facing bundle
+        working-directory: api
+        run: |
+          set -euo pipefail
+          hits=$(grep -rl "Small Studio\|Standard Studio\|Large Studio" .next 2>/dev/null \
+                 | grep -v "/.next/cache/" \
+                 | grep -v "(admin)" \
+                 | grep -v "/chunks/" || true)
+          if [ -n "$hits" ]; then
+            echo "::error::a retired package label reached a customer-facing bundle:"
+            echo "$hits"
+            exit 1
+          fi
+          echo "No retired package labels outside admin/historical bundles."

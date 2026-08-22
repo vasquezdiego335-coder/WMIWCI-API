@@ -1125,6 +1125,17 @@ export type LeadCardData = {
   email?: string | null
   /** DOLLARS. Null when no estimate could be produced — never rendered as $0. */
   estimateDollars?: number | null
+  // ── The stored quote snapshot, so the card DESCRIBES what was quoted rather
+  //    than re-deriving it. All optional: a lead captured before the snapshot
+  //    existed simply renders the plain total, exactly as it used to. ──
+  /** 'pending' → the routed mileage is not priced yet and must be disclosed. */
+  quoteMileageStatus?: string | null
+  /** DOLLARS. The package price alone. */
+  quoteBaseDollars?: number | null
+  /** DOLLARS. An APPROVED larger-truck upgrade; 0/absent when none. */
+  quoteTruckDollars?: number | null
+  /** The truck the package price already covers, e.g. '15ft'. */
+  quoteIncludedTruck?: string | null
   moveDate?: Date | string | null
   moveSize?: string | null
   pickup?: string | null
@@ -1250,11 +1261,29 @@ export function buildLeadCard(data: LeadCardData): { embeds: EmbedJson[]; compon
   // even if one somehow reached it. The route already refuses to compute one;
   // a card that WOULD render a stray value is a card that eventually will.
   const inPersonEstimate = (data.formStep ?? '').trim().toLowerCase() === 'quote_in_person'
+  // ── A SUBTOTAL IS NOT AN ESTIMATE (owner spec 2026-08-22) ──────────────
+  //  A quick quote knows the package and the ZIPs — never the routed miles —
+  //  so its number is a PACKAGE SUBTOTAL. Printing it as a bare bold total led
+  //  the owner to quote it as finished work and left the drive unbilled. When
+  //  the stored snapshot says mileage is still pending, the card says so on
+  //  the same line as the money, and calls the figure what it is.
+  const money = (n: number): string => `$${Math.round(n).toLocaleString('en-US')}`
+  const mileagePending = data.quoteMileageStatus === 'pending'
   const estimate = inPersonEstimate
     // Not "we could not price it" — we deliberately did not.
     ? '_In-person estimate requested_'
     : typeof data.estimateDollars === 'number' && data.estimateDollars > 0
-      ? `**$${Math.round(data.estimateDollars).toLocaleString('en-US')}**`
+      ? mileagePending
+        ? [
+            `**${money(data.estimateDollars)}** _package subtotal_`,
+            ...(typeof data.quoteBaseDollars === 'number'
+              ? [`Base ${money(data.quoteBaseDollars)}` +
+                 (data.quoteTruckDollars ? ` · Truck upgrade ${money(data.quoteTruckDollars)}` : '') +
+                 (data.quoteIncludedTruck ? ` · ${data.quoteIncludedTruck} truck included` : '')]
+              : []),
+            '⚠️ Transportation pending — billed at $3 per routed mile, fuel included',
+          ].join('\n')
+        : `**${money(data.estimateDollars)}**`
       : '_no estimate yet_'
 
   // null, not "Not given" — the field is omitted entirely when there is no
