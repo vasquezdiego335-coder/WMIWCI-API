@@ -115,6 +115,10 @@ export type QuoteLeadCaptureResponse =
       captured: true
       emailStatus: QueueStatus
       notificationStatus: QueueStatus
+      /** The price book the server quoted from. Present on EVERY successful
+       *  response, including those carrying no estimate, so a stale client can
+       *  always detect it needs to reload. */
+      priceBookVersion: string
       /** The SERVER's price, so a stale browser can correct itself. */
       estimate: {
         totalDollars: number
@@ -189,6 +193,10 @@ const CAPTURE_SELECT = {
   quoteIncludedTruck: true,
   quoteMileageStatus: true,
   quotePriceBookVersion: true,
+  quoteMileageCents: true,
+  quoteBillableMiles: true,
+  quoteRequiresReview: true,
+  quoteReviewReasons: true,
   moveDate: true,
   moveSize: true,
   zip: true,
@@ -230,6 +238,10 @@ export type CaptureLead = {
   quoteIncludedTruck: string | null
   quoteMileageStatus: string | null
   quotePriceBookVersion: string | null
+  quoteMileageCents: number | null
+  quoteBillableMiles: number | null
+  quoteRequiresReview: boolean | null
+  quoteReviewReasons: string | null
   moveDate: Date | null
   moveSize: string | null
   zip: string | null
@@ -266,6 +278,26 @@ export function firstNameOf(name?: string | null): string {
 /** Cents → the display string the email prints, e.g. "$1,049". Returns
  *  undefined when there is no real estimate, which is what makes the template
  *  DROP the estimate paragraph instead of printing an empty value. */
+/**
+ * THE AMOUNT ANY NOTIFICATION MUST QUOTE.
+ *
+ * `Lead.estimatedValue` is a LIVE CRM value — a later capture may legitimately
+ * raise it (see leads.mayWriteEstimate), and the admin can edit it. So it can
+ * never be the record of what was quoted. `quoteTotalCents` is written once,
+ * at capture, from the server price book, and never moves.
+ *
+ * When a snapshot exists it wins. `estimatedValue` remains the fallback for
+ * leads captured before the snapshot columns existed, which must keep
+ * rendering exactly as they always did.
+ */
+export function quotedCentsOf(lead: {
+  estimatedValue?: number | null
+  quoteTotalCents?: number | null
+}): number | null {
+  if (typeof lead.quoteTotalCents === 'number' && lead.quoteTotalCents > 0) return lead.quoteTotalCents
+  return typeof lead.estimatedValue === 'number' && lead.estimatedValue > 0 ? lead.estimatedValue : null
+}
+
 export function formatEstimate(cents?: number | null): string | undefined {
   if (typeof cents !== 'number' || cents <= 0) return undefined
   return `$${Math.round(cents / 100).toLocaleString('en-US')}`
@@ -513,7 +545,7 @@ async function queueConfirmationEmail(
   // Read the MODE off the lead, not off the request that triggered this send.
   // An owner resend months later must still produce the in-person wording.
   const inPerson = isInPersonRequest(lead.formStep)
-  const estimatedPrice = inPerson ? null : formatEstimate(lead.estimatedValue)
+  const estimatedPrice = inPerson ? null : formatEstimate(quotedCentsOf(lead))
 
   try {
     await deps.enqueueConfirmationEmail({
@@ -607,13 +639,17 @@ async function queueInternalAlert(
     name: lead.name,
     phone: lead.phone,
     email: lead.email,
-    estimateDollars: typeof lead.estimatedValue === 'number' ? lead.estimatedValue / 100 : null,
+    // The FROZEN snapshot, not the live column — see quotedCentsOf.
+    estimateDollars: (() => { const c = quotedCentsOf(lead); return c === null ? null : c / 100 })(),
     // The snapshot, so the card can say "package subtotal · transportation
     // pending" rather than printing a bold total the drive is not inside.
     quoteMileageStatus: lead.quoteMileageStatus ?? null,
     quoteBaseDollars: typeof lead.quoteBaseCents === 'number' ? lead.quoteBaseCents / 100 : null,
     quoteTruckDollars: typeof lead.quoteTruckCents === 'number' ? lead.quoteTruckCents / 100 : null,
     quoteIncludedTruck: lead.quoteIncludedTruck ?? null,
+    quoteMileageDollars: typeof lead.quoteMileageCents === 'number' ? lead.quoteMileageCents / 100 : null,
+    quoteBillableMiles: lead.quoteBillableMiles ?? null,
+    reviewReasons: (lead.quoteReviewReasons ?? '').split('\n').filter(Boolean),
     moveDate: lead.moveDate,
     moveSize: packageLabelOf(lead.moveSize),
     pickup: routeLabel(lead.originCity, lead.originZip ?? lead.zip),

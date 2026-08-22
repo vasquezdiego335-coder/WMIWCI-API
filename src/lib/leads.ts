@@ -660,6 +660,13 @@ export type PartialLeadInput = {
     /** 'pending' until a routed mileage is actually measured. */
     mileageStatus: 'pending' | 'calculated'
     priceBookVersion: string
+    /** Set ONLY with mileageStatus 'calculated': the drive, and the whole
+     *  miles that produced it, so a total containing a drive can explain it. */
+    mileageCents?: number | null
+    billableMiles?: number | null
+    /** Server-calculated review requirement, and WHY. */
+    requiresReview?: boolean
+    reviewReasons?: string[]
   } | null
   // ── Move details (owner spec 2026-07-28) ──────────────────────────────
   // A quick-quote or homepage estimate carries real intent. Without these a
@@ -809,6 +816,13 @@ function quoteSnapshotColumns(input: PartialLeadInput): Record<string, unknown> 
     quoteIncludedTruck: q.includedTruck ?? null,
     quoteMileageStatus: q.mileageStatus,
     quotePriceBookVersion: q.priceBookVersion,
+    quoteMileageCents: q.mileageCents ?? null,
+    quoteBillableMiles: q.billableMiles ?? null,
+    quoteRequiresReview: q.requiresReview ?? false,
+    //  One reason per line: readable in psql, and trivially split for display.
+    //  Null rather than an empty string when there is nothing to review.
+    quoteReviewReasons:
+      q.reviewReasons && q.reviewReasons.length ? q.reviewReasons.join('\n') : null,
   }
 }
 

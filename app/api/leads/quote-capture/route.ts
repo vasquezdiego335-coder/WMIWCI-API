@@ -89,7 +89,26 @@ const enabled = () => process.env.QUOTE_LEAD_CAPTURE_ENABLED === 'true'
 function sanitizeText(value: string): string {
   return value.replace(/[\x00-\x1f\x7f]/g, ' ').replace(/\s+/g, ' ').trim()
 }
-const str = (max: number) => z.string().transform(sanitizeText).pipe(z.string().max(max)).optional()
+/**
+ * An OPTIONAL string field, tolerant of an explicit `null`.
+ *
+ * WHY THE preprocess. Zod's `.optional()` accepts `undefined` and REJECTS
+ * `null`, so a client that serialises a missing value as `null` fails the
+ * whole request on shape. That is not a theoretical shape quibble: the quote
+ * page briefly sent `priceBookVersion: null` from a cached mirror that
+ * predated the field, which 422'd the submission BEFORE the retired-package
+ * check could run — and the browser, which only handles `pricing_expired`
+ * specially, fell through and revealed the stale price it had cached.
+ *
+ * For an OPTIONAL field, `null` and `undefined` mean the same thing: the
+ * client does not have a value. Normalising them together loses nothing and
+ * removes an entire class of lead-destroying 422s from older clients.
+ */
+const str = (max: number) =>
+  z.preprocess(
+    (v) => (v === null ? undefined : v),
+    z.string().transform(sanitizeText).pipe(z.string().max(max)).optional(),
+  ) as z.ZodType<string | undefined>
 
 const QuoteLeadSchema = z.object({
   // ── Required contact block. Validated STRICTLY here even though the browser
@@ -389,6 +408,11 @@ async function handle(req: NextRequest): Promise<NextResponse> {
             includedTruck: priced.includedTruck,
             mileageStatus: 'pending' as const,
             priceBookVersion: priced.priceBookVersion,
+            //  Server-calculated, and finally carried somewhere it can be
+            //  ACTED on: the flag used to be computed and then discarded, so
+            //  a 3BR floor price reached the owner looking like a flat rate.
+            requiresReview: priced.requiresReview,
+            reviewReasons: priced.reviewReasons,
           }
         : null,
     },
@@ -434,6 +458,12 @@ async function handle(req: NextRequest): Promise<NextResponse> {
     captured: true,
     emailStatus: outcome.emailStatus,
     notificationStatus: outcome.notificationStatus,
+    // ── TOP-LEVEL, NOT ONLY INSIDE `estimate` ────────────────────────────
+    //  A client must be able to learn its price book is stale even on the
+    //  paths that carry NO estimate — an in-person request or a manual-plan
+    //  5BR. Nesting it only inside `estimate` made the one field that detects
+    //  staleness absent from exactly the responses a stale client might get.
+    priceBookVersion: PRICE_BOOK_VERSION,
     // The server's own number, so a browser showing a stale price can correct
     // itself. Safe to expose: it is the price we publish.
     estimate: priced.ok

@@ -42,6 +42,7 @@ import { ACTIVE_PACKAGE_KEYS, isPackageActiveForNewIntake, isRetiredPackage } fr
 import { quoteEstimate, compareClientTotal } from '../quote-estimate'
 import { pricePartialLead } from '../partial-lead-pricing'
 import { buildLeadCard } from '../booking-display'
+import { quotedCentsOf, formatEstimate } from '../quote-capture'
 import { computeQuote } from '../booking-quote'
 import { formatLeadAlert } from '../lead-alert'
 
@@ -173,7 +174,7 @@ test('3b. the quote route stores the SERVER cents, never the submitted ones', ()
 //  inputs — a Next route file may not export helpers, which is why it could
 //  not simply be exported from there.
 test('3c. the partial route stores the SERVER price, never the submitted one', () => {
-  const r = pricePartialLead({ moveSize: '2br', estimateTotal: 1 })
+  const r = pricePartialLead({ moveSize: '2br', estimateTotal: 1, serviceType: 'full_service' })
   assert.equal(r.estimateCents, 77900, 'the stored figure is the server package subtotal')
   assert.notEqual(r.estimateCents, 100, 'the browser $1 must not survive')
   assert.deepEqual(r.mismatch, { serverDollars: 779, clientDollars: 1, deltaDollars: -778 })
@@ -181,7 +182,7 @@ test('3c. the partial route stores the SERVER price, never the submitted one', (
 
 test('3d. a retired key stores no price AND no service', () => {
   for (const key of LEGACY_PACKAGE_KEYS) {
-    const r = pricePartialLead({ moveSize: key, estimateTotal: 379 })
+    const r = pricePartialLead({ moveSize: key, estimateTotal: 379, serviceType: 'full_service' })
     assert.equal(r.estimateCents, null, `${key} must bank nothing`)
     assert.equal(r.moveSizeToStore, undefined,
       `${key} must not become the official service on a NEW lead`)
@@ -191,20 +192,20 @@ test('3d. a retired key stores no price AND no service', () => {
 })
 
 test('3e. an unknown key is refused too — an active key is not', () => {
-  const bogus = pricePartialLead({ moveSize: 'penthouse', estimateTotal: 9999 })
+  const bogus = pricePartialLead({ moveSize: 'penthouse', estimateTotal: 9999, serviceType: 'full_service' })
   assert.equal(bogus.estimateCents, null)
   assert.equal(bogus.moveSizeToStore, undefined)
   assert.equal(bogus.refusedReason, 'unknown_package')
 
   // A real selection we simply do not auto-price is still worth recording.
-  const manual = pricePartialLead({ moveSize: '5br', estimateTotal: 5000 })
+  const manual = pricePartialLead({ moveSize: '5br', estimateTotal: 5000, serviceType: 'full_service' })
   assert.equal(manual.estimateCents, null, '5BR is quoted by hand — no number')
   assert.equal(manual.moveSizeToStore, '5br', 'but it IS a real thing the customer chose')
   assert.equal(manual.refusedSize, false)
 })
 
 test('3f. a contact-only capture banks nothing and refuses nothing', () => {
-  const r = pricePartialLead({ estimateTotal: 12345 })
+  const r = pricePartialLead({ estimateTotal: 12345, serviceType: 'full_service' })
   assert.equal(r.estimateCents, null, 'no package means no price, whatever the browser says')
   assert.equal(r.moveSizeToStore, undefined)
   assert.equal(r.refusedSize, false, 'typing an email is not an error')
@@ -219,7 +220,7 @@ test('3g. a forged $1 is discarded by BOTH capture paths', () => {
     assert.equal(compareClientTotal(quick.totalDollars, 1).matched, false)
   }
   // booking form (/api/leads/partial)
-  const partial = pricePartialLead({ moveSize: '1br', estimateTotal: 1 })
+  const partial = pricePartialLead({ moveSize: '1br', estimateTotal: 1, serviceType: 'full_service' })
   assert.equal(partial.estimateCents, 55000)
 })
 
@@ -286,7 +287,10 @@ test('5c. a new quote carries the price-book version that produced it', () => {
   const r = quoteEstimate({ moveSize: '1br' })
   assert.ok(r.ok)
   if (r.ok) assert.equal(r.priceBookVersion, PRICE_BOOK_VERSION)
-  assert.match(PRICE_BOOK_VERSION, /^\d{4}-\d{2}-\d{2}$/)
+  // MONOTONIC, not merely dated: a bare date cannot separate two releases on
+  // one day, and the second release of 2026-08-22 is what changed the truck
+  // rule. See pricing-release.test.ts, which owns this contract.
+  assert.match(PRICE_BOOK_VERSION, /^\d{4}-\d{2}-\d{2}\.\d+$/)
 })
 
 // ════════════════════════════════════════════════════════════════════════
@@ -335,8 +339,8 @@ test('6c. a retired key is refused identically by every guard that exists', () =
 test('7. the lead card is built from the stored lead, never recalculated', () => {
   const src = readFileSync(resolve(__dirname, '../quote-capture.ts'), 'utf8')
   // Both money and label come off the `lead` row that was read back from the DB.
-  assert.match(src, /estimateDollars: typeof lead\.estimatedValue === 'number' \? lead\.estimatedValue \/ 100 : null/,
-    'the card amount must be the stored estimate')
+  assert.match(src, /estimateDollars: \(\(\) => \{ const c = quotedCentsOf\(lead\)/,
+    'the card amount must be the stored FROZEN snapshot, not the mutable column')
   assert.match(src, /moveSize: packageLabelOf\(lead\.moveSize\)/,
     'the card label must be resolved from the stored key')
   // It must not reach for pricing at render time, and must not take a total

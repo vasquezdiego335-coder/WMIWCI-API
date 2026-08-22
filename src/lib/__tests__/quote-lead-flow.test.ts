@@ -58,7 +58,10 @@ function captureLead(over: Partial<CaptureLead> = {}): CaptureLead {
     name: 'Sam Rivera',
     email: 'customer@example.com',
     phone: '5555550142',
-    estimatedValue: 87900,
+    // The live CRM column and the frozen snapshot AGREE here on purpose: a
+    // conflict would make every assertion below depend on which one wins.
+    // The deliberate conflict is exercised in quick-quote-pricing-integrity.
+    estimatedValue: 77900,
     // The structured snapshot the quick quote now writes. Defaults describe a
     // real capture: a package subtotal with the drive not yet measured.
     quoteBaseCents: 77900,
@@ -66,7 +69,11 @@ function captureLead(over: Partial<CaptureLead> = {}): CaptureLead {
     quoteTotalCents: 77900,
     quoteIncludedTruck: '15ft',
     quoteMileageStatus: 'pending',
-    quotePriceBookVersion: '2026-08-22',
+    quotePriceBookVersion: '2026-08-22.2',
+    quoteMileageCents: null,
+    quoteBillableMiles: null,
+    quoteRequiresReview: false,
+    quoteReviewReasons: null,
     moveDate: new Date('2026-08-28T00:00:00.000Z'),
     moveSize: '2br',
     zip: null,
@@ -274,7 +281,8 @@ const QUOTE_INPUT = {
   moveSize: '2br',
   pickupZip: '07050',
   destinationZip: '07050',
-  estimatedValue: 87900,
+  //  2BR is $779: the included 15ft truck is no longer surcharged.
+  estimatedValue: 77900,
 }
 
 // ════════════════════════════════════════════════════════════════════════
@@ -335,7 +343,7 @@ test('4. the quote confirmation email is queued, with the customer-facing payloa
   assert.equal(job.leadId, 'lead_1')
   assert.equal(job.businessEventKey, 'lead:lead_1:quote-request-received:v1')
   assert.equal(job.payload.firstName, 'Sam')
-  assert.equal(job.payload.estimatedPrice, '$879', 'the SERVER total, formatted for a human')
+  assert.equal(job.payload.estimatedPrice, '$779', 'the SERVER total, formatted for a human')
   assert.equal(job.payload.moveSize, '2 Bedrooms', 'the label, never the internal key')
 })
 
@@ -355,7 +363,7 @@ test('6. the Discord lead card is still queued, with the lead facts on it', asyn
   assert.equal(out.notificationStatus, 'queued')
   assert.equal(rec.cards.length, 1)
   assert.equal(rec.cards[0].leadId, 'lead_1')
-  assert.equal(rec.cards[0].estimateDollars, 879)
+  assert.equal(rec.cards[0].estimateDollars, 779)
   assert.equal(rec.cards[0].moveSize, '2 Bedrooms')
   assert.equal(rec.cards[0].pickup, '07050', 'the pickup zip comes from originZip — the column that exists')
   assert.equal(rec.cards[0].isUpdate, false)
@@ -414,8 +422,8 @@ test('7. lead_created fires for a CONSENTED lead, carrying segmentation facts', 
   assert.equal(snap.email, 'customer@example.com')
   assert.equal(snap.firstName, 'Sam')
   assert.equal(snap.source, 'QUICK_QUOTE_FORM')
-  assert.equal(snap.estimatedValueCents, 87900)
-  assert.equal(snap.estimatedValueDollars, 879)
+  assert.equal(snap.estimatedValueCents, 77900)
+  assert.equal(snap.estimatedValueDollars, 779)
   assert.equal(snap.moveDate, '2026-08-28T00:00:00.000Z')
   assert.equal(snap.pickupZip, '07050')
   assert.equal(snap.destinationZip, '07050')
@@ -642,7 +650,7 @@ test('pricing: the confirmation email prints the SERVER total, to the dollar', a
     const priced = quoteEstimate({ moveSize: key })
     assert.ok(priced.ok)
     // The lead stores the SERVER total in cents — that is what the email reads.
-    const { deps, rec } = makeDeps(captureLead({ moveSize: key, estimatedValue: priced.totalCents }))
+    const { deps, rec } = makeDeps(captureLead({ moveSize: key, estimatedValue: priced.totalCents, quoteTotalCents: priced.totalCents }))
     await onQuoteRequestCaptured('lead_1', {}, deps)
 
     const printed = rec.emails[0].payload.estimatedPrice

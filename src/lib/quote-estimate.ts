@@ -57,6 +57,11 @@ export type QuoteEstimateResult =
       includedTruck: string | null
       /** Blocks automatic confirmation (floor price, review line, NY job). */
       requiresReview: boolean
+      /** WHY it needs review, in the owner's words. Empty iff requiresReview
+       *  is false. The flag alone told nobody what to look at, so it was
+       *  computed and then dropped on the floor; these travel with it to the
+       *  Discord card, the email and the stored lead. */
+      reviewReasons: string[]
       /** The truck the SERVER assigned. Never smaller than the minimum. */
       truckSize: SelectableTruckSize
       /** The minimum this package requires — for honest UI copy. */
@@ -91,6 +96,41 @@ export type QuoteEstimateResult =
  * inferred would allow a crafted payload to route into the labor-only branch
  * and produce an hourly total for a package job.
  */
+/**
+ * WHY a quote needs a human, stated so the owner can act on it.
+ *
+ * `requiresReview` was a bare boolean: true for 3BR+, true for an upgraded
+ * truck, and indistinguishable between them. An owner seeing "review" on a
+ * card had to open the booking to find out what to review. These are the
+ * reasons, in the order they matter.
+ */
+function reviewReasonsFor(
+  key: string,
+  baseRequiresReview: boolean,
+  truck: { upgradeAmount: number; assigned: string; included: string; corrected: boolean },
+): string[] {
+  const reasons: string[] = []
+  if (baseRequiresReview) {
+    // 3BR/4BR/5BR publish a FLOOR, not a flat rate: the price is confirmed
+    // after inventory and access are seen.
+    reasons.push(
+      `${key.toUpperCase()} is a starting price — confirm inventory, access and the truck plan before approving.`,
+    )
+  }
+  if (truck.upgradeAmount > 0) {
+    reasons.push(
+      `A larger truck was requested (${truck.included} included → ${truck.assigned}). ` +
+        'The upgrade is charged only once you approve that the inventory needs it.',
+    )
+  }
+  if (truck.corrected) {
+    reasons.push(
+      `The truck was corrected up to ${truck.assigned} — the customer selected a smaller one than this move needs.`,
+    )
+  }
+  return reasons
+}
+
 export function quoteEstimate(input: QuoteEstimateInput): QuoteEstimateResult {
   const key = (input.moveSize ?? '').trim().toLowerCase()
   if (!key) return { ok: false, reason: 'no_package' }
@@ -152,6 +192,7 @@ export function quoteEstimate(input: QuoteEstimateInput): QuoteEstimateResult {
        without an owner confirming the inventory actually needs the bigger
        truck. A standard package with its included truck is unaffected. */
     requiresReview: est.requiresReview || truck.upgradeAmount > 0,
+    reviewReasons: reviewReasonsFor(key, est.requiresReview, truck),
     truckSize: truck.assigned,
     truckMinimum: truck.minimum,
     truckUpgrade: truck.upgradeAmount,

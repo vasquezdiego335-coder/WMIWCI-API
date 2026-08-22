@@ -181,7 +181,13 @@ test('6. the confirmation prints the STORED estimate, never a recomputed one', (
   // database, so the read is asserted instead: the payload comes off `lead`.
   const s = src('lib/quote-capture.ts')
   const fn = s.slice(s.indexOf('async function queueConfirmationEmail'), s.indexOf('//  2. THE INTERNAL ALERT'))
-  assert.match(fn, /formatEstimate\(lead\.estimatedValue\)/, 'the estimate must come off the LEAD')
+  //  Still off the LEAD — but off the FROZEN snapshot in preference to the
+  //  mutable column. `estimatedValue` is a live CRM value that a later capture
+  //  may raise and an admin may edit, so it cannot be the record of what was
+  //  quoted; `quoteTotalCents` is written once at capture and never moves.
+  //  quotedCentsOf() falls back to estimatedValue for leads that predate the
+  //  snapshot, so historical mail is unchanged.
+  assert.match(fn, /formatEstimate\(quotedCentsOf\(lead\)\)/, 'the estimate must come off the LEAD snapshot')
   assert.ok(!/req\.|body\./.test(fn), 'the confirmation must never read the request')
 })
 

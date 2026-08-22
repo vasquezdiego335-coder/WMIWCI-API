@@ -1299,9 +1299,37 @@ export const LEGACY_PACKAGE_KEYS = [
 //  historical read keeps using PACKAGES / packageLabel() and is unaffected.
 // ════════════════════════════════════════════════════════════════════════
 
-/** The price book these amounts belong to. Stamped onto new quote snapshots
- *  so a stored total can always be traced to the rules that produced it. */
-export const PRICE_BOOK_VERSION = '2026-08-22'
+/**
+ * The price book these amounts belong to. Stamped onto new quote snapshots so
+ * a stored total can always be traced to the rules that produced it.
+ *
+ * MONOTONIC, NOT MERELY DATED. This was `'2026-08-22'`, which cannot tell two
+ * releases on the same day apart — and the second release of 2026-08-22 is
+ * exactly what changed the truck rule. The trailing ordinal makes each release
+ * distinct: bump it for EVERY material pricing change, on the same day or not.
+ *
+ *   2026-08-22    studios retired; retired keys refused
+ *   2026-08-22.2  the included truck stops being charged (2BR $879 -> $779,
+ *                 3BR $1,199 -> $1,049, 4BR $1,599 -> $1,449); quote snapshot
+ *                 persisted; mileage disclosed as pending
+ *
+ * `pricing-release.test.ts` fingerprints the material price book and fails if
+ * it moves without this value AND the browser asset cache key moving with it.
+ */
+export const PRICE_BOOK_VERSION = '2026-08-22.2'
+
+/**
+ * The cache-busting token on every `<script src="js/pricing-config.js?v=…">`.
+ *
+ * It lives HERE, beside the version it protects, because the two must change
+ * together: a regenerated mirror served under an unchanged URL is the same
+ * stale file to every browser and CDN that already has it. Bumping the price
+ * book without bumping this ships a fix nobody receives.
+ *
+ * The value is the TOKEN ITSELF (the `8` in `?v=8`), so pricing-release.test.ts
+ * can compare it to the pages byte-for-byte rather than reconstructing it.
+ */
+export const PRICING_ASSET_CACHE_KEY = '8'
 
 //  NO NEW "is it sellable?" HELPER LIVES HERE. `LEGACY_PACKAGE_KEYS` above is
 //  the one list, and product-catalog.ts already derives the whole retirement

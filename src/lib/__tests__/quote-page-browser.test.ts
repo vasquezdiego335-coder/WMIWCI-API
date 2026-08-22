@@ -61,9 +61,16 @@ type Harness = {
  * Every other asset (site-copy.js, analytics) resolves to empty: none of them
  * price anything, and 404s would only add noise.
  */
-async function loadPage(fetchImpl: (url: string, init?: any) => Promise<any>): Promise<Harness> {
+async function loadPage(
+  fetchImpl: (url: string, init?: any) => Promise<any>,
+  /** Rewrite the mirror before serving it — used to reproduce an OLDER cached
+   *  price book, which is the state a genuinely stale client is actually in. */
+  mirrorTransform?: (js: string) => string,
+): Promise<Harness> {
   const html = readFileSync(PAGE, 'utf8')
-  const mirrorBytes = readFileSync(MIRROR)
+  const mirrorBytes = mirrorTransform
+    ? Buffer.from(mirrorTransform(readFileSync(MIRROR, 'utf8')), 'utf8')
+    : readFileSync(MIRROR)
   let assetRefetches = 0
   let firstLoadSeen = false
 
@@ -333,5 +340,79 @@ test('browser: the page runs the same price-book version as the server', { skip 
   const h = await loadPage(stubFetch(PRICING_EXPIRED))
   assert.equal(h.win.WMIC_PRICING.PRICE_BOOK_VERSION, PRICE_BOOK_VERSION,
     'the generated mirror must carry the server price-book version')
+  h.dom.window.close()
+})
+
+// ══════════════════════════════════════════════════════════════════════
+//  5. A PREVIOUS MIRROR — ONE THAT PREDATES PRICE_BOOK_VERSION ENTIRELY
+//
+//  This is the state a genuinely stale visitor is in, and the one the last
+//  round got wrong: the page sent `priceBookVersion: null`, which the API
+//  rejected on SHAPE (422) before it could ever say `pricing_expired`.
+// ══════════════════════════════════════════════════════════════════════
+
+/** Strip PRICE_BOOK_VERSION and the retirement flags, i.e. the mirror as it
+ *  was BEFORE this work: studios present and sellable, no version field. */
+const asPreviousMirror = (js: string): string =>
+  js
+    .replace(/"PRICE_BOOK_VERSION":\s*"[^"]*",\s*/, '')
+    .replace(/"legacy":\s*true,\s*/g, '')
+    .replace(/"retiredOn":\s*"[^"]*",\s*/g, '')
+
+test('browser: a PREVIOUS mirror omits priceBookVersion rather than sending null', { skip }, async () => {
+  const fetchImpl = stubFetch(PRICING_EXPIRED)
+  const h = await loadPage(fetchImpl, asPreviousMirror)
+
+  // Sanity: this really is an old book — no version, and the studios are back.
+  assert.equal(h.win.WMIC_PRICING.PRICE_BOOK_VERSION, undefined, 'the fixture must actually be a pre-version mirror')
+
+  await submitWith(h, '1br')
+
+  const body = (fetchImpl as any).__posted[0]
+  assert.ok(body, 'the submission must reach the API')
+  assert.ok(
+    !('priceBookVersion' in body),
+    `an unknown version must be OMITTED, never sent as null — got ${JSON.stringify(body.priceBookVersion)}`,
+  )
+  // Belt and braces: null must not appear under ANY spelling.
+  assert.ok(
+    !Object.values(body).includes(null),
+    `no field may be sent as null — the API rejects null on shape: ${JSON.stringify(body)}`,
+  )
+  h.dom.window.close()
+})
+
+test('browser: even a PREVIOUS mirror cannot put a retired tier on the page', { skip }, async () => {
+  // A better outcome than expected, and worth pinning. The retirement flags
+  // are stripped from this mirror, so the `pkg.legacy` filter is dead exactly
+  // as it was during the incident — but the ALLOWLIST still holds: a package
+  // must be in PRICED_PACKAGE_KEYS to be offered, and the studios never were.
+  //
+  // This is what "fails closed" buys. The flag filter protects against a
+  // retirement; the allowlist protects against the flag going missing.
+  const h = await loadPage(stubFetch(PRICING_EXPIRED), asPreviousMirror)
+
+  const P = h.win.WMIC_PRICING
+  assert.equal(P.PACKAGES['little-studio'].legacy, undefined, 'the fixture must really have lost the flag')
+  assert.equal(P.PACKAGES['little-studio'].price.amount, 379, 'and must still contain the retired tier')
+
+  const offered = Array.from(h.doc.querySelectorAll('input[name="qSize"]')).map(
+    (el) => (el as HTMLInputElement).value,
+  )
+  for (const retired of LEGACY_PACKAGE_KEYS) {
+    assert.ok(!offered.includes(retired), `${retired} was offered from a flag-less mirror`)
+  }
+  assert.ok(!/\$\s?379\b/.test(h.doc.body.textContent ?? ''), '$379 reached the screen from the stale book')
+  h.dom.window.close()
+})
+
+test('browser: a CURRENT mirror does send its version', { skip }, async () => {
+  // The positive control. Without it, the omission test above would pass even
+  // if the page had stopped sending the field altogether.
+  const fetchImpl = stubFetch(PRICING_EXPIRED)
+  const h = await loadPage(fetchImpl)
+  await submitWith(h, '1br')
+  const body = (fetchImpl as any).__posted[0]
+  assert.equal(body.priceBookVersion, PRICE_BOOK_VERSION, 'a current client must declare its price book')
   h.dom.window.close()
 })

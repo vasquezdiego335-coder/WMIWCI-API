@@ -2140,8 +2140,20 @@ model Lead {
   /// 'pending' — the drive is not measured yet and is billed at $3 per routed
   /// mile; 'calculated' — a real routed figure is included in the total.
   quoteMileageStatus     String?   @map("quote_mileage_status")
-  /// The price book that produced the numbers above, e.g. '2026-08-22'.
+  /// The price book that produced the numbers above, e.g. '2026-08-22.2'.
   quotePriceBookVersion  String?   @map("quote_price_book_version")
+  /// CENTS of routed-mileage actually billed. Set ONLY with
+  /// quoteMileageStatus='calculated' — a total that includes a drive must be
+  /// able to explain it, or it is just a bigger unexplained number.
+  quoteMileageCents      Int?      @map("quote_mileage_cents")
+  /// The whole miles that produced quoteMileageCents (rounded up, per the
+  /// published rule). Stored beside the money so the arithmetic is checkable.
+  quoteBillableMiles     Int?      @map("quote_billable_miles")
+  /// Server-calculated: this quote may not be auto-confirmed.
+  quoteRequiresReview    Boolean?  @map("quote_requires_review")
+  /// WHY, one reason per line. Shown on the owner's card and alert — the flag
+  /// alone told nobody what to look at.
+  quoteReviewReasons     String?   @map("quote_review_reasons")
   /// Send count. Also the `version` in the guard's idempotency key, so an owner
   /// resend is a NEW key rather than a refused duplicate.
   quoteConfirmationCount       Int       @default(0) @map("quote_confirmation_count")

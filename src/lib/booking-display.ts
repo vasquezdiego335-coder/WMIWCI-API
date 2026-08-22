@@ -1136,6 +1136,12 @@ export type LeadCardData = {
   quoteTruckDollars?: number | null
   /** The truck the package price already covers, e.g. '15ft'. */
   quoteIncludedTruck?: string | null
+  /** DOLLARS of routed mileage, set only when mileageStatus is 'calculated'. */
+  quoteMileageDollars?: number | null
+  /** The whole miles behind quoteMileageDollars, so the total explains itself. */
+  quoteBillableMiles?: number | null
+  /** Server-calculated reasons this quote may not be auto-confirmed. */
+  reviewReasons?: string[] | null
   moveDate?: Date | string | null
   moveSize?: string | null
   pickup?: string | null
@@ -1340,6 +1346,13 @@ export function buildLeadCard(data: LeadCardData): { embeds: EmbedJson[]; compon
 
   // ── Tier 2: the job. Inline, and only what exists. ──
   fields.push(field('💵 Estimate', [estimate, data.moveSize || null].filter(Boolean).join('\n'), true))
+  // ── WHY IT NEEDS A HUMAN, where the owner will actually see it ──────────
+  //  The server has always computed `requiresReview`; nothing ever displayed
+  //  it, so a 3BR FLOOR price reached the owner looking like a flat rate and a
+  //  requested truck upgrade looked like a settled charge.
+  if (data.reviewReasons && data.reviewReasons.length > 0) {
+    fields.push(field('⚠️ Manual review required', data.reviewReasons.map((r) => `• ${r}`).join('\n')))
+  }
   if (dateLabel) fields.push(field('📅 Move date', dateLabel, true))
   const route = routeLine(data.pickup, data.destination)
   if (route) fields.push(field('📍 Route', route, true))

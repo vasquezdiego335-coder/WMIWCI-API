@@ -92,7 +92,26 @@ function parseMoveDate(raw?: string | null): Date | null {
 function sanitizeText(value: string): string {
   return value.replace(/[\x00-\x1f\x7f]/g, ' ').replace(/\s+/g, ' ').trim()
 }
-const str = (max: number) => z.string().transform(sanitizeText).pipe(z.string().max(max)).optional()
+/**
+ * An OPTIONAL string field, tolerant of an explicit `null`.
+ *
+ * WHY THE preprocess. Zod's `.optional()` accepts `undefined` and REJECTS
+ * `null`, so a client that serialises a missing value as `null` fails the
+ * whole request on shape. That is not a theoretical shape quibble: the quote
+ * page briefly sent `priceBookVersion: null` from a cached mirror that
+ * predated the field, which 422'd the submission BEFORE the retired-package
+ * check could run — and the browser, which only handles `pricing_expired`
+ * specially, fell through and revealed the stale price it had cached.
+ *
+ * For an OPTIONAL field, `null` and `undefined` mean the same thing: the
+ * client does not have a value. Normalising them together loses nothing and
+ * removes an entire class of lead-destroying 422s from older clients.
+ */
+const str = (max: number) =>
+  z.preprocess(
+    (v) => (v === null ? undefined : v),
+    z.string().transform(sanitizeText).pipe(z.string().max(max)).optional(),
+  ) as z.ZodType<string | undefined>
 
 const PartialSchema = z.object({
   // Email is validated + normalized server-side by capturePartialLead; keep the
@@ -123,6 +142,14 @@ const PartialSchema = z.object({
   pickupZip: str(12),
   destinationZip: str(12),
   serviceInterest: str(60),
+  /* WHICH PRODUCT. Explicit beats inferred: a package key alone cannot be
+     priced, because the same '1br' means a $550 flat full-service job or
+     nothing at all on an hourly labor-only job. */
+  serviceType: str(40),
+  /* Structured labor-only inputs. An hourly figure needs BOTH, and is refused
+     below the published two-hour minimum rather than silently billed up. */
+  laborWorkers: z.number().int().min(1).max(20).nullish(),
+  laborMinutes: z.number().int().min(0).max(24 * 60).nullish(),
   /* Home size from the quick quote form ("2br"). Its own field so it never
      shares a column with real job types like "full-move". */
   moveSize: str(30),
@@ -188,12 +215,28 @@ async function handle(req: NextRequest): Promise<NextResponse> {
   //  because the server computed it. Anything richer (add-ons, routed miles)
   //  is settled later by /api/bookings, which has the full picture.
   // ══════════════════════════════════════════════════════════════════════
-  const pricing = pricePartialLead({ moveSize: d.moveSize, estimateTotal: d.estimateTotal })
+  //  SERVICE TYPE IS PART OF THE PRICE. A package key alone cannot be priced:
+  //  the same '1br' means a $550 flat full-service job or nothing at all on an
+  //  hourly labor-only job. See partial-lead-pricing.ts.
+  const pricing = pricePartialLead({
+    moveSize: d.moveSize,
+    estimateTotal: d.estimateTotal,
+    serviceType: d.serviceType,
+    serviceInterest: d.serviceInterest,
+    laborWorkers: d.laborWorkers,
+    laborMinutes: d.laborMinutes,
+  })
 
   if (pricing.refusedSize) {
     apiLogger.warn(
       { reason: pricing.refusedReason, priceBookVersion: PRICE_BOOK_VERSION },
       'POST /api/leads/partial — refused the submitted move size; lead saved without a service or an estimate'
+    )
+  }
+  if (pricing.serviceType !== 'full_service' && d.moveSize) {
+    apiLogger.info(
+      { serviceType: pricing.serviceType },
+      'POST /api/leads/partial — a move size was submitted for a non-full-service lead; no package price was derived'
     )
   }
   //  DIAGNOSTIC ONLY. Two numbers and a delta — never the payload, never stored.
@@ -225,6 +268,9 @@ async function handle(req: NextRequest): Promise<NextResponse> {
       referrer: d.referrer,
       promoCode: d.utmCampaign, // door-hanger/QR campaign code doubles as the promo code slot
       estimatedValue: pricing.estimateCents,
+      //  Only a FULL-SERVICE subtotal produces a structured snapshot; a
+      //  labor-only or unknown lead stores an amount without one, or nothing.
+      quoteSnapshot: pricing.snapshot,
       //  Set because the SERVER computed the figure from the price book. It is
       //  what stops the booking form's own browser number overwriting it later
       //  (see leads.mayWriteEstimate).

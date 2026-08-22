@@ -65,32 +65,48 @@ jobs:
       #    1. the workflow_dispatch input, when given
       #    2. a SITE branch with the SAME NAME as this one — so a paired change
       #       (price book here, regenerated mirror there) is verified together
-      #    3. master
+      #    3. PRODUCTION_SITE_BRANCH below
+      #
+      #  ⚠ THE FALLBACK IS THE DEPLOYED BRANCH, NOT `master`.
+      #  Vercel serves WMIWCI-SITE from `claude/quick-quote-email-flow`, and
+      #  `master` is a DIFFERENT tree. Falling back to master would verify the
+      #  mirror against a branch nobody ships, then report success — the same
+      #  class of false green as skipping. If the deployed branch is ever
+      #  changed in Vercel, change it HERE in the same breath.
+      #
       #  Whatever is chosen is PRINTED, so a green run always says which mirror
       #  it proved. A release must never have to guess.
       - name: Resolve the SITE ref
         id: siteref
         env:
           GH_TOKEN: ${{ secrets.SITE_REPO_TOKEN }}
+          # The branch Vercel actually deploys. Verified 2026-08-22.
+          PRODUCTION_SITE_BRANCH: claude/quick-quote-email-flow
         run: |
           set -euo pipefail
           if [ -z "${GH_TOKEN:-}" ]; then
             echo "::error::SITE_REPO_TOKEN is not set. WMIWCI-SITE is private, so pricing parity cannot be verified. Add a fine-grained PAT with Contents: read on WMIWCI-SITE. Refusing to pass a run that proves nothing."
             exit 1
           fi
+          REMOTE="https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository_owner }}/WMIWCI-SITE.git"
           BRANCH="${{ github.head_ref || github.ref_name }}"
           WANTED="${{ inputs.site_ref }}"
+          HOW="workflow_dispatch input"
           if [ -z "$WANTED" ]; then
-            if git ls-remote --exit-code --heads \
-                 "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository_owner }}/WMIWCI-SITE.git" \
-                 "$BRANCH" >/dev/null 2>&1; then
-              WANTED="$BRANCH"
+            if git ls-remote --exit-code --heads "$REMOTE" "$BRANCH" >/dev/null 2>&1; then
+              WANTED="$BRANCH"; HOW="matching branch name"
             else
-              WANTED="master"
+              WANTED="$PRODUCTION_SITE_BRANCH"; HOW="production fallback"
             fi
           fi
+          # A fallback that does not exist must FAIL, not resolve to whatever
+          # the repo's default happens to be.
+          git ls-remote --exit-code --heads "$REMOTE" "$WANTED" >/dev/null 2>&1 || {
+            echo "::error::WMIWCI-SITE has no branch '$WANTED' ($HOW). Pricing parity cannot be verified against a branch that does not exist."
+            exit 1
+          }
           echo "ref=$WANTED" >> "$GITHUB_OUTPUT"
-          echo "Verifying pricing parity against WMIWCI-SITE@$WANTED"
+          echo "Verifying pricing parity against WMIWCI-SITE@$WANTED ($HOW)"
 
       - name: Check out WMIWCI-SITE
         uses: actions/checkout@v4
@@ -169,20 +185,42 @@ jobs:
         working-directory: api
         run: npm run build
 
-      # A last look at what would actually ship. Admin surfaces legitimately
-      # render historical labels, so they are allowlisted BY PATH and the
-      # reason is stated; anything else carrying a retired label is a defect.
-      - name: No retired package reaches a customer-facing bundle
+      # A last look at what would actually ship.
+      #
+      # ── WHAT THIS SCAN DOES AND DOES NOT COVER — read before trusting it ──
+      #  It checks the CUSTOMER-FACING route bundles by name. Three exclusions,
+      #  each a real gap rather than a clean bill of health:
+      #
+      #   • `(admin)/**` — admin screens legitimately render historical labels;
+      #     an owner looking at a 2026-07 booking must see "Small Studio".
+      #   • `chunks/**`  — SHARED code, including the price book itself, which
+      #     necessarily contains every retired label so history can render.
+      #     Excluding it means this scan CANNOT prove a customer route is free
+      #     of retired labels reached through a shared chunk.
+      #   • `.next/cache/**` — build cache, not shipped.
+      #
+      #  So this is a NAMED-ROUTE check, not a proof. The actual guarantee that
+      #  a customer cannot be quoted a retired price is the server refusal
+      #  (pricing_expired) plus the browser allowlist — both covered by tests.
+      - name: No retired package label in a customer-facing route bundle
         working-directory: api
         run: |
           set -euo pipefail
-          hits=$(grep -rl "Small Studio\|Standard Studio\|Large Studio" .next 2>/dev/null \
-                 | grep -v "/.next/cache/" \
-                 | grep -v "(admin)" \
-                 | grep -v "/chunks/" || true)
-          if [ -n "$hits" ]; then
+          ROUTES="app/deposit app/my-booking app/api/leads app/api/services app/api/bookings app/terms app/privacy"
+          hits=""
+          for r in $ROUTES; do
+            [ -d ".next/server/$r" ] || continue
+            found=$(grep -rl "Small Studio\|Standard Studio\|Large Studio" ".next/server/$r" 2>/dev/null || true)
+            [ -n "$found" ] && hits="$hits$found"$'\n'
+          done
+          # Public (non-admin) browser bundles too.
+          pub=$(grep -rl "Small Studio\|Standard Studio\|Large Studio" .next/static/chunks 2>/dev/null \
+                | grep -v "admin" || true)
+          [ -n "$pub" ] && hits="$hits$pub"$'\n'
+          if [ -n "${hits// /}" ]; then
             echo "::error::a retired package label reached a customer-facing bundle:"
             echo "$hits"
             exit 1
           fi
-          echo "No retired package labels outside admin/historical bundles."
+          echo "Checked routes: $ROUTES + non-admin static chunks."
+          echo "NOT checked (by design, see the comment above): (admin)/**, shared server chunks/**, .next/cache/**."

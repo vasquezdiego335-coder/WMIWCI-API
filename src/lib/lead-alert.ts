@@ -49,7 +49,15 @@ export type LeadAlertInput = {
   moveDate?: Date | string | null
   originZip?: string | null
   destinationZip?: string | null
-  estimatedValue?: number | null // cents
+  estimatedValue?: number | null // cents — LIVE, may be raised later
+  // ── The frozen quote snapshot. Optional: a lead captured before these
+  //    columns existed renders exactly as it always did. ──
+  /** CENTS, written once at capture. Wins over estimatedValue when present. */
+  quoteTotalCents?: number | null
+  /** 'pending' → the routed mileage is not priced and must be disclosed. */
+  quoteMileageStatus?: string | null
+  /** Server-calculated reasons this quote needs a human. */
+  reviewReasons?: string[] | null
   emailMarketingConsent?: boolean | null
   landingPage?: string | null
   utmSource?: string | null
@@ -151,9 +159,31 @@ export function formatLeadAlert(lead: LeadAlertInput): { title: string; lines: A
   else if (route.length === 1) job.push(`from ${route[0]}`)
   const when = day(lead.moveDate)
   if (when) job.push(when)
-  const est = money(lead.estimatedValue)
-  if (est) job.push(`est. ${est}`)
+  // ── THE PLAIN FALLBACK MUST BE AS HONEST AS THE RICH CARD ──────────────
+  //  This notice goes out when the queue is down, so it is precisely the path
+  //  nobody watches. It printed a bare "est. $779", which reads as a finished
+  //  price — while the rich card, for the same lead, says the drive is not in
+  //  that number yet. Two notices for one lead must not disagree.
+  //
+  //  The FROZEN snapshot wins over the mutable estimatedValue, for the same
+  //  reason it does everywhere else (see quote-capture.quotedCentsOf).
+  const quotedCents =
+    typeof lead.quoteTotalCents === 'number' && lead.quoteTotalCents > 0
+      ? lead.quoteTotalCents
+      : lead.estimatedValue
+  const est = money(quotedCents)
+  const mileagePending = lead.quoteMileageStatus === 'pending'
+  if (est) job.push(mileagePending ? `${est} package subtotal` : `est. ${est}`)
   if (job.length) lines.push({ message: job.join('  ·  ') })
+  if (est && mileagePending) {
+    lines.push({ message: 'Transportation pending — $3 per routed mile, fuel included.' })
+  }
+
+  //  WHY IT NEEDS A HUMAN, on the notice the owner actually reads. The flag
+  //  was computed server-side and then never shown anywhere.
+  if (lead.reviewReasons && lead.reviewReasons.length > 0) {
+    lines.push({ message: `⚠️ Manual review: ${lead.reviewReasons.join(' ')}` })
+  }
 
   lines.push({ message: consentLine(lead.emailMarketingConsent) })
 
