@@ -25,6 +25,7 @@
 // ════════════════════════════════════════════════════════════════════════
 
 import { PACKAGES, type PackageKey } from './pricing-config'
+import { ACTIVE_PACKAGE_KEYS } from './product-catalog'
 
 export type Inventory = {
   boxes: number
@@ -115,9 +116,18 @@ const PACKAGE_BEDROOMS: Record<PackageKey, number> = {
  *  normal variance; this is the point past which it stops being variance. */
 export const OVERSIZE_TOLERANCE = 1.10
 
-const ORDERED_PACKAGES: PackageKey[] = [
-  'little-studio', 'half-studio', 'full-studio', '1br', '2br', '3br', '4br', '5br',
-]
+// ── A SUGGESTION MAY NEVER NAME A WITHDRAWN TIER (fix 2026-08-22) ──────────
+//  This list used to lead with the three studios, so a small disclosed load
+//  made suggestedPackage() answer 'little-studio' — turning inventory into an
+//  obsolete service, and putting "the disclosed items look like a Small Studio"
+//  in front of an owner for a package that cannot be sold. The capacity and
+//  bedroom tables still hold every key (historical bookings are still sized
+//  against what they bought); only what we may PROPOSE is filtered.
+//
+//  ACTIVE_PACKAGE_KEYS is derived from LEGACY_PACKAGE_KEYS, so retiring a tier
+//  in the price book removes it from here automatically. '5br' is the terminal
+//  fallback below and stays reachable.
+const ORDERED_PACKAGES: PackageKey[] = ACTIVE_PACKAGE_KEYS.filter((k) => k !== 'not-sure')
 
 // ── PARSING ───────────────────────────────────────────────────────────────
 

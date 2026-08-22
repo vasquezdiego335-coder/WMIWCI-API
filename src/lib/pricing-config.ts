@@ -133,6 +133,24 @@ export type MovePackage = {
   serviceType?: ServiceTypeKey
   /** Crew size is confirmed after inventory review rather than published. */
   crewConfirmedAfterReview?: boolean
+
+  // ── RETIREMENT (incident fix 2026-08-22) ─────────────────────────────
+  //  WHY THIS FIELD EXISTS. `LEGACY_PACKAGE_KEYS` already said the studio
+  //  tiers were "readable forever, sellable never" — but it said it in a
+  //  place nothing on the sell path ever read. public/quote.html builds its
+  //  size cards by iterating this record and skipping `if (pkg.legacy)`,
+  //  and NO package carried a `legacy` field, so that filter was dead code:
+  //  the live quick quote offered "Small Studio $379" as its first and
+  //  cheapest option, and quoteEstimate() happily priced it.
+  //
+  //  The retirement now lives ON the package, so it reaches the generated
+  //  browser mirror and the server guard from ONE definition. Keep this in
+  //  sync with LEGACY_PACKAGE_KEYS — pricing-config.test.ts asserts the two
+  //  agree exactly, so they cannot drift apart again.
+  /** Withdrawn from sale. Readable forever (history), quotable never. */
+  legacy?: boolean
+  /** ISO date the package stopped being sold. Present iff `legacy`. */
+  retiredOn?: string
 }
 
 /** PUBLIC NAMES vs INTERNAL KEYS (owner decision 2026-07-25)
@@ -143,9 +161,12 @@ export type MovePackage = {
  *  `label` / `label_es` to change what customers read; never the key.
  */
 export const PACKAGES: Record<PackageKey, MovePackage> = {
-  'little-studio': { key: 'little-studio', label: 'Small Studio',    label_es: 'Estudio Pequeño',  rooms: 1, requiresReview: false, includedTruck: null, upgradeTruck: null, serviceType: 'full_service', crewConfirmedAfterReview: false, price: c({ kind: 'fixed', amount: 379, label: 'Small Studio' }) },
-  'half-studio':   { key: 'half-studio',   label: 'Standard Studio', label_es: 'Estudio Estándar', rooms: 1, requiresReview: false, includedTruck: null, upgradeTruck: null, serviceType: 'full_service', crewConfirmedAfterReview: false, price: c({ kind: 'fixed', amount: 439, label: 'Standard Studio' }) },
-  'full-studio':   { key: 'full-studio',   label: 'Large Studio',    label_es: 'Estudio Grande',   rooms: 1, requiresReview: false, includedTruck: null, upgradeTruck: null, serviceType: 'full_service', crewConfirmedAfterReview: false, price: c({ kind: 'fixed', amount: 549, label: 'Large Studio' }) },
+  // ── RETIRED 2026-07-31. Present so a historic booking still renders the
+  //    label and amount it was sold at; `legacy` keeps them out of every
+  //    new-quote surface (browser mirror filter + assertSellable guard). ──
+  'little-studio': { key: 'little-studio', label: 'Small Studio',    label_es: 'Estudio Pequeño',  rooms: 1, requiresReview: false, includedTruck: null, upgradeTruck: null, serviceType: 'full_service', crewConfirmedAfterReview: false, legacy: true, retiredOn: '2026-07-31', price: c({ kind: 'fixed', amount: 379, label: 'Small Studio' }) },
+  'half-studio':   { key: 'half-studio',   label: 'Standard Studio', label_es: 'Estudio Estándar', rooms: 1, requiresReview: false, includedTruck: null, upgradeTruck: null, serviceType: 'full_service', crewConfirmedAfterReview: false, legacy: true, retiredOn: '2026-07-31', price: c({ kind: 'fixed', amount: 439, label: 'Standard Studio' }) },
+  'full-studio':   { key: 'full-studio',   label: 'Large Studio',    label_es: 'Estudio Grande',   rooms: 1, requiresReview: false, includedTruck: null, upgradeTruck: null, serviceType: 'full_service', crewConfirmedAfterReview: false, legacy: true, retiredOn: '2026-07-31', price: c({ kind: 'fixed', amount: 549, label: 'Large Studio' }) },
   '1br':           { key: '1br',           label: '1 Bedroom',     label_es: '1 Recámara',       rooms: 2, requiresReview: false, includedTruck: '10ft', upgradeTruck: '15ft', serviceType: 'full_service', crewConfirmedAfterReview: false, price: c({ kind: 'fixed', amount: 550, label: '1 Bedroom' }) },
   '2br':           { key: '2br',           label: '2 Bedrooms',    label_es: '2 Recámaras',      rooms: 3, requiresReview: false, includedTruck: '15ft', upgradeTruck: '26ft', serviceType: 'full_service', crewConfirmedAfterReview: false, price: c({ kind: 'fixed', amount: 779, label: '2 Bedrooms' }) },
 
@@ -330,6 +351,18 @@ export function assignTruck(packageKey?: string | null, requested?: string | nul
 
   // The assigned size's own fee — a REPLACEMENT, so upgrading 10ft -> 26ft is
   // $150 and never the sum of the intermediate steps.
+  //
+  // ⚠ UNRESOLVED (raised 2026-08-22, needs an owner decision — do not "fix"
+  //   this without one). This fee is ABSOLUTE, so the minimum truck a package
+  //   requires is charged even though PACKAGES[key].includedTruck says that
+  //   same truck is included in the flat price: a plain 2BR prices at
+  //   $779 + $100 = $879. That figure is deliberate and approved — it is what
+  //   booking-form.html prints and what APPROVED_CARD_PRICES in
+  //   pricing-truck-parity.test.ts pins ($879 / $1,199 / $1,599). But it reads
+  //   as a contradiction against `includedTruck`, and against a published base
+  //   price of $779. Either the base prices or the card prices are the real
+  //   published numbers; changing this line moves revenue on every 2BR+ job,
+  //   so it stays as approved until the owner says which.
   const upgradeAmount = truckUpgradeAmount(assigned) ?? 0
   return { ok: true, assigned, minimum, upgradeAmount, corrected, upgraded }
 }
@@ -1241,6 +1274,30 @@ export const LEGACY_PACKAGE_KEYS = [
   "half-studio",
   "full-studio"
 ] as readonly string[]
+
+// ════════════════════════════════════════════════════════════════════════
+//  PRICE BOOK VERSION + THE SELLABILITY GUARD  (incident fix 2026-08-22)
+//
+//  "Sellable never" was a comment, not a rule. On 2026-08-22 a quick-quote
+//  lead was created for "Small Studio — $379": the browser mirror carried no
+//  per-package `legacy` flag, so public/quote.html rendered the retired tier,
+//  and quoteEstimate() priced it because nothing on the server refused it.
+//
+//  These three exports are now THE rule. Every new-quote path asks
+//  isSellablePackageKey() (or assertSellablePackage()) before pricing; every
+//  historical read keeps using PACKAGES / packageLabel() and is unaffected.
+// ════════════════════════════════════════════════════════════════════════
+
+/** The price book these amounts belong to. Stamped onto new quote snapshots
+ *  so a stored total can always be traced to the rules that produced it. */
+export const PRICE_BOOK_VERSION = '2026-08-22'
+
+//  NO NEW "is it sellable?" HELPER LIVES HERE. `LEGACY_PACKAGE_KEYS` above is
+//  the one list, and product-catalog.ts already derives the whole retirement
+//  API from it — RETIRED_PACKAGE_KEYS / ACTIVE_PACKAGE_KEYS /
+//  isPackageActiveForNewIntake / isRetiredPackage / isKnownPackage. Callers
+//  must use those. A fifth spelling of the same question is how the fourth one
+//  ended up unenforced on the quote path in the first place.
 
 // ── HELPERS ───────────────────────────────────────────────────────────────
 //  Authored, not recovered. The mirror's JavaScript versions are the reference

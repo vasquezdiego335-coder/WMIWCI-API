@@ -24,7 +24,8 @@
 //  PURE + OFFLINE: no prisma, no env, no network — so it is fully unit-tested.
 // ════════════════════════════════════════════════════════════════════════
 import { computeEstimate, MOVE_SIZES } from './estimate'
-import { assignTruck, type SelectableTruckSize } from './pricing-config'
+import { assignTruck, PRICE_BOOK_VERSION, type SelectableTruckSize } from './pricing-config'
+import { isPackageActiveForNewIntake, isRetiredPackage } from './product-catalog'
 
 /** What the quick quote can tell us. Deliberately narrow: the quote page asks
  *  three questions, so anything richer belongs to the booking form's estimate. */
@@ -64,13 +65,20 @@ export type QuoteEstimateResult =
       truckUpgrade: number
       /** True when a below-minimum request was corrected upward. */
       truckCorrected: boolean
+      /** The price book that produced these numbers. Stored on the snapshot so
+       *  a total can always be traced back to the rules that made it. */
+      priceBookVersion: string
     }
   | {
       ok: false
-      /** `unknown_package`  — not a key we sell (or a retired one).
+      /** `unknown_package`  — not a key we sell and never did.
+       *  `retired_package`  — a key we DID sell and withdrew. Almost always a
+       *                       stale cached bundle, not an attack: the customer
+       *                       must be told their selection expired, and must
+       *                       NEVER be issued the retired price.
        *  `no_package`       — nothing selected; a lead is still worth saving,
        *                       it simply carries no estimate. */
-      reason: 'unknown_package' | 'no_package' | 'manual_plan' | 'unsupported_truck'
+      reason: 'unknown_package' | 'retired_package' | 'no_package' | 'manual_plan' | 'unsupported_truck'
       /** Present for a retired key so the caller can log something useful. */
       packageKey?: string
     }
@@ -90,10 +98,22 @@ export function quoteEstimate(input: QuoteEstimateInput): QuoteEstimateResult {
   const pkg = MOVE_SIZES[key]
   if (!pkg) return { ok: false, reason: 'unknown_package' }
 
-  // 'not-sure' is a real answer on the booking form ("I need a quote"), but it
-  // is not a price. The quote page never offers it; reject it explicitly so a
-  // hand-crafted payload cannot reach computeEstimate with it.
-  if (key === 'not-sure') return { ok: false, reason: 'unknown_package', packageKey: key }
+  // ── SELLABILITY IS CHECKED BEFORE ANY PRICE IS COMPUTED ─────────────────
+  //  MOVE_SIZES is derived from PACKAGES, which still holds the retired studio
+  //  tiers so historic bookings keep their label and amount. That made every
+  //  retired key quotable: on 2026-08-22 a lead was issued "Small Studio $379"
+  //  from a cached browser bundle that still offered the tier.
+  //
+  //  'not-sure' is a real booking-form answer ("I need a quote") but is not a
+  //  price, so it is refused here too — a hand-crafted payload must never
+  //  reach computeEstimate with it. assertSellablePackage() covers both, and
+  //  distinguishes "withdrawn" from "never existed" so the route can tell the
+  //  customer their selection expired instead of calling them a bad request.
+  //  product-catalog.ts already owned this answer (isPackageActiveForNewIntake,
+  //  derived from LEGACY_PACKAGE_KEYS). The quote path simply never asked it.
+  if (!isPackageActiveForNewIntake(key)) {
+    return { ok: false, reason: isRetiredPackage(key) ? 'retired_package' : 'unknown_package', packageKey: key }
+  }
 
   // ── TRUCK IS DERIVED, NOT CHOSEN ────────────────────────────────────────
   //  A customer cannot pick a smaller truck to dodge the fee: below-minimum
@@ -128,6 +148,7 @@ export function quoteEstimate(input: QuoteEstimateInput): QuoteEstimateResult {
     truckMinimum: truck.minimum,
     truckUpgrade: truck.upgradeAmount,
     truckCorrected: truck.corrected,
+    priceBookVersion: PRICE_BOOK_VERSION,
     /** The package price on its own, so the UI can show the breakdown:
      *  base package + required truck upgrade + routed mileage + add-ons. */
     baseDollars: est.base,

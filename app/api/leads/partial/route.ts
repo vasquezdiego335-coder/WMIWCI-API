@@ -4,6 +4,8 @@ import { normaliseConsentSource } from '@/lib/consent'
 import { apiLogger } from '@/lib/logger'
 import { rateLimit, tooManyRequests, LIMITS, clientIp } from '@/lib/rate-limit'
 import { capturePartialLeadSafe } from '@/lib/leads'
+import { PRICE_BOOK_VERSION } from '@/lib/pricing-config'
+import { isRetiredPackage } from '@/lib/product-catalog'
 
 // ════════════════════════════════════════════════════════════════════════
 //  POST /api/leads/partial — PUBLIC, cross-origin (called from the static
@@ -165,6 +167,28 @@ async function handle(req: NextRequest): Promise<NextResponse> {
   // Honeypot tripped → pretend success, drop silently.
   if (d.company && d.company.length > 0) return NextResponse.json({ ok: true, skipped: 'honeypot' })
 
+  // ── A RETIRED PACKAGE MAY NOT CARRY ITS RETIRED PRICE (fix 2026-08-22) ───
+  //  `estimateTotal` is the BROWSER's live figure. That is tolerable for the
+  //  booking form, whose estimate legitimately includes add-ons this route
+  //  never receives — and `mayWriteEstimate` already stops it undercutting a
+  //  quote we have emailed. What is NOT tolerable is persisting the price of a
+  //  package we withdrew: a cached bundle offering "Small Studio $379" would
+  //  otherwise store $379 on a brand-new lead, which is precisely what the
+  //  Discord card then displayed.
+  //
+  //  The lead is still captured — saving the contact is this route's entire
+  //  purpose and the visitor did nothing wrong. It simply carries NO estimate,
+  //  so the owner quotes it from the current book by hand.
+  const retiredSelection = isRetiredPackage((d.moveSize ?? '').trim().toLowerCase())
+  if (retiredSelection) {
+    apiLogger.warn(
+      { moveSize: d.moveSize, priceBookVersion: PRICE_BOOK_VERSION },
+      'POST /api/leads/partial — dropped the estimate for a retired package (stale client price book)'
+    )
+  }
+  const estimateCents =
+    !retiredSelection && typeof d.estimateTotal === 'number' ? Math.round(d.estimateTotal * 100) : null
+
   const result = await capturePartialLeadSafe(
     {
       email: d.email,
@@ -188,7 +212,7 @@ async function handle(req: NextRequest): Promise<NextResponse> {
       landingPage: d.landingPage,
       referrer: d.referrer,
       promoCode: d.utmCampaign, // door-hanger/QR campaign code doubles as the promo code slot
-      estimatedValue: typeof d.estimateTotal === 'number' ? Math.round(d.estimateTotal * 100) : null,
+      estimatedValue: estimateCents,
       moveDate: parseMoveDate(d.moveDate),
       pickupZip: d.pickupZip,
       destinationZip: d.destinationZip,

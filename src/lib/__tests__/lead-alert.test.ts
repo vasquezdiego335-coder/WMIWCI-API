@@ -11,6 +11,7 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { consentLine, formatLeadAlert } from '../lead-alert'
+import { PACKAGES } from '../pricing-config'
 
 const base = { id: 'lead_1', name: 'Maria Vasquez', phone: '862-640-0625', email: 'maria@example.com' }
 
@@ -47,7 +48,11 @@ test('the card carries what the owner needs to act', () => {
   const text = lines.map((l) => l.message).join('\n')
   assert.match(text, /862-640-0625/, 'phone')
   assert.match(text, /maria@example\.com/, 'email')
-  assert.match(text, /2 bedrooms/, 'the size key must be spelled out')
+  // The size must be spelled out USING THE PRICE BOOK'S OWN LABEL. This used to
+  // assert the literal "2 bedrooms", which pinned a hand-written second label
+  // book that had drifted from PACKAGES ("Little studio" vs "Small Studio").
+  // Asserting equality with PACKAGES makes the two impossible to separate.
+  assert.match(text, new RegExp(PACKAGES['2br'].label), 'the size must use the price-book label')
   assert.match(text, /07001 → 07002/, 'both ends of the move')
   assert.match(text, /\$899/, 'the estimate')
   assert.match(text, /Quick quote form/, 'the capture surface')

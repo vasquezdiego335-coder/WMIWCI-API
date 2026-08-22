@@ -23,11 +23,25 @@ import { resolve } from 'node:path'
 import { buildPricingPayload, renderPricingConfigJs } from '../../../scripts/gen-pricing-config'
 import { PACKAGES, TRUCK_PICKUP_RETURN, BOOKING_AUTHORIZATION } from '../pricing-config'
 
-const SITE = resolve(__dirname, '../../../../WMIWCI-SITE')
+// ── WHICH SITE CHECKOUT IS BEING VALIDATED (fix 2026-08-22) ───────────────
+//  This path was hard-wired to the sibling directory, so the parity gate
+//  graded whatever branch happened to be checked out next door — not the
+//  branch being released. That is how the deployed mirror drifted out of sync
+//  with pricing-config.ts while these tests stayed green: the sibling checkout
+//  held a different branch's copy. WMIWCI_SITE_DIR now points the gate at the
+//  tree under test (CI and release worktrees set it); the sibling remains the
+//  default so an ordinary local run is unchanged.
+const SITE = resolve(process.env.WMIWCI_SITE_DIR ?? resolve(__dirname, '../../../../WMIWCI-SITE'))
 const MIRROR = resolve(SITE, 'public/js/pricing-config.js')
 const FORM = resolve(SITE, 'public/booking-form.html')
 
 const siteAvailable = existsSync(SITE)
+//  A MISSING SITE STILL SKIPS, but an EXPLICITLY POINTED one never may: if
+//  WMIWCI_SITE_DIR is set and wrong, silently skipping would hand back a green
+//  run that proved nothing about the release.
+if (process.env.WMIWCI_SITE_DIR && !siteAvailable) {
+  throw new Error(`WMIWCI_SITE_DIR=${process.env.WMIWCI_SITE_DIR} does not exist — parity cannot be proven`)
+}
 const skip = siteAvailable ? false : 'WMIWCI-SITE not checked out beside WMIWCI-API'
 
 test('parity: the generated browser mirror matches pricing-config.ts exactly', { skip }, () => {
@@ -81,8 +95,23 @@ test('parity: the booking form loads the mirror and defines no prices itself', {
   assert.ok(!/const\s+MODIFIERS\s*=\s*\{/.test(html), 'booking-form.html still defines a local MODIFIERS table')
 })
 
+/** Remove HTML comments, JS block comments and JS line comments, so a note
+ *  ABOUT a retired price is never mistaken for an offer OF one. `//` inside a
+ *  URL (https://…) is deliberately preserved. */
+function stripComments(src: string): string {
+  return src
+    .replace(/<!--[\s\S]*?-->/g, ' ')
+    .replace(/\/\*[\s\S]*?\*\//g, ' ')
+    .replace(/(^|[^:])\/\/[^\n\r]*/g, '$1 ')
+}
+
 test('parity: no retired price appears anywhere in the deployed site', { skip }, () => {
-  const RETIRED = [359, 409, 509, 599, 699, 949, 1249, 1549]
+  // Every price we have ever withdrawn, oldest generation first. The 2026-07-31
+  // studio tiers (379/439/549) and the old 1BR (649) were MISSING here, which
+  // is why this test stayed green while public/quote.html offered "Small Studio
+  // $379" — the guard listed the previous generation of retired prices only.
+  // A price added to LEGACY_PACKAGE_KEYS must be added here in the same commit.
+  const RETIRED = [359, 379, 409, 439, 509, 549, 599, 649, 699, 949, 1249, 1549]
   const files = [
     'public/booking-form.html', 'public/pricing.html', 'public/services.html',
     'public/faq.html', 'public/index.html', 'public/terms/index.html',
@@ -92,7 +121,12 @@ test('parity: no retired price appears anywhere in the deployed site', { skip },
   for (const rel of files) {
     const p = resolve(SITE, rel)
     if (!existsSync(p)) continue
-    const text = readFileSync(p, 'utf8')
+    // COMMENTS ARE NOT PUBLISHED PRICES. Several of these files carry a note
+    // explaining WHY a tier was withdrawn, and those notes necessarily name the
+    // retired amount. Scanning raw bytes flagged the documentation and would
+    // pressure the next reader into deleting either the note or this guard.
+    // Strip comments first, then assert on what a customer can actually read.
+    const text = stripComments(readFileSync(p, 'utf8'))
     for (const n of RETIRED) {
       // Match a money-formatted retired price: $359 or $1,249 — not a stray
       // coordinate, opacity, or pixel value.

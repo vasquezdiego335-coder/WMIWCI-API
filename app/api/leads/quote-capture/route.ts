@@ -5,6 +5,7 @@ import { rateLimit, tooManyRequests, LIMITS, clientIp } from '@/lib/rate-limit'
 import { capturePartialLeadSafe } from '@/lib/leads'
 import { onQuoteRequestCaptured } from '@/lib/quote-capture'
 import { quoteEstimate, compareClientTotal } from '@/lib/quote-estimate'
+import { PRICE_BOOK_VERSION } from '@/lib/pricing-config'
 import { isValidMoveDate, parseMoveDate } from '@/lib/quote-date'
 import { composeAccessDetails } from '@/lib/quote-access-details'
 import { CONSENT_VERSION, normaliseConsentSource } from '@/lib/consent'
@@ -259,6 +260,22 @@ async function handle(req: NextRequest): Promise<NextResponse> {
   const priced = inPerson
     ? { ok: false as const, reason: 'manual_plan' as const, packageKey: d.moveSize ?? null }
     : quoteEstimate({ moveSize: d.moveSize, truckSize: d.truckSize })
+  // ── A WITHDRAWN PACKAGE IS AN EXPIRED PRICE, NOT A BAD REQUEST ──────────
+  //  A visitor whose browser cached the price book from before a tier was
+  //  retired submits a key that was perfectly valid when their page loaded.
+  //  Answering 422 validation_error blames them; answering with the retired
+  //  price (which is what happened on 2026-08-22) is far worse. Say the
+  //  selection expired, name the current price book, write NOTHING.
+  if (!priced.ok && priced.reason === 'retired_package') {
+    apiLogger.warn(
+      { packageKey: priced.packageKey ?? '(unrecognised)', priceBookVersion: PRICE_BOOK_VERSION },
+      'POST /api/leads/quote-capture — refused a retired package (stale client price book)'
+    )
+    return json(
+      { ok: false, captured: false, error: 'pricing_expired', fields: ['moveSize'], priceBookVersion: PRICE_BOOK_VERSION },
+      409
+    )
+  }
   if (!priced.ok && (priced.reason === 'unknown_package' || priced.reason === 'unsupported_truck')) {
     // Never silently default to a price for something we do not sell, and never
     // swap a retired truck size for a different one behind the customer's back.

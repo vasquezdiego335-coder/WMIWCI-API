@@ -31,6 +31,7 @@
 
 import { postToChannels, type AlertLine, type AlertResult } from './ops-alert'
 import { apiLogger } from './logger'
+import { PACKAGES } from './pricing-config'
 
 const log = apiLogger.child({ mod: 'lead-alert' })
 
@@ -79,17 +80,19 @@ const SOURCE_LABELS: Record<string, string> = {
   WEBSITE: 'Website',
 }
 
-/** Move-size keys are the price-book keys; spell them for a human. */
-const SIZE_LABELS: Record<string, string> = {
-  'little-studio': 'Little studio',
-  'half-studio': 'Half studio',
-  'full-studio': 'Full studio',
-  '1br': '1 bedroom',
-  '2br': '2 bedrooms',
-  '3br': '3 bedrooms',
-  '4br': '4 bedrooms',
-  '5br': '5 bedrooms',
-}
+/** Move-size keys are the price-book keys; spell them for a human.
+ *
+ *  DERIVED, NOT TRANSCRIBED (fix 2026-08-22). This was a hand-written second
+ *  label book, and it had already drifted: it called the tiers "Little studio"
+ *  / "Half studio" / "Full studio" while the price book — and therefore the
+ *  quote page, the emails and the quick-quote Discord card — called the same
+ *  keys "Small Studio" / "Standard Studio" / "Large Studio". One owner could
+ *  read two different names for one booking depending on which alert fired.
+ *  Retired keys stay resolvable here on purpose: an alert about a historical
+ *  lead must still say what that lead bought. */
+const SIZE_LABELS: Record<string, string> = Object.fromEntries(
+  Object.values(PACKAGES).map((p) => [p.key, p.label])
+)
 
 const money = (cents?: number | null): string | null =>
   typeof cents === 'number' && cents > 0 ? `$${(cents / 100).toLocaleString('en-US')}` : null

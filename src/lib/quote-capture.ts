@@ -136,9 +136,18 @@ export type QuoteLeadCaptureResponse =
   | {
       ok: false
       captured: false
-      error: 'validation_error' | 'rate_limited' | 'server_error'
+      /** `pricing_expired` is NOT a validation failure and must not be reported
+       *  as one. It means the browser submitted a package we have withdrawn —
+       *  almost always a cached bundle from before the tier was retired, so the
+       *  visitor did nothing wrong. They are told their selection is no longer
+       *  available and pointed at the current book; they are NEVER issued the
+       *  retired price. See pricing-config.assertSellablePackage(). */
+      error: 'validation_error' | 'pricing_expired' | 'rate_limited' | 'server_error'
       /** Our own field NAMES only — never submitted values. */
       fields?: string[]
+      /** Set for `pricing_expired`: the price book the server is quoting from,
+       *  so a stale client can detect it needs to reload. */
+      priceBookVersion?: string
     }
 
 /**
