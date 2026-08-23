@@ -56,7 +56,13 @@ env:
   # it the build fails on every run, which is how a "green" CI that never
   # actually built anything would look.
   JWT_SECRET: ci-build-only-not-a-real-secret-0000000000000000000000000000
-  NODE_ENV: production
+  # NODE_ENV is deliberately NOT set here. As a job-level variable it makes
+  # `npm ci` omit devDependencies, so typescript, tsx and jsdom are absent and
+  # every gate that needs them either dies or — worse — `npx` silently fetches
+  # an unrelated package of the same name from the registry. `npx tsc` did
+  # exactly that on run 32641446234: it installed tsc@2.0.4, which is not the
+  # TypeScript compiler. NODE_ENV=production is set on the BUILD step alone,
+  # where it belongs.
 
 jobs:
   # ══════════════════════════════════════════════════════════════════════
@@ -99,7 +105,10 @@ jobs:
           done
 
       - name: Typecheck
-        run: npx tsc --noEmit
+        # `npm run typecheck`, never `npx tsc`: the script resolves the
+        # typescript binary this repo pins. npx would download whatever is
+        # published as "tsc" when the local one is missing.
+        run: npm run typecheck
 
       - name: Lint
         run: npm run lint
@@ -112,6 +121,11 @@ jobs:
         run: npm test
 
       - name: Production build
+        # The production path is what we want to prove builds — auth.ts refuses
+        # to load without a JWT secret when NODE_ENV is production, and that
+        # check must actually run.
+        env:
+          NODE_ENV: production
         run: npm run build
 
       # ── WHAT THIS SCAN DOES AND DOES NOT COVER ─────────────────────────
