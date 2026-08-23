@@ -28,9 +28,16 @@ import {
   WAITING_TIME, ELEVATOR, PARKING_TOLLS_DELAYS, WEEKEND_HOLIDAY, MATERIALS,
   formatCharge, type Charge,
 } from '../pricing-config'
+import { SKIP_WITHOUT_SITE, siteFile } from './site-dir'
 
-const PAGE = resolve(__dirname, '../../../../WMIWCI-SITE/public/services.html')
-const skip = existsSync(PAGE) ? false : 'WMIWCI-SITE services.html not present'
+// The services page is the OTHER place a retired price can survive: it
+// publishes every package price as a static fallback. It used to be read from
+// a hard-coded sibling checkout (`../../../../WMIWCI-SITE`), which meant this
+// suite graded whatever branch happened to sit next door and skipped silently
+// in CI, where no sibling exists. It now uses the same opt-in tree as the rest
+// of the cross-repository gate.
+const PAGE = siteFile('public/services.html')
+const skip = SKIP_WITHOUT_SITE || (existsSync(PAGE) ? false : 'WMIWCI-SITE services.html not present')
 
 const html = (): string => readFileSync(PAGE, 'utf8')
 

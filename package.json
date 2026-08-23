@@ -42,7 +42,7 @@
     "agent:cost": "tsx scripts/email-agent-cost.ts",
     "email:preflight-rollout": "tsx scripts/email-rollout-preflight.ts",
     "email:queue-audit": "tsx scripts/email-queue-audit.ts",
-    "test:parity": "tsx --test src/lib/__tests__/pricing-parity.test.ts src/lib/__tests__/pricing-browser-parity.test.ts src/lib/__tests__/pricing-truck-parity.test.ts src/lib/__tests__/quick-quote-pricing-integrity.test.ts src/lib/__tests__/quote-page-browser.test.ts src/lib/__tests__/pricing-release.test.ts src/lib/__tests__/quote-capture-route.test.ts src/lib/__tests__/quick-quote-service-and-review.test.ts src/lib/__tests__/partial-route-persistence.test.ts src/lib/__tests__/quote-snapshot-notifications.test.ts src/lib/__tests__/booking-form-partial-payload.test.ts"
+    "test:parity": "tsx --test src/lib/__tests__/pricing-parity.test.ts src/lib/__tests__/pricing-browser-parity.test.ts src/lib/__tests__/pricing-truck-parity.test.ts src/lib/__tests__/quick-quote-pricing-integrity.test.ts src/lib/__tests__/quote-page-browser.test.ts src/lib/__tests__/pricing-release.test.ts src/lib/__tests__/quote-capture-route.test.ts src/lib/__tests__/quick-quote-service-and-review.test.ts src/lib/__tests__/partial-route-persistence.test.ts src/lib/__tests__/quote-snapshot-notifications.test.ts src/lib/__tests__/booking-form-partial-payload.test.ts src/lib/__tests__/quote-page.test.ts src/lib/__tests__/services-page-parity.test.ts"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.600.0",
