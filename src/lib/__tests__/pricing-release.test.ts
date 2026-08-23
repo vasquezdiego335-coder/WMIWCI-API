@@ -40,12 +40,9 @@ import {
   LEGACY_PACKAGE_KEYS,
   BOOKING_AUTHORIZATION,
 } from '../pricing-config'
+import { SITE_DIR, SKIP_WITHOUT_SITE, siteFile } from './site-dir'
 
-const SITE = resolve(process.env.WMIWCI_SITE_DIR ?? resolve(__dirname, '../../../../WMIWCI-SITE'))
-if (process.env.WMIWCI_SITE_DIR && !existsSync(SITE)) {
-  throw new Error(`WMIWCI_SITE_DIR=${process.env.WMIWCI_SITE_DIR} does not exist — the release cannot be verified`)
-}
-const skipSite = existsSync(SITE) ? false : 'WMIWCI-SITE not available'
+const skipSite = SKIP_WITHOUT_SITE
 
 /** Deterministic JSON: keys sorted at every level, so property ORDER can never
  *  move the fingerprint on its own. */
@@ -205,7 +202,7 @@ test('release: the price-book version is monotonic, not merely a date', () => {
  *  listed: a hardcoded set of four filenames silently stops covering the fifth
  *  page somebody adds, which is the same "it looked green" failure as before. */
 function siteSourceFiles(): string[] {
-  const roots = ['public', 'pages', 'sites'].map((r) => resolve(SITE, r)).filter((p) => existsSync(p))
+  const roots = ['public', 'pages', 'sites'].map((r) => siteFile(r)).filter((p) => existsSync(p))
   const out: string[] = []
   const walk = (dir: string): void => {
     for (const entry of readdirSync(dir, { withFileTypes: true })) {
@@ -233,7 +230,7 @@ function pricingConsumers(): { file: string; src: string; version: string | null
     for (const m of Array.from(text.matchAll(/<script[^>]+src=["']([^"']*pricing-config\.js[^"']*)["']/gi))) {
       const src = m[1]
       const v = /[?&]v=([^"'&]+)/.exec(src)
-      found.push({ file: file.slice(SITE.length + 1), src, version: v ? v[1] : null })
+      found.push({ file: file.slice((SITE_DIR ?? '').length + 1), src, version: v ? v[1] : null })
     }
   }
   return found
@@ -269,7 +266,7 @@ test('release: the consumer walk actually reaches the known pages', { skip: skip
 })
 
 test('release: the generated mirror carries the same version the server reports', { skip: skipSite }, () => {
-  const mirror = resolve(SITE, 'public/js/pricing-config.js')
+  const mirror = siteFile('public/js/pricing-config.js')
   if (!existsSync(mirror)) return
   const js = readFileSync(mirror, 'utf8')
   assert.ok(

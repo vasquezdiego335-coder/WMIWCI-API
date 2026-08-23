@@ -187,20 +187,52 @@ By hand on the live quote page:
 
 ---
 
-## CI
+## CI — two jobs, and the secret one of them needs
 
-`.github/workflows/ci.yml` verifies API↔SITE pricing parity by checking out the
-SITE branch and running the tests against it. It **fails rather than skips**
-when the mirror cannot be verified.
+`.github/workflows/ci.yml` runs TWO jobs. Both must be green on the exact
+commit being released:
 
-- **Requires a repository secret `SITE_REPO_TOKEN`** — a fine-grained,
-  read-only PAT (*Contents: read*) on WMIWCI-SITE. WMIWCI-SITE is private and
-  WMIWCI-API is public, so the default `GITHUB_TOKEN` cannot read it.
-  **Until this secret exists, CI fails by design.**
-- The fallback branch is pinned to `claude/quick-quote-email-flow` — see the
-  byte evidence in step 4. **If the deployed branch changes in Vercel, change
-  `PRODUCTION_SITE_BRANCH` in the workflow in the same breath**, or CI will
-  verify a tree nobody ships and call it green.
+| Job | Needs the SITE? | What its failure tells you |
+|---|---|---|
+| `verify` — "typecheck · lint · tests · build" | no | this repo does not compile, lint, test or build |
+| `pricing-parity` | yes | the cross-repository gate could not be verified |
+
+They are separate because the previous version put the SITE checkout at step 2
+of a SINGLE job: when the token was missing the run died there, and typecheck,
+lint, tests and build never ran. A red run then carried no information about
+whether the code even compiled. Run `32605306351` is exactly that failure.
+
+### Configure the token — required, once, by a repo admin
+
+WMIWCI-SITE is PRIVATE and WMIWCI-API is PUBLIC, so the workflow's built-in
+`GITHUB_TOKEN` cannot read it. Create a **fine-grained, READ-ONLY** PAT:
+
+- Repository access: **only** `vasquezdiego335-coder/WMIWCI-SITE`
+- Permissions: **Contents = Read**. Nothing else.
+- Expiry: set one and diarise the renewal. An expired token fails the parity
+  job exactly like a missing one, which is the correct behaviour.
+
+Then store it and re-run:
+
+    gh secret set SITE_REPO_TOKEN --repo vasquezdiego335-coder/WMIWCI-API
+    gh secret list --repo vasquezdiego335-coder/WMIWCI-API
+    gh run list --repo vasquezdiego335-coder/WMIWCI-API \
+      --branch fix/quick-quote-pricing-parity --limit 1
+
+**A secret that exists but is empty is not configured.** `gh secret list` only
+proves the NAME exists; it cannot show the value. The workflow's first parity
+step rejects an empty `GH_TOKEN` with a stated reason rather than attempting a
+clone that would fail obscurely — so an empty secret still fails loudly, and it
+now fails in `pricing-parity` only, leaving `verify` free to report the truth
+about the code.
+
+**Until a real token is stored, `pricing-parity` fails by design.** An
+unverifiable release must never look like a passing one.
+
+The fallback branch is pinned to `claude/quick-quote-email-flow` (byte evidence
+in step 4). **If the branch Vercel builds ever changes, change
+`PRODUCTION_SITE_BRANCH` in the workflow in the same breath**, or CI will
+verify a tree nobody ships and call it green.
 
 ---
 

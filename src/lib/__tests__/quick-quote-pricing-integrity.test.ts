@@ -45,12 +45,12 @@ import { buildLeadCard } from '../booking-display'
 import { quotedCentsOf, formatEstimate } from '../quote-capture'
 import { computeQuote } from '../booking-quote'
 import { formatLeadAlert } from '../lead-alert'
+import { SITE_DIR, SKIP_WITHOUT_SITE, siteFile } from './site-dir'
 
 // ── The site tree under test. See pricing-parity.test.ts for why this is an
 //    env var and not the hard-wired sibling directory. ──
-const SITE = resolve(process.env.WMIWCI_SITE_DIR ?? resolve(__dirname, '../../../../WMIWCI-SITE'))
-const MIRROR = resolve(SITE, 'public/js/pricing-config.js')
-const QUOTE_PAGE = resolve(SITE, 'public/quote.html')
+const MIRROR = siteFile('public/js/pricing-config.js')
+const QUOTE_PAGE = siteFile('public/quote.html')
 const skipSite = existsSync(MIRROR) && existsSync(QUOTE_PAGE) ? false : 'WMIWCI-SITE not available'
 
 /** Evaluate the GENERATED browser mirror in a sandbox — the exact bytes the
@@ -587,5 +587,5 @@ test('15. an explicitly-pointed but missing SITE checkout FAILS the parity gate'
     0,
     `a missing SITE checkout must FAIL the run, never skip it (exit ${res.status})\n${output.slice(-800)}`,
   )
-  assert.match(output, /does not exist — parity cannot be proven/, 'and it must say why')
+  assert.match(output, /does not exist — the cross-repository gate cannot be proven/, 'and it must say why')
 })

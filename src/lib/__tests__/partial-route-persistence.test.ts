@@ -226,3 +226,75 @@ test('partial: an unknown service type stores no package price', async () => {
   assert.equal(row.estimatedValue, null, 'guessing full service is how $550 lands on an hourly job')
   assert.equal(row.moveSize, '1br', 'but the size they picked is still recorded, canonically')
 })
+
+// ══════════════════════════════════════════════════════════════════════
+//  A UTM CAMPAIGN IS NOT A PROMO CODE
+// ══════════════════════════════════════════════════════════════════════
+test('partial: a utm campaign does NOT become the promo code', async () => {
+  // The route wrote `promoCode: d.utmCampaign`, so every door-hanger and QR
+  // visit stamped its campaign slug into the DISCOUNT column — a campaign name
+  // arriving as an entitlement nobody granted.
+  install()
+  await postPartial({ ...base, utmCampaign: 'door_hanger_aug', utmSource: 'qr' })
+  const row = harness.created[0]
+  assert.notEqual(row.promoCode, 'door_hanger_aug', 'a campaign slug must not land in the discount column')
+  assert.equal(row.promoCode, null, 'no promo code was offered, so none is recorded')
+  // Attribution still lands, in its OWN columns.
+  assert.equal(row.utmCampaign, 'door_hanger_aug')
+  assert.equal(row.utmSource, 'qr')
+})
+
+test('partial: an EXPLICIT promo code is still recorded', async () => {
+  install()
+  await postPartial({ ...base, promoCode: 'SAVE10', utmCampaign: 'door_hanger_aug' })
+  const row = harness.created[0]
+  assert.equal(row.promoCode, 'SAVE10', 'a real promo code is a real promo code')
+  assert.equal(row.utmCampaign, 'door_hanger_aug', 'and the campaign keeps its own column')
+})
+
+// ══════════════════════════════════════════════════════════════════════
+//  THE REAL BOOKING-FORM PAYLOAD PRICES
+// ══════════════════════════════════════════════════════════════════════
+test('partial: the payload booking-form.html actually sends produces a real snapshot', async () => {
+  // Built from the fields booking-form.html now sends — not an idealised body.
+  // Before this, the form sent only `estimateTotal`, which the API correctly
+  // ignores, so every real partial lead stored no estimate at all.
+  install()
+  const body = await postPartial({
+    ...base,
+    formStep: 'card2',
+    estimateTotal: 879,               // the browser's figure — must be ignored
+    serviceTypeKey: 'full_service',   // what the form now sends
+    moveSize: '2br',
+  })
+  assert.equal(body.serviceType, 'full_service')
+  const row = harness.created[0]
+  assert.equal(row.estimatedValue, 77_900, 'the SERVER price, not the browser $879')
+  assert.equal(row.quoteTotalCents, 77_900, 'and a real snapshot, which never used to be written')
+  assert.equal(row.quoteMileageStatus, 'pending')
+  assert.equal(row.moveSize, '2br')
+})
+
+test('partial: the labor-only payload booking-form.html sends prices hourly', async () => {
+  // The form sends laborMinutes and NO crew size — it does not ask, and the
+  // server defaults to the included two-worker crew.
+  install()
+  const body = await postPartial({
+    ...base,
+    serviceTypeKey: 'labor_only',
+    serviceInterest: 'loading_and_unloading',
+    laborMinutes: 180,               // 3 hours, as the form's hours field × 60
+    estimateTotal: 999,              // ignored
+  })
+  assert.equal(body.serviceType, 'labor_only')
+  const row = harness.created[0]
+  assert.equal(row.estimatedValue, 45_000, '3h × $150 for the included two-worker crew')
+  assert.notEqual(row.estimatedValue, 99_900, 'the browser figure is never stored')
+  assert.equal(row.quoteTotalCents, undefined, 'labor-only writes no full-service snapshot')
+})
+
+test('partial: labor-only with no hours yet stores nothing rather than guessing', async () => {
+  install()
+  await postPartial({ ...base, serviceTypeKey: 'labor_only', serviceInterest: 'loading_only', estimateTotal: 450 })
+  assert.equal(harness.created[0].estimatedValue, null)
+})

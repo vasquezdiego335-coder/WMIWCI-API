@@ -22,6 +22,7 @@ import { readFileSync, existsSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { buildPricingPayload, renderPricingConfigJs } from '../../../scripts/gen-pricing-config'
 import { PACKAGES, TRUCK_PICKUP_RETURN, BOOKING_AUTHORIZATION } from '../pricing-config'
+import { SITE_DIR, SKIP_WITHOUT_SITE, siteFile } from './site-dir'
 
 // ── WHICH SITE CHECKOUT IS BEING VALIDATED (fix 2026-08-22) ───────────────
 //  This path was hard-wired to the sibling directory, so the parity gate
@@ -31,18 +32,11 @@ import { PACKAGES, TRUCK_PICKUP_RETURN, BOOKING_AUTHORIZATION } from '../pricing
 //  held a different branch's copy. WMIWCI_SITE_DIR now points the gate at the
 //  tree under test (CI and release worktrees set it); the sibling remains the
 //  default so an ordinary local run is unchanged.
-const SITE = resolve(process.env.WMIWCI_SITE_DIR ?? resolve(__dirname, '../../../../WMIWCI-SITE'))
-const MIRROR = resolve(SITE, 'public/js/pricing-config.js')
-const FORM = resolve(SITE, 'public/booking-form.html')
+const MIRROR = siteFile('public/js/pricing-config.js')
+const FORM = siteFile('public/booking-form.html')
 
-const siteAvailable = existsSync(SITE)
-//  A MISSING SITE STILL SKIPS, but an EXPLICITLY POINTED one never may: if
-//  WMIWCI_SITE_DIR is set and wrong, silently skipping would hand back a green
-//  run that proved nothing about the release.
-if (process.env.WMIWCI_SITE_DIR && !siteAvailable) {
-  throw new Error(`WMIWCI_SITE_DIR=${process.env.WMIWCI_SITE_DIR} does not exist — parity cannot be proven`)
-}
-const skip = siteAvailable ? false : 'WMIWCI-SITE not checked out beside WMIWCI-API'
+const siteAvailable = SITE_DIR !== null
+const skip = SKIP_WITHOUT_SITE
 
 test('parity: the generated browser mirror matches pricing-config.ts exactly', { skip }, () => {
   assert.ok(existsSync(MIRROR), `missing ${MIRROR} — run: npm run gen:pricing-config`)
@@ -119,7 +113,7 @@ test('parity: no retired price appears anywhere in the deployed site', { skip },
   ]
   const offenders: string[] = []
   for (const rel of files) {
-    const p = resolve(SITE, rel)
+    const p = siteFile(rel)
     if (!existsSync(p)) continue
     // COMMENTS ARE NOT PUBLISHED PRICES. Several of these files carry a note
     // explaining WHY a tier was withdrawn, and those notes necessarily name the
@@ -141,7 +135,7 @@ test('parity: the site publishes the truck add-on at $49, never $50', { skip }, 
   const files = ['public/pricing.html', 'public/services.html', 'public/faq.html', 'public/terms/index.html']
   const offenders: string[] = []
   for (const rel of files) {
-    const p = resolve(SITE, rel)
+    const p = siteFile(rel)
     if (!existsSync(p)) continue
     const text = readFileSync(p, 'utf8')
     // A "+$50" next to truck wording is the exact stale pattern.

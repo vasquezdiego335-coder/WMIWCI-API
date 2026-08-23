@@ -22,14 +22,11 @@ import { readFileSync, existsSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { JSDOM, VirtualConsole, ResourceLoader } from 'jsdom'
 import { PACKAGES, LEGACY_PACKAGE_KEYS, PRICE_BOOK_VERSION } from '../pricing-config'
+import { SITE_DIR, SKIP_WITHOUT_SITE, siteFile } from './site-dir'
 
-const SITE = resolve(process.env.WMIWCI_SITE_DIR ?? resolve(__dirname, '../../../../WMIWCI-SITE'))
-const PAGE = resolve(SITE, 'public/quote.html')
-const MIRROR = resolve(SITE, 'public/js/pricing-config.js')
+const PAGE = siteFile('public/quote.html')
+const MIRROR = siteFile('public/js/pricing-config.js')
 
-if (process.env.WMIWCI_SITE_DIR && !(existsSync(PAGE) && existsSync(MIRROR))) {
-  throw new Error(`WMIWCI_SITE_DIR=${process.env.WMIWCI_SITE_DIR} is missing quote.html or the pricing mirror`)
-}
 const skip = existsSync(PAGE) && existsSync(MIRROR) ? false : 'WMIWCI-SITE not available'
 
 /** The response the API gives a browser holding a withdrawn package. */
@@ -512,6 +509,100 @@ test('browser: a 3BR shows the SERVER review language, from the REAL response', 
   assert.ok(!/\$1,199/.test(shown), 'the retired truck surcharge is back on screen')
   assert.match(shown, /subject to review/i, 'the server said this needs a human; the page must say so')
   assert.match(shown, /inventory|access|truck plan/i, 'and give the reason')
+  h.dom.window.close()
+  process.env.QUOTE_LEAD_CAPTURE_ENABLED = 'true'
+})
+
+// ══════════════════════════════════════════════════════════════════════
+//  7. A MANUAL-REVIEW PACKAGE HAS NO PRICE TO SHOW
+//
+//  5BR is quoted by hand: the API returns `estimate: null` and
+//  `manualReview: true`. The page ignored the top-level review state, fell
+//  through to unlock(), and rendered the amount from its OWN mirror — so a
+//  customer was shown "$1,799" for a job the server had explicitly declined
+//  to price, and the conversion could report that number as revenue.
+// ══════════════════════════════════════════════════════════════════════
+test('browser: 5BR never displays a price — driven by the REAL route', { skip }, async () => {
+  const { POST } = (await import('../../../app/api/leads/quote-capture/route')) as unknown as {
+    POST: (req: Request) => Promise<Response>
+  }
+  process.env.QUOTE_LEAD_CAPTURE_ENABLED = 'false' // priced, not persisted
+  const viaRealRoute: any = async (url: string, init?: any) => {
+    if (!url.includes('/api/leads/quote-capture')) return { ok: true, status: 200, json: async () => ({}) }
+    const res = await POST(
+      new Request('https://api.example.com/api/leads/quote-capture', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', origin: 'https://moveitclearit.com' },
+        body: init.body,
+      }) as never,
+    )
+    const json = await res.json()
+    return { ok: res.status < 400, status: res.status, json: async () => json }
+  }
+  viaRealRoute.__posted = []
+
+  const h = await loadPage(viaRealRoute)
+  await submitWith(h, '5br')
+
+  const shown = h.doc.body.textContent ?? ''
+  const priceNum = h.doc.getElementById('qPriceNum')?.textContent ?? ''
+
+  // THE DEFECT: the estimate panel presenting the mirror's amount as if it
+  // were this customer's quote.
+  assert.ok(
+    !/1[,.]?799/.test(priceNum),
+    `the mirror's own $1,799 was displayed as the estimate for a package the server refused to price: "${priceNum}"`,
+  )
+  assert.equal(priceNum.trim(), '—', 'an unpriced job shows no figure at all')
+
+  // And the page must NOT be unlocked, which is what keeps the size cards'
+  // prices hidden (CSS gates `.q-size-price` behind `.q-unlocked`).
+  assert.ok(
+    !(h.doc.getElementById('quoteForm') as HTMLElement).classList.contains('q-unlocked'),
+    'the page unlocked for a job the server declined to price',
+  )
+
+  // NOTE on the size card: it carries "From $1,799", which is the genuinely
+  // PUBLISHED starting price for 5 bedrooms — the same figure the pricing page
+  // advertises. That is legitimate and is not asserted against; it is also
+  // invisible here, because the form never unlocks. What must never happen is
+  // presenting it as the customer's own quote, which is what the two
+  // assertions above pin.
+  assert.match(shown, /by hand|manual|review/i, 'the customer must be told it is quoted by hand')
+  // And no conversion may report a number the business never quoted.
+  assert.ok(!h.tracked.includes('generate_lead'), 'a conversion fired for an unpriced job')
+  h.dom.window.close()
+  process.env.QUOTE_LEAD_CAPTURE_ENABLED = 'true'
+})
+
+test('browser: an in-person request shows no price either', { skip }, async () => {
+  const { POST } = (await import('../../../app/api/leads/quote-capture/route')) as unknown as {
+    POST: (req: Request) => Promise<Response>
+  }
+  process.env.QUOTE_LEAD_CAPTURE_ENABLED = 'false'
+  const viaRealRoute: any = async (url: string, init?: any) => {
+    if (!url.includes('/api/leads/quote-capture')) return { ok: true, status: 200, json: async () => ({}) }
+    // The page has no in-person toggle in this fixture, so ask for it directly:
+    // the point is the RESPONSE shape (no estimate + manualReview), which the
+    // page must handle whatever produced it.
+    const body = { ...JSON.parse(init.body), quoteMode: 'in_person' }
+    const res = await POST(
+      new Request('https://api.example.com/api/leads/quote-capture', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', origin: 'https://moveitclearit.com' },
+        body: JSON.stringify(body),
+      }) as never,
+    )
+    const json = await res.json()
+    return { ok: res.status < 400, status: res.status, json: async () => json }
+  }
+  viaRealRoute.__posted = []
+
+  const h = await loadPage(viaRealRoute)
+  await submitWith(h, '2br')
+  assert.ok(!/\$\s?779/.test(h.doc.getElementById('qPriceNum')?.textContent ?? ''),
+    'no automatic number may be shown when the server produced none')
+  assert.ok(!h.tracked.includes('generate_lead'))
   h.dom.window.close()
   process.env.QUOTE_LEAD_CAPTURE_ENABLED = 'true'
 })

@@ -141,6 +141,11 @@ const PartialSchema = z.object({
   moveDate: z.string().max(40).optional(),
   pickupZip: str(12),
   destinationZip: str(12),
+  /* A promo code is NOT a marketing campaign. They are separate columns and
+     separate inputs; conflating them filled the discount column with campaign
+     slugs. /api/leads/quote-capture already keeps them apart — this route did
+     not, so the two capture surfaces disagreed. */
+  promoCode: str(60),
   serviceInterest: str(60),
   /* WHICH PRODUCT. Explicit beats inferred: a package key alone cannot be
      priced, because the same '1br' means a $550 flat full-service job or
@@ -271,7 +276,18 @@ async function handle(req: NextRequest): Promise<NextResponse> {
       utmTerm: d.utmTerm,
       landingPage: d.landingPage,
       referrer: d.referrer,
-      promoCode: d.utmCampaign, // door-hanger/QR campaign code doubles as the promo code slot
+      // ── A UTM CAMPAIGN IS NOT A PROMO CODE (fix 2026-08-22) ────────────
+      //  This was `promoCode: d.utmCampaign`, so every door-hanger and QR
+      //  visit wrote its campaign slug into the DISCOUNT column. That column
+      //  is read as a promo code by the admin and by anything reasoning about
+      //  discounts, so a campaign name arrived looking like an entitlement
+      //  nobody granted. Attribution already has its own columns — utmSource,
+      //  utmCampaign, source — and they are populated above.
+      //
+      //  BEHAVIOUR CHANGE, deliberate: a campaign code no longer lands in
+      //  promoCode from this route. Only an EXPLICIT promoCode does, which is
+      //  exactly how /api/leads/quote-capture has always behaved.
+      promoCode: d.promoCode,
       estimatedValue: pricing.estimateCents,
       //  Only a FULL-SERVICE subtotal produces a structured snapshot; a
       //  labor-only or unknown lead stores an amount without one, or nothing.

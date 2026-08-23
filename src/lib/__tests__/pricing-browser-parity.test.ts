@@ -21,14 +21,11 @@ import {
   additionalLocationChargeForMiles, travelChargeForMinutes,
   formatCharge, isAutoApplicable, applyDiscount, PACKAGES,
 } from '../pricing-config'
+import { SITE_DIR, SKIP_WITHOUT_SITE, siteFile } from './site-dir'
 
 // WMIWCI_SITE_DIR points the gate at the tree under test — see the note in
 // pricing-parity.test.ts. Hard-wiring the sibling graded the wrong checkout.
-const SITE_DIR = process.env.WMIWCI_SITE_DIR ?? resolve(__dirname, '../../../../WMIWCI-SITE')
-const MIRROR = resolve(SITE_DIR, 'public/js/pricing-config.js')
-if (process.env.WMIWCI_SITE_DIR && !existsSync(MIRROR)) {
-  throw new Error(`WMIWCI_SITE_DIR=${process.env.WMIWCI_SITE_DIR} has no pricing mirror — parity cannot be proven`)
-}
+const MIRROR = siteFile('public/js/pricing-config.js')
 const skip = existsSync(MIRROR) ? false : 'WMIWCI-SITE mirror not present'
 
 /** Objects created inside the VM sandbox have a DIFFERENT Object prototype, so

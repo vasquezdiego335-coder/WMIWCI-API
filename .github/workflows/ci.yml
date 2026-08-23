@@ -1,29 +1,32 @@
 # ════════════════════════════════════════════════════════════════════════
-#  CI — and, specifically, CROSS-REPOSITORY PRICING PARITY.
+#  CI — two jobs, deliberately.
 #
-#  WHY THIS FILE EXISTS. The price book lives in this repo
-#  (src/lib/pricing-config.ts) and is generated into the SITE repo as
-#  public/js/pricing-config.js. The parity tests compare the two. They used to
-#  resolve the site from a hard-wired sibling directory and SKIP silently when
-#  it was absent — so on any machine without that directory (every CI runner,
-#  had there been one) the suite went green having verified nothing. That is
-#  how a mirror missing its `legacy` flags reached production and offered a
-#  retired "Small Studio $379" to customers.
+#  WHY TWO. The first version put everything in one job, with the SITE
+#  checkout as step 2. When `SITE_REPO_TOKEN` was missing the run died there
+#  and typecheck, tests and build were SKIPPED — reported as "skipped", which
+#  reads as "not run" but lands as a red run with no information in it. A
+#  missing credential must not be able to hide whether the code compiles.
 #
-#  So: the site is checked out HERE, its path is handed to the tests through
-#  WMIWCI_SITE_DIR, and the tests THROW rather than skip when that path is set
-#  and wrong. Parity is verified or the run fails. There is no third outcome.
+#    verify         — everything that needs only this repo. Always runs.
+#    pricing-parity — the cross-repository gate. Needs the SITE checkout, and
+#                     FAILS LOUDLY (never skips) when it cannot be verified.
+#
+#  Both must be green to merge. The split changes WHAT YOU LEARN from a red
+#  run, not what is required.
 #
 #  ── CREDENTIAL REQUIRED ────────────────────────────────────────────────
-#  WMIWCI-SITE is a PRIVATE repository and WMIWCI-API is PUBLIC, so the
-#  default GITHUB_TOKEN cannot read it. Add a repository secret:
+#  WMIWCI-SITE is PRIVATE and WMIWCI-API is PUBLIC, so the default
+#  GITHUB_TOKEN cannot read it. Add a repository secret:
 #
-#      SITE_REPO_TOKEN — a fine-grained PAT with Contents: read on
-#                        vasquezdiego335-coder/WMIWCI-SITE
+#      SITE_REPO_TOKEN — a fine-grained PAT, READ-ONLY:
+#        Repository access : only vasquezdiego335-coder/WMIWCI-SITE
+#        Permissions       : Contents = Read   (nothing else)
 #
-#  Without it the parity job FAILS with a named error rather than skipping —
-#  an unverifiable release must never look like a passing one. Note this repo
-#  is public, so workflow logs are public: the token is never echoed, and only
+#      gh secret set SITE_REPO_TOKEN --repo vasquezdiego335-coder/WMIWCI-API
+#
+#  Without it `pricing-parity` fails with a named error rather than skipping —
+#  an unverifiable release must never look like a passing one. This repo is
+#  public, so workflow logs are public: the token is never echoed, and only
 #  branch names appear in output.
 # ════════════════════════════════════════════════════════════════════════
 name: CI
@@ -50,16 +53,106 @@ env:
   # `next build` collects page data, which imports src/lib/auth.ts, which
   # refuses to load without a JWT secret in production. A THROWAWAY value: it
   # signs nothing, verifies nothing and never leaves the runner — but without
-  # it the build step fails on every run, which is how a "green" CI that never
+  # it the build fails on every run, which is how a "green" CI that never
   # actually built anything would look.
   JWT_SECRET: ci-build-only-not-a-real-secret-0000000000000000000000000000
   NODE_ENV: production
 
 jobs:
+  # ══════════════════════════════════════════════════════════════════════
+  #  1 · VERIFY — needs nothing but this repo, so it always reports.
+  # ══════════════════════════════════════════════════════════════════════
   verify:
     name: typecheck · lint · tests · build
     runs-on: ubuntu-latest
     timeout-minutes: 25
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Prisma validate + generate
+        run: |
+          npx prisma validate
+          npx prisma generate
+
+      # ── MIGRATIONS ARE CHECKED, NOT APPLIED ─────────────────────────────
+      #  No database is reachable here by design. What CI can prove is that
+      #  every migration is present and consistently named; applying them is a
+      #  deploy step with its own review.
+      - name: Migration files are readable and named consistently
+        run: |
+          set -euo pipefail
+          for d in prisma/migrations/*/; do
+            [ "$d" = "prisma/migrations/*/" ] && continue
+            test -f "$d/migration.sql" || { echo "::error::$d has no migration.sql"; exit 1; }
+            base=$(basename "$d")
+            echo "$base" | grep -Eq '^[0-9]{14}_[a-z0-9_]+$' \
+              || { echo "::error::migration $base does not match <14-digit timestamp>_<snake_case>"; exit 1; }
+          done
+
+      - name: Typecheck
+        run: npx tsc --noEmit
+
+      - name: Lint
+        run: npm run lint
+
+      # WMIWCI_SITE_DIR is deliberately UNSET here: the cross-repository tests
+      # skip cleanly without it, and `pricing-parity` below is the job that
+      # actually runs them. This step proves the server-side suite compiles and
+      # passes on its own.
+      - name: Test suite (server-side; cross-repo tests run in pricing-parity)
+        run: npm test
+
+      - name: Production build
+        run: npm run build
+
+      # ── WHAT THIS SCAN DOES AND DOES NOT COVER ─────────────────────────
+      #  A NAMED-ROUTE check, not a proof. Three exclusions, each a real gap:
+      #   • `(admin)/**` — admin screens legitimately render historical labels;
+      #     an owner looking at a 2026-07 booking must see "Small Studio".
+      #   • shared `chunks/**` — contains the price book itself, which
+      #     necessarily holds every retired label so history can render. So
+      #     this CANNOT prove a customer route is label-free via a shared chunk.
+      #   • `.next/cache/**` — build cache, not shipped.
+      #  The actual guarantee that a customer cannot be quoted a retired price
+      #  is the server refusal plus the browser allowlist, both covered by tests.
+      - name: No retired package label in a customer-facing route bundle
+        run: |
+          set -euo pipefail
+          ROUTES="app/deposit app/my-booking app/api/leads app/api/services app/api/bookings app/terms app/privacy"
+          hits=""
+          for r in $ROUTES; do
+            [ -d ".next/server/$r" ] || continue
+            found=$(grep -rl "Small Studio\|Standard Studio\|Large Studio" ".next/server/$r" 2>/dev/null || true)
+            [ -n "$found" ] && hits="$hits$found"$'\n'
+          done
+          pub=$(grep -rl "Small Studio\|Standard Studio\|Large Studio" .next/static/chunks 2>/dev/null \
+                | grep -v "admin" || true)
+          [ -n "$pub" ] && hits="$hits$pub"$'\n'
+          if [ -n "${hits// /}" ]; then
+            echo "::error::a retired package label reached a customer-facing bundle:"
+            echo "$hits"
+            exit 1
+          fi
+          echo "Checked routes: $ROUTES + non-admin static chunks."
+          echo "NOT checked (by design, see the comment above): (admin)/**, shared server chunks/**, .next/cache/**."
+
+  # ══════════════════════════════════════════════════════════════════════
+  #  2 · PRICING PARITY — the cross-repository gate.
+  #     Fails, never skips, when the mirror cannot be verified.
+  # ══════════════════════════════════════════════════════════════════════
+  pricing-parity:
+    name: cross-repository pricing parity
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
 
     steps:
       - name: Check out WMIWCI-API
@@ -75,24 +168,21 @@ jobs:
       #    3. PRODUCTION_SITE_BRANCH below
       #
       #  ⚠ THE FALLBACK IS THE DEPLOYED BRANCH, NOT `master`.
-      #  Vercel serves WMIWCI-SITE from `claude/quick-quote-email-flow`, and
-      #  `master` is a DIFFERENT tree. Falling back to master would verify the
-      #  mirror against a branch nobody ships, then report success — the same
-      #  class of false green as skipping. If the deployed branch is ever
-      #  changed in Vercel, change it HERE in the same breath.
-      #
-      #  Whatever is chosen is PRINTED, so a green run always says which mirror
-      #  it proved. A release must never have to guess.
+      #  Established by byte comparison against production on 2026-08-22: the
+      #  live quote.html and pricing-config.js match
+      #  claude/quick-quote-email-flow, and `master` contains neither file.
+      #  Falling back to master would verify a tree nobody ships and report
+      #  success — the same class of false green as skipping. If the deployed
+      #  branch changes in Vercel, change it HERE in the same breath.
       - name: Resolve the SITE ref
         id: siteref
         env:
           GH_TOKEN: ${{ secrets.SITE_REPO_TOKEN }}
-          # The branch Vercel actually deploys. Verified 2026-08-22.
           PRODUCTION_SITE_BRANCH: claude/quick-quote-email-flow
         run: |
           set -euo pipefail
           if [ -z "${GH_TOKEN:-}" ]; then
-            echo "::error::SITE_REPO_TOKEN is not set. WMIWCI-SITE is private, so pricing parity cannot be verified. Add a fine-grained PAT with Contents: read on WMIWCI-SITE. Refusing to pass a run that proves nothing."
+            echo "::error::SITE_REPO_TOKEN is not set (or is not readable from this event). WMIWCI-SITE is private, so pricing parity cannot be verified. Add a fine-grained, READ-ONLY PAT (Contents: Read on WMIWCI-SITE) as the repository secret SITE_REPO_TOKEN. Refusing to pass a run that proves nothing. NOTE: the 'verify' job runs independently, so typecheck, tests and build results are still available on this run."
             exit 1
           fi
           REMOTE="https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository_owner }}/WMIWCI-SITE.git"
@@ -106,8 +196,6 @@ jobs:
               WANTED="$PRODUCTION_SITE_BRANCH"; HOW="production fallback"
             fi
           fi
-          # A fallback that does not exist must FAIL, not resolve to whatever
-          # the repo's default happens to be.
           git ls-remote --exit-code --heads "$REMOTE" "$WANTED" >/dev/null 2>&1 || {
             echo "::error::WMIWCI-SITE has no branch '$WANTED' ($HOW). Pricing parity cannot be verified against a branch that does not exist."
             exit 1
@@ -124,14 +212,14 @@ jobs:
           path: site
 
       # A checkout that "succeeded" but produced no mirror would let the tests
-      # fall back to skipping. Prove the file is there before trusting the run.
-      - name: Confirm the mirror is present
+      # fall back to skipping. Prove the files are there before trusting the run.
+      - name: Confirm the SITE files are present
         run: |
           set -euo pipefail
-          test -f site/public/js/pricing-config.js \
-            || { echo "::error::WMIWCI-SITE@${{ steps.siteref.outputs.ref }} has no public/js/pricing-config.js — pricing parity cannot be proven."; exit 1; }
-          test -f site/public/quote.html \
-            || { echo "::error::WMIWCI-SITE@${{ steps.siteref.outputs.ref }} has no public/quote.html — the browser regression tests cannot run."; exit 1; }
+          for f in public/js/pricing-config.js public/quote.html public/booking-form.html; do
+            test -f "site/$f" \
+              || { echo "::error::WMIWCI-SITE@${{ steps.siteref.outputs.ref }} has no $f — the cross-repository tests cannot run."; exit 1; }
+          done
 
       - uses: actions/setup-node@v4
         with:
@@ -143,91 +231,25 @@ jobs:
         working-directory: api
         run: npm ci
 
-      - name: Prisma validate + generate
+      - name: Prisma generate
         working-directory: api
-        run: |
-          npx prisma validate
-          npx prisma generate
+        run: npx prisma generate
 
-      # ── MIGRATIONS ARE CHECKED, NOT APPLIED ─────────────────────────────
-      #  No database is reachable here by design. What CI can prove is that
-      #  every migration is present and the schema is coherent; applying them
-      #  is a deploy step with its own review.
-      - name: Migration files are readable and named consistently
-        working-directory: api
-        run: |
-          set -euo pipefail
-          for d in prisma/migrations/*/; do
-            [ "$d" = "prisma/migrations/*/" ] && continue
-            test -f "$d/migration.sql" || { echo "::error::$d has no migration.sql"; exit 1; }
-            base=$(basename "$d")
-            echo "$base" | grep -Eq '^[0-9]{14}_[a-z0-9_]+$' \
-              || { echo "::error::migration $base does not match <14-digit timestamp>_<snake_case>"; exit 1; }
-          done
-
-      - name: Typecheck
-        working-directory: api
-        run: npx tsc --noEmit
-
-      - name: Lint
-        working-directory: api
-        run: npm run lint
-
-      # THE PARITY GATE. WMIWCI_SITE_DIR is absolute and points at the checkout
-      # above; the tests throw if it is set and wrong, so this step cannot pass
-      # by skipping.
-      - name: Pricing parity (cross-repository)
+      # THE GATE. WMIWCI_SITE_DIR is absolute and points at the checkout above;
+      # the tests THROW if it is set and wrong, so this cannot pass by skipping.
+      - name: Pricing parity, route, browser and persistence tests
         working-directory: api
         env:
           WMIWCI_SITE_DIR: ${{ github.workspace }}/site
         run: npm run test:parity
 
-      - name: Full test suite
-        working-directory: api
-        env:
-          WMIWCI_SITE_DIR: ${{ github.workspace }}/site
-        run: npm test
-
-      - name: Production build
-        working-directory: api
-        run: npm run build
-
-      # A last look at what would actually ship.
-      #
-      # ── WHAT THIS SCAN DOES AND DOES NOT COVER — read before trusting it ──
-      #  It checks the CUSTOMER-FACING route bundles by name. Three exclusions,
-      #  each a real gap rather than a clean bill of health:
-      #
-      #   • `(admin)/**` — admin screens legitimately render historical labels;
-      #     an owner looking at a 2026-07 booking must see "Small Studio".
-      #   • `chunks/**`  — SHARED code, including the price book itself, which
-      #     necessarily contains every retired label so history can render.
-      #     Excluding it means this scan CANNOT prove a customer route is free
-      #     of retired labels reached through a shared chunk.
-      #   • `.next/cache/**` — build cache, not shipped.
-      #
-      #  So this is a NAMED-ROUTE check, not a proof. The actual guarantee that
-      #  a customer cannot be quoted a retired price is the server refusal
-      #  (pricing_expired) plus the browser allowlist — both covered by tests.
-      - name: No retired package label in a customer-facing route bundle
+      # The mirror is GENERATED. If the committed copy differs from what the
+      # generator produces, it was hand-edited or is stale.
+      - name: The committed mirror is exactly what the generator produces
         working-directory: api
         run: |
           set -euo pipefail
-          ROUTES="app/deposit app/my-booking app/api/leads app/api/services app/api/bookings app/terms app/privacy"
-          hits=""
-          for r in $ROUTES; do
-            [ -d ".next/server/$r" ] || continue
-            found=$(grep -rl "Small Studio\|Standard Studio\|Large Studio" ".next/server/$r" 2>/dev/null || true)
-            [ -n "$found" ] && hits="$hits$found"$'\n'
-          done
-          # Public (non-admin) browser bundles too.
-          pub=$(grep -rl "Small Studio\|Standard Studio\|Large Studio" .next/static/chunks 2>/dev/null \
-                | grep -v "admin" || true)
-          [ -n "$pub" ] && hits="$hits$pub"$'\n'
-          if [ -n "${hits// /}" ]; then
-            echo "::error::a retired package label reached a customer-facing bundle:"
-            echo "$hits"
-            exit 1
-          fi
-          echo "Checked routes: $ROUTES + non-admin static chunks."
-          echo "NOT checked (by design, see the comment above): (admin)/**, shared server chunks/**, .next/cache/**."
+          npx tsx scripts/gen-pricing-config.ts /tmp/mirror-regen.js
+          cmp /tmp/mirror-regen.js "${{ github.workspace }}/site/public/js/pricing-config.js" \
+            || { echo "::error::the committed pricing mirror is not the generator's output — run: npm run gen:pricing-config"; exit 1; }
+          echo "Mirror is byte-identical to the generator output."
