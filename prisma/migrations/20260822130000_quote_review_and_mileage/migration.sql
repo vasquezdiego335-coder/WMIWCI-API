@@ -13,7 +13,7 @@
 --  ADDITIVE AND NULLABLE. No backfill; existing rows read NULL, which is
 --  correct — those leads predate the structured snapshot.
 -- ═══════════════════════════════════════════════════════════════════════
-ALTER TABLE "leads" ADD COLUMN IF NOT EXISTS "quote_mileage_cents"   INTEGER;
-ALTER TABLE "leads" ADD COLUMN IF NOT EXISTS "quote_billable_miles"  INTEGER;
-ALTER TABLE "leads" ADD COLUMN IF NOT EXISTS "quote_requires_review" BOOLEAN;
-ALTER TABLE "leads" ADD COLUMN IF NOT EXISTS "quote_review_reasons"  TEXT;
+ALTER TABLE "crm_leads" ADD COLUMN IF NOT EXISTS "quote_mileage_cents"   INTEGER;
+ALTER TABLE "crm_leads" ADD COLUMN IF NOT EXISTS "quote_billable_miles"  INTEGER;
+ALTER TABLE "crm_leads" ADD COLUMN IF NOT EXISTS "quote_requires_review" BOOLEAN;
+ALTER TABLE "crm_leads" ADD COLUMN IF NOT EXISTS "quote_review_reasons"  TEXT;

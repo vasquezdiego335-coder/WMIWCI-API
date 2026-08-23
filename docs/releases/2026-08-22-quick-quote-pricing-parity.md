@@ -95,15 +95,21 @@ npx prisma migrate deploy
 Verify before moving on:
 
 ```sql
--- all ten columns present
+-- all ten columns present ON THE REAL TABLE.
+-- `crm_leads` is what the Prisma Lead model maps to. A separate, EMPTY legacy
+-- `leads` table also exists: if these columns land there instead, the
+-- migration reports success and every quick-quote capture is lost silently.
 SELECT column_name FROM information_schema.columns
- WHERE table_name = 'leads' AND column_name LIKE 'quote_%'
+ WHERE table_name = 'crm_leads' AND column_name LIKE 'quote_%'
  ORDER BY column_name;
+-- expect the ten new ones ALONGSIDE nine pre-existing quote_confirmation_*
+-- columns from the notification-delivery feature, which this release leaves
+-- untouched.
 
 -- and NO existing lead was touched: every historical row reads NULL
 SELECT count(*) AS total,
        count(quote_total_cents) AS with_snapshot   -- expect 0 immediately after
-  FROM leads;
+  FROM crm_leads;
 ```
 
 If `with_snapshot` is anything but 0, stop: something wrote during the
