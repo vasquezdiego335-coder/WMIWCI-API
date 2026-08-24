@@ -225,6 +225,27 @@ jobs:
           token: ${{ secrets.SITE_REPO_TOKEN }}
           path: site
 
+      # ── THE PAIRED COMMITS, PRINTED ────────────────────────────────────
+      #  A cross-repository result means nothing without knowing WHICH two
+      #  trees produced it. Both SHAs go in the log and in the job summary so a
+      #  release report can quote them instead of assuming them.
+      - name: Print the paired API and SITE checkout SHAs
+        run: |
+          set -euo pipefail
+          API_SHA="$(git -C api rev-parse HEAD)"
+          SITE_SHA="$(git -C site rev-parse HEAD)"
+          SITE_REF="${{ steps.siteref.outputs.ref }}"
+          echo "API  checkout: $API_SHA"
+          echo "SITE checkout: $SITE_SHA  (ref: $SITE_REF)"
+          {
+            echo "### Cross-repository pricing parity"
+            echo ""
+            echo "| Repo | Ref | SHA |"
+            echo "|---|---|---|"
+            echo "| WMIWCI-API | ${{ github.ref_name }} | \`$API_SHA\` |"
+            echo "| WMIWCI-SITE | $SITE_REF | \`$SITE_SHA\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
       # A checkout that "succeeded" but produced no mirror would let the tests
       # fall back to skipping. Prove the files are there before trusting the run.
       - name: Confirm the SITE files are present
@@ -255,7 +276,20 @@ jobs:
         working-directory: api
         env:
           WMIWCI_SITE_DIR: ${{ github.workspace }}/site
-        run: npm run test:parity
+        run: |
+          set -euo pipefail
+          npm run test:parity 2>&1 | tee ../parity.log
+          # ZERO SKIPPED, ZERO TODO. A cross-repository job whose suites skip
+          # is the exact failure this gate exists to prevent: three suites were
+          # absent from the command AND resolved a sibling path, so every one
+          # of their assertions skipped while the run reported success.
+          skipped="$(grep -Eo '^# skipped [0-9]+' ../parity.log | awk '{print $3}' | tail -1)"
+          todo="$(grep -Eo '^# todo [0-9]+' ../parity.log | awk '{print $3}' | tail -1)"
+          echo "skipped=${skipped:-?} todo=${todo:-?}"
+          if [ "${skipped:-1}" != "0" ] || [ "${todo:-1}" != "0" ]; then
+            echo "::error::cross-repository suite reported skipped=${skipped:-?} todo=${todo:-?}; it must be 0/0."
+            exit 1
+          fi
 
       # The mirror is GENERATED. If the committed copy differs from what the
       # generator produces, it was hand-edited or is stale.

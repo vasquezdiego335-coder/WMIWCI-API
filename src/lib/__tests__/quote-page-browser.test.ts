@@ -41,6 +41,7 @@ type Harness = {
   win: any
   /** Every event name passed to the page's `track()`. */
   tracked: string[]
+  events: Array<{ name: string; params?: Record<string, unknown> }>
   /** Bodies POSTed to the capture endpoint. */
   posted: any[]
   /** Number of times the page asked for a fresh pricing asset. */
@@ -102,6 +103,7 @@ async function loadPage(
     beforeParse(win: any) {
       win.fetch = (url: string, init?: any) => fetchImpl(String(url), init)
       win.__tracked = []
+      win.__trackedEvents = []
     },
   })
 
@@ -119,6 +121,7 @@ async function loadPage(
   const pageTrack = win.track
   win.track = (name: string, params?: unknown) => {
     win.__tracked.push(name)
+    win.__trackedEvents.push({ name, params: params as Record<string, unknown> | undefined })
     if (typeof pageTrack === 'function') { try { pageTrack(name, params) } catch { /* GA absent */ } }
   }
 
@@ -127,6 +130,11 @@ async function loadPage(
     doc: win.document,
     win,
     get tracked() { return win.__tracked as string[] },
+    /* NAMES ARE NOT ENOUGH. "generate_lead fired" is true both when the event
+       carries the server's total and when it carries the browser's own figure,
+       and those are opposite outcomes. The parameter objects are recorded so a
+       test can assert on what was actually reported. */
+    get events() { return win.__trackedEvents as Array<{ name: string; params?: Record<string, unknown> }> },
     posted: (fetchImpl as any).__posted ?? [],
     get assetRefetches() { return assetRefetches },
     text: () => win.document.body.textContent ?? '',

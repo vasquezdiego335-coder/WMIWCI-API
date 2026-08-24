@@ -49,6 +49,7 @@ type Harness = {
   doc: Document
   win: any
   tracked: string[]
+  events: Array<{ name: string; params?: Record<string, unknown> }>
   status(): string
   priceText(): string
   buttonLabel(): string
@@ -97,6 +98,7 @@ async function loadPage(fetchImpl: any): Promise<Harness> {
     beforeParse(win: any) {
       win.fetch = (url: string, init?: any) => fetchImpl(String(url), init)
       win.__tracked = []
+      win.__trackedEvents = []
     },
   })
   const win = dom.window as any
@@ -108,6 +110,7 @@ async function loadPage(fetchImpl: any): Promise<Harness> {
   const pageTrack = win.track
   win.track = (name: string, params?: unknown) => {
     win.__tracked.push(name)
+    win.__trackedEvents.push({ name, params: params as Record<string, unknown> | undefined })
     if (typeof pageTrack === 'function') { try { pageTrack(name, params) } catch { /* GA absent */ } }
   }
 
@@ -117,6 +120,11 @@ async function loadPage(fetchImpl: any): Promise<Harness> {
     doc: win.document,
     win,
     get tracked() { return win.__tracked as string[] },
+    /* NAMES ARE NOT ENOUGH. "generate_lead fired" is true both when the event
+       carries the server's total and when it carries the browser's own figure,
+       and those are opposite outcomes. The parameter objects are recorded so a
+       test can assert on what was actually reported. */
+    get events() { return win.__trackedEvents as Array<{ name: string; params?: Record<string, unknown> }> },
     status: () => el('qStatus')?.textContent ?? '',
     priceText: () => el('qPriceNum')?.textContent ?? '',
     buttonLabel: () => el('qSubmit')?.textContent ?? '',
@@ -206,7 +214,23 @@ test('quote page: a genuine hand-quote is received, shows no price, and CAN cont
   // And the published card prices stay CSS-hidden, because 'manual' does not
   // add .q-unlocked — which is the whole reason the two flags were split.
   assert.equal(h.revealed(), false, 'the card prices must remain unrevealed')
-  assert.ok(!h.tracked.includes('generate_lead'), 'a job with no amount is not revenue')
+  // BEHAVIOUR CHANGED 2026-08-24, and the assertion is stronger for it. This
+  // used to require that NO conversion fire, on the reasoning that a job with
+  // no quoted amount is not revenue. The premise is right; the conclusion was
+  // not. A captured hand-quote is a real lead — 5BR and in-person requests are
+  // among the largest jobs the business takes — and suppressing the event
+  // deleted them from the conversion data entirely.
+  //
+  // So it fires exactly once and carries NO `value` property. That is the
+  // honest record of "a real lead, amount not yet known", which is a different
+  // thing from a lead worth zero, and different again from reporting the
+  // browser's own figure.
+  const leadEvents = h.events.filter((e) => e.name === 'generate_lead')
+  assert.equal(leadEvents.length, 1, 'a captured hand-quote is still a lead')
+  assert.ok(
+    !('value' in (leadEvents[0].params ?? {})),
+    `a job with no quoted amount must report no value: ${JSON.stringify(leadEvents[0].params)}`,
+  )
   h.dom.window.close()
 })
 
