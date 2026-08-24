@@ -1,7 +1,20 @@
 # Release — quick-quote pricing parity (price book `2026-08-22.3`)
 
-**Status: NOT DEPLOYED.** This is the order to deploy in, not a record that
-anyone did. No migration has been applied and no branch merged.
+**Status: HALF DEPLOYED — the migrations and the API are live, the SITE is
+not.** Steps 0-3 below have been carried out; steps 4-5 have not. The site is
+still serving the pre-fix tree.
+
+| | State | Detail |
+|---|---|---|
+| Migrations | **APPLIED** 2026-08-23 | both, to production Neon; 10 nullable columns on `crm_leads` |
+| WMIWCI-API `main` | **DEPLOYED** | Railway `earnest-solace` + `patient-communication`, both `success` |
+| WMIWCI-SITE | **PENDING** | `claude/quick-quote-email-flow` unchanged; Vercel serves `?v=6` |
+
+WHAT THAT MEANS RIGHT NOW. A retired Studio **cannot be captured or booked** —
+the API answers `409 pricing_expired` and writes nothing. It is **still
+displayed**, because the browser prices from its own cached mirror and the
+deployed page has no branch for the refusal. A customer who picks one sees a
+price and their lead is lost. **Completing step 4 closes that window.**
 
 Branches (both `fix/quick-quote-pricing-parity`):
 
@@ -9,6 +22,22 @@ Branches (both `fix/quick-quote-pricing-parity`):
 |---|---|
 | WMIWCI-API | price book, routes, snapshot columns, two migrations, CI |
 | WMIWCI-SITE | regenerated mirror, quote page, `?v=9` cache key |
+
+### What actually happened on 2026-08-23
+
+- `npx prisma migrate deploy` applied `20260822120000_quote_price_snapshot` and
+  `20260822130000_quote_review_and_mileage`. `crm_leads` went 59 -> 69 columns,
+  stayed at 10 rows, and the SHA-256 fingerprint of every existing row was
+  unchanged. All ten new columns are NULL on every historical row. Nothing was
+  added to the empty legacy `leads` table.
+- `main` fast-forwarded and both Railway services redeployed.
+- Production smoke: all three retired Studios refused with `409`; 2BR $779;
+  3BR $1,049 and 4BR $1,449 both review-flagged; 5BR returns no automatic
+  price; a UTM campaign is not recorded as a promo code. The two smoke leads
+  created were deleted by id, returning `crm_leads` to exactly 10 rows.
+- The SITE deploy was **halted** by a failing smoke test — the booking form's
+  `renderIncludedTruck()` threw on an undefined COPY key. That is fixed in the
+  commits above, and the SITE deploy has not been re-attempted.
 
 ---
 
@@ -78,7 +107,7 @@ pg_restore --list pre-2026-08-22.3.dump | head          # proves it is readable
 A dump you have not listed is not a backup. Note its byte size and the row
 count of `leads` so the post-migration check has something to compare against.
 
-### 1 · Apply the migrations, then verify them
+### 1 · Apply the migrations, then verify them  — ✅ DONE 2026-08-23
 
 Two, both additive and nullable — no backfill, no rewrite, no lock beyond the
 catalogue update:
@@ -115,13 +144,13 @@ SELECT count(*) AS total,
 If `with_snapshot` is anything but 0, stop: something wrote during the
 migration and this document's assumptions no longer hold.
 
-### 2 · Deploy the API, with the flags verified
+### 2 · Deploy the API, with the flags verified  — ✅ DONE 2026-08-23
 
 The API goes first. From this moment a retired key is refused with
 `409 pricing_expired` — which is what protects every browser still holding an
 old mirror, which is all of them until step 4. **Run both flag checks above.**
 
-### 3 · Retired-package API smoke, BEFORE the SITE moves
+### 3 · Retired-package API smoke, BEFORE the SITE moves  — ✅ DONE 2026-08-23
 
 ```bash
 for body in \
@@ -136,7 +165,7 @@ done
 # and NO occurrence of 379, 439, 549 or 649 anywhere in the output.
 ```
 
-### 4 · Deploy the SITE — the branch Vercel actually serves
+### 4 · Deploy the SITE — the branch Vercel actually serves  — ⛔ NOT DONE
 
 **Deploy `fix/quick-quote-pricing-parity` into whatever branch Vercel builds.**
 Verified 2026-08-22 by fetching production and byte-comparing:
@@ -159,7 +188,7 @@ copies of both files, so the hashes cannot single out one of those three by
 themselves. What they DO establish conclusively is that **`master` is not the
 deployed tree.**
 
-### 5 · Cache, pricing, review, notification and page smoke
+### 5 · Cache, pricing, review, notification and page smoke  — ⛔ NOT DONE
 
 ```bash
 # the mirror the browser will really load
@@ -234,6 +263,25 @@ about the code.
 
 **Until a real token is stored, `pricing-parity` fails by design.** An
 unverifiable release must never look like a passing one.
+
+### Current state of that secret — READ THIS BEFORE TRUSTING A GREEN RUN
+
+A repository secret named `SITE_REPO_TOKEN` **exists but is EMPTY**. It was
+created accidentally by a malformed shell command on 2026-08-23; `gh secret
+list` shows the NAME and can never show the value, so it looks configured and
+is not. Running `gh secret set SITE_REPO_TOKEN` overwrites it — no deletion
+needed.
+
+Consequently **`pricing-parity` has never verified the mirror on a shipping
+commit**, and this release must not be described as CI-green. What IS true:
+
+- `verify` (typecheck, lint, the full suite, production build) passes in CI.
+- the cross-repository gate was run LOCALLY against the exact SITE branch being
+  shipped, and passed in full.
+
+That is verification by a person rather than by the robot, and it is stated
+that way deliberately. Creating the PAT is the one remaining external blocker
+and only a repository admin can do it.
 
 The fallback branch is pinned to `claude/quick-quote-email-flow` (byte evidence
 in step 4). **If the branch Vercel builds ever changes, change

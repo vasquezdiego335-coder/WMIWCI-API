@@ -1,3 +1,4 @@
+import { SKIP_WITHOUT_SITE, siteFile } from './site-dir'
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync, existsSync, statSync } from 'node:fs'
@@ -24,7 +25,10 @@ const DEPOSIT_IMAGE = 'public/assets/social/move-it-clear-it-deposit-v1.jpg'
 // The marketing site is a SEPARATE repository. When it is not checked out
 // beside this one these assertions SKIP rather than fail — a false red here
 // would be about the developer's folder layout, not about the site.
-const SITE_DIR = process.env.WMIWCI_SITE_DIR ?? 'C:\\WMIWCI-SITE'
+// The hard-coded sibling fallback is gone (2026-08-24): it graded a
+// checkout that is a different tree from the one being released, and it made
+// a local run and a CI run mean different things.
+const SITE_DIR = siteFile('.')
 const homepagePath = resolve(SITE_DIR, 'public/index.html')
 const siteAvailable = existsSync(homepagePath)
 

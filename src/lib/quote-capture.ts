@@ -171,6 +171,23 @@ export type QuoteLeadCaptureResponse =
        *  others, which can be produced before the price book is consulted
        *  (a rate limit, an unparseable body). */
       priceBookVersion?: string
+      // ── PRICED, THEN NOT SAVED ────────────────────────────────────────
+      //  These three are PRESENT exactly when `error: 'server_error'` follows
+      //  a successful pricing pass — the persistence failure. They are the
+      //  values the server already computed, so the customer sees the real
+      //  number and the page never has to fall back to its own mirror to put
+      //  something on screen. That fallback is what produced the retired $379.
+      //
+      //  That response is a 503, not a 200. Answering 200 made an outage
+      //  indistinguishable from success to every proxy, uptime check and log
+      //  line, and left the browser to infer failure from a body field.
+      //
+      //  `estimate` is null when the request was hand-quoted (5BR, in-person):
+      //  there is genuinely no number, which is different from having one and
+      //  withholding it.
+      estimate?: QuoteEstimatePayload | null
+      manualReview?: boolean
+      reviewReasons?: string[]
     }
 
 /**

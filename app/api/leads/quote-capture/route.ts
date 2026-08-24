@@ -294,12 +294,26 @@ async function handle(req: NextRequest): Promise<NextResponse> {
   const inPerson = d.quoteMode === 'in_person'
 
   // ── SERVER-AUTHORITATIVE PRICING ────────────────────────────────────────
-  // An in-person request never reaches the pricing call at all. Both halves
-  // matter: the truck must still be validated for every OTHER request, and a
-  // retired or invented size must be REJECTED rather than silently swapped.
-  const priced = inPerson
-    ? { ok: false as const, reason: 'manual_plan' as const, packageKey: d.moveSize ?? null }
-    : quoteEstimate({ moveSize: d.moveSize, truckSize: d.truckSize })
+  //  VALIDATE FIRST, IN EVERY MODE. This used to read
+  //
+  //      const priced = inPerson ? { ok: false, reason: 'manual_plan', … } : quoteEstimate(…)
+  //
+  //  so `quoteMode: 'in_person'` skipped quoteEstimate ENTIRELY — and with it
+  //  the retired-package refusal and the package/truck validation below. A
+  //  request for a withdrawn Studio was accepted and written as an in-person
+  //  plan, and so was a package that does not exist and a truck we do not run.
+  //  Asking for a visit is a statement about HOW the price is set; it is not a
+  //  claim that the selection is valid, and it must not be a way around the
+  //  gate that the whole 2026-08-22 incident was about.
+  //
+  //  So the selection is validated unconditionally, the refusals below run on
+  //  that result, and ONLY an active, valid package is then converted into a
+  //  manual in-person plan.
+  const validated = quoteEstimate({ moveSize: d.moveSize, truckSize: d.truckSize })
+  const priced =
+    inPerson && validated.ok
+      ? { ok: false as const, reason: 'manual_plan' as const, packageKey: d.moveSize ?? null }
+      : validated
   // ── A WITHDRAWN PACKAGE IS AN EXPIRED PRICE, NOT A BAD REQUEST ──────────
   //  A visitor whose browser cached the price book from before a tier was
   //  retired submits a key that was perfectly valid when their page loaded.
@@ -530,10 +544,36 @@ async function handle(req: NextRequest): Promise<NextResponse> {
     { notifyOwner: false }
   )
 
-  // Persistence failed (DB down). The customer still gets their estimate —
-  // capturePartialLeadSafe has already logged it.
+  // ── PRICED, THEN NOT SAVED ──────────────────────────────────────────────
+  //  Persistence failed after pricing succeeded (capturePartialLeadSafe has
+  //  already logged it). Two things were wrong with answering HTTP 200 here:
+  //
+  //    • An outage looked exactly like a success to every proxy, uptime check
+  //      and log aggregator. Nothing alerted, because nothing was failing as
+  //      far as HTTP was concerned — the only evidence was a field in a body
+  //      nobody was reading. That is how a lead-loss window stays open.
+  //    • The browser was left to infer failure. With no server estimate in the
+  //      response, the page's only way to show a number was its OWN mirror,
+  //      which is precisely the fallback that displayed a retired $379.
+  //
+  //  So it is a 503 — the honest code for "we are the problem, try again" —
+  //  and it carries the pricing the server ALREADY computed, so the customer
+  //  still sees the real, authoritative figure while being told plainly that
+  //  we could not save it. `estimate` is null for a hand-quoted move, which is
+  //  a different thing from having a number and withholding it.
   if (!result) {
-    return json({ ok: false, captured: false, error: 'server_error' }, 200)
+    return json(
+      {
+        ok: false,
+        captured: false,
+        error: 'server_error',
+        priceBookVersion: PRICE_BOOK_VERSION,
+        estimate: estimatePayload,
+        manualReview,
+        reviewReasons,
+      },
+      503
+    )
   }
 
   // Side effects. Awaited so a serverless invocation cannot freeze before they

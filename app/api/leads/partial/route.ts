@@ -166,8 +166,18 @@ const PartialSchema = z.object({
   //    vocabulary; an unrecognised value is dropped rather than stored raw,
   //    which is what filled the lead table with `OTHER` in the first place.
   consentSource: str(40),
-  // Honeypot — bots fill hidden fields; humans leave them empty.
-  company: z.string().max(0).optional(),
+  // ── Honeypot — bots fill hidden fields; humans leave them empty.
+  //  This was `z.string().max(0)`, which made the honeypot branch below
+  //  UNREACHABLE: a filled value failed the schema, so the request returned as
+  //  `invalid_shape` from the parse guard and the honeypot never ran. The trap
+  //  reported the wrong reason for every bot that sprang it, and the branch
+  //  that is supposed to be the trap was dead code one edit away from being
+  //  "cleaned up" as unused.
+  //
+  //  A BOUNDED filled value is now accepted by the schema so the branch below
+  //  can own the decision. The bound matters: this field is never stored or
+  //  echoed, and an unbounded string is free memory for anyone who asks.
+  company: z.string().max(200).optional(),
 })
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
@@ -200,8 +210,14 @@ async function handle(req: NextRequest): Promise<NextResponse> {
 
   const d = parsed.data
 
-  // Honeypot tripped → pretend success, drop silently.
-  if (d.company && d.company.length > 0) return NextResponse.json({ ok: true, skipped: 'honeypot' })
+  // ── Honeypot tripped → generic success, nothing persisted ───────────────
+  //  A bot that can tell rejection from acceptance tunes around the trap, so
+  //  the shape here is deliberately the same `{ ok: true, skipped }` every
+  //  other silent path returns. Nothing is written, nothing is queued, and the
+  //  request stops HERE — before the pricing and persistence below.
+  if (d.company && d.company.trim().length > 0) {
+    return NextResponse.json({ ok: true, skipped: 'honeypot' })
+  }
 
   // ══════════════════════════════════════════════════════════════════════
   //  THE BROWSER'S TOTAL IS NEVER STORED (blocker fix 2026-08-22)

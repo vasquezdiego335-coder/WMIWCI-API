@@ -23,6 +23,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync, existsSync } from 'node:fs'
+import { SKIP_WITHOUT_SITE, siteFile } from './site-dir'
 import path from 'node:path'
 
 import { BookingSchema } from '../booking-schema'
@@ -32,10 +33,16 @@ import { computeEstimate } from '../estimate'
 
 // ── The marketing site lives in a sibling checkout. When it is not present
 //    (CI clones only the API) the browser-source tests skip rather than fail. ──
-const SITE_ROOT = path.resolve(process.cwd(), '..', 'WMIWCI-SITE', 'public')
-const hasSite = existsSync(path.join(SITE_ROOT, 'booking-form.html'))
+// RESOLVED THROUGH THE OPT-IN TREE (2026-08-24). This read
+// `process.cwd()/../WMIWCI-SITE/public`, a hard-coded sibling checkout, so it
+// graded whatever branch happened to sit next door and skipped silently in CI
+// where no sibling exists. It now uses the same WMIWCI_SITE_DIR every other
+// cross-repository test uses, which is what lets the pricing-parity job run it
+// against the exact SITE commit being released.
+const SITE_ROOT = siteFile('public')
+const hasSite = Boolean(SITE_ROOT) && existsSync(path.join(SITE_ROOT, 'booking-form.html'))
 const site = (f: string) => readFileSync(path.join(SITE_ROOT, f), 'utf8')
-const skipSite = { skip: hasSite ? false : 'WMIWCI-SITE checkout not present' }
+const skipSite = { skip: SKIP_WITHOUT_SITE || (hasSite ? false : 'WMIWCI-SITE checkout not present') }
 
 /** Minimum payload the schema accepts, so each test can vary one thing. */
 const base = () => ({

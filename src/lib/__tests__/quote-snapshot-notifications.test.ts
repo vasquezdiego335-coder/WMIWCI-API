@@ -138,21 +138,45 @@ test('a conflicting estimatedValue loses to the frozen snapshot everywhere', () 
 
   // (c) the rich Discord card, from the same derived quote
   const q = notificationQuoteOf(row)
-  const rich = JSON.stringify(
-    buildLeadCard({
-      leadId: row.id,
-      name: row.name,
-      estimateDollars: q.quotedCents! / 100,
-      quoteMileageStatus: q.mileageStatus,
-      quoteBaseDollars: q.baseCents! / 100,
-      quoteTruckDollars: q.truckCents! / 100,
-      quoteIncludedTruck: q.includedTruck,
-      adminUrl: 'https://example.com/admin',
-    } as never),
-  )
-  assert.ok(rich.includes('779'))
-  assert.ok(!rich.includes('879'))
-  assert.match(rich, /package subtotal/i)
+  // ── READ THE ESTIMATE FIELD, NOT THE WHOLE CARD ────────────────────
+  //  This used to JSON.stringify the entire card and assert
+  //  `!rich.includes('879')`. The card carries
+  //  `timestamp: new Date().toISOString()` (booking-display.ts:497), so the
+  //  serialised blob contains a fresh timestamp on every run — and an ISO
+  //  timestamp's millisecond field is three digits, which lands on "879"
+  //  roughly once in a thousand runs. The assertion was therefore structurally
+  //  flaky: it could fail with nothing wrong, and the failure looked like a
+  //  pricing regression.
+  //
+  //  It is also weaker than it appears. Searching a whole card for a bare
+  //  three-character substring would pass if "$879" appeared under a different
+  //  label, and would fail on any unrelated field that happened to contain
+  //  those digits. Naming the field fixes both problems at once.
+  const card = buildLeadCard({
+    leadId: row.id,
+    name: row.name,
+    estimateDollars: q.quotedCents! / 100,
+    quoteMileageStatus: q.mileageStatus,
+    quoteBaseDollars: q.baseCents! / 100,
+    quoteTruckDollars: q.truckCents! / 100,
+    quoteIncludedTruck: q.includedTruck,
+    adminUrl: 'https://example.com/admin',
+  } as never)
+
+  const fields = (card.embeds?.[0] as { fields?: Array<{ name: string; value: string }> })?.fields ?? []
+  const estimateField = fields.find((f) => /Estimate/i.test(f.name))
+  assert.ok(estimateField, `the card must have an Estimate field; got: ${fields.map((f) => f.name).join(', ')}`)
+
+  const value = estimateField!.value
+  assert.match(value, /\$779/, `the Estimate field must show the quoted figure: ${value}`)
+  assert.doesNotMatch(value, /\$879/, `the Estimate field must not show the drifted value: ${value}`)
+  assert.match(value, /package subtotal/i, 'and must caption it as a subtotal')
+  assert.match(value, /Transportation pending/i, 'and say the drive is not in that number yet')
+
+  // The timestamp is a real field and it is allowed to contain any digits it
+  // likes. Pinned so nobody "fixes" the flake by deleting the timestamp.
+  const stamped = JSON.stringify(card)
+  assert.match(stamped, /"timestamp":"\d{4}-\d{2}-\d{2}T/, 'the card still carries its timestamp')
 })
 
 test('a HISTORICAL lead with no snapshot keeps its original wording', () => {

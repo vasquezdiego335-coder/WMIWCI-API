@@ -27,6 +27,7 @@
 //  otherwise be about a developer's folder layout, not about the policy. The
 //  in-repo assertions always run.
 // ════════════════════════════════════════════════════════════════════════════
+import { SKIP_WITHOUT_SITE, siteFile } from './site-dir'
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync, existsSync } from 'node:fs'
@@ -50,7 +51,10 @@ function plain(html: string): string {
 const APP_TERMS = plain(read('app/terms/page.tsx'))
 
 // The marketing site, when it is checked out beside this repo.
-const SITE_DIR = process.env.WMIWCI_SITE_DIR ?? 'C:\\WMIWCI-SITE'
+// The hard-coded sibling fallback is gone (2026-08-24): it graded a
+// checkout that is a different tree from the one being released, and it made
+// a local run and a CI run mean different things.
+const SITE_DIR = siteFile('.')
 const sitePath = resolve(SITE_DIR, 'public/terms/index.html')
 const siteAvailable = existsSync(sitePath)
 const SITE_TERMS = siteAvailable ? plain(readFileSync(sitePath, 'utf8')) : ''
