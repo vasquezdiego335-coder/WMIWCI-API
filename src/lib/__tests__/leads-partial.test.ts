@@ -94,6 +94,9 @@ function existing(overrides: Partial<ExistingPartialLead> = {}): ExistingPartial
     bookingSessionId: 'sess-1', lifecycle: 'PARTIAL', emailMarketingConsent: null, formStep: 'card1',
     quoteConfirmationQueuedAt: null,
     estimatedValue: null, utmSource: null, utmCampaign: null, landingPage: null, referrer: null, promoCode: null,
+    // Selected by defaultPartialLeadDeps, so the fixture has to carry it or
+    // fillIfBlank compares against undefined and the first-touch rule breaks.
+    attributionId: null,
     notes: null,
     ...overrides,
   }

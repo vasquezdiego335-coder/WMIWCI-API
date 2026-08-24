@@ -28,6 +28,27 @@ export type TrackerBookingIngest = {
   scheduledDate?: string | null // YYYY-MM-DD
   completedDate?: string | null // YYYY-MM-DD
   notes?: string | null
+  /**
+   * The anonymous visitor id the tracker itself minted on /q/<code>.
+   *
+   * THIS IS THE FIELD THAT CLOSES THE LOOP. Without it the tracker cannot join
+   * this revenue to the scan that produced it, so `_record_conversion` writes
+   * attribution_id NULL, scan_id NULL and campaign_key 'unattributed', and the
+   * owner's Discord revenue card reads "Attributed scan: no" — which is what it
+   * has said for every booking so far. The tracker is not guessing; it refuses
+   * to credit revenue it cannot prove. It simply was never given the proof.
+   */
+  attributionId?: string | null
+  /**
+   * PICKUP (origin) location. Campaign performance is grouped by the CUSTOMER'S
+   * OWN city, never by the IP-estimated scan city: North Jersey cellular
+   * traffic egresses through carrier aggregation points, so a Montclair scan
+   * routinely reports as Newark. The estimate is shown because the disagreement
+   * is informative, never because it is true.
+   */
+  originCity?: string | null
+  originState?: string | null
+  originZip?: string | null
 }
 
 /**
@@ -49,6 +70,11 @@ export async function ingestBookingToTracker(input: TrackerBookingIngest): Promi
     scheduled_date: input.scheduledDate ?? null,
     completed_date: input.completedDate ?? null,
     notes: input.notes ?? null,
+    // snake_case to match the tracker's own request shape (app.py api_ingest_booking).
+    attribution_id: input.attributionId ?? null,
+    origin_city: input.originCity ?? null,
+    origin_state: input.originState ?? null,
+    origin_zip: input.originZip ?? null,
   }
 
   const controller = new AbortController()

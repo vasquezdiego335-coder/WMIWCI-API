@@ -197,6 +197,24 @@ const QuoteLeadSchema = z.object({
   // classifier, which is out of scope here (main owns the source taxonomy).
   gclid: str(200),
   fbclid: str(200),
+  /**
+   * The anonymous visitor id from the marketing tracker's /q/<code> QR
+   * redirect (?aid=). This route is the MAJORITY door-hanger path — the
+   * landing page's primary CTA points at /quote.html — so if the id does not
+   * survive here, the campaign is unmeasurable no matter what the booking
+   * route does.
+   *
+   * `.catch(undefined)` matches BookingSchema deliberately: a mangled tracking
+   * parameter must DROP the attribution, never 422 a real customer's lead. A
+   * single over-long or malformed value failing the whole request is exactly
+   * how a lead gets silently lost — the customer is told we could not save
+   * their information and the owner never hears about them.
+   */
+  attributionId: z
+    .string()
+    .regex(/^[a-f0-9]{8,64}$/i)
+    .optional()
+    .catch(undefined),
   landingPage: str(500),
   referrer: str(500),
 
@@ -507,6 +525,9 @@ async function handle(req: NextRequest): Promise<NextResponse> {
       utmTerm: d.utmTerm,
       landingPage: d.landingPage,
       referrer: d.referrer,
+      // The scan that produced this lead. FIRST-TOUCH on the lead: a later
+      // submission never overwrites it (see buildPartialLeadUpdate).
+      attributionId: d.attributionId,
       // A REAL promo code only. Previously this was `d.utmCampaign`, which put
       // marketing campaign slugs in the discount column.
       promoCode: d.promoCode,
