@@ -104,6 +104,9 @@ const SOURCE_MAP: Record<string, LeadSource> = {
   door_hanger: LeadSource.DOOR_HANGER,
   'door-hanger': LeadSource.DOOR_HANGER,
   doorhanger: LeadSource.DOOR_HANGER,
+  // The `src` the marketing tracker actually mints for the printed QR. See the
+  // DOOR-HANGER note in mapLeadSource below for why an exact key is not enough.
+  door_hanger_5000_batch: LeadSource.DOOR_HANGER,
   yard_sign: LeadSource.YARD_SIGN,
   'yard-sign': LeadSource.YARD_SIGN,
   referral: LeadSource.REFERRAL,
@@ -139,12 +142,58 @@ export function mapLeadSource(source?: string | null): LeadSource {
     return LeadSource[upper as keyof typeof LeadSource]
   }
 
+  // ── DOOR HANGERS: MATCH THE CHANNEL, NOT THE BATCH (fix 2026-08-24) ─────
+  //  The printed QR mints `src=door_hanger_5000_batch`. That is a CAMPAIGN
+  //  label, and campaign labels grow batch suffixes: the exact-key lookup
+  //  above missed it, the enum fallback produced DOOR_HANGER_5000_BATCH which
+  //  is not a LeadSource value, and every quick-quote lead from the campaign
+  //  was filed as OTHER. The owner's own "Door hanger" admin filter matches on
+  //  `source = 'DOOR_HANGER'` exactly, so those leads were invisible on the
+  //  page built to find them — while the hangers were in fact producing them.
+  //
+  //  This was clearly a bug and not a choice, because the OTHER capture
+  //  surface already got it right: booking-form.html normalises anything
+  //  matching /door[_-]?hanger/ to `door_hanger` before it sends. The two
+  //  forms disagreed about what a door-hanger lead is called.
+  //
+  //  Matching the CHANNEL means run two, or a second town's batch, or a
+  //  reprint with a new suffix, all land in the same place without another
+  //  deploy — which is the whole reason the label carries a batch in the first
+  //  place. The batch itself is not lost: it stays on the lead in `source`'s
+  //  sibling columns and in the tracker's own scan rows.
+  //
+  //  Deliberately LAST, after both exact lookups, so it can only ever catch
+  //  what would otherwise have become OTHER.
+  const lower = raw.toLowerCase()
+  if (/door[_\- ]?hanger/.test(lower)) return LeadSource.DOOR_HANGER
+  if (/yard[_\- ]?sign/.test(lower)) return LeadSource.YARD_SIGN
+
   return LeadSource.OTHER
 }
 
 const clean = (v?: string | null): string | null => {
   const s = (v ?? '').trim()
   return s.length ? s : null
+}
+
+/**
+ * The QR attribution id, or null.
+ *
+ * SHAPE-CHECKED RATHER THAN TRIMMED, and the difference matters. The value is
+ * machine-minted (`os.urandom(16).hex()` in the tracker), so anything that is
+ * not lower/upper hex of a sane length did not come from a scan — it came from
+ * a mangled shared link, a truncating client, or somebody probing. Storing it
+ * anyway would put junk in the column the campaign report JOINS on, and a join
+ * that silently matches nothing is worse than a null, because null is
+ * obviously "we don't know".
+ *
+ * Never throws and never rejects: an unusable value simply drops the
+ * attribution. A tracking parameter the customer never saw must not be able to
+ * fail their lead or their booking.
+ */
+export const cleanAttributionId = (v?: string | null): string | null => {
+  const s = (v ?? '').trim()
+  return /^[a-f0-9]{8,64}$/i.test(s) ? s.toLowerCase() : null
 }
 
 /** Compose the human-readable notes log (message + "found us" note). */
@@ -643,6 +692,19 @@ export type PartialLeadInput = {
   landingPage?: string | null
   referrer?: string | null
   promoCode?: string | null
+  /**
+   * The anonymous visitor id the marketing tracker mints on its `/q/<code>` QR
+   * redirect, carried through the landing page and the quote form as `?aid=`.
+   *
+   * All 2,500 printed door hangers share ONE code, so `source` can say "a door
+   * hanger" and can never say "which scan". This is the only value that can
+   * tie a lead — and later a booking — back to an individual card, which is
+   * what makes "did the hangers pay for themselves" answerable at all.
+   *
+   * Opaque, random, 32 hex characters. It carries no personal data and
+   * identifies nobody on its own.
+   */
+  attributionId?: string | null
   estimatedValue?: number | null // cents
   /**
    * TRUE when `estimatedValue` came from the SERVER's price book rather than
@@ -848,6 +910,7 @@ export function buildPartialLeadCreate(input: PartialLeadInput, now: Date) {
     landingPage: clean(input.landingPage),
     referrer: clean(input.referrer),
     promoCode: clean(input.promoCode),
+    attributionId: cleanAttributionId(input.attributionId),
     estimatedValue: input.estimatedValue ?? null,
     lastActivityAt: now,
     emailMarketingConsent: consented ? (input.marketingConsent as boolean) : null,
@@ -875,6 +938,10 @@ export type ExistingPartialLead = {
   landingPage: string | null
   referrer: string | null
   promoCode: string | null
+  /** Read so the update can apply first-touch attribution correctly. Without it
+   *  fillIfBlank compares against `undefined`, decides the column is empty, and
+   *  overwrites a real id with null on the next ping. */
+  attributionId: string | null
   notes: string | null
 }
 
@@ -934,6 +1001,16 @@ export function buildPartialLeadUpdate(
     landingPage: fillIfBlank(existing.landingPage, clean(input.landingPage)),
     referrer: fillIfBlank(existing.referrer, clean(input.referrer)),
     promoCode: fillIfBlank(existing.promoCode, clean(input.promoCode)),
+    /* FILL-BLANK-ONLY, and NOT `correctable`, even in-session.
+       Attribution is FIRST-TOUCH here on purpose: the id belongs to the scan
+       that produced this lead. A later ping in the same session that happens to
+       arrive without one — a bookmark, a back-navigation, a tab the visitor had
+       already open — must not be able to blank it, and a DIFFERENT id arriving
+       later is a second visit, not a correction of the first. The rest of the
+       attribution block on this object follows the same rule for the same
+       reason; only name/phone/email are `correctable`, because those are the
+       fields a customer actually retypes to fix a typo. */
+    attributionId: fillIfBlank(existing.attributionId, cleanAttributionId(input.attributionId)),
     // Access details: FILL-BLANK-ONLY. See PartialLeadInput.accessDetails.
     notes: fillIfBlank(existing.notes, clean(input.accessDetails)),
     ...partialConsentPatch(input, now),
@@ -1064,6 +1141,7 @@ export function defaultPartialLeadDeps(): PartialLeadDeps {
     lifecycle: true, emailMarketingConsent: true, formStep: true, estimatedValue: true,
     quoteConfirmationQueuedAt: true,
     utmSource: true, utmCampaign: true, landingPage: true, referrer: true, promoCode: true,
+    attributionId: true,
     // Read so the update can fill `notes` ONLY when it is empty.
     notes: true,
   } as const

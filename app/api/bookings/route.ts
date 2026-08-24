@@ -763,6 +763,12 @@ async function handleBooking(req: NextRequest): Promise<NextResponse> {
       // for the Discord card; these power the marketing-tracker revenue merge.
       source: data.source,
       foundUs: data.foundUs,
+      // Ties this booking to the QR scan that produced it. `source` can say "a
+      // door hanger" and never "which scan", because all 2,500 printed cards
+      // share one code — see the 20260824120000_attribution_id migration and
+      // marketing-tracker /q/<code>. Already shape-validated by BookingSchema,
+      // where a malformed value drops rather than rejecting the booking.
+      attributionId: data.attributionId,
       customerTokenExpiry: tokenExpiry,
       // ── Moving Service Agreement acceptance record ──
       agreementAccepted: true,

@@ -192,6 +192,26 @@ export const BookingSchema = z.object({
 
   // ── Marketing attribution (?src= from the QR / landing URL) ──
   source: z.string().transform(sanitizeText).pipe(z.string().max(60)).optional(),
+  /**
+   * The anonymous visitor id from the tracker's /q/<code> redirect (?aid=).
+   *
+   * Every door hanger shares ONE printed code, so this is the only thing that
+   * can tie a booking back to an individual scan. Hex only: it is machine-
+   * minted, and constraining the shape keeps arbitrary text out of a column the
+   * campaign report later JOINs on.
+   *
+   * `.catch(undefined)` IS LOAD-BEARING — do not "tidy" it into a plain
+   * `.optional()`. Without it a malformed ?aid= on a shared or truncated link
+   * 422s a real customer's paid checkout over a tracking parameter they never
+   * saw, and because the value is kept in a 90-day cookie it would fail again
+   * every single time they retried. A bad id must DROP THE ATTRIBUTION, never
+   * reject the booking.
+   */
+  attributionId: z
+    .string()
+    .regex(/^[a-f0-9]{8,64}$/i)
+    .optional()
+    .catch(undefined),
   // "Where did you find us?" self-report from the booking-form dropdown.
   foundUs: z.string().transform(sanitizeText).pipe(z.string().max(40)).optional(),
 

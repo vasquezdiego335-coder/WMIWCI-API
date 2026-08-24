@@ -274,6 +274,20 @@ export async function fulfillPaidCheckout(params: {
       status: 'scheduled',
       scheduledDate: booking.requestedDate ? booking.requestedDate.toISOString().slice(0, 10) : null,
       notes: `Booking ${booking.displayId} — deposit paid`,
+      // ── WHAT MAKES THIS REVENUE ATTRIBUTABLE (2026-08-24) ───────────────
+      //  Without attributionId the tracker has no way to join this money to
+      //  the scan that produced it, so it writes the conversion as
+      //  'unattributed' — correctly, because it refuses to guess. That is why
+      //  the owner's revenue card has always said "Attributed scan: no".
+      //
+      //  originCity/State/Zip are the CUSTOMER-REPORTED pickup location. The
+      //  tracker groups campaign performance by this, never by the
+      //  IP-estimated scan city, which is a network guess and regularly a town
+      //  off. Both already exist on Booking; neither needed a migration.
+      attributionId: booking.attributionId,
+      originCity: booking.originCity,
+      originState: booking.originState,
+      originZip: booking.originZip,
     })
   )
 

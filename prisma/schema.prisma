@@ -1204,6 +1204,19 @@ model Booking {
   utmCampaign         String?   @map("utm_campaign")
   utmContent          String?   @map("utm_content")
   qrCampaign          String?   @map("qr_campaign")
+  /// Anonymous visitor id minted by the marketing tracker's /q/<code> QR
+  /// redirect and carried through the landing page, the quote form and the
+  /// booking form as ?aid=.
+  ///
+  /// It is what links BOOKED REVENUE back to the individual printed hanger
+  /// that was scanned. `source` alone cannot: all 2,500 cards in the Essex
+  /// County run share one printed code, so source says "a door hanger" and
+  /// can never say "which one".
+  ///
+  /// Opaque and random (16 bytes, hex). It carries no personal data and
+  /// identifies nobody on its own. Nullable and additive: every booking that
+  /// did not come from a scan simply has none.
+  attributionId       String?   @map("attribution_id")
 
   // ── Job completion (Phase 3) — set when the booking transitions to COMPLETED;
   //    the anchor time for the post-move follow-up sequence. ──
@@ -1235,6 +1248,8 @@ model Booking {
   @@index([source])
   @@index([ownerAssignedSource])
   @@index([originCity])
+  /// The campaign report joins scans to bookings on this column.
+  @@index([attributionId])
   @@map("bookings")
 }
 
@@ -2068,6 +2083,11 @@ model Lead {
   landingPage    String?   @map("landing_page")
   referrer       String?
   promoCode      String?   @map("promo_code")
+  /// Anonymous visitor id from the tracker's /q/<code> QR redirect (?aid=).
+  /// Present on leads that began as a scan of a printed code; null otherwise.
+  /// FIRST-TOUCH: a later submission never overwrites it — see
+  /// buildPartialLeadUpdate. Opaque, random, identifies nobody on its own.
+  attributionId  String?   @map("attribution_id")
   lastActivityAt DateTime? @map("last_activity_at")
 
   // ── Partial-booking capture + marketing consent (owner spec 2026-07-24) — all
@@ -2181,6 +2201,8 @@ model Lead {
   @@index([phone])
   @@index([lastActivityAt])
   @@index([bookingSessionId])
+  /// Lets a scan be traced to the lead it produced without a table scan.
+  @@index([attributionId])
   // Own table (owner spec 2026-07-24). The Neon DB is SHARED with the marketing
   // tracker, whose raw-SQL `leads` table (mention_code/source_code/ts/…) collides
   // with this Prisma model and made every `prisma.lead.*` call fail. Mapping to a

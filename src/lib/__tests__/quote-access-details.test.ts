@@ -35,6 +35,9 @@ const existing = (over: Partial<ExistingPartialLead> = {}): ExistingPartialLead 
   landingPage: null,
   referrer: null,
   promoCode: null,
+  // Selected by defaultPartialLeadDeps, so the fixture has to carry it or
+  // fillIfBlank compares against undefined and the first-touch rule breaks.
+  attributionId: null,
   notes: null,
   ...over,
 })
