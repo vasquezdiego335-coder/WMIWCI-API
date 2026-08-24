@@ -199,21 +199,45 @@ jobs:
             echo "::error::SITE_REPO_TOKEN is not set (or is not readable from this event). WMIWCI-SITE is private, so pricing parity cannot be verified. Add a fine-grained, READ-ONLY PAT (Contents: Read on WMIWCI-SITE) as the repository secret SITE_REPO_TOKEN. Refusing to pass a run that proves nothing. NOTE: the 'verify' job runs independently, so typecheck, tests and build results are still available on this run."
             exit 1
           fi
-          REMOTE="https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository_owner }}/WMIWCI-SITE.git"
+          OWNER="${{ github.repository_owner }}"
+          REPO="$OWNER/WMIWCI-SITE"
+
+          # ── PROVE THE TOKEN CAN SEE THE REPOSITORY, BEFORE BLAMING A BRANCH
+          #  This used to probe branches with `git ls-remote` over a
+          #  `https://x-access-token:$TOKEN@` URL, and on any failure reported
+          #  "WMIWCI-SITE has no branch X". A missing branch is only one cause.
+          #  A token without access to the repository produces the identical
+          #  message, and so does an auth form the credential does not accept —
+          #  three different problems behind one misleading sentence, and the
+          #  first reading sends you hunting for a branch that is sitting there.
+          #
+          #  `gh api` uses GH_TOKEN natively and separates them.
+          if ! gh api "repos/$REPO" --jq .full_name > repo.txt 2> repo.err; then
+            echo "::error::SITE_REPO_TOKEN cannot read $REPO. This is a CREDENTIAL SCOPE problem, not a missing branch. The token needs repository access to the private $REPO with permission Contents: Read."
+            echo "gh reported:"
+            cat repo.err
+            exit 1
+          fi
+          echo "Token can read: $(cat repo.txt)"
+
           BRANCH="${{ github.head_ref || github.ref_name }}"
           WANTED="${{ inputs.site_ref }}"
           HOW="workflow_dispatch input"
+          branch_exists() { gh api "repos/$REPO/branches/$1" --jq .name > /dev/null 2>&1; }
+
           if [ -z "$WANTED" ]; then
-            if git ls-remote --exit-code --heads "$REMOTE" "$BRANCH" >/dev/null 2>&1; then
+            if branch_exists "$BRANCH"; then
               WANTED="$BRANCH"; HOW="matching branch name"
             else
               WANTED="$PRODUCTION_SITE_BRANCH"; HOW="production fallback"
             fi
           fi
-          git ls-remote --exit-code --heads "$REMOTE" "$WANTED" >/dev/null 2>&1 || {
-            echo "::error::WMIWCI-SITE has no branch '$WANTED' ($HOW). Pricing parity cannot be verified against a branch that does not exist."
+          if ! branch_exists "$WANTED"; then
+            echo "::error::WMIWCI-SITE has no branch '$WANTED' ($HOW). The token CAN read the repository, so this is genuinely a missing branch."
+            echo "Branches the token can see:"
+            gh api "repos/$REPO/branches" --paginate --jq '.[].name' || true
             exit 1
-          }
+          fi
           echo "ref=$WANTED" >> "$GITHUB_OUTPUT"
           echo "Verifying pricing parity against WMIWCI-SITE@$WANTED ($HOW)"
 
