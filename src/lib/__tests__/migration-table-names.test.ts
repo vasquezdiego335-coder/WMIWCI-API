@@ -141,22 +141,47 @@ test('each snapshot column is in BOTH the datamodel and a migration', () => {
 })
 
 test('no migration in the tree writes to a table no model maps to', () => {
-  // Repo-wide sweep. Historical migrations may reference tables that were
-  // later renamed or dropped, so anything genuinely retired is listed here
-  // BY NAME with its reason — an empty escape hatch is not an escape hatch.
-  const RETIRED: Record<string, string> = {
-    leads: 'pre-CRM lead table; superseded by crm_leads, kept empty in production',
-  }
+  // Repo-wide sweep. Historical migrations legitimately reference tables that
+  // were later renamed or superseded, so those are allowed — but the exception
+  // is scoped to the EXACT migrations that already contain it.
+  //
+  // A blanket `RETIRED = { leads: '…' }` would have let a NEW migration write
+  // to `leads` and pass this test, which is the precise failure it exists to
+  // catch. So the allowance is a (migration, table) pair: the historical
+  // migrations below may mention `leads`; any migration not on this list may
+  // not, and adding one to the list is a visible, reviewable act.
   const known = physicalTables()
+
+  // `leads` is the pre-CRM lead table: superseded by crm_leads and kept empty
+  // in production. These three migrations are the COMPLETE, EXACT set that
+  // already writes to it. The list is enumerated by name rather than derived
+  // from a timestamp cutoff, because a cutoff is not a scope — a new migration
+  // named with an older timestamp would slip straight through it, which is
+  // exactly the failure this test exists to prevent.
+  const GRANDFATHERED: Record<string, string[]> = {
+    '20260713000100_admin_operating_system': ['leads'],
+    '20260715000100_lead_ingestion_fields': ['leads'],
+    '20260724000000_partial_lead_capture': ['leads'],
+  }
+  const RETIRED_TABLES = new Set(Object.values(GRANDFATHERED).flat())
+
   const unexplained: string[] = []
 
   for (const dir of readdirSync(MIGRATIONS, { withFileTypes: true })) {
     if (!dir.isDirectory()) continue
     const file = resolve(MIGRATIONS, dir.name, 'migration.sql')
     if (!existsSync(file)) continue
+    const allowedHere = GRANDFATHERED[dir.name] ?? []
     for (const { table, line } of tablesWrittenBy(readFileSync(file, 'utf8'))) {
-      if (known.has(table) || table in RETIRED) continue
-      unexplained.push(`${dir.name}/migration.sql:${line} -> "${table}"`)
+      if (known.has(table)) continue
+      if (allowedHere.includes(table)) continue
+      unexplained.push(
+        `${dir.name}/migration.sql:${line} -> "${table}"` +
+          (RETIRED_TABLES.has(table)
+            ? `  ("${table}" is a RETIRED table and this migration is not one of the ` +
+              `${Object.keys(GRANDFATHERED).length} grandfathered ones — a new migration may never write to it)`
+            : ''),
+      )
     }
   }
 
