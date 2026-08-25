@@ -1,0 +1,48 @@
+-- ═══════════════════════════════════════════════════════════════════════════
+--  ROUTEABLE-END EVIDENCE ON THE LEAD  (V3)
+--
+--  WHY
+--  ---
+--  The booking form captures its lead at the CONTACT step and does not collect
+--  addresses until four steps later. Until V3 the partial capture carried no
+--  address fields at all, so a lead could never gain the move's two ends and
+--  the owner's transportation line could never move off "awaiting pickup and
+--  destination addresses" — the facts that would advance it had nowhere to
+--  land, and no state after WAITING_FOR_ADDRESSES was reachable for a lead.
+--
+--  WHAT THESE COLUMNS HOLD
+--  -----------------------
+--  Whether each end is complete enough to ROUTE. Both are DERIVED ON THE
+--  SERVER from bounded components (a 5-digit ZIP, a 2-letter state, and a flag
+--  that the street/city line is non-empty). The client's boolean alone is never
+--  sufficient: a page must not be able to assert a completeness the server
+--  cannot check.
+--
+--  The street line is deliberately NOT stored here. The partial capture carries
+--  the least PII that still supports honest routing; the full address reaches
+--  the system on the real booking submit, where it is actually needed.
+--
+--  NULL means the address step was never reached. That is a different fact
+--  from reached-and-incomplete (FALSE), and collapsing them is the same class
+--  of mistake that produced "Marketing: not asked".
+--
+--  TABLE NAMES — CHECKED, NOT ASSUMED
+--  ----------------------------------
+--  `Lead` maps to "crm_leads". Production ALSO carries a separate legacy
+--  "leads" table belonging to the marketing tracker; two migrations in an
+--  earlier release targeted it by mistake and would have applied cleanly while
+--  leaving the real table without the columns. Enforced by
+--  src/lib/__tests__/migration-table-names.test.ts.
+--
+--  SAFETY
+--  ------
+--  Additive, nullable, IF NOT EXISTS. No DEFAULT, no NOT NULL, no backfill, no
+--  DROP, no UPDATE. Every existing row stays NULL and reads as "not reached",
+--  which is the honest answer for a lead captured before this shipped.
+--  Re-running is a no-op. Safe to apply while the previous API is still live.
+--
+--  Rollback: drop the two columns. Nothing else is touched.
+-- ═══════════════════════════════════════════════════════════════════════════
+
+ALTER TABLE "crm_leads" ADD COLUMN IF NOT EXISTS "pickup_address_complete" BOOLEAN;
+ALTER TABLE "crm_leads" ADD COLUMN IF NOT EXISTS "destination_address_complete" BOOLEAN;

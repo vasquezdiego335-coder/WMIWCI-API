@@ -166,6 +166,14 @@ const PartialSchema = z.object({
   moveDate: z.string().max(40).optional(),
   pickupZip: str(12),
   destinationZip: str(12),
+  /* ROUTEABLE-END EVIDENCE (V3). Bounded components the SERVER can check, plus
+     a flag that the street/city line is non-empty. The flag alone is never
+     enough — see deriveAddressCompleteness in leads.ts. The street line itself
+     deliberately does not travel on a partial capture. */
+  pickupState: str(2),
+  destinationState: str(2),
+  pickupAddressPresent: z.boolean().optional(),
+  destinationAddressPresent: z.boolean().optional(),
   /* A promo code is NOT a marketing campaign. They are separate columns and
      separate inputs; conflating them filled the discount column with campaign
      slugs. /api/leads/quote-capture already keeps them apart — this route did
@@ -343,6 +351,10 @@ async function handle(req: NextRequest): Promise<NextResponse> {
       moveDate: parseMoveDate(d.moveDate),
       pickupZip: d.pickupZip,
       destinationZip: d.destinationZip,
+      pickupState: d.pickupState,
+      destinationState: d.destinationState,
+      pickupAddressPresent: d.pickupAddressPresent,
+      destinationAddressPresent: d.destinationAddressPresent,
       serviceInterest: d.serviceInterest,
       //  A refused key is dropped rather than recorded, so no new lead can end
       //  up with a withdrawn package as its official service.

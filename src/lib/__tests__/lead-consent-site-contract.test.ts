@@ -262,3 +262,155 @@ test('FORM_CONTRACTS does not claim the quick quote asks how they heard', { skip
     'a surface may only be recorded as "does not ask" while that is actually true',
   )
 })
+
+// ══════════════════════════════════════════════════════════════════════
+//  V3 — THE BROWSER PAYLOAD CONTRACT
+//
+//  The V2 pass claimed an abandoned booking-form lead could gain ZIPs and an
+//  individual scan id. That claim was INVALID: the V2 staging harness supplied
+//  `pickupZip`, `destinationZip` and `attributionId` BY HAND. The real page
+//  never sent them on the partial capture — `attribution()` returned no aid,
+//  `collect()` carried no zips, and `attributionId` was added only to the
+//  final /api/bookings payload.
+//
+//  So V2 proved: hand-built request -> API -> PostgreSQL.
+//  It did NOT prove: real booking-form.html -> API -> PostgreSQL.
+//
+//  These tests read the UNMODIFIED body the real page puts on the wire.
+//  Nothing is injected after it leaves the browser.
+// ══════════════════════════════════════════════════════════════════════
+
+/** Load the form on a URL carrying a real door-hanger scan, as a scanner sees it. */
+async function loadScanned(aid: string, extra = ''): Promise<Harness> {
+  const html = readFileSync(FORM, 'utf8')
+  const mirror = existsSync(MIRROR) ? readFileSync(MIRROR) : Buffer.from('')
+  const posted: any[] = []
+  const served = (buf: Buffer) => {
+    const p = Promise.resolve(buf) as Promise<Buffer> & { abort(): void }
+    p.abort = () => {}
+    return p
+  }
+  class LocalAssets extends ResourceLoader {
+    fetch(url: string) {
+      return served(/\/js\/pricing-config\.js/.test(url) ? mirror : Buffer.from(''))
+    }
+  }
+  const dom = new JSDOM(html, {
+    runScripts: 'dangerously',
+    url: `https://moveitclearit.com/booking-form.html?aid=${aid}&src=door_hanger_5000_batch${extra}`,
+    virtualConsole: new VirtualConsole(),
+    resources: new LocalAssets(),
+    beforeParse(win: any) {
+      const record = (url: unknown, body: unknown) => {
+        if (/\/api\/leads\/partial/.test(String(url)) && typeof body === 'string') {
+          try { posted.push(JSON.parse(body)) } catch { /* not ours */ }
+        }
+      }
+      win.fetch = async (url: string, init?: any) => {
+        record(url, init?.body)
+        return { ok: true, status: 200, json: async () => ({ ok: true }), text: async () => '{}' }
+      }
+      win.navigator.sendBeacon = (url: string, blob: any) => {
+        //  JSDOM's Blob exposes no `_text`; read it properly or every
+        //  exit-beacon body (which is how card-4 enrichment leaves the page)
+        //  is silently dropped and the test proves nothing.
+        if (blob && typeof blob.text === 'function') blob.text().then((t: string) => record(url, t)).catch(() => {})
+        else record(url, blob?._text)
+        return true
+      }
+    },
+  })
+  const win = dom.window as any
+  await new Promise((r) => setTimeout(r, 40))
+  return { doc: win.document, win, posted }
+}
+
+const AID = 'ab12cd34ef56ab78cd90ef12ab34cd56'
+
+test('V3: the CONTACT-step capture carries the individual scan id', { skip }, async () => {
+  //  The aid exists from the moment the page loads — it does not depend on
+  //  reaching card 4. A lead abandoned at the contact step is exactly the lead
+  //  the door-hanger campaign most needs to attribute.
+  const h = await loadScanned(AID)
+  await triggerBookingCapture(h)
+  const body = lastPost(h)
+  assert.equal(body.attributionId, AID, 'the scan id must be on the FIRST partial capture')
+})
+
+test('V3: a malformed scan id is omitted, and never costs the lead', { skip }, async () => {
+  const h = await loadScanned('not-hex-at-all')
+  await triggerBookingCapture(h)
+  const body = lastPost(h)
+  assert.equal(body.attributionId, undefined, 'a mangled id is dropped, not sent')
+  assert.equal(body.email, 'test.customer@example.com', 'and the lead is still captured')
+})
+
+test('V3: the card-4 capture carries the REAL address evidence', { skip }, async () => {
+  const h = await loadScanned(AID)
+  await triggerBookingCapture(h)
+
+  //  Fill the REAL inputs the form actually has — addressFrom / pu_zip /
+  //  addressTo / do_zip — not invented field ids.
+  const set = (id: string, v: string) => {
+    const el = h.doc.getElementById(id) as HTMLInputElement | null
+    assert.ok(el, `the form must have #${id}`)
+    el!.value = v
+    el!.dispatchEvent(new h.win.Event('input', { bubbles: true }))
+    el!.dispatchEvent(new h.win.Event('change', { bubbles: true }))
+  }
+  set('addressFrom', '12 Example Street, West Orange')
+  set('pu_zip', '07052')
+  set('addressTo', '9 Sample Avenue, Hoboken')
+  set('do_zip', '07030')
+  const found = h.doc.getElementById('foundUs') as HTMLSelectElement
+  found.value = found.options[found.options.length - 1]?.value || 'Other'
+  found.dispatchEvent(new h.win.Event('change', { bubbles: true }))
+
+  //  Trigger the page's OWN exit capture, which is how a visitor who fills the
+  //  address step and then leaves actually reaches the API. Note the form's
+  //  step tracker does not advance under JSDOM (navigation is validation-gated
+  //  and the earlier required fields are empty), so this asserts the EVIDENCE
+  //  the page sends, not the step label.
+  //  A visitor who fills the address step then moves on triggers the form's
+  //  own nav capture; one who closes the tab triggers the exit beacon. Fire
+  //  both, because a real abandonment can be either.
+  const cont = h.doc.querySelector('.btn-continue') as HTMLElement | null
+  if (cont) cont.dispatchEvent(new h.win.MouseEvent('click', { bubbles: true }))
+  for (let i = 0; i < 40; i++) await new Promise((r) => setTimeout(r, 5))
+  h.win.dispatchEvent(new h.win.Event('pagehide'))
+  for (let i = 0; i < 60; i++) await new Promise((r) => setTimeout(r, 5))
+
+  //  Assert against the LAST body that actually carried address evidence —
+  //  the beacon and the nav capture are both legitimate carriers.
+  const withAddr = h.posted.filter((b: any) => b && b.pickupZip)
+  assert.ok(withAddr.length > 0, 'the page must send the address evidence on SOME real capture')
+
+  const body = withAddr[withAddr.length - 1]
+  assert.equal(body.pickupZip, '07052', 'the pickup ZIP must reach the API')
+  assert.equal(body.destinationZip, '07030', 'and the destination ZIP')
+  assert.equal(body.pickupAddressPresent, true, 'the server needs proof the pickup end is filled')
+  assert.equal(body.destinationAddressPresent, true, 'and the destination end')
+  assert.ok(body.foundUs, 'and the customer-reported source once answered')
+})
+
+test('V3: address evidence is ABSENT at the contact step, never guessed', { skip }, async () => {
+  const h = await loadScanned(AID)
+  await triggerBookingCapture(h)
+  const body = lastPost(h)
+  assert.equal(body.pickupZip, undefined, 'nothing may be claimed before the step is reached')
+  assert.equal(body.destinationZip, undefined)
+  assert.equal(body.pickupAddressPresent, undefined)
+  assert.equal(body.destinationAddressPresent, undefined)
+})
+
+test('V3: the dedupe signature does not suppress newly available evidence', { skip }, async () => {
+  //  The signature decides whether a re-send happens at all. If it ignores the
+  //  address fields, a card-4 enrichment looks like a duplicate of the contact
+  //  step and is never sent — the fix would be invisible in production.
+  const src = readFileSync(FORM, 'utf8')
+  const sig = /var sig = \[([\s\S]{0,2000}?)\]\.join/.exec(src)?.[1] ?? ''
+  assert.ok(sig.length > 0, 'the dedupe signature must be findable')
+  for (const field of ['pickupZip', 'destinationZip', 'attributionId']) {
+    assert.match(sig, new RegExp(field), `${field} must be part of the re-send signature`)
+  }
+})

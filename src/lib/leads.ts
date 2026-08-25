@@ -455,6 +455,7 @@ function notifyOwnerOfNewLead(leadId: string, context: string): void {
           utmMedium: true, referrer: true, attributionId: true,
           marketingConsentPrompted: true, marketingConsentSource: true,
           foundUs: true, foundUsPrompted: true,
+          pickupAddressComplete: true, destinationAddressComplete: true,
           lifecycle: true, convertedBookingId: true, jobType: true,
           // ── THE SNAPSHOT COLUMNS ────────────────────────────────────────
           //  This projection asked for `estimatedValue` and nothing else about
@@ -761,6 +762,14 @@ export type PartialLeadInput = {
   /** TRUE when that question was put in front of them, FALSE when they had not
    *  reached that step yet, undefined when the client did not say. */
   foundUsPrompted?: boolean
+  /** Bounded address components for the ROUTEABLE-END derivation. The street
+   *  line is deliberately absent: see deriveAddressCompleteness. */
+  pickupState?: string | null
+  destinationState?: string | null
+  /** The browser saying the street/city line is non-empty. NEVER sufficient on
+   *  its own — the server also requires a valid ZIP and state. */
+  pickupAddressPresent?: boolean
+  destinationAddressPresent?: boolean
   utmSource?: string | null
   utmMedium?: string | null
   utmCampaign?: string | null
@@ -995,6 +1004,8 @@ export function buildPartialLeadCreate(input: PartialLeadInput, now: Date) {
     moveDate: input.moveDate ?? undefined,
     originZip: clean(input.pickupZip) ?? undefined,
     destinationZip: clean(input.destinationZip) ?? undefined,
+    pickupAddressComplete: deriveAddressCompleteness(input.pickupZip, input.pickupState, input.pickupAddressPresent) ?? null,
+    destinationAddressComplete: deriveAddressCompleteness(input.destinationZip, input.destinationState, input.destinationAddressPresent) ?? null,
     moveSize: clean(input.moveSize) ?? undefined,
     ...quoteSnapshotColumns(input),
     utmSource: clean(input.utmSource),
@@ -1088,6 +1099,38 @@ export type ExistingPartialLead = {
  * PURE. Returns only the keys it means to change — an absent key leaves the
  * stored column exactly as it was.
  */
+/**
+ * Is one end of the move complete enough to ROUTE?
+ *
+ * DERIVED HERE, ON THE SERVER, and deliberately not taken from the browser's
+ * boolean alone: a page must not be able to assert a completeness nothing can
+ * check. All three must hold —
+ *
+ *   • a well-formed 5-digit (or ZIP+4) postal code,
+ *   • a 2-letter state,
+ *   • and the client reporting the street/city line non-empty.
+ *
+ * The street line itself never travels on a partial capture, so the flag is the
+ * only signal that it is filled; pairing it with two independently validated
+ * components is what stops it being a bare assertion.
+ *
+ * Returns undefined when the step was never reached, which is a different fact
+ * from reached-and-incomplete and must stay distinguishable.
+ */
+export function deriveAddressCompleteness(
+  zip?: string | null,
+  state?: string | null,
+  streetPresent?: boolean,
+): boolean | undefined {
+  const z = (zip ?? '').trim()
+  const st = (state ?? '').trim()
+  //  Nothing at all about this end -> not reached.
+  if (!z && !st && streetPresent === undefined) return undefined
+  const zipOk = /^\d{5}(-\d{4})?$/.test(z)
+  const stateOk = /^[A-Za-z]{2}$/.test(st)
+  return zipOk && stateOk && streetPresent === true
+}
+
 export function questionProvenancePatch(
   existing: Pick<ExistingPartialLead, 'marketingConsentPrompted' | 'foundUs' | 'foundUsPrompted'>,
   input: PartialLeadInput,
@@ -1226,6 +1269,14 @@ export function buildPartialLeadUpdate(
     //  Same merge rule as name/phone/email: in-session the customer's latest
     //  value wins (they are correcting what they typed), a loose email match
     //  only fills blanks. Never blanked by a payload that omits them.
+    //  Written ONLY when this payload actually carried address evidence, so a
+    //  contact-step ping that knows nothing can never blank a completed end.
+    ...(deriveAddressCompleteness(input.pickupZip, input.pickupState, input.pickupAddressPresent) !== undefined
+      ? { pickupAddressComplete: deriveAddressCompleteness(input.pickupZip, input.pickupState, input.pickupAddressPresent) }
+      : {}),
+    ...(deriveAddressCompleteness(input.destinationZip, input.destinationState, input.destinationAddressPresent) !== undefined
+      ? { destinationAddressComplete: deriveAddressCompleteness(input.destinationZip, input.destinationState, input.destinationAddressPresent) }
+      : {}),
     ...(clean(input.pickupZip) ? { originZip: correctable(existing.originZip, clean(input.pickupZip)) } : {}),
     ...(clean(input.destinationZip)
       ? { destinationZip: correctable(existing.destinationZip, clean(input.destinationZip)) }

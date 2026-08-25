@@ -2136,6 +2136,22 @@ model Lead {
   //  NULL  = unknown (legacy, or a surface that never reports it).
   foundUsPrompted Boolean? @map("found_us_prompted")
 
+  // ── ROUTEABLE-END EVIDENCE (V3) ────────────────────────────────────────
+  //  Whether each end of the move is complete enough to route. DERIVED ON THE
+  //  SERVER from bounded components the browser sends (a 5-digit ZIP, a
+  //  2-letter state, and a flag that the street/city line is non-empty) — never
+  //  taken from the client's boolean alone, which would let a page assert a
+  //  completeness the server cannot check.
+  //
+  //  The street line itself is deliberately NOT stored here: the partial
+  //  capture carries the least PII that still supports honest routing, and the
+  //  full address reaches the system on the real booking submit.
+  //
+  //  NULL = the address step was never reached, which is not the same as
+  //  reached-and-incomplete (false).
+  pickupAddressComplete      Boolean? @map("pickup_address_complete")
+  destinationAddressComplete Boolean? @map("destination_address_complete")
+
   // ══════════════════════════════════════════════════════════════════════════
   //  QUOTE-REQUEST CAPTURE (owner spec 2026-08-03). A person who asked for an
   //  estimate, not someone who booked. All nullable: a lead captured before
