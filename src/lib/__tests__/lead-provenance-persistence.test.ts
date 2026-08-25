@@ -56,6 +56,8 @@ const existing = (over: Partial<ExistingPartialLead> = {}): ExistingPartialLead 
   marketingConsentPrompted: null,
   foundUs: null,
   foundUsPrompted: null,
+  originZip: null,
+  destinationZip: null,
   ...over,
 })
 
@@ -512,4 +514,74 @@ test('the migration does not touch price snapshots or any accepted quote', () =>
   for (const col of ['quote_total_cents', 'quote_base_cents', 'quote_mileage_cents', 'estimated_value', 'price_book']) {
     assert.doesNotMatch(sql, new RegExp(col), `${col} must not appear in a provenance migration`)
   }
+})
+
+// ══════════════════════════════════════════════════════════════════════
+//  LATER ENRICHMENT — found by driving the REAL route against a REAL
+//  PostgreSQL, not by any unit test.
+//
+//  The booking form captures its lead at card1 (Contact) and does not collect
+//  addresses or the QR scan id until later. Both were written on the CREATE
+//  path only, so every booking-form lead was created without them and could
+//  never gain them — the columns stayed null for the lead's whole life.
+//  Every existing test exercised CREATE, which is exactly why this survived.
+// ══════════════════════════════════════════════════════════════════════
+
+test('a contact-step lead can gain the move\'s two ends later', () => {
+  const patch = buildPartialLeadUpdate(
+    existing({ originZip: null, destinationZip: null }),
+    { email: 'test.customer@example.com', formStep: 'card4', pickupZip: '07052', destinationZip: '07030' },
+    NOW,
+    'session',
+  )
+  assert.equal(patch.originZip, '07052', 'the pickup end must land on the UPDATE path')
+  assert.equal(patch.destinationZip, '07030', 'and so must the destination')
+})
+
+test('a payload without zips never blanks the ones already stored', () => {
+  const patch = buildPartialLeadUpdate(
+    existing({ originZip: '07052', destinationZip: '07030' }),
+    { email: 'test.customer@example.com', formStep: 'card2' },
+    NOW,
+    'session',
+  )
+  assert.equal('originZip' in patch, false, 'an absent value must not clear a stored one')
+  assert.equal('destinationZip' in patch, false)
+})
+
+test('an email-matched lead only FILLS BLANK zips — a shared address cannot move somebody', () => {
+  const patch = buildPartialLeadUpdate(
+    existing({ originZip: '07052', destinationZip: '07030' }),
+    { email: 'test.customer@example.com', pickupZip: '99999', destinationZip: '88888' },
+    NOW,
+    'email',
+  )
+  assert.equal(patch.originZip, '07052', 'a loose email match must not rewrite a stored address')
+  assert.equal(patch.destinationZip, '07030')
+})
+
+test('the partial route ACCEPTS the QR scan id and forwards it', async () => {
+  //  All 2,500 printed door hangers share ONE code, so `source` can say "a door
+  //  hanger" and never "which scan". This route accepted no attributionId at
+  //  all, so every booking-form lead arrived unattributable however it entered.
+  const aid = 'a'.repeat(32)
+  await post({
+    email: 'test.customer@example.com',
+    bookingSessionId: 'sess-aid',
+    formStep: 'card1',
+    attributionId: aid,
+  })
+  assert.equal(captured[0].attributionId, aid, 'the scan id must reach persistence')
+})
+
+test('a malformed scan id drops the attribution but never the lead', async () => {
+  const res = await post({
+    email: 'test.customer@example.com',
+    bookingSessionId: 'sess-aid-bad',
+    formStep: 'card1',
+    attributionId: 'not-hex-at-all',
+  })
+  assert.equal(res.status, 200, 'a tracking value the customer never saw must not cost them their lead')
+  //  It reaches persistence verbatim; cleanAttributionId is the shape gate.
+  assert.equal(captured.length, 1)
 })

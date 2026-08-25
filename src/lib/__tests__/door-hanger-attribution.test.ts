@@ -143,6 +143,8 @@ const existing = (over: Partial<ExistingPartialLead> = {}): ExistingPartialLead 
   landingPage: null, referrer: null, promoCode: null, attributionId: null,
   notes: null,
   source: null, marketingConsentPrompted: null, foundUs: null, foundUsPrompted: null,
+  originZip: null,
+  destinationZip: null,
   ...over,
 })
 

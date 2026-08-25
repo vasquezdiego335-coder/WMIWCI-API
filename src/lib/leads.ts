@@ -1053,6 +1053,10 @@ export type ExistingPartialLead = {
    *  fillIfBlank compares against `undefined`, decides the column is empty, and
    *  overwrites a real id with null on the next ping. */
   attributionId: string | null
+  /** Read so a lead captured at the contact step can gain the move's two ends
+   *  later. See the enrichment block in buildPartialLeadUpdate. */
+  originZip: string | null
+  destinationZip: string | null
   notes: string | null
   /** Read so the channel can be UPGRADED off the OTHER placeholder without a
    *  real channel ever being overwritten. See sourceUpgradePatch. */
@@ -1207,6 +1211,25 @@ export function buildPartialLeadUpdate(
     ...partialConsentPatch(existing, input, now),
     ...questionProvenancePatch(existing, input),
     ...sourceUpgradePatch(existing, input),
+    // ── THE MOVE'S TWO ENDS, ON THE UPDATE PATH TOO (fix 2026-08-25) ──────
+    //  These were written on CREATE only. The booking form captures its lead at
+    //  card1 (Contact) and does not collect addresses until card4, so EVERY
+    //  booking-form lead was created with no zips and could never gain them —
+    //  the columns stayed null for the whole life of the lead no matter how far
+    //  the customer got. That is also why the transportation line could never
+    //  move off "awaiting pickup and destination addresses": the facts that
+    //  would advance it had nowhere to land.
+    //
+    //  Found by driving the real route against a real database; no unit test
+    //  could see it, because they all exercised the CREATE path.
+    //
+    //  Same merge rule as name/phone/email: in-session the customer's latest
+    //  value wins (they are correcting what they typed), a loose email match
+    //  only fills blanks. Never blanked by a payload that omits them.
+    ...(clean(input.pickupZip) ? { originZip: correctable(existing.originZip, clean(input.pickupZip)) } : {}),
+    ...(clean(input.destinationZip)
+      ? { destinationZip: correctable(existing.destinationZip, clean(input.destinationZip)) }
+      : {}),
   }
   // The customer's own current answers. Written only when supplied, so a
   // later page that omits them erases nothing.
@@ -1345,6 +1368,9 @@ export function defaultPartialLeadDeps(): PartialLeadDeps {
     marketingConsentPrompted: true,
     foundUs: true,
     foundUsPrompted: true,
+    // Selected so a contact-step lead can gain the move's two ends later.
+    originZip: true,
+    destinationZip: true,
   } as const
   _partialDeps = {
     now: () => new Date(),

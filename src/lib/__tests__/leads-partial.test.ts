@@ -103,6 +103,7 @@ function existing(overrides: Partial<ExistingPartialLead> = {}): ExistingPartial
     // asked" may only move forward. A fixture that omits them compares
     // against undefined and silently disables both rules.
     source: null, marketingConsentPrompted: null, foundUs: null, foundUsPrompted: null,
+    originZip: null, destinationZip: null,
     ...overrides,
   }
 }

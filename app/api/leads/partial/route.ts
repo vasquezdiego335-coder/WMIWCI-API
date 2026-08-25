@@ -149,6 +149,17 @@ const PartialSchema = z.object({
   utmTerm: str(120),
   landingPage: str(500),
   referrer: str(500),
+  /* THE QR SCAN ID. All 2,500 printed door hangers share ONE code, so `source`
+     can say "a door hanger" and never "which scan" — this is the only value
+     that ties a lead back to an individual card, and therefore the only thing
+     that makes scan-to-booking conversion answerable.
+
+     It was accepted by /api/leads/quote-capture and by /api/bookings but NOT
+     here, so every lead captured through the BOOKING FORM arrived with
+     attribution_id NULL however it was scanned. Shape-checked server-side by
+     cleanAttributionId, so a mangled shared link drops the attribution rather
+     than putting junk in the column the campaign report JOINs on. */
+  attributionId: str(64),
   // Live estimate in DOLLARS; converted to cents for the Lead. Bounded.
   estimateTotal: z.number().nonnegative().max(1_000_000).optional(),
   // ── Move details (owner spec 2026-07-28) ──
@@ -308,6 +319,7 @@ async function handle(req: NextRequest): Promise<NextResponse> {
       utmTerm: d.utmTerm,
       landingPage: d.landingPage,
       referrer: d.referrer,
+      attributionId: d.attributionId,
       // ── A UTM CAMPAIGN IS NOT A PROMO CODE (fix 2026-08-22) ────────────
       //  This was `promoCode: d.utmCampaign`, so every door-hanger and QR
       //  visit wrote its campaign slug into the DISCOUNT column. That column
