@@ -177,6 +177,12 @@ const QuoteLeadSchema = z.object({
   formStep: str(40),
   /** TRI-STATE: present only when the visitor actually toggled the checkbox. */
   marketingConsent: z.boolean().optional(),
+  /* WAS THE CHECKBOX ON SCREEN? quote.html has the same tri-state pathology
+     the booking form had: it sends a value only when #qOptIn has been CLICKED,
+     so "shown and left alone" arrived as nothing at all and the owner card
+     reported "not asked". TRUE = displayed; FALSE = this surface has no
+     marketing question; absent = the client cannot say and nothing is inferred. */
+  marketingConsentPresented: z.boolean().optional(),
   consentSource: str(60),
   consentVersion: str(40),
   locale: str(8),
@@ -500,6 +506,7 @@ async function handle(req: NextRequest): Promise<NextResponse> {
       // correctly, and admin can filter on it without parsing prose.
       formStep: inPerson ? 'quote_in_person' : d.formStep || 'quote',
       marketingConsent: d.marketingConsent,
+      marketingConsentPrompted: d.marketingConsentPresented,
       // CONSENT EVIDENCE — source, version and timestamp travel together or the
       // record proves nothing (see lib/consent.ts). Normalised HERE against the
       // controlled vocabulary so an unrecognised value falls back to THIS

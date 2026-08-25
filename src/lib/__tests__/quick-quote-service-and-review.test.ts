@@ -135,7 +135,7 @@ test('quoteTotalCents overrides a conflicting estimatedValue in all three surfac
   assert.match(plain, /\$779/, 'the fallback must show the quoted figure')
   assert.ok(!/\$879/.test(plain), 'and must not show the drifted one')
   assert.match(plain, /package subtotal/i, 'and must not call a subtotal a finished estimate')
-  assert.match(plain, /Transportation pending/i)
+  assert.match(plain, /Transportation: Pending/i)
   assert.match(plain, /\$3 per routed mile/i)
   assert.match(plain, /fuel included/i)
 })

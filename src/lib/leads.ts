@@ -37,7 +37,16 @@ export type LeadInput = {
   message?: string | null
   /** Free-form source string; mapped to the LeadSource enum. */
   source?: string | null
+  /** The customer's own "How did you hear about us?" answer. NOT `source`:
+   *  that is the marketing CHANNEL our tracking observed, this is what the
+   *  customer said. Kept apart because merging them is what let the column
+   *  default `OTHER` be rendered as a customer's choice. */
   foundUs?: string | null
+  /** TRUE when that question was actually shown to them. */
+  foundUsPrompted?: boolean
+  /** TRUE when the marketing checkbox was actually displayed. See the field of
+   *  the same name on PartialLeadInput for why this is not `marketingConsent`. */
+  marketingConsentPrompted?: boolean
   jobType?: string | null
   moveDate?: Date | null
   zip?: string | null
@@ -219,6 +228,12 @@ function consentColumnsForCreate(input: LeadInput, now: Date, defaultSource: Con
     marketingConsentAt: asked ? now : null,
     marketingConsentSource: asked ? (normaliseConsentSource(input.consentSource) ?? defaultSource) : null,
     marketingConsentVersion: asked ? (clean(input.consentVersion) ?? CONSENT_VERSION) : null,
+    //  WAS THE QUESTION ASKED? Recorded even for a SUPPRESSED address, whose
+    //  decision we refuse to store — we still showed them the box, and
+    //  forgetting that would put the record back in the state where "no
+    //  consent" and "never asked" are the same null.
+    marketingConsentPrompted:
+      typeof input.marketingConsent === 'boolean' ? true : (input.marketingConsentPrompted ?? null),
   }
 }
 
@@ -233,6 +248,12 @@ export function buildLeadCreate(input: LeadInput, now: Date) {
     status: LeadStatus.NEW,
     message: clean(input.message),
     notes: composeNotes(input),
+    //  ALSO ITS OWN COLUMN NOW. composeNotes() still writes the human-readable
+    //  "Found us: …" line into the notes log the owner reads, but a free-text
+    //  log is not a field anything can reason about — which is why no
+    //  notification could ever show what the customer actually reported.
+    foundUs: clean(input.foundUs),
+    foundUsPrompted: input.foundUsPrompted ?? (clean(input.foundUs) ? true : null),
     jobType: clean(input.jobType),
     moveDate: input.moveDate ?? null,
     zip: clean(input.zip),
@@ -272,6 +293,12 @@ export type ExistingLead = {
   emailMarketingConsent: boolean | null
   marketingConsentSource: string | null
   marketingConsentVersion: string | null
+  //  Same reasoning as the consent trio above: "we asked" can only move
+  //  forward, and a rule about what may CHANGE needs the current value. A
+  //  store that forgets to select these cannot compile.
+  marketingConsentPrompted: boolean | null
+  foundUs: string | null
+  foundUsPrompted: boolean | null
 }
 
 /** The patch to UPDATE an existing OPEN lead with a repeat submission. Pure:
@@ -315,6 +342,26 @@ export function buildLeadUpdate(existing: ExistingLead, input: LeadInput, now: D
     destCity: fillIfBlank(existing.destCity, clean(input.destCity)),
     jobType: fillIfBlank(existing.jobType, clean(input.jobType)),
     promoCode: fillIfBlank(existing.promoCode, clean(input.promoCode)),
+    //  WHAT WE ASKED, and what they answered — merged forward only, by the
+    //  same rules the partial path uses, so the two ingestion routes cannot
+    //  disagree about a customer's provenance.
+    ...questionProvenancePatch(
+      {
+        marketingConsentPrompted: existing.marketingConsentPrompted,
+        foundUs: existing.foundUs,
+        foundUsPrompted: existing.foundUsPrompted,
+      },
+      {
+        //  LeadInput's consent is `boolean | null` (this path accepts an
+        //  explicit null from older callers); the patch reads the partial
+        //  path's `boolean | undefined`. Both mean "no answer supplied".
+        marketingConsent: input.marketingConsent ?? undefined,
+        marketingConsentPrompted: input.marketingConsentPrompted,
+        foundUs: input.foundUs,
+        //  An answer is itself proof the question was shown.
+        foundUsPrompted: input.foundUsPrompted ?? (clean(input.foundUs) ? true : undefined),
+      },
+    ),
   }
 }
 
@@ -364,6 +411,8 @@ export function defaultLeadDeps(): LeadDeps {
             // Required by ExistingLead — the consent merge cannot be applied
             // against a record it cannot see.
             emailMarketingConsent: true, marketingConsentSource: true, marketingConsentVersion: true,
+            // Same rule, for the question-provenance merge.
+            marketingConsentPrompted: true, foundUs: true, foundUsPrompted: true,
           },
         })
       },
@@ -399,6 +448,14 @@ function notifyOwnerOfNewLead(leadId: string, context: string): void {
           moveDate: true, originZip: true, destinationZip: true,
           emailMarketingConsent: true, landingPage: true, utmSource: true, utmCampaign: true,
           formStep: true,
+          // ── PROVENANCE, or the card goes back to guessing ────────────────
+          //  Without these the notice cannot tell "we never asked" from "they
+          //  were asked and said nothing", which is the whole incident. A
+          //  projection that omits one silently re-enables the wrong answer.
+          utmMedium: true, referrer: true, attributionId: true,
+          marketingConsentPrompted: true, marketingConsentSource: true,
+          foundUs: true, foundUsPrompted: true,
+          lifecycle: true, convertedBookingId: true, jobType: true,
           // ── THE SNAPSHOT COLUMNS ────────────────────────────────────────
           //  This projection asked for `estimatedValue` and nothing else about
           //  money, so the notice could not know a total was a SUBTOTAL with
@@ -679,11 +736,31 @@ export type PartialLeadInput = {
   /** TRI-STATE: true = opted in, false = explicit withdrawal, undefined = the
    *  visitor never touched the checkbox (leave any stored value untouched). */
   marketingConsent?: boolean
+  /**
+   * TRUE when the originating form actually DISPLAYED the marketing checkbox.
+   *
+   * WHY IT IS SEPARATE FROM `marketingConsent`. The two answer different
+   * questions — "what did they choose" and "were they even asked" — and the
+   * booking form conflated them: it sent nothing at all unless the box had
+   * been CLICKED, so "shown and left alone" was indistinguishable from "this
+   * form has no checkbox". The owner card then reported the second one, and
+   * told the owner we had never asked a customer we had asked.
+   *
+   * `false` is a real claim (this surface carries no marketing question);
+   * `undefined` means the client did not say, and nothing may be inferred.
+   */
+  marketingConsentPrompted?: boolean
   consentSource?: string | null
   consentVersion?: string | null
   /** Free-form source string (utm_source or a client-derived channel). */
   source?: string | null
+  /** The customer's own "How did you hear about us?" answer. NOT `source`:
+   *  that is the marketing CHANNEL our tracking observed, this is what the
+   *  customer said. Stored in its own column since 2026-08-25. */
   foundUs?: string | null
+  /** TRUE when that question was put in front of them, FALSE when they had not
+   *  reached that step yet, undefined when the client did not say. */
+  foundUsPrompted?: boolean
   utmSource?: string | null
   utmMedium?: string | null
   utmCampaign?: string | null
@@ -845,14 +922,32 @@ function composePartialName(input: PartialLeadInput): string | null {
 /** The consent columns to MERGE into an update — ONLY when a boolean is supplied.
  *  Pure; returns an empty object when the visitor never interacted (leave stored
  *  consent untouched). Update-path only (create always sets an explicit value). */
-function partialConsentPatch(input: PartialLeadInput, now: Date): Record<string, unknown> {
-  if (typeof input.marketingConsent !== 'boolean') return {}
-  return {
-    emailMarketingConsent: input.marketingConsent,
-    marketingConsentAt: now,
-    marketingConsentSource: normaliseConsentSource(input.consentSource) ?? 'BOOKING_FORM',
-    marketingConsentVersion: clean(input.consentVersion),
-  }
+function partialConsentPatch(
+  existing: Pick<ExistingPartialLead, 'emailMarketingConsent'>,
+  input: PartialLeadInput,
+  now: Date,
+): Record<string, unknown> {
+  // ── THE SHARED RULES, NOT A SECOND COPY (fix 2026-08-25) ───────────────
+  //  This used to write whatever boolean arrived, straight through. That was
+  //  survivable only because the browser almost never SENT `false`: every
+  //  capture surface gated it behind a click, which is the bug this release
+  //  fixes. The moment the booking form started reporting a displayed-but-
+  //  unchecked box honestly — on all FIVE of its triggers, including an exit
+  //  beacon — this line would have revoked a real opt-in on the next ping.
+  //
+  //  decideConsent already owns that rule ("an unchecked box on a later form
+  //  is not an unsubscribe"), and the other ingestion path has always used it.
+  //  Two capture paths must not hold two different consent policies.
+  const decision = decideConsent(
+    { consent: existing.emailMarketingConsent },
+    {
+      consent: input.marketingConsent,
+      source: input.consentSource ?? 'BOOKING_FORM',
+      version: clean(input.consentVersion) ?? CONSENT_VERSION,
+    },
+    now,
+  )
+  return decision.changes
 }
 
 /** Row to CREATE for a fresh partial lead. Pure. Status NEW keeps it an OPEN,
@@ -917,6 +1012,22 @@ export function buildPartialLeadCreate(input: PartialLeadInput, now: Date) {
     marketingConsentAt: consented ? now : null,
     marketingConsentSource: consented ? (normaliseConsentSource(input.consentSource) ?? 'BOOKING_FORM') : null,
     marketingConsentVersion: consented ? clean(input.consentVersion) : null,
+    // ── WHETHER WE ASKED, recorded even when they did not answer ──────────
+    //  Written whenever the client tells us, INCLUDING alongside a null
+    //  consent — that combination ("we showed the box, they left it") is the
+    //  exact state the old schema could not hold, and the one that produced
+    //  "Marketing: not asked" about somebody who had been asked. A client that
+    //  says nothing still stores null, which reads as unknown.
+    //
+    //  An explicit consent decision is itself proof the question was asked, so
+    //  it implies TRUE without the client having to say so twice.
+    marketingConsentPrompted: consented ? true : (input.marketingConsentPrompted ?? null),
+    // ── THE CUSTOMER'S OWN ANSWER, in its own column ─────────────────────
+    //  It used to reach only composeNotes() -> free-text `notes` on the OTHER
+    //  ingestion path, and nothing at all on this one, so a partial capture
+    //  could never say what the customer reported.
+    foundUs: clean(input.foundUs),
+    foundUsPrompted: input.foundUsPrompted ?? null,
   }
 }
 
@@ -943,6 +1054,13 @@ export type ExistingPartialLead = {
    *  overwrites a real id with null on the next ping. */
   attributionId: string | null
   notes: string | null
+  /** Read so the channel can be UPGRADED off the OTHER placeholder without a
+   *  real channel ever being overwritten. See sourceUpgradePatch. */
+  source: LeadSource | null
+  /** Read so "we asked" can only ever move forward. See questionProvenancePatch. */
+  marketingConsentPrompted: boolean | null
+  foundUs: string | null
+  foundUsPrompted: boolean | null
 }
 
 /** Patch to UPDATE an existing lead from a repeat partial submission. Pure:
@@ -950,6 +1068,79 @@ export type ExistingPartialLead = {
  *  CONVERTED), always tracks the latest step, fills blank attribution, and
  *  applies TRI-STATE consent (a fresh unchecked load — marketingConsent
  *  undefined — leaves any stored consent untouched). */
+/**
+ * WHAT WE ASKED, merged forward only.
+ *
+ * "We showed them the question" is a fact that cannot become untrue. Once a
+ * step has been reached, a later ping from an earlier step — a back-navigation,
+ * a stale tab, an exit beacon that fires after the visitor scrolled back — must
+ * not be able to un-ask it. So these are MONOTONIC: false/undefined can raise
+ * to true, and nothing lowers.
+ *
+ * The customer's own answer follows the opposite-but-consistent rule: written
+ * only when one actually arrives, so a payload that omits it (every ping before
+ * they reach that step) erases nothing.
+ *
+ * PURE. Returns only the keys it means to change — an absent key leaves the
+ * stored column exactly as it was.
+ */
+export function questionProvenancePatch(
+  existing: Pick<ExistingPartialLead, 'marketingConsentPrompted' | 'foundUs' | 'foundUsPrompted'>,
+  input: PartialLeadInput,
+): Record<string, unknown> {
+  const patch: Record<string, unknown> = {}
+
+  //  An explicit consent decision proves the question was asked, whatever the
+  //  client claimed about the checkbox.
+  const asked = typeof input.marketingConsent === 'boolean' || input.marketingConsentPrompted === true
+  if (asked) {
+    if (existing.marketingConsentPrompted !== true) patch.marketingConsentPrompted = true
+  } else if (input.marketingConsentPrompted === false && existing.marketingConsentPrompted == null) {
+    //  Only ever recorded on a lead that had NO answer either way. A surface
+    //  saying "I have no checkbox" must not overwrite a surface that did.
+    patch.marketingConsentPrompted = false
+  }
+
+  const answer = clean(input.foundUs)
+  if (answer) patch.foundUs = answer
+
+  if (input.foundUsPrompted === true) {
+    if (existing.foundUsPrompted !== true) patch.foundUsPrompted = true
+  } else if (input.foundUsPrompted === false && existing.foundUsPrompted == null) {
+    patch.foundUsPrompted = false
+  }
+
+  return patch
+}
+
+/**
+ * The marketing CHANNEL, upgraded but never downgraded.
+ *
+ * `source` was written on CREATE only, so a lead whose first ping carried no
+ * detectable channel was stored as `OTHER` — the column default and the
+ * mapLeadSource() fallback — and stayed OTHER forever, even when a later ping
+ * in the same session arrived with the campaign attached. That is how a
+ * door-hanger scan could sit in the CRM as "Other" while the hanger was
+ * demonstrably working.
+ *
+ * ONE DIRECTION ONLY. A real channel is never overwritten by another one: a
+ * second value later in the same session is a second touch, not a correction of
+ * the first, and first-touch attribution is what the campaign report joins on
+ * (the same rule `attributionId` follows above).
+ */
+export function sourceUpgradePatch(
+  existing: Pick<ExistingPartialLead, 'source'>,
+  input: PartialLeadInput,
+): Record<string, unknown> {
+  const known = (existing.source ?? '').trim().toUpperCase()
+  //  Only a placeholder may be replaced. OTHER and UNKNOWN are not channels
+  //  anybody chose — they are what the system writes when it has nothing.
+  if (known && known !== LeadSource.OTHER && known !== 'UNKNOWN') return {}
+  if (!clean(input.source)) return {}
+  const next = mapLeadSource(input.source)
+  return next === LeadSource.OTHER ? {} : { source: next }
+}
+
 export function buildPartialLeadUpdate(
   existing: ExistingPartialLead,
   input: PartialLeadInput,
@@ -1013,7 +1204,9 @@ export function buildPartialLeadUpdate(
     attributionId: fillIfBlank(existing.attributionId, cleanAttributionId(input.attributionId)),
     // Access details: FILL-BLANK-ONLY. See PartialLeadInput.accessDetails.
     notes: fillIfBlank(existing.notes, clean(input.accessDetails)),
-    ...partialConsentPatch(input, now),
+    ...partialConsentPatch(existing, input, now),
+    ...questionProvenancePatch(existing, input),
+    ...sourceUpgradePatch(existing, input),
   }
   // The customer's own current answers. Written only when supplied, so a
   // later page that omits them erases nothing.
@@ -1144,6 +1337,14 @@ export function defaultPartialLeadDeps(): PartialLeadDeps {
     attributionId: true,
     // Read so the update can fill `notes` ONLY when it is empty.
     notes: true,
+    // Read so the merge rules above can be applied at all: a column the store
+    // does not SELECT compares against `undefined`, which every fill-blank
+    // helper reads as "empty" — that is how a real attributionId used to be
+    // overwritten with null on the next ping.
+    source: true,
+    marketingConsentPrompted: true,
+    foundUs: true,
+    foundUsPrompted: true,
   } as const
   _partialDeps = {
     now: () => new Date(),

@@ -141,7 +141,9 @@ const existing = (over: Partial<ExistingPartialLead> = {}): ExistingPartialLead 
   emailMarketingConsent: null, formStep: 'quote', estimatedValue: null,
   quoteConfirmationQueuedAt: null, utmSource: null, utmCampaign: null,
   landingPage: null, referrer: null, promoCode: null, attributionId: null,
-  notes: null, ...over,
+  notes: null,
+  source: null, marketingConsentPrompted: null, foundUs: null, foundUsPrompted: null,
+  ...over,
 })
 
 test('a repeat submission fills a blank id', () => {

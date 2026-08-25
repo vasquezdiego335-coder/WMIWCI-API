@@ -23,14 +23,31 @@ test('an opted-in lead is visibly distinct from one that is not', () => {
   assert.notEqual(yes.title, no.title)
 })
 
-test('the three consent states are never flattened', () => {
+test('the consent states are never flattened — and "not asked" needs proof', () => {
   // The whole point of tri-state. "not asked" and "not opted in" are
   // different facts and the owner is entitled to both.
-  assert.match(consentLine(true), /OPTED IN/)
-  assert.match(consentLine(false), /not opted in/)
-  assert.match(consentLine(null), /not asked/)
-  assert.match(consentLine(undefined), /not asked/)
+  assert.match(consentLine(true), /Opted in/i)
+  assert.match(consentLine(false), /not opted in/i)
+
+  //  REGRESSION (incident 2026-08-25). A bare `null` used to render "not
+  //  asked". That is a claim about US, not about the customer, and it was
+  //  false for every booking-form lead: that form shows the checkbox on the
+  //  very step that creates the lead, and only reported a value once the box
+  //  had been CLICKED. Without provenance the honest answer is that this
+  //  record cannot say — so a bare null must not claim we never asked.
+  assert.doesNotMatch(consentLine(null), /not asked/i)
+  assert.doesNotMatch(consentLine(undefined), /not asked/i)
+  assert.match(consentLine(null), /unknown/i)
+
+  //  "Not asked" is now EARNED: the client says the box was absent...
+  assert.match(consentLine(null, { marketingConsentPrompted: false }), /not asked/i)
+  //  ...and a box that WAS shown, with no opt-in recorded, is a decline.
+  assert.match(consentLine(null, { marketingConsentPrompted: true }), /not opted in/i)
+  //  A surface known to ask stays unknown rather than borrowing the claim.
+  assert.doesNotMatch(consentLine(null, { captureSurface: 'BOOKING_FORM' }), /not asked/i)
+
   assert.notEqual(consentLine(false), consentLine(null))
+  assert.notEqual(consentLine(null, { marketingConsentPrompted: false }), consentLine(null))
 })
 
 test('a null consent NEVER claims the person opted in', () => {
@@ -68,7 +85,14 @@ test('a lead with almost no detail still produces a usable card', () => {
   const { title, lines } = formatLeadAlert({ id: 'lead_2' })
   assert.match(title, /New lead/)
   assert.ok(lines.length > 0, 'an empty card would be dropped by the sender')
-  assert.match(lines.map((l) => l.message).join('\n'), /not asked/)
+  const text = lines.map((l) => l.message).join('\n')
+  //  A card with NOTHING behind it must claim nothing. This used to assert
+  //  "not asked" — an affirmative statement about a customer derived from an
+  //  empty object — and the same card printed "From: OTHER" beside it.
+  assert.match(text, /Marketing email: Unknown/i)
+  assert.match(text, /Tracked acquisition: Unknown/i)
+  assert.doesNotMatch(text, /not asked/i)
+  assert.doesNotMatch(text, /\bOTHER\b/)
 })
 
 test('lead notices never target the ops ALERTS channel', () => {

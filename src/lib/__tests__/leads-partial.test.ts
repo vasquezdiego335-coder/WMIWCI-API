@@ -98,6 +98,11 @@ function existing(overrides: Partial<ExistingPartialLead> = {}): ExistingPartial
     // fillIfBlank compares against undefined and the first-touch rule breaks.
     attributionId: null,
     notes: null,
+    // Selected by defaultPartialLeadDeps so the merge rules can be applied:
+    // the channel may only be UPGRADED off the OTHER placeholder, and "we
+    // asked" may only move forward. A fixture that omits them compares
+    // against undefined and silently disables both rules.
+    source: null, marketingConsentPrompted: null, foundUs: null, foundUsPrompted: null,
     ...overrides,
   }
 }
@@ -127,9 +132,27 @@ test('buildPartialLeadUpdate: consent untouched when checkbox not interacted (un
   assert.equal('emailMarketingConsent' in patch, false) // no consent key at all → DB value preserved
 })
 
-test('buildPartialLeadUpdate: explicit false records a withdrawal', () => {
-  const patch = buildPartialLeadUpdate(existing({ emailMarketingConsent: true }), { marketingConsent: false }, NOW)
-  assert.equal(patch.emailMarketingConsent, false)
+test('buildPartialLeadUpdate: explicit false records a decline — but never revokes an opt-in', () => {
+  //  A lead with no recorded decision: the unchecked box is a real answer and
+  //  is written down, so "we asked and they said no" stops looking like
+  //  "nobody ever asked".
+  const declined = buildPartialLeadUpdate(existing({ emailMarketingConsent: null }), { marketingConsent: false }, NOW)
+  assert.equal(declined.emailMarketingConsent, false)
+
+  // ── CHANGED 2026-08-25, and the old expectation was the bug ────────────
+  //  This asserted that `false` overwrites an existing `true`. That directly
+  //  contradicted consent.test.ts, which has always held that "an unchecked box
+  //  on a later form is not an unsubscribe" — the two capture paths were
+  //  carrying two different consent policies, and only the OTHER one went
+  //  through decideConsent.
+  //
+  //  It was survivable only because the browser hardly ever sent `false`: every
+  //  form gated it behind a CLICK. Fixing that gate (so a displayed-but-
+  //  unchecked box is reported honestly) made this path fire on ordinary
+  //  traffic — an exit beacon alone would have revoked a real opt-in.
+  //  buildPartialLeadUpdate now uses the shared rules.
+  const kept = buildPartialLeadUpdate(existing({ emailMarketingConsent: true }), { marketingConsent: false }, NOW)
+  assert.equal(kept.emailMarketingConsent, undefined, 'an earlier opt-in stands; unsubscribing is a different flow')
 })
 
 // ── hasPromotionalConsent + audience exclusion rule ──────────────────────────

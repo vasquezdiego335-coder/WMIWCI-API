@@ -132,7 +132,7 @@ test('a conflicting estimatedValue loses to the frozen snapshot everywhere', () 
   assert.match(plain, /\$779/, 'the fallback must show the quoted figure')
   assert.ok(!/\$879/.test(plain), 'and must not show the drifted one')
   assert.match(plain, /package subtotal/i)
-  assert.match(plain, /Transportation pending/i)
+  assert.match(plain, /Transportation: Pending/i)
   assert.match(plain, /\$3 per routed mile/i)
   assert.match(plain, /fuel included/i)
 
@@ -188,7 +188,7 @@ test('a HISTORICAL lead with no snapshot keeps its original wording', () => {
   const plain = plainText(row)
   assert.match(plain, /\$379/, 'history renders its original amount')
   assert.ok(!/package subtotal/i.test(plain), 'and is not retro-labelled with language it never had')
-  assert.ok(!/Transportation pending/i.test(plain))
+  assert.ok(!/Transportation: Pending/i.test(plain))
 })
 
 test('a snapshot with an unreadable mileage state SUPPRESSES the amount', () => {

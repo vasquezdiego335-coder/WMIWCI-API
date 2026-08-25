@@ -17,6 +17,9 @@
 // ════════════════════════════════════════════════════════════════════════
 
 import { resolveBookingScope, scopeInventoryLine } from './booking-scope'
+//  ONE vocabulary for the stored mileage state, shared with the plain notice
+//  and the state derivation, so the two owner cards cannot drift apart again.
+import { MILEAGE_STATUS } from './lead-state'
 
 /** "1000 Executive Dr, West Orange, NJ — Unit 443A". The unit is appended, not
  *  left buried inside the street string where no filter could ever see it. */
@@ -1274,7 +1277,18 @@ export function buildLeadCard(data: LeadCardData): { embeds: EmbedJson[]; compon
   //  the stored snapshot says mileage is still pending, the card says so on
   //  the same line as the money, and calls the figure what it is.
   const money = (n: number): string => `$${Math.round(n).toLocaleString('en-US')}`
-  const mileagePending = data.quoteMileageStatus === 'pending'
+  //  ── NORMALISED, NOT COMPARED RAW (fix 2026-08-25) ──────────────────────
+  //  This was `data.quoteMileageStatus === 'pending'`, while the plain notice
+  //  went through notificationQuoteOf(), which trims and lower-cases first. So
+  //  a stored `'Pending'` or `' pending'` made the two owner cards for ONE lead
+  //  disagree: the plain one disclosed the unpriced drive and this one fell
+  //  through to a bare bold total that reads as a finished price. Same
+  //  normalisation as the shared mapping, so they cannot drift again.
+  const mileageStatus = (data.quoteMileageStatus ?? '').trim().toLowerCase()
+  const mileagePending = mileageStatus === MILEAGE_STATUS.pending
+  //  Addresses complete and the route could not be measured. Ours to chase,
+  //  and it must never read as "still waiting for the customer".
+  const routingFailed = mileageStatus === MILEAGE_STATUS.routingFailed
   /** Base + any approved truck upgrade + which truck the price already covers. */
   const breakdownLine = (d: LeadCardData): string[] =>
     typeof d.quoteBaseDollars === 'number'
@@ -1294,7 +1308,15 @@ export function buildLeadCard(data: LeadCardData): { embeds: EmbedJson[]; compon
             ...breakdownLine(data),
             '⚠️ Transportation pending — billed at $3 per routed mile, fuel included',
           ].join('\n')
-        : data.quoteMileageStatus === 'calculated'
+        : routingFailed
+          ? [
+              // The money is real; the drive is not in it and could not be
+              // measured. Both facts on the card, so nobody quotes this as done.
+              `**${money(data.estimateDollars)}** _package subtotal_`,
+              ...breakdownLine(data),
+              '⚠️ Transportation: manual review — route calculation unavailable',
+            ].join('\n')
+        : mileageStatus === MILEAGE_STATUS.calculated
           ? [
               // A total that CONTAINS the drive must be able to explain it —
               // otherwise it is just a bigger unexplained number.

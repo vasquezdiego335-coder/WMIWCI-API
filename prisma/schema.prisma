@@ -2108,6 +2108,33 @@ model Lead {
   marketingConsentSource  String?   @map("marketing_consent_source")
   // Disclosure/consent-text version shown when consent was given.
   marketingConsentVersion String?   @map("marketing_consent_version")
+  // ── WAS THE QUESTION EVEN ASKED? (incident fix 2026-08-25) ─────────────
+  //  emailMarketingConsent is tri-state, but `null` was carrying TWO facts at
+  //  once: "this form has no checkbox" and "the checkbox was on screen and the
+  //  visitor left it alone". The booking form only ever sent a value once the
+  //  box had been CLICKED, so the second case arrived as null — and the owner
+  //  card printed "Marketing: not asked" about a customer who had been asked.
+  //
+  //  TRUE  = the originating form displayed the disclosure.
+  //  FALSE = that surface genuinely carries no marketing question.
+  //  NULL  = unknown; the record predates the client reporting it. NOT
+  //          rewritten, because guessing which of the two it was is exactly
+  //          the mistake being fixed.
+  marketingConsentPrompted Boolean? @map("marketing_consent_prompted")
+
+  // ── THE CUSTOMER'S OWN "HOW DID YOU HEAR ABOUT US?" ANSWER ─────────────
+  //  Booking has carried `found_us` since the beginning; Lead never did, so
+  //  leads.composeNotes() folded the answer into free-text `notes` where
+  //  nothing could read it, and the partial-capture path dropped it entirely.
+  //  It is the CUSTOMER's self-report and is deliberately NOT the `source`
+  //  column, which records the marketing CHANNEL our own tracking observed.
+  //  Collapsing the two is what let a column default (`OTHER`) be printed as
+  //  though the customer had chosen "Other".
+  foundUs        String?  @map("found_us")
+  //  TRUE  = the question was actually put in front of them.
+  //  FALSE = they had not reached that step of the form yet.
+  //  NULL  = unknown (legacy, or a surface that never reports it).
+  foundUsPrompted Boolean? @map("found_us_prompted")
 
   // ══════════════════════════════════════════════════════════════════════════
   //  QUOTE-REQUEST CAPTURE (owner spec 2026-08-03). A person who asked for an

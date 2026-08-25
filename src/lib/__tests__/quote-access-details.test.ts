@@ -39,6 +39,10 @@ const existing = (over: Partial<ExistingPartialLead> = {}): ExistingPartialLead 
   // fillIfBlank compares against undefined and the first-touch rule breaks.
   attributionId: null,
   notes: null,
+  source: null,
+  marketingConsentPrompted: null,
+  foundUs: null,
+  foundUsPrompted: null,
   ...over,
 })
 

@@ -1,0 +1,82 @@
+-- ═══════════════════════════════════════════════════════════════════════════
+--  LEAD QUESTION PROVENANCE  —  what we ASKED, kept apart from what they SAID
+--
+--  WHY
+--  ---
+--  A real owner notification went out reading:
+--
+--      New lead — <customer>
+--      • 1 Bedroom · $550 package subtotal
+--      • Transportation pending — $3 per routed mile, fuel included.
+--      • Marketing: not asked
+--      • From: OTHER
+--
+--  Two of those lines were false, and both were false the same way: a MISSING
+--  value was rendered as an AFFIRMATIVE ANSWER.
+--
+--    "Marketing: not asked"  The booking form shows the checkbox on card1 —
+--                            the very step that produced this lead. The
+--                            customer saw it and left it alone. `null` was
+--                            carrying two different facts ("no checkbox on
+--                            this form" and "shown, not ticked") and the card
+--                            picked the wrong one.
+--    "From: OTHER"           Nobody chose "Other". `OTHER` is the DEFAULT on
+--                            crm_leads.source and the mapLeadSource() fallback.
+--                            The customer's actual self-report lives in a
+--                            question this table had no column for at all —
+--                            leads.composeNotes() folded it into free-text
+--                            `notes`, and the partial-capture path dropped it.
+--
+--  WHAT THESE COLUMNS FIX
+--  ----------------------
+--  marketing_consent_prompted  TRUE  the form displayed the disclosure
+--                              FALSE that surface has no marketing question
+--                              NULL  unknown — predates the client reporting it
+--  found_us                    the customer's own "How did you hear about us?"
+--                              answer, verbatim. Booking has carried `found_us`
+--                              since the beginning; the lead table never did.
+--  found_us_prompted           TRUE  the question was put in front of them
+--                              FALSE they had not reached that step yet
+--                              NULL  unknown
+--
+--  `found_us` is deliberately NOT `source`. `source` is the marketing CHANNEL
+--  our own tracking observed; `found_us` is what the customer told us. Forcing
+--  both into one column is the thing that let a column default be printed as a
+--  customer's answer — the same mistake the 2026-07-28 capture-surface
+--  migration called out when it added the surface values to LeadSource.
+--
+--  TABLE NAMES — CHECKED, NOT ASSUMED
+--  ----------------------------------
+--  `Lead` maps to "crm_leads" (@@map in prisma/schema.prisma). Production ALSO
+--  carries a separate legacy "leads" table belonging to the marketing tracker;
+--  two migrations in an earlier release targeted it by mistake, would have
+--  applied cleanly, reported success, and left the real table without the
+--  columns. The name below is enforced by
+--  src/lib/__tests__/migration-table-names.test.ts.
+--
+--  SAFETY
+--  ------
+--  Additive, nullable, IF NOT EXISTS throughout. NO BACKFILL — deliberately.
+--  Every existing row keeps NULL, which reads as "we cannot prove what was
+--  asked", and the application renders that as unknown rather than inventing
+--  a decision the customer never made. Writing FALSE across the table would
+--  claim we never asked those people, and writing TRUE would claim they
+--  declined; both are guesses about real customers.
+--
+--  No column is dropped, no default changes, no existing query changes
+--  meaning, and no accepted price snapshot is touched. Re-running it is a
+--  no-op. Safe to apply BEFORE the API that reads the columns is deployed
+--  (rolling-deploy safe in both directions).
+--
+--  Rollback: drop the three columns. No data other than these columns is
+--  written by this migration, so nothing else is lost.
+--
+--  NOT AUTO-APPLIED ON THIS PROJECT — see docs/deployment.md.
+-- ═══════════════════════════════════════════════════════════════════════════
+
+-- ── Was the marketing question actually asked? ────────────────────────────
+ALTER TABLE "crm_leads" ADD COLUMN IF NOT EXISTS "marketing_consent_prompted" BOOLEAN;
+
+-- ── The customer's own answer, and whether they ever saw the question ─────
+ALTER TABLE "crm_leads" ADD COLUMN IF NOT EXISTS "found_us" TEXT;
+ALTER TABLE "crm_leads" ADD COLUMN IF NOT EXISTS "found_us_prompted" BOOLEAN;

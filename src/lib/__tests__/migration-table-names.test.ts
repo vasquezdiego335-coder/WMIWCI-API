@@ -57,8 +57,18 @@ function tablesWrittenBy(sql: string): Array<{ table: string; line: number }> {
   return out
 }
 
-/** Migrations this release adds — the ones a reviewer is accountable for. */
-const RELEASE_MIGRATIONS = ['20260822120000_quote_price_snapshot', '20260822130000_quote_review_and_mileage']
+/** Migrations this release adds — the ones a reviewer is accountable for.
+ *
+ *  APPENDED, never replaced: the earlier entries are the two migrations that
+ *  actually shipped the `ALTER TABLE "leads"` defect this file exists to catch,
+ *  and dropping them would retire the regression test along with the release. */
+const RELEASE_MIGRATIONS = [
+  '20260822120000_quote_price_snapshot',
+  '20260822130000_quote_review_and_mileage',
+  //  The lead-notification state fix (2026-08-25): three additive nullable
+  //  columns recording what we ASKED, kept apart from what the customer said.
+  '20260825120000_lead_question_provenance',
+]
 
 test('release migrations write only to tables the datamodel maps to', () => {
   const known = physicalTables()

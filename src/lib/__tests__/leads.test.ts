@@ -58,7 +58,7 @@ test('buildLeadUpdate appends message and fills only blank fields', () => {
   const existing: ExistingLead = {
     id: 'l1', status: 'CONTACTED', name: 'Sam', phone: '5551112222', notes: 'first note',
     message: 'first', moveDate: null, zip: null, originCity: null, destCity: null, jobType: null, promoCode: null,
-    emailMarketingConsent: null, marketingConsentSource: null, marketingConsentVersion: null,
+    emailMarketingConsent: null, marketingConsentSource: null, marketingConsentVersion: null, marketingConsentPrompted: null, foundUs: null, foundUsPrompted: null,
   }
   const patch = buildLeadUpdate(existing, { message: 'second message', phone: '9999999999', zip: '07050' }, NOW)
   assert.equal(patch.lastActivityAt, NOW)
@@ -124,7 +124,7 @@ test('same email but the prior lead is CLOSED (LOST) → CREATE a fresh lead', a
   const seed: ExistingLead = {
     id: 'l1', status: 'LOST', name: 'Sam', phone: null, notes: null, message: null,
     moveDate: null, zip: null, originCity: null, destCity: null, jobType: null, promoCode: null,
-    emailMarketingConsent: null, marketingConsentSource: null, marketingConsentVersion: null,
+    emailMarketingConsent: null, marketingConsentSource: null, marketingConsentVersion: null, marketingConsentPrompted: null, foundUs: null, foundUsPrompted: null,
   }
   const { store, rows } = makeStore([{ ...seed, ...({ email: 'sam@x.com' } as object) } as ExistingLead])
   const res = await createOrUpdateLead({ email: 'sam@x.com', message: 'new inquiry' }, deps(store))

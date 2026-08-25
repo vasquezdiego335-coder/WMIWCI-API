@@ -558,7 +558,7 @@ test('26. another form submission can never silently re-subscribe someone', () =
   const existing: ExistingLead = {
     id: 'l1', status: 'NEW', name: 'Sam', phone: null, notes: null, message: null,
     moveDate: null, zip: null, originCity: null, destCity: null, jobType: null, promoCode: null,
-    emailMarketingConsent: null, marketingConsentSource: null, marketingConsentVersion: null,
+    emailMarketingConsent: null, marketingConsentSource: null, marketingConsentVersion: null, marketingConsentPrompted: null, foundUs: null, foundUsPrompted: null,
   }
 
   // A suppressed address ticking a box changes nothing.

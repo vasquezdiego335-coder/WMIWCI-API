@@ -226,8 +226,14 @@ export type NotificationQuote = {
   mileagePending: boolean
   /** The stored mileage state, or null when a snapshot exists but its state is
    *  unreadable — the one case where an amount must be SUPPRESSED rather than
-   *  captioned, because we can say neither "subtotal" nor "final" honestly. */
-  mileageStatus: 'pending' | 'calculated' | null
+   *  captioned, because we can say neither "subtotal" nor "final" honestly.
+   *
+   *  `routing_failed` (2026-08-25) is a KNOWN state, not an unreadable one:
+   *  the addresses were complete, the provider could not answer, and the
+   *  package price is still exactly what we can vouch for. Suppressing the
+   *  amount there would hide the one number the owner needs in order to pick
+   *  the manual review up. */
+  mileageStatus: 'pending' | 'calculated' | 'routing_failed' | null
   /** True when a snapshot exists at all (vs a pre-snapshot historical lead). */
   hasSnapshot: boolean
   baseCents: number | null
@@ -251,10 +257,21 @@ export type NotificationQuote = {
 export function notificationQuoteOf(row: LeadSnapshotRow): NotificationQuote {
   const hasSnapshot = typeof row.quoteTotalCents === 'number' && row.quoteTotalCents > 0
   const status = (row.quoteMileageStatus ?? '').trim().toLowerCase()
-  const mileageStatus = status === 'pending' ? 'pending' : status === 'calculated' ? 'calculated' : null
+  const mileageStatus =
+    status === 'pending'
+      ? 'pending'
+      : status === 'calculated'
+        ? 'calculated'
+        : status === 'routing_failed'
+          ? 'routing_failed'
+          : null
   return {
     quotedCents: quotedCentsOf(row),
-    mileagePending: hasSnapshot && mileageStatus === 'pending',
+    //  "The drive is not in this number." True while we are waiting for the
+    //  addresses AND when routing failed on complete ones — both leave the
+    //  figure a package subtotal. The DIFFERENCE between those two (whose
+    //  problem it is) is carried by the transportation state, not by this flag.
+    mileagePending: hasSnapshot && (mileageStatus === 'pending' || mileageStatus === 'routing_failed'),
     mileageStatus: hasSnapshot ? mileageStatus : null,
     hasSnapshot,
     baseCents: hasSnapshot ? row.quoteBaseCents ?? null : null,

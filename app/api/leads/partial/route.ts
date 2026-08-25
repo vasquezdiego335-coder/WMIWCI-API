@@ -125,9 +125,23 @@ const PartialSchema = z.object({
   // TRI-STATE consent: present boolean only when the visitor actually toggled the
   // checkbox; omitted = never interacted (server leaves any stored value alone).
   marketingConsent: z.boolean().optional(),
+  /* WAS THE CHECKBOX ON SCREEN? (incident fix 2026-08-25)
+     `marketingConsent` alone could not answer this. The booking form sent a
+     value only once the box had been CLICKED, so a visitor who saw it and left
+     it alone arrived indistinguishable from one whose form has no box at all —
+     and the owner card said "Marketing: not asked" about a customer we had in
+     fact asked. TRUE = the disclosure was displayed; FALSE = this surface
+     carries no marketing question; absent = the client cannot say, and the
+     server infers NOTHING. */
+  marketingConsentPresented: z.boolean().optional(),
   consentVersion: str(40),
   source: str(60),
   foundUs: str(60),
+  /* WAS "How did you hear about us?" REACHED? It sits on card4 of the booking
+     form, four steps after the contact details that trigger this capture, so a
+     partial lead must be able to say "not yet" rather than letting the absence
+     of an answer be read as one. */
+  foundUsPresented: z.boolean().optional(),
   utmSource: str(80),
   utmMedium: str(80),
   utmCampaign: str(120),
@@ -279,6 +293,8 @@ async function handle(req: NextRequest): Promise<NextResponse> {
       bookingSessionId: d.bookingSessionId,
       formStep: d.formStep,
       marketingConsent: d.marketingConsent,
+      marketingConsentPrompted: d.marketingConsentPresented,
+      foundUsPrompted: d.foundUsPresented,
       // The capture surface, from the request. Falls back to BOOKING_FORM
       // because that is the only caller that historically omitted it.
       consentSource: normaliseConsentSource(d.consentSource) ?? 'BOOKING_FORM',
