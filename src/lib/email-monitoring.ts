@@ -31,6 +31,11 @@ import { prisma } from './db'
 import { queueLogger } from './logger'
 import { postOpsAlert } from './ops-alert'
 import { shouldSendOpsAlert } from './ops-alert-dedupe'
+//  THE CANONICAL SAMPLE FLOOR, imported rather than re-declared. The agent
+//  checks and this monitor previously disagreed about what counts as a usable
+//  sample — the agent required 20 terminal outcomes and this file had no floor
+//  at all, which is how a critical alert fired on three messages.
+import { RATE_MIN_SAMPLE } from './email-agent/checks/shared'
 
 const log = queueLogger.child({ mod: 'email-monitoring' })
 
@@ -66,6 +71,11 @@ export const RUN_STUCK_MS = 2 * 60 * 60 * 1000
 export const SCHEDULE_MISSED_MS = 15 * 60 * 1000
 /** Window for rate calculations. */
 export const RATE_WINDOW_HOURS = 24
+/** Minimum terminal outcomes before a RATE is meaningful. Re-exported from the
+ *  agent checks so the monitor and the agent cannot disagree about what counts
+ *  as a usable sample — this monitor previously had no floor at all and fired
+ *  a critical alert on three messages. */
+export { RATE_MIN_SAMPLE }
 
 const ok = (id: string, message: string, value = 0): Check => ({ id, severity: 'ok', message, value })
 
@@ -112,29 +122,90 @@ export async function checkComplaintRate(windowHours = RATE_WINDOW_HOURS): Promi
   return ok('complaint_rate', `Complaint rate ${pct(r)} (${complaints} of ${accepted} in ${windowHours}h).`, r)
 }
 
-/** HARD BOUNCE RATE — list quality. Soft bounces are deliberately excluded. */
+/**
+ * HARD BOUNCE RATE — list quality. Soft bounces are deliberately excluded.
+ *
+ * ── THE 133% ALERT (incident 2026-08-25) ───────────────────────────────
+ * This fired "Hard-bounce rate is 133.33% (4 of 3 in 24h)". A rate cannot
+ * exceed 100%. The two halves counted DIFFERENT TIME COHORTS:
+ *
+ *     bounces  = rows whose BOUNCEDAT fell in the window — whenever sent
+ *     accepted = rows whose SENTAT   fell in the window
+ *
+ * So a message sent last week and bounced today counted in the numerator and
+ * could never appear in the denominator. Four bounces arriving against three
+ * in-window sends is exactly 4/3. The bounces were real; attributing them to
+ * today's three sends was the arithmetic error.
+ *
+ * NOT the cause, and worth writing down because it looks like it should be:
+ * `status` does NOT change on a bounce. applyDeliveryState() writes only the
+ * timestamp column, so a hard-bounced row keeps status 'delivered' — that
+ * field records only that the PROVIDER ACCEPTED THE API CALL. The old
+ * denominator therefore did include bounced rows; the anchors are what broke.
+ * Keying on deliveredAt/bouncedAt rather than `status` removes the dependency
+ * on that subtlety altogether.
+ *
+ * A second fault compounded it:
+ *
+ *   • NO MINIMUM SAMPLE. The equivalent agent check uses RATE_MIN_SAMPLE, so
+ *     it stays quiet below a usable volume. This one had none and fired at
+ *     n=3, where a single bounce is 33%.
+ *
+ * THE COHORT IS NOW ONE POPULATION: messages SENT inside the window that have
+ * since reached a terminal delivery outcome — delivered or bounced. Both parts
+ * are anchored on sentAt, so every message counted in the numerator is also
+ * counted in the denominator and the ratio is bounded by definition. The same
+ * shape is already used by provider.ts's deliverability check, which is where
+ * this was cross-checked from.
+ *
+ * The threshold is unchanged. A genuinely bad bounce rate must still fire —
+ * correcting the arithmetic must not silence the concern that prompted it.
+ */
 export async function checkBounceRate(windowHours = RATE_WINDOW_HOURS): Promise<Check> {
   const since = new Date(Date.now() - windowHours * 3600_000)
+  //  ONE cohort, ONE anchor: sent in the window AND terminal. `bounces` is a
+  //  strict subset of `accepted`, so 0 <= r <= 1 always.
+  const cohort = { isTest: false, sentAt: { gte: since } } as const
   const [bounces, accepted] = await Promise.all([
-    prisma.emailSend.count({ where: { bouncedAt: { gte: since }, isTest: false } }),
-    prisma.emailSend.count({ where: { status: 'delivered', isTest: false, sentAt: { gte: since } } }),
+    prisma.emailSend.count({ where: { ...cohort, bouncedAt: { not: null } } }),
+    prisma.emailSend.count({
+      where: { ...cohort, OR: [{ deliveredAt: { not: null } }, { bouncedAt: { not: null } }] },
+    }),
   ])
   const r = rate(bounces, accepted)
   if (accepted === 0) return ok('bounce_rate', 'No email sent in the window — no bounce rate to report.')
+  //  BELOW THE SAMPLE FLOOR the rate is reported, never escalated: at n=3 a
+  //  single bad address is 33% and would page the owner about nothing. The
+  //  bounces are still named, because a hard bounce is worth reading at any
+  //  volume — it is a real address that does not exist.
+  if (accepted < RATE_MIN_SAMPLE) {
+    if (bounces === 0) return ok('bounce_rate', `No hard bounces in ${windowHours}h (${accepted} terminal outcomes).`)
+    return {
+      id: 'bounce_rate',
+      severity: 'warn',
+      value: r,
+      threshold: BOUNCE_RATE_WARN,
+      message:
+        `${bounces} hard ${bounces === 1 ? 'bounce' : 'bounces'} of ${accepted} terminal ` +
+        `${accepted === 1 ? 'outcome' : 'outcomes'} in ${windowHours}h. Too small a sample ` +
+        `(minimum ${RATE_MIN_SAMPLE}) to call a rate, but a hard bounce is a real address that does not exist.`,
+      action: 'Read the bounced addresses and check where they were captured. Do not treat this as a rate.',
+    }
+  }
   if (r >= BOUNCE_RATE_CRITICAL) {
     return {
       id: 'bounce_rate',
       severity: 'critical',
       value: r,
       threshold: BOUNCE_RATE_CRITICAL,
-      message: `Hard-bounce rate is ${pct(r)} (${bounces} of ${accepted} in ${windowHours}h) — providers treat this as mailing an unverified list.`,
+      message: `Hard-bounce rate is ${pct(r)} (${bounces} hard bounces of ${accepted} terminal outcomes in ${windowHours}h, minimum sample ${RATE_MIN_SAMPLE}) — providers treat this as mailing an unverified list.`,
       action: 'Pause campaigns. The audience contains addresses that were never validated; check where they came from.',
     }
   }
   if (r >= BOUNCE_RATE_WARN) {
-    return { id: 'bounce_rate', severity: 'warn', value: r, threshold: BOUNCE_RATE_WARN, message: `Hard-bounce rate is ${pct(r)} (${bounces} of ${accepted} in ${windowHours}h).`, action: 'Review the audience source before the next campaign.' }
+    return { id: 'bounce_rate', severity: 'warn', value: r, threshold: BOUNCE_RATE_WARN, message: `Hard-bounce rate is ${pct(r)} (${bounces} hard bounces of ${accepted} terminal outcomes in ${windowHours}h, minimum sample ${RATE_MIN_SAMPLE}).`, action: 'Review the audience source before the next campaign.' }
   }
-  return ok('bounce_rate', `Hard-bounce rate ${pct(r)} (${bounces} of ${accepted} in ${windowHours}h).`, r)
+  return ok('bounce_rate', `Hard-bounce rate ${pct(r)} (${bounces} hard bounces of ${accepted} terminal outcomes in ${windowHours}h).`, r)
 }
 
 /**
