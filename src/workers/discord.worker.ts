@@ -43,6 +43,37 @@ async function processDiscordJob(job: Job<DiscordJobData>): Promise<void> {
     case 'contact-message':
       await postContactMessage(payload)
       break
+    // ── DURABLE LEAD NOTICE (V3) ────────────────────────────────────────
+    //  The claim is atomic, the attempt counter moves only when a provider
+    //  request actually begins, and a failure RE-THROWS so this queue's
+    //  configured attempts are genuinely reachable. The pre-existing
+    //  'lead-created' case below logs a failure and returns normally, which is
+    //  exactly why its attempts: 5 never fired.
+    case 'lead-notify': {
+      const {
+        claimNotification, beginProviderAttempt, recordSent, recordFailure,
+      } = await import('../lib/lead-notification-outbox')
+      const dedupeKey = String((payload as { dedupeKey?: string })?.dedupeKey ?? '')
+      if (!dedupeKey) return
+      const claim = await claimNotification(dedupeKey)
+      //  Already sent, already claimed by another worker, terminal, or not yet
+      //  due. Every one of those means "not mine" — never a second message.
+      if (!claim) return
+
+      const { prisma } = await import('../lib/db')
+      const lead = await prisma.lead.findUnique({ where: { id: claim.leadId } })
+      if (!lead) { await recordSent(dedupeKey); return }
+
+      const { notifyNewLead, toLeadAlertInput } = await import('../lib/lead-alert')
+      await beginProviderAttempt(dedupeKey)
+      const res = await notifyNewLead(toLeadAlertInput(lead as never))
+      if (res.delivered) { await recordSent(dedupeKey); return }
+      const outcome = await recordFailure(dedupeKey, res.reason ?? 'not delivered', null)
+      //  THROW, or BullMQ marks this complete and the retry budget is dead.
+      if (outcome.status !== 'failed_terminal') throw new Error('lead notice delivery failed; retry scheduled')
+      return
+    }
+
     case 'lead-created': {
       // postLeadCard returns FALSE when no channel was configured or the REST
       // post failed. restSendToChannel never throws, so without observing the

@@ -467,6 +467,37 @@ function notifyOwnerOfNewLead(leadId: string, context: string): void {
         },
       })
       if (!lead) return
+
+      // ── DURABLE FIRST, BEST-EFFORT SECOND (V3) ───────────────────────
+      //  The lead is already committed. Record that the owner is OWED a
+      //  notice before anything is sent, so a Discord 500, a timeout or a
+      //  process restart can no longer lose it: the row survives and a worker
+      //  or sweeper can still deliver. `recordLeadNotification` is idempotent
+      //  on a deterministic key, so this cannot produce a second ping.
+      let durable = false
+      try {
+        const { recordLeadNotification, dedupeKeyFor } = await import('./lead-notification-outbox')
+        const rec = await recordLeadNotification(leadId, 'lead_created')
+        durable = true
+        if (rec.created) {
+          //  The queue job is only a NUDGE — the truth is the row above. The
+          //  jobId is the same deterministic key, so BullMQ dedupes too.
+          const { discordQueue } = await import('./queues')
+          const key = dedupeKeyFor(leadId, 'lead_created')
+          await discordQueue.remove(key).catch(() => {})
+          await discordQueue.add('lead-notify', { dedupeKey: key }, { jobId: key })
+        }
+        //  A durable record exists and the worker owns delivery from here.
+        return
+      } catch (err) {
+        //  The outbox or Redis is unavailable. Fall through to the legacy
+        //  direct post so an owner is still told TODAY, and say plainly in the
+        //  log that this delivery is not durable.
+        apiLogger.warn(
+          { leadId, durable, err: String(err).slice(0, 200) },
+          'lead notice could not be made durable — falling back to a single best-effort post',
+        )
+      }
       const { notifyNewLead, toLeadAlertInput } = await import('./lead-alert')
       await notifyNewLead(toLeadAlertInput(lead))
     } catch (err) {
@@ -1451,7 +1482,28 @@ export function defaultPartialLeadDeps(): PartialLeadDeps {
   return _partialDeps
 }
 
+/**
+ * Why a partial capture did not produce a lead.
+ *
+ * These are NOT interchangeable, and collapsing them is what let a database
+ * outage look like a healthy no-op: `null` meant both "there was nothing to key
+ * on" and "Prisma threw", and the route answered HTTP 200 either way.
+ */
+export type CaptureFailure =
+  /** No session id and no usable email — nothing to dedupe on. Not an error. */
+  | { kind: 'no_key' }
+  /** Persistence itself failed. The lead is LOST and someone must know. */
+  | { kind: 'db_error'; error: string }
+
 export type CapturePartialOptions = {
+  /**
+   * Told when a capture produced no lead, and WHY.
+   *
+   * Exists because the route cannot otherwise distinguish a benign skip from
+   * silent data loss: both surfaced as `null`. PII-free by contract — the
+   * callback receives a reason and a bounded error string, never the customer.
+   */
+  onFailure?: (failure: CaptureFailure) => void
   /**
    * Post the plain new-lead notice to Discord on a NEW lead. Default true.
    * `false` means the CALLER owns the owner-facing notification — today only
@@ -1484,12 +1536,33 @@ export async function capturePartialLeadSafe(
     // duplicate. quote-capture falls back to this notice if its queue is down,
     // so opting out never costs the owner the lead.
     if (res?.isNew && opts.notifyOwner !== false) notifyOwnerOfNewLead(res.lead.id, context)
+    //  A null here is the BENIGN case: no session id and no usable email, so
+    //  there was nothing to key a lead on. Reported separately from a failure
+    //  so the route can answer 200 for one and 503 for the other.
+    if (!res) opts.onFailure?.({ kind: 'no_key' })
     return res
   } catch (err) {
+    // ── SILENT LEAD LOSS ENDS HERE (V3) ─────────────────────────────────
+    //  This used to log and return null, and the route answered HTTP 200 with
+    //  {ok:true}. A missing column, a connection cap or a Neon blip therefore
+    //  read as a healthy no-op: the customer's page carried on, the lead was
+    //  gone, and every dashboard stayed green. The browser may still ignore the
+    //  response — that is a deliberate product choice — but the SYSTEM must not
+    //  call this success.
+    const message = err instanceof Error ? err.message : String(err)
     apiLogger.error(
-      { err: err instanceof Error ? err.message : String(err), context },
-      'partial lead capture failed (non-fatal)'
+      {
+        context,
+        // Correlation only. Never the customer's name, email, phone or address.
+        bookingSessionId: clean(input.bookingSessionId) ?? null,
+        formStep: clean(input.formStep) ?? null,
+        errorKind: err instanceof Error ? err.name : 'unknown',
+        err: message.slice(0, 300),
+        leadLost: true,
+      },
+      'PARTIAL LEAD CAPTURE FAILED — the lead was NOT persisted'
     )
+    opts.onFailure?.({ kind: 'db_error', error: message.slice(0, 300) })
     return null
   }
 }

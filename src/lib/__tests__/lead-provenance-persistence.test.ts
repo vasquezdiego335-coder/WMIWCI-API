@@ -585,3 +585,112 @@ test('a malformed scan id drops the attribution but never the lead', async () =>
   //  It reaches persistence verbatim; cleanAttributionId is the shape gate.
   assert.equal(captured.length, 1)
 })
+
+// ══════════════════════════════════════════════════════════════════════
+//  V3 — A DATABASE FAILURE MUST NOT LOOK HEALTHY
+//
+//  capturePartialLeadSafe used to catch a Prisma error, return null, and the
+//  route answered HTTP 200 {ok:true}. A missing column, a connection cap or a
+//  Neon blip therefore read as a healthy no-op: the lead was gone and every
+//  dashboard stayed green.
+// ══════════════════════════════════════════════════════════════════════
+
+test('a persistence failure is reported as a FAILURE, not a benign skip', async () => {
+  const { capturePartialLeadSafe } = await import('../leads')
+  const failures: any[] = []
+  const exploding = {
+    now: () => NOW,
+    store: {
+      async findBySessionId() { return null },
+      async findOpenPartialByEmail() { return null },
+      async create() { throw new Error('column "found_us" does not exist') },
+      async update() { throw new Error('unreachable') },
+    },
+  }
+  const res = await capturePartialLeadSafe(
+    { email: 'test.customer@example.com', bookingSessionId: 'sess-fail', formStep: 'card1' },
+    'test',
+    exploding as never,
+    { notifyOwner: false, onFailure: (f: any) => failures.push(f) },
+  )
+  assert.equal(res, null, 'the caller still gets null — the page must not break')
+  assert.equal(failures.length, 1, 'but the failure must be REPORTED')
+  assert.equal(failures[0].kind, 'db_error')
+  assert.match(failures[0].error, /found_us/, 'and carry the technical reason')
+})
+
+test('nothing to key on is a benign skip, NOT a database failure', async () => {
+  const { capturePartialLeadSafe } = await import('../leads')
+  const failures: any[] = []
+  const store = {
+    now: () => NOW,
+    store: {
+      async findBySessionId() { return null },
+      async findOpenPartialByEmail() { return null },
+      async create() { throw new Error('should not be called') },
+      async update() { throw new Error('should not be called') },
+    },
+  }
+  //  No session id and no usable email.
+  const res = await capturePartialLeadSafe({ email: 'not-an-email' }, 'test', store as never, {
+    notifyOwner: false,
+    onFailure: (f: any) => failures.push(f),
+  })
+  assert.equal(res, null)
+  assert.equal(failures.length, 1)
+  assert.equal(failures[0].kind, 'no_key', 'a skip and an outage must stay distinguishable')
+})
+
+test('a failure report carries NO customer data', async () => {
+  const { capturePartialLeadSafe } = await import('../leads')
+  const failures: any[] = []
+  const exploding = {
+    now: () => NOW,
+    store: {
+      async findBySessionId() { return null },
+      async findOpenPartialByEmail() { return null },
+      async create() { throw new Error('connection refused') },
+      async update() { throw new Error('x') },
+    },
+  }
+  await capturePartialLeadSafe(
+    { email: 'test.customer@example.com', phone: '8625550100', firstName: 'Test', bookingSessionId: 's' },
+    'test',
+    exploding as never,
+    { notifyOwner: false, onFailure: (f: any) => failures.push(f) },
+  )
+  const blob = JSON.stringify(failures)
+  for (const pii of ['test.customer@example.com', '8625550100', 'Test']) {
+    assert.ok(!blob.includes(pii), `${pii} must never reach an error payload`)
+  }
+})
+
+test('ROUTE: a database failure answers 503, never {ok:true}', async () => {
+  restore?.()
+  restore = __setQuoteCaptureRouteDeps({
+    async partialCapture(_input, _ctx, _deps, opts?: any) {
+      opts?.onFailure?.({ kind: 'db_error', error: 'connection refused' })
+      return null
+    },
+  })
+  const res = await post({ email: 'test.customer@example.com', bookingSessionId: 'sess-503', formStep: 'card1' })
+  assert.equal(res.status, 503, 'a lost lead must not be reported as success')
+  const body = JSON.parse(await res.text())
+  assert.equal(body.ok, false)
+  assert.equal(body.captured, false)
+  //  And the customer is not in the error body.
+  assert.ok(!JSON.stringify(body).includes('test.customer@example.com'))
+})
+
+test('ROUTE: a benign skip still answers 200 — the page must not break', async () => {
+  restore?.()
+  restore = __setQuoteCaptureRouteDeps({
+    async partialCapture(_input, _ctx, _deps, opts?: any) {
+      opts?.onFailure?.({ kind: 'no_key' })
+      return null
+    },
+  })
+  const res = await post({ email: 'half-typed', bookingSessionId: 'sess-skip', formStep: 'card1' })
+  assert.equal(res.status, 200, 'a skip is not an outage')
+  assert.equal(JSON.parse(await res.text()).captured, false)
+})

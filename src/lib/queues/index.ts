@@ -214,6 +214,10 @@ export type DiscordJobData = {
     | 'contact-message'    // a new contact-form submission (alerts the team)
     | 'reschedule-offer'   // re-post an approval card after a customer picks a new date
     | 'lead-created'       // quick-quote lead card; link buttons only
+    //  DURABLE lead notice (V3). Carries only a dedupeKey — the payload is NOT
+    //  snapshotted into the job, because the durable row in `lead_notifications`
+    //  is the truth and the job is only a nudge to go and look at it.
+    | 'lead-notify'
     // A CONFIRMED deposit-link payment. Queued only by the Stripe webhook path,
     // only after Stripe reported the session paid. payload: { depositRequestId }
     | 'deposit-paid'

@@ -1257,6 +1257,53 @@ model Booking {
 //    (no FK) so this table is decoupled from the Booking model. The unique
 //    idempotency_key (bookingId::EVENT) + ON CONFLICT DO NOTHING is what makes
 //    event creation exactly-once. ──
+/// ══════════════════════════════════════════════════════════════════════════
+///  LEAD NOTIFICATION OUTBOX (V3)
+///
+///  The owner's lead notice was a bare single-attempt HTTPS POST with a 5s
+///  timeout: no record, no retry, no dedup. A Discord 500, a timeout, or a
+///  process restart between "lead saved" and "owner told" lost the notice
+///  permanently, and nothing anywhere knew it had happened.
+///
+///  This is the durable record of an owner notification that OUGHT to exist.
+///  It rides the EXISTING BullMQ `discord` queue rather than adding a third
+///  notification architecture; the queue moves work, this table owns truth.
+///
+///  IDENTITY IS DETERMINISTIC. `dedupeKey` is derived from the lead and the
+///  lifecycle transition, so the same transition can be enqueued any number of
+///  times and produce exactly ONE owner message. It is also used as the BullMQ
+///  jobId, so the queue dedupes too.
+///
+///  ATTEMPTS COUNT PROVIDER REQUESTS, not claims. A worker that dies before it
+///  reaches Discord must not consume the retry budget — that is how a transient
+///  crash silently exhausts a notice's chances.
+model LeadNotification {
+  id       String @id @default(cuid())
+  leadId   String @map("lead_id")
+  /// 'lead_created' | 'lead_enriched'. One row per meaningful transition.
+  eventType String @map("event_type")
+  /// Deterministic identity: lead + transition. UNIQUE, so a duplicate enqueue
+  /// is a no-op rather than a second owner message.
+  dedupeKey String @unique @map("dedupe_key")
+  /// 'pending' | 'sending' | 'sent' | 'retry' | 'failed_terminal'
+  status    String @default("pending")
+  /// PROVIDER attempts. Incremented only when a request to Discord begins.
+  attempts  Int    @default(0)
+  /// Earliest time a retryable row may be attempted again. Honoured by the
+  /// claim query, so a retry cannot run early even if the queue delivers early.
+  nextAttemptAt DateTime? @map("next_attempt_at")
+  claimedAt     DateTime? @map("claimed_at")
+  sentAt        DateTime? @map("sent_at")
+  /// Last failure reason. PII-FREE by contract — see recordFailure().
+  lastError     String?   @map("last_error")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@index([status, nextAttemptAt])
+  @@index([leadId])
+  @@map("lead_notifications")
+}
+
 model EmailJob {
   id             String   @id @default(uuid())
   bookingId      String   @map("booking_id")

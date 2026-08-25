@@ -303,6 +303,10 @@ async function handle(req: NextRequest): Promise<NextResponse> {
     apiLogger.warn(pricing.mismatch, 'partial-lead estimate mismatch — server value used')
   }
 
+  //  Set when persistence itself failed, as opposed to there being nothing to
+  //  key a lead on. The two used to be indistinguishable from out here.
+  let captureFailure: { kind: string; error?: string } | null = null
+
   const result = await quoteCaptureRouteDeps().partialCapture(
     {
       email: d.email,
@@ -361,7 +365,31 @@ async function handle(req: NextRequest): Promise<NextResponse> {
       moveSize: pricing.moveSizeToStore,
     },
     'partial-lead',
+    undefined,
+    { onFailure: (f) => { if (f.kind === 'db_error') captureFailure = f } },
   )
+
+  // ── A DATABASE FAILURE IS NOT A HEALTHY NO-OP (V3) ─────────────────────
+  //  The browser fires this fire-and-forget and ignores the response, so the
+  //  customer's page is unaffected either way — but answering {ok:true} for a
+  //  lost lead made an outage invisible to everything that watches this
+  //  endpoint. 503 is the honest answer, and it is what a smoke test or an
+  //  uptime check can actually see.
+  //
+  //  The body carries NO customer data: a correlation id and a reason, nothing
+  //  else. Whatever went wrong, the customer's details are not in this payload.
+  if (captureFailure) {
+    void import('@/lib/ops-alert')
+      .then((m) => m.postOpsAlert?.('Lead capture is failing', [
+        { message: 'A partial lead could not be persisted. Leads are being LOST while this continues.' },
+        { message: 'Check the database connection and whether a pending migration has not been applied.' },
+      ]))
+      .catch(() => { /* the alert channel must never mask the 503 */ })
+    return NextResponse.json(
+      { ok: false, captured: false, error: 'capture_unavailable' },
+      { status: 503 },
+    )
+  }
 
   // ── SEQUENCE B ENROLMENT ────────────────────────────────────────────────
   // Fired only when this submission could plausibly change the answer, because
