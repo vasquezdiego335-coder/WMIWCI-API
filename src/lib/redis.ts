@@ -37,14 +37,39 @@ function buildRedisOptions(): RedisOptions {
   }
 }
 
+/**
+ * In PRODUCTION, a missing REDIS_URL is a configuration failure, not a default.
+ *
+ * Falling back to localhost on a Railway service produces a Redis that is
+ * always down and never noticed: every enqueue fails, the durable notification
+ * outbox stops being drained, and the only symptom is a warning in a log
+ * nobody reads. Failing fast turns a silent, permanent outage into a loud one
+ * at boot, which is the only point at which anybody is looking.
+ *
+ * Outside production the localhost default stays, because a developer running
+ * the app locally genuinely does want it.
+ */
+function requireRedisUrl(caller: string): string {
+  const raw = process.env.REDIS_URL
+  if (raw) return raw
+  if (process.env.NODE_ENV === 'production') {
+    throw new Error(
+      `REDIS_URL is not set (${caller}). Refusing to fall back to localhost in production: ` +
+        'the queue would appear healthy while every job silently failed. ' +
+        'Set REDIS_URL on this service.',
+    )
+  }
+  return 'redis://localhost:6379'
+}
+
 // ── 1. Shared singleton for direct ioredis calls ─────────────────────────
 let redisClient: Redis | undefined
 
 export function getRedis(): Redis {
   if (!redisClient) {
-    const url = process.env.REDIS_URL ?? 'redis://localhost:6379'
+    const url = requireRedisUrl('getRedis')
     if (!process.env.REDIS_URL) {
-      console.warn('[Redis] ⚠️  REDIS_URL is NOT set — direct client falling back to localhost.')
+      console.warn('[Redis] ⚠️  REDIS_URL is NOT set — direct client falling back to localhost (non-production only).')
     }
 
     // Match the Railway dual-stack DNS fix used for the BullMQ config so both
@@ -103,12 +128,12 @@ export const redis = new Proxy({} as Redis, {
 // internally and handles reconnect/error lifecycle itself.
 export function getBullConnection(): ConnectionOptions {
   const rawUrl = process.env.REDIS_URL
-  const url = rawUrl ?? 'redis://localhost:6379'
+  const url = requireRedisUrl('getBullConnection')
 
   // ── DIAGNOSTIC ──────────────────────────────────────────────────────
   const safeUrl = url.replace(/:([^@/]+)@/, ':****@')
   if (!rawUrl) {
-    console.warn('[Redis] ⚠️  REDIS_URL is NOT set — falling back to localhost. ' +
+    console.warn('[Redis] ⚠️  REDIS_URL is NOT set — falling back to localhost (non-production only). ' +
       'Set REDIS_URL on this service or the app cannot reach Redis.')
   }
   console.log(`[Redis] getBullConnection: URL="${safeUrl}"`)

@@ -173,7 +173,37 @@ export function marketingConsentState(row: MarketingConsentRow): MarketingConsen
   if (row.emailMarketingConsent === true) return 'OPTED_IN'
   if (row.emailMarketingConsent === false) return 'NOT_OPTED_IN'
 
-  // No recorded decision. Was the question actually asked?
+  // ── THE SERVER OWNS THE FORM CONTRACT (security fix, V3) ────────────────
+  //  `marketingConsentPrompted` arrives from a PUBLIC endpoint. Anyone can POST
+  //  `marketingConsentPresented: false` while naming BOOKING_FORM, and the card
+  //  would then report "Not asked" about a form we KNOW carries the checkbox —
+  //  turning the owner's compliance record into something a stranger can edit.
+  //
+  //  For a surface whose contract the server knows, the REGISTRY WINS over any
+  //  contradictory client claim. The client flag is authoritative only where
+  //  the server genuinely cannot know: an unregistered or dynamic surface.
+  //  CONTRADICTION vs ABSENCE. The registry overrides a client that ASSERTS
+  //  something we know to be false; it does not manufacture an answer out of a
+  //  client that said nothing. A legacy row predates the flag entirely and its
+  //  silence is not a contradiction — the checkbox may genuinely have been
+  //  added to that form after the row was written.
+  const known = formContract(row.marketingConsentSource ?? row.captureSurface)
+  if (known?.presentsMarketingConsent && row.marketingConsentPrompted === false) {
+    //  The client claimed this form never asked. We know it does. With no
+    //  opt-in recorded, the truthful state is a decline, and it can never be
+    //  downgraded to "we never asked them".
+    return 'NOT_OPTED_IN'
+  }
+  if (known && !known.presentsMarketingConsent && row.marketingConsentPrompted === true) {
+    //  The mirror attack: a surface we know has no checkbox cannot be talked
+    //  INTO having asked.
+    return 'NOT_ASKED'
+  }
+  //  A known non-asking surface with no client claim can still answer, because
+  //  the contract alone settles it.
+  if (known && !known.presentsMarketingConsent) return 'NOT_ASKED'
+
+  // Unknown surface: the client's report is the only evidence there is.
   if (row.marketingConsentPrompted === true) {
     // Shown, and no opt-in was ever recorded. That is a decline, not a silence:
     // an opt-in would have arrived as `true` from the same client that told us
@@ -182,13 +212,9 @@ export function marketingConsentState(row: MarketingConsentRow): MarketingConsen
   }
   if (row.marketingConsentPrompted === false) return 'NOT_ASKED'
 
-  // Nothing explicit. The form contract is the only other admissible evidence.
-  const contract = formContract(row.marketingConsentSource ?? row.captureSurface)
-  if (contract && !contract.presentsMarketingConsent) return 'NOT_ASKED'
-
-  //  DELIBERATELY NOT 'NOT_ASKED'. A surface we know DOES ask, on a record
-  //  with no prompted flag, is exactly the ambiguity the incident exposed —
-  //  the honest answer is that this row cannot say.
+  //  Nothing explicit and no registered contract. The honest answer is that
+  //  this row cannot say — deliberately NOT 'NOT_ASKED', which is the ambiguity
+  //  the original incident turned on.
   return 'UNKNOWN_LEGACY'
 }
 

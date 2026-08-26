@@ -24,6 +24,10 @@
 // ════════════════════════════════════════════════════════════════════════
 
 import { queueLogger } from './logger'
+//  THE SAME neutraliser the rich lead card and the deposit notice already use.
+//  Imported rather than reimplemented, so the owner-facing renderers cannot
+//  drift into three different ideas of what is safe to post.
+import { discordSafe } from './booking-display'
 
 const log = queueLogger.child({ mod: 'ops-alert' })
 
@@ -92,11 +96,31 @@ export async function postToChannels(
 
   // Cap the body: Discord rejects messages over 2000 characters outright, and
   // a rejected alert is a silent alert.
+  // ── CUSTOMER TEXT REACHES THIS STRING (security fix, V3) ───────────────
+  //  A lead card carries the customer's own name, email, "how did you hear
+  //  about us?" answer, referrer and utm values. Those are attacker-controlled
+  //  for the price of one form submission, and this path posted them raw. A
+  //  name of "@everyone" would have pinged the whole guild from the owner's
+  //  own bot. The rich card and the deposit notice already neutralise this;
+  //  the plain lead notice — the path the incident actually used — did not.
+  //
+  //  TWO INDEPENDENT DEFENCES, because either alone can be worked around:
+  //   1. discordSafe() breaks mention SYNTAX in the text. It is the SAME
+  //      helper the other renderers use, deliberately not a second copy.
+  //   2. allowed_mentions:{parse:[]} tells Discord to resolve NOTHING, which
+  //      also covers syntax nobody thought of.
+  //
+  //  Per-line caps keep one long field from crowding out the lines below it;
+  //  the whole message is capped again at the Discord limit afterwards.
   const body = lines
     .slice(0, 8)
-    .map((l) => (l.action ? `• ${l.message}\n  → ${l.action}` : `• ${l.message}`))
+    .map((l) =>
+      l.action
+        ? `• ${discordSafe(l.message, 400)}\n  → ${discordSafe(l.action, 200)}`
+        : `• ${discordSafe(l.message, 400)}`,
+    )
     .join('\n')
-  const content = `${title}\n${body}`.slice(0, 1900)
+  const content = `${discordSafe(title, 200)}\n${body}`.slice(0, 1900)
 
   try {
     const controller = new AbortController()
@@ -104,7 +128,9 @@ export async function postToChannels(
     const res = await fetch(`https://discord.com/api/v10/channels/${channelId}/messages`, {
       method: 'POST',
       headers: { Authorization: `Bot ${token}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ content }),
+      //  parse: [] disables @everyone, @here, user and role resolution for
+      //  this message whatever the text turns out to contain.
+      body: JSON.stringify({ content, allowed_mentions: { parse: [] } }),
       signal: controller.signal,
     }).finally(() => clearTimeout(timer))
 

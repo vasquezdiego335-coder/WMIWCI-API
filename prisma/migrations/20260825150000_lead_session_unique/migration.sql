@@ -1,0 +1,63 @@
+-- ═══════════════════════════════════════════════════════════════════════════
+--  ONE BROWSER SESSION, ONE OPEN CRM LEAD  (V3)
+--
+--  THE DEFECT
+--  ----------
+--  `capturePartialLead` does a lookup, then a create, and its own comment said
+--  the create failing is what protects it:
+--
+--      "If the create fails for ANY reason, re-run the lookup"
+--
+--  There was nothing to fail. `booking_session_id` carried only an ORDINARY
+--  index, so no database invariant existed for the insert to violate. Two
+--  concurrent requests both missed the lookup, both inserted, and both returned
+--  isNew: true.
+--
+--  Reproduced against real PostgreSQL before this migration existed: twenty
+--  concurrent captures on ONE session produced FOUR rows in one run and TWENTY
+--  in another. The booking form fires capture from five triggers (debounce,
+--  blur, nav, consent toggle, exit beacon), several of which land within
+--  milliseconds, so this is everyday behaviour rather than a rare race.
+--
+--  A duplicate lead splits one customer's consent, attribution and enrichment
+--  across two rows and produces two owner notifications for one person.
+--
+--  WHY PARTIAL, AND WHY THESE STATUSES
+--  -----------------------------------
+--  A session may legitimately produce more than one lead ACROSS TIME: the
+--  existing dedupe deliberately starts a fresh lead once the previous one is
+--  closed (see OPEN_STATUSES / findBySessionId). What must never happen is TWO
+--  OPEN leads at once. The predicate encodes exactly that, and no more.
+--
+--  NULL is excluded because a null session id is the ABSENCE of an identifier,
+--  not a shared one. Postgres would already treat NULLs as distinct in a plain
+--  unique index, but the predicate states the intent explicitly.
+--
+--  THIS MIGRATION CAN FAIL, AND THAT IS CORRECT
+--  --------------------------------------------
+--  If production already holds open duplicates, CREATE UNIQUE INDEX aborts and
+--  this migration does not apply. Deciding which half of a split customer
+--  survives is a business call, not something a migration may guess. Run
+--  scripts/lead-session-duplicate-preflight.sql first; it carries the reviewed
+--  manual merge procedure. Nothing here deletes or merges any row.
+--
+--  TABLE NAME — CHECKED, NOT ASSUMED
+--  ---------------------------------
+--  `Lead` maps to "crm_leads". Production also carries the marketing tracker's
+--  separate legacy "leads" table, which this migration does not reference.
+--
+--  NOT EXPRESSIBLE IN THE PRISMA DATAMODEL. Prisma has no syntax for a partial
+--  unique index, so this lives in SQL only. `prisma migrate deploy` preserves
+--  it. Never run `prisma db push` or `migrate dev` against production — either
+--  would consider this index "extra" and drop it, and would also drop the
+--  tracker's `leads` table.
+--
+--  Rollback: DROP INDEX IF EXISTS "crm_leads_open_booking_session_key";
+--  Additive and non-destructive in both directions — it creates no column and
+--  writes no row.
+-- ═══════════════════════════════════════════════════════════════════════════
+
+CREATE UNIQUE INDEX IF NOT EXISTS "crm_leads_open_booking_session_key"
+    ON "crm_leads" ("booking_session_id")
+ WHERE "booking_session_id" IS NOT NULL
+   AND "status" IN ('NEW', 'CONTACTED', 'QUOTE_SENT', 'FOLLOW_UP');

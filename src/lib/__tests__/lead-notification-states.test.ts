@@ -112,17 +112,34 @@ test('FLOW B — an opt-in is visibly distinct, in the title as well as the body
 })
 
 test('FLOW C — a channel that genuinely does not ask may say so', () => {
-  const text = render(partialLead({ marketingConsentPrompted: false }))
+  //  CHANGED in V3, and the old fixture was the problem. It claimed
+  //  `marketingConsentPrompted: false` while ALSO naming BOOKING_FORM as the
+  //  surface — a contradiction, because the server knows that form carries the
+  //  checkbox. The registry now wins over that claim (see the crafted-payload
+  //  tests in lead-state.test.ts), so "not asked" has to come from a surface
+  //  that genuinely does not ask.
+  const text = render(partialLead({ marketingConsentPrompted: false, marketingConsentSource: null, source: null }))
   assert.match(text, /Marketing email: Not asked/)
   assert.match(text, /no marketing checkbox/i, 'and says WHY, so it cannot be read as a customer decision')
 })
 
+test('V3: a crafted "we never asked" claim cannot beat the server contract', () => {
+  //  The same payload as FLOW C but naming a KNOWN asking surface. A public
+  //  endpoint must not let a stranger rewrite the owner's compliance record.
+  const text = render(partialLead({ marketingConsentPrompted: false, marketingConsentSource: 'BOOKING_FORM' }))
+  assert.match(text, /Marketing email: Not opted in/)
+  assert.doesNotMatch(text, /Not asked/)
+})
+
 test('the four consent outcomes are four different sentences', () => {
+  //  NOT_ASKED must come from a surface that genuinely does not ask; naming a
+  //  known asking form alongside it is a contradiction the server now rejects.
+  //  UNKNOWN likewise needs a surface the server has no contract for.
   const said = [
     render(partialLead({ marketingConsentPrompted: true, emailMarketingConsent: true })),
     render(partialLead({ marketingConsentPrompted: true, emailMarketingConsent: false })),
-    render(partialLead({ marketingConsentPrompted: false })),
-    render(partialLead()),
+    render(partialLead({ marketingConsentPrompted: false, marketingConsentSource: null, source: null })),
+    render(partialLead({ marketingConsentSource: null, source: null })),
   ].map((t) => /Marketing email: (.*)/.exec(t)?.[1])
 
   assert.equal(new Set(said).size, 4, `four states must read four ways, got ${JSON.stringify(said)}`)

@@ -347,3 +347,75 @@ test('the form contracts are the only thing licensed to claim "we do not ask"', 
   assert.equal(formContract('SOMETHING_NOBODY_REGISTERED'), null)
   assert.equal(formContract(null), null)
 })
+
+// ══════════════════════════════════════════════════════════════════════
+//  V3 — THE SERVER OWNS THE FORM CONTRACT
+//
+//  `marketingConsentPrompted` arrives from a PUBLIC endpoint. Without a
+//  server-side authority, anyone could POST `marketingConsentPresented: false`
+//  while naming BOOKING_FORM and make the owner's card report "Not asked"
+//  about a form that demonstrably carries the checkbox — a compliance record a
+//  stranger can edit.
+// ══════════════════════════════════════════════════════════════════════
+
+test('a crafted payload CANNOT talk a known form out of having asked', () => {
+  //  The attack: claim the booking form never showed the box.
+  const forged = marketingConsentState({
+    emailMarketingConsent: null,
+    marketingConsentPrompted: false,          // <- attacker-supplied lie
+    marketingConsentSource: 'BOOKING_FORM',   // <- a surface the server KNOWS
+  })
+  assert.equal(forged, 'NOT_OPTED_IN', 'the registry must beat the client claim')
+  assert.doesNotMatch(MARKETING_CONSENT_LABEL[forged], /not asked/i)
+})
+
+test('a crafted payload CANNOT talk a form INTO having asked', () => {
+  //  The mirror attack, against a surface the server knows has no checkbox.
+  const noBoxSurface = Object.entries(FORM_CONTRACTS).find(([, c]) => !c.presentsMarketingConsent)?.[0]
+  if (!noBoxSurface) return // no such surface registered today
+  const forged = marketingConsentState({
+    emailMarketingConsent: null,
+    marketingConsentPrompted: true,           // <- attacker-supplied lie
+    marketingConsentSource: noBoxSurface,
+  })
+  assert.equal(forged, 'NOT_ASKED', 'a surface with no checkbox cannot be claimed to have one')
+})
+
+test('the customer\'s own ANSWER still outranks everything', () => {
+  //  Server authority is about the QUESTION, never about overriding a real
+  //  recorded decision.
+  assert.equal(
+    marketingConsentState({ emailMarketingConsent: true, marketingConsentPrompted: false, marketingConsentSource: 'BOOKING_FORM' }),
+    'OPTED_IN',
+  )
+  assert.equal(
+    marketingConsentState({ emailMarketingConsent: false, marketingConsentPrompted: true, marketingConsentSource: 'BOOKING_FORM' }),
+    'NOT_OPTED_IN',
+  )
+})
+
+test('the client flag is trusted ONLY where the server cannot know', () => {
+  //  An unregistered / dynamic surface is the one place the client's report is
+  //  the only evidence available.
+  assert.equal(
+    marketingConsentState({ marketingConsentPrompted: false, marketingConsentSource: 'SOME_UNREGISTERED_SURFACE' }),
+    'NOT_ASKED',
+  )
+  assert.equal(
+    marketingConsentState({ marketingConsentPrompted: true, marketingConsentSource: 'SOME_UNREGISTERED_SURFACE' }),
+    'NOT_OPTED_IN',
+  )
+  //  And with nothing at all it still refuses to guess.
+  assert.equal(marketingConsentState({ marketingConsentSource: 'SOME_UNREGISTERED_SURFACE' }), 'UNKNOWN_LEGACY')
+})
+
+test('unchecked is NEVER converted to "not asked", by any route', () => {
+  for (const surface of ['BOOKING_FORM', 'QUICK_QUOTE_FORM', 'SOME_UNREGISTERED_SURFACE', undefined]) {
+    const s = marketingConsentState({
+      emailMarketingConsent: false,
+      marketingConsentPrompted: false,
+      marketingConsentSource: surface ?? null,
+    })
+    assert.equal(s, 'NOT_OPTED_IN', `surface ${surface}: an explicit decline must survive`)
+  }
+})

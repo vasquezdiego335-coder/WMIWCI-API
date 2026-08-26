@@ -76,7 +76,12 @@ async function seedLead(): Promise<string> {
 
 beforeEach(async () => {
   if (skip) return
-  await prisma.leadNotification.deleteMany({})
+  //  SCOPED, not a truncate. node --test runs suites in PARALLEL against the
+  //  same database, and a bare deleteMany({}) here wiped the concurrency
+  //  suite's rows mid-flight (and vice versa), producing "record to update not
+  //  found" failures that had nothing to do with the code under test.
+  const mine = await prisma.lead.findMany({ where: { email: { contains: 'outbox.' } }, select: { id: true } })
+  if (mine.length) await prisma.leadNotification.deleteMany({ where: { leadId: { in: mine.map((m) => m.id) } } })
   await prisma.lead.deleteMany({ where: { email: { contains: 'outbox.' } } })
   const q = new Queue(QUEUE, { connection })
   await q.obliterate({ force: true }).catch(() => {})

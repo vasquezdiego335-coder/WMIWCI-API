@@ -66,7 +66,9 @@ after(async () => {
 })
 beforeEach(async () => {
   if (skip) return
-  await prisma.leadNotification.deleteMany({})
+  //  SCOPED — parallel suites share this database.
+  const mine = await prisma.lead.findMany({ where: { email: EMAIL }, select: { id: true } })
+  if (mine.length) await prisma.leadNotification.deleteMany({ where: { leadId: { in: mine.map((m) => m.id) } } })
   await prisma.lead.deleteMany({ where: { email: EMAIL } })
 })
 
