@@ -73,9 +73,36 @@ export function dedupeKeyFor(leadId: string, event: LeadNotificationEvent): stri
  * the claim query can refuse to run early even if the queue delivers early —
  * the schedule is enforced by the database, not by trusting the transport.
  */
-export function nextAttemptAfter(attempts: number, now: Date): Date {
+export function nextAttemptAfter(attempts: number, now: Date, jitter = true): Date {
   const seconds = Math.min(3600, 30 * Math.pow(2, Math.max(0, attempts - 1)))
-  return new Date(now.getTime() + seconds * 1000)
+  //  FULL-WIDTH JITTER of +/-10%. Without it, a provider outage that fails a
+  //  hundred notices at once schedules all hundred retries for the same
+  //  instant, and the recovery attempt becomes its own thundering herd.
+  //  Deterministic when disabled, so the backoff curve stays testable.
+  const spread = jitter ? 1 + (Math.random() * 0.2 - 0.1) : 1
+  return new Date(now.getTime() + Math.round(seconds * 1000 * spread))
+}
+
+/**
+ * Honour the provider's own retry instruction.
+ *
+ * Discord sends `Retry-After` on a 429 in seconds, and occasionally as an
+ * HTTP-date. Ignoring it is how a client earns a longer ban, so it wins over
+ * our own backoff when it asks for LONGER, and is floored at one second when it
+ * asks for something implausibly short.
+ */
+export function retryAfterToDate(header: string | null | undefined, now: Date): Date | null {
+  if (!header) return null
+  const trimmed = header.trim()
+  const seconds = Number(trimmed)
+  if (Number.isFinite(seconds) && seconds >= 0) {
+    return new Date(now.getTime() + Math.max(1, Math.min(seconds, 3600)) * 1000)
+  }
+  const asDate = new Date(trimmed)
+  if (!Number.isNaN(asDate.getTime()) && asDate.getTime() > now.getTime()) {
+    return new Date(Math.min(asDate.getTime(), now.getTime() + 3600 * 1000))
+  }
+  return null
 }
 
 /**
@@ -147,6 +174,41 @@ export async function recordLeadNotification(
  * Returns null when the row is already sent, already claimed, terminal, or not
  * yet due — every one of which means "not mine to send".
  */
+/**
+ * Why a claim failed. The caller must be able to tell "someone else has it" —
+ * which is fine — from "it is not due yet" — which means the job ran EARLY and
+ * must be rescheduled rather than dropped.
+ *
+ * Returning a bare null for both is what stranded rows: a job that arrived
+ * before `nextAttemptAt` found nothing to do, returned success, and BullMQ
+ * removed it. Nothing else was scheduled to come back, so the row sat in
+ * `retry` forever with its due time in the past.
+ */
+export type ClaimOutcome =
+  | { claimed: true; id: string; leadId: string; eventType: string; attempts: number }
+  | { claimed: false; reason: 'not_due'; dueAt: Date }
+  | { claimed: false; reason: 'gone_or_taken' }
+
+/**
+ * Inspect a row and say precisely why it cannot be claimed right now.
+ * Used by the worker to decide between "reschedule me" and "drop me".
+ */
+export async function inspectClaim(dedupeKey: string, now: Date = new Date()): Promise<ClaimOutcome> {
+  const claimed = await claimNotification(dedupeKey, now)
+  if (claimed) return { claimed: true, ...claimed }
+  const row = await prisma.leadNotification.findUnique({ where: { dedupeKey } })
+  if (
+    row &&
+    (row.status === NOTIFICATION_STATUS.pending || row.status === NOTIFICATION_STATUS.retry) &&
+    row.nextAttemptAt &&
+    row.nextAttemptAt.getTime() > now.getTime()
+  ) {
+    //  The row is ours to do — just not yet. The caller MUST reschedule.
+    return { claimed: false, reason: 'not_due', dueAt: row.nextAttemptAt }
+  }
+  return { claimed: false, reason: 'gone_or_taken' }
+}
+
 export async function claimNotification(
   dedupeKey: string,
   now: Date = new Date(),

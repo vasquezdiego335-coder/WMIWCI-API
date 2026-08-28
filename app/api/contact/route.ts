@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 import { NextRequest, NextResponse } from 'next/server'
 import { z } from 'zod'
 import { discordQueue } from '@/lib/queues'
@@ -76,7 +77,14 @@ const ContactSchema = z.object({
   consentSource: z.string().transform(sanitizeText).pipe(z.string().max(40)).optional(),
   consentVersion: z.string().transform(sanitizeText).pipe(z.string().max(40)).optional(),
   // Honeypot — bots fill hidden fields; humans leave them empty.
-  company: z.string().max(0).optional(),
+  /* HONEYPOT — BOUNDED, not max(0).
+     `max(0)` made a FILLED honeypot fail the schema, so the request was
+     rejected as `invalid_shape` and the silent-accept branch below was
+     unreachable dead code. The trap reported the wrong reason for every bot
+     that sprang it. A bounded value is accepted so the branch can own the
+     decision; it is never stored or echoed, and the bound matters because an
+     unbounded string is free memory for anyone who asks. */
+  company: z.string().max(200).optional(),
 })
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
@@ -136,6 +144,11 @@ async function handleContact(req: NextRequest): Promise<NextResponse> {
   //  form rather than being stored raw. ingestLeadSafe checks the suppression
   //  list before any of it is written, so a form can never re-subscribe someone
   //  who unsubscribed.
+  //  One correlation id, shared by the response, the structured log and the
+  //  operations alert, so a customer saying "it failed" can be matched to the
+  //  exact incident without asking them for anything identifying.
+  const errorRef = randomUUID()
+  let leadFailed = false
   const lead = await ingestLeadSafe(
     {
       name: data.name,
@@ -152,6 +165,7 @@ async function handleContact(req: NextRequest): Promise<NextResponse> {
     },
     'contact-form',
   )
+  if (!lead) leadFailed = true
 
   // ── Non-quote nurture (Sequence B) ──────────────────────────────────
   //  A contact-form lead has an intent and an email and NO calculated quote,
@@ -194,7 +208,37 @@ async function handleContact(req: NextRequest): Promise<NextResponse> {
   // (To re-enable: add 'contact-ack' to ALLOWED_TEMPLATES in the email worker
   //  and restore the smsQueue.add for contact-ack-sms.)
 
-  apiLogger.info({ email: data.email, locale }, '/api/contact handled OK (team alerted via Discord; no customer auto-reply per messaging policy)')
+  // ── A LOST CONTACT MESSAGE MUST NOT LOOK LIKE A DELIVERED ONE ────────
+  //  This route answered {ok:true} even when the lead was never persisted, so
+  //  HTTP monitoring saw a healthy request while the customer's enquiry existed
+  //  nowhere. The customer is told plainly, given the phone number, and handed
+  //  a reference; the SYSTEM records the same reference for correlation.
+  if (leadFailed) {
+    apiLogger.error(
+      { errorRef, locale, stage: 'contact_lead_persist' },
+      '/api/contact — the enquiry was NOT persisted',
+    )
+    void import('@/lib/ops-alert')
+      .then((m) => m.postOpsAlert?.('Contact form is failing', [
+        { message: `A contact enquiry could not be persisted. Reference ${errorRef}.` },
+        { message: 'Enquiries are being LOST while this continues. Check the database connection.' },
+      ]))
+      .catch(() => { /* the alert must never mask the 503 */ })
+    return NextResponse.json(
+      {
+        ok: false,
+        error: 'contact_unavailable',
+        errorRef,
+        message:
+          locale === 'es'
+            ? 'No pudimos guardar tu mensaje. Por favor llámanos o escríbenos al 862-640-0625.'
+            : "We couldn't save your message. Please call or text us at 862-640-0625.",
+      },
+      { status: 503 },
+    )
+  }
+
+  apiLogger.info({ locale }, '/api/contact handled OK (team alerted via Discord; no customer auto-reply per messaging policy)')
   return NextResponse.json({
     ok: true,
     message:

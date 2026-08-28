@@ -108,11 +108,19 @@ test('a 4xx that is not 408/429 is terminal; everything else is retryable', { sk
 
 test('backoff grows and is capped', { skip }, () => {
   const now = new Date('2026-08-25T12:00:00Z')
-  const at = (n: number) => nextAttemptAfter(n, now).getTime() - now.getTime()
+  //  Jitter OFF gives the deterministic curve the design specifies.
+  const at = (n: number) => nextAttemptAfter(n, now, false).getTime() - now.getTime()
   assert.equal(at(1), 30_000)
   assert.equal(at(2), 60_000)
   assert.ok(at(3) > at(2))
   assert.ok(at(20) <= 3_600_000, 'capped at an hour')
+
+  //  Jitter ON must stay within +/-10% — enough to break up a thundering herd,
+  //  never enough to turn a 30s backoff into something unrecognisable.
+  for (let i = 0; i < 50; i++) {
+    const j = nextAttemptAfter(1, now).getTime() - now.getTime()
+    assert.ok(j >= 27_000 && j <= 33_000, `jitter out of range: ${j}`)
+  }
 })
 
 test('stored failures never carry customer data', { skip }, () => {
@@ -204,8 +212,11 @@ test('10. a crash BEFORE the provider request does not consume an attempt', { sk
   assert.equal(row!.attempts, 0, 'claiming is not attempting')
 
   //  11. The sweeper recovers it without charging an attempt.
+  //  Suites run in PARALLEL against one database, so this global sweep may
+  //  legitimately release another suite's row too. Assert the PROPERTY — at
+  //  least one release, and MINE specifically recovered — not a shared count.
   const released = await releaseStaleClaims(new Date(Date.now() + 60_000))
-  assert.equal(released, 1)
+  assert.ok(released >= 1, `expected at least one stale claim released, got ${released}`)
   row = await prisma.leadNotification.findUnique({ where: { dedupeKey } })
   assert.equal(row!.status, NOTIFICATION_STATUS.retry)
   assert.equal(row!.attempts, 0, 'the retry budget must be intact after a crash')

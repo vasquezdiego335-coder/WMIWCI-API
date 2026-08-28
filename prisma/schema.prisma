@@ -776,10 +776,10 @@ model User {
   updatedAt DateTime @updatedAt @map("updated_at")
 
   // Relations
-  availability        Availability[]
-  assignedJobs        JobCrew[]
-  auditLogs           AuditLog[]
-  availabilityRules   AvailabilityRule[]
+  availability           Availability[]
+  assignedJobs           JobCrew[]
+  auditLogs              AuditLog[]
+  availabilityRules      AvailabilityRule[]
   availabilityExceptions AvailabilityException[]
 
   @@map("users")
@@ -803,15 +803,15 @@ model Customer {
   //    Distinct from marketingOptOut (a TCPA SMS opt-out): this is the durable
   //    record of an explicit email-marketing opt-in, propagated from the booking
   //    lead's Step-1 checkbox on conversion. null = never expressed a choice. ──
-  emailMarketingConsent Boolean?  @map("email_marketing_consent")
-  marketingConsentAt    DateTime? @map("marketing_consent_at")
+  emailMarketingConsent   Boolean?  @map("email_marketing_consent")
+  marketingConsentAt      DateTime? @map("marketing_consent_at")
   // ── CONSENT EVIDENCE (owner spec 2026-07-28) ──
   // Storing `true` is not enough to defend a send. WHERE they agreed and WHAT
   // they were shown are what make the record provable, and the Lead table has
   // carried both since 2026-07-24 while Customer did not — so a customer who
   // consented without a prior lead had a bare boolean and nothing behind it.
-  marketingConsentSource  String? @map("marketing_consent_source")
-  marketingConsentVersion String? @map("marketing_consent_version")
+  marketingConsentSource  String?   @map("marketing_consent_source")
+  marketingConsentVersion String?   @map("marketing_consent_version")
 
   // ── Extended contact (admin operations, owner spec 2026-07-12) — all nullable ──
   preferredName         String? @map("preferred_name")
@@ -954,14 +954,14 @@ model Booking {
   //
   //    Nullable because a browser tab opened before this cutover does not send
   //    them; null means "not asked", which is NOT the same as "no".
-  difficultElevatorPickup  Boolean? @map("difficult_elevator_pickup")
-  difficultElevatorDropoff Boolean? @map("difficult_elevator_dropoff")
-  difficultBuildingPickup  Boolean? @map("difficult_building_pickup")
-  difficultBuildingDropoff Boolean? @map("difficult_building_dropoff")
+  difficultElevatorPickup    Boolean? @map("difficult_elevator_pickup")
+  difficultElevatorDropoff   Boolean? @map("difficult_elevator_dropoff")
+  difficultBuildingPickup    Boolean? @map("difficult_building_pickup")
+  difficultBuildingDropoff   Boolean? @map("difficult_building_dropoff")
   /// The customer attested their inventory/access details are accurate. Required
   /// on new submissions; defaults false so legacy rows read honestly as "never
   /// attested" rather than silently claiming an attestation never made.
-  inventoryAccuracyConfirmed Boolean @default(false) @map("inventory_accuracy_confirmed")
+  inventoryAccuracyConfirmed Boolean  @default(false) @map("inventory_accuracy_confirmed")
 
   // ── Verified structured address (Phase 2, owner spec 2026-07-12). Written by
   //    SERVER-side Google Address Validation only — client-claimed components are
@@ -1022,8 +1022,8 @@ model Booking {
   //    reads NULL and src/lib/service-shape.ts DERIVES the answer from what it
   //    does carry (truck_provider, the "Truck:" line in items_description), so
   //    nothing needs back-filling and no existing booking changes price.
-  serviceTypeKey       String?   @map("service_type_key") // labor_only | full_service
-  moveSizeKey          String?   @map("move_size_key") // package key: 1br, 2br, …
+  serviceTypeKey String? @map("service_type_key") // labor_only | full_service
+  moveSizeKey    String? @map("move_size_key") // package key: 1br, 2br, …
 
   // ── LABOR-ONLY HOURLY QUOTE (repair audit 2026-08-14, P0-02) ────────────
   //    The authoritative price for a labor-only job: $150/hour for two movers
@@ -1057,16 +1057,16 @@ model Booking {
   //    These REPLACE the retired travel-band fee (travel_fee), which stays on
   //    the row for historical bookings and is never recalculated. A booking
   //    may carry one or the other — never both.
-  routedMiles          Float?   @map("routed_miles")
-  billableMiles        Int?     @map("billable_miles")
-  mileageRateCents     Int?     @map("mileage_rate_cents")
-  transportationCharge Int?     @map("transportation_charge")
+  routedMiles          Float?    @map("routed_miles")
+  billableMiles        Int?      @map("billable_miles")
+  mileageRateCents     Int?      @map("mileage_rate_cents")
+  transportationCharge Int?      @map("transportation_charge")
   /// measured | skipped | failed — why we do or do not have a distance.
-  routeStatus          String?  @map("route_status")
+  routeStatus          String?   @map("route_status")
   /// Route could not be measured: an owner prices it before approval.
-  routeManualReview    Boolean  @default(false) @map("route_manual_review")
+  routeManualReview    Boolean   @default(false) @map("route_manual_review")
   /// Distances and status WITHOUT the address strings (privacy).
-  routeSummary         Json?    @map("route_summary")
+  routeSummary         Json?     @map("route_summary")
   //    An owner may correct the size WITHOUT the customer rebooking. The change
   //    is attributed and reasoned; the price it implies is a separate, explicit
   //    approval (see price_change_approved_*).
@@ -1108,7 +1108,7 @@ model Booking {
   //    Discounts that were REQUESTED and did not apply, with the reason. A
   //    customer who was told "use MOVE10" must find out why it did not stack
   //    from the record, not from an argument on move day.
-  discountRejected Json? @map("discount_rejected")
+  discountRejected     Json?   @map("discount_rejected")
 
   //    A price change is never silent: an owner approves the new amount, and we
   //    record who and when. See src/lib/approval-guards.ts.
@@ -1226,17 +1226,17 @@ model Booking {
   updatedAt DateTime @updatedAt @map("updated_at")
 
   // Relations
-  customer      Customer         @relation(fields: [customerId], references: [id])
-  payments      Payment[]
-  job           Job?
-  files         File[]
-  notifications Notification[]
-  receipt       Receipt?
-  auditLogs     AuditLog[]
-  review        Review?
-  followUps     FollowUpLedger[]
-  expenses      Expense[] // job-linked expenses (admin OS) — reduce this job's profit
-  closeout      MoveCloseout? // Phase 2 financial closeout
+  customer        Customer         @relation(fields: [customerId], references: [id])
+  payments        Payment[]
+  job             Job?
+  files           File[]
+  notifications   Notification[]
+  receipt         Receipt?
+  auditLogs       AuditLog[]
+  review          Review?
+  followUps       FollowUpLedger[]
+  expenses        Expense[] // job-linked expenses (admin OS) — reduce this job's profit
+  closeout        MoveCloseout? // Phase 2 financial closeout
   depositRequests DepositRequest[] // admin-issued deposit links (owner spec 2026-08-15)
 
   @@index([status])
@@ -1278,17 +1278,17 @@ model Booking {
 ///  reaches Discord must not consume the retry budget — that is how a transient
 ///  crash silently exhausts a notice's chances.
 model LeadNotification {
-  id       String @id @default(cuid())
-  leadId   String @map("lead_id")
+  id            String    @id @default(cuid())
+  leadId        String    @map("lead_id")
   /// 'lead_created' | 'lead_enriched'. One row per meaningful transition.
-  eventType String @map("event_type")
+  eventType     String    @map("event_type")
   /// Deterministic identity: lead + transition. UNIQUE, so a duplicate enqueue
   /// is a no-op rather than a second owner message.
-  dedupeKey String @unique @map("dedupe_key")
+  dedupeKey     String    @unique @map("dedupe_key")
   /// 'pending' | 'sending' | 'sent' | 'retry' | 'failed_terminal'
-  status    String @default("pending")
+  status        String    @default("pending")
   /// PROVIDER attempts. Incremented only when a request to Discord begins.
-  attempts  Int    @default(0)
+  attempts      Int       @default(0)
   /// Earliest time a retryable row may be attempted again. Honoured by the
   /// claim query, so a retry cannot run early even if the queue delivers early.
   nextAttemptAt DateTime? @map("next_attempt_at")
@@ -1296,8 +1296,8 @@ model LeadNotification {
   sentAt        DateTime? @map("sent_at")
   /// Last failure reason. PII-FREE by contract — see recordFailure().
   lastError     String?   @map("last_error")
-  createdAt DateTime @default(now()) @map("created_at")
-  updatedAt DateTime @updatedAt @map("updated_at")
+  createdAt     DateTime  @default(now()) @map("created_at")
+  updatedAt     DateTime  @updatedAt @map("updated_at")
 
   @@index([status, nextAttemptAt])
   @@index([leadId])
@@ -1324,13 +1324,13 @@ model EmailJob {
 }
 
 model Payment {
-  id                    String        @id @default(cuid())
-  bookingId             String        @map("booking_id")
-  stripePaymentIntentId String?       @unique @map("stripe_payment_intent_id")
-  stripeChargeId        String?       @unique @map("stripe_charge_id")
+  id                    String         @id @default(cuid())
+  bookingId             String         @map("booking_id")
+  stripePaymentIntentId String?        @unique @map("stripe_payment_intent_id")
+  stripeChargeId        String?        @unique @map("stripe_charge_id")
   amount                Int // in cents
-  currency              String        @default("usd")
-  status                PaymentStatus @default(PENDING)
+  currency              String         @default("usd")
+  status                PaymentStatus  @default(PENDING)
   /// HOW the money arrived (D1, Stage 4). Nullable because historical rows
   /// predate the column and their method is genuinely unknown — never guess.
   /// Stripe-originated rows are backfilled to STRIPE only where a Stripe id
@@ -1339,18 +1339,18 @@ model Payment {
   method                PaymentMethod?
   // Internal checkout tests (owner-flagged; mirrors Stripe metadata.internal_test).
   // EXCLUDED from every revenue aggregate/report. Never affects payment status.
-  isInternalTest        Boolean       @default(false) @map("is_internal_test")
+  isInternalTest        Boolean        @default(false) @map("is_internal_test")
   description           String?
-  receiptUrl            String?       @map("receipt_url")
+  receiptUrl            String?        @map("receipt_url")
   metadata              Json?
   // ── Refund + dispute tracking (additive; money truth stays in `status`).
   //    Cumulative refunded cents (monotonic); dispute id + raw Stripe status. ──
-  refundedAmountCents   Int?          @map("refunded_amount_cents")
-  stripeRefundId        String?       @map("stripe_refund_id")
-  stripeDisputeId       String?       @map("stripe_dispute_id")
-  disputeStatus         String?       @map("dispute_status")
-  createdAt             DateTime      @default(now()) @map("created_at")
-  updatedAt             DateTime      @updatedAt @map("updated_at")
+  refundedAmountCents   Int?           @map("refunded_amount_cents")
+  stripeRefundId        String?        @map("stripe_refund_id")
+  stripeDisputeId       String?        @map("stripe_dispute_id")
+  disputeStatus         String?        @map("dispute_status")
+  createdAt             DateTime       @default(now()) @map("created_at")
+  updatedAt             DateTime       @updatedAt @map("updated_at")
 
   // Relations
   booking Booking @relation(fields: [bookingId], references: [id])
@@ -1439,25 +1439,25 @@ model JobCrew {
   //    JobCrew stays THE assignment record; these fill the gaps Stage 5 needs
   //    without a competing table. All nullable/defaulted so existing rows read
   //    cleanly and Stage 4 closeout reads are unaffected.
-  offeredAt          DateTime? @map("offered_at")
+  offeredAt             DateTime? @map("offered_at")
   /// When the worker acknowledged (accepted). Distinct from acceptedAt only so a
   /// re-request after a material change can be tracked without losing the first.
-  acknowledgedAt     DateTime? @map("acknowledged_at")
+  acknowledgedAt        DateTime? @map("acknowledged_at")
   /// Set when a material schedule change invalidates a prior acknowledgment; the
   /// worker must acknowledge again. Cleared on re-acknowledgment.
   acknowledgmentStaleAt DateTime? @map("acknowledgment_stale_at")
-  declineReason      String?   @map("decline_reason")
-  removedAt          DateTime? @map("removed_at")
-  removalReason      String?   @map("removal_reason")
-  completedAt        DateTime? @map("completed_at")
-  noShowAt           DateTime? @map("no_show_at")
+  declineReason         String?   @map("decline_reason")
+  removedAt             DateTime? @map("removed_at")
+  removalReason         String?   @map("removal_reason")
+  completedAt           DateTime? @map("completed_at")
+  noShowAt              DateTime? @map("no_show_at")
   /// When this worker should ARRIVE — may differ from the job's start.
-  reportTime         DateTime? @map("report_time")
+  reportTime            DateTime? @map("report_time")
   /// Explicit driver designation. Not inferred from free text or role alone.
-  isDriver           Boolean   @default(false) @map("is_driver")
+  isDriver              Boolean   @default(false) @map("is_driver")
   /// Notes the WORKER may see, kept apart from privateAdminNotes.
-  workerVisibleNotes String?   @map("worker_visible_notes")
-  privateAdminNotes  String?   @map("private_admin_notes")
+  workerVisibleNotes    String?   @map("worker_visible_notes")
+  privateAdminNotes     String?   @map("private_admin_notes")
 
   // ── Scheduled time ──
   scheduledStartAt       DateTime? @map("scheduled_start_at")
@@ -1624,19 +1624,19 @@ model DayBlock {
 /// stored `timezone`, so comparisons are explicit rather than string-parsed.
 /// Multiple rows per (user, dayOfWeek) express multiple blocks in a day.
 model AvailabilityRule {
-  id          String   @id @default(cuid())
-  userId      String   @map("user_id")
-  dayOfWeek   Int      @map("day_of_week") // 0 = Sunday … 6 = Saturday
-  startMinute Int      @map("start_minute") // minutes from midnight, local
-  endMinute   Int      @map("end_minute")
-  timezone    String   @default("America/New_York")
+  id            String    @id @default(cuid())
+  userId        String    @map("user_id")
+  dayOfWeek     Int       @map("day_of_week") // 0 = Sunday … 6 = Saturday
+  startMinute   Int       @map("start_minute") // minutes from midnight, local
+  endMinute     Int       @map("end_minute")
+  timezone      String    @default("America/New_York")
   effectiveFrom DateTime? @map("effective_from") @db.Date
   effectiveTo   DateTime? @map("effective_to") @db.Date
-  active      Boolean  @default(true)
-  notes       String?
-  createdById String?  @map("created_by_id")
-  createdAt   DateTime @default(now()) @map("created_at")
-  updatedAt   DateTime @updatedAt @map("updated_at")
+  active        Boolean   @default(true)
+  notes         String?
+  createdById   String?   @map("created_by_id")
+  createdAt     DateTime  @default(now()) @map("created_at")
+  updatedAt     DateTime  @updatedAt @map("updated_at")
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
@@ -1676,28 +1676,28 @@ model JobStaffingRequirement {
   requiresLead     Boolean     @default(true) @map("requires_lead")
   requiredSkills   CrewSkill[] @default([]) @map("required_skills")
 
-  estimatedStartAt DateTime? @map("estimated_start_at")
-  estimatedEndAt   DateTime? @map("estimated_end_at")
-  reportTime       DateTime? @map("report_time")
-  expectedBreakMinutes Int?  @map("expected_break_minutes")
-  additionalStops  Int       @default(0) @map("additional_stops")
+  estimatedStartAt     DateTime? @map("estimated_start_at")
+  estimatedEndAt       DateTime? @map("estimated_end_at")
+  reportTime           DateTime? @map("report_time")
+  expectedBreakMinutes Int?      @map("expected_break_minutes")
+  additionalStops      Int       @default(0) @map("additional_stops")
 
   // Job characteristics — inform staffing and pay, never the customer price.
-  hasStairs           Boolean @default(false) @map("has_stairs")
-  hasElevator         Boolean @default(false) @map("has_elevator")
-  longCarry           Boolean @default(false) @map("long_carry")
-  heavyItems          Boolean @default(false) @map("heavy_items")
-  packing             Boolean @default(false)
-  assembly            Boolean @default(false)
+  hasStairs             Boolean @default(false) @map("has_stairs")
+  hasElevator           Boolean @default(false) @map("has_elevator")
+  longCarry             Boolean @default(false) @map("long_carry")
+  heavyItems            Boolean @default(false) @map("heavy_items")
+  packing               Boolean @default(false)
+  assembly              Boolean @default(false)
   customerProvidedTruck Boolean @default(false) @map("customer_provided_truck")
-  rentalTruckPickup   Boolean @default(false) @map("rental_truck_pickup")
-  drivingRequired     Boolean @default(true) @map("driving_required")
-  outOfState          Boolean @default(false) @map("out_of_state")
+  rentalTruckPickup     Boolean @default(false) @map("rental_truck_pickup")
+  drivingRequired       Boolean @default(true) @map("driving_required")
+  outOfState            Boolean @default(false) @map("out_of_state")
 
-  loadingLocation   String? @map("loading_location")
-  unloadingLocation String? @map("unloading_location")
+  loadingLocation    String? @map("loading_location")
+  unloadingLocation  String? @map("unloading_location")
   workerInstructions String? @map("worker_instructions")
-  privateNotes      String? @map("private_notes")
+  privateNotes       String? @map("private_notes")
 
   createdById String?  @map("created_by_id")
   updatedById String?  @map("updated_by_id")
@@ -1712,26 +1712,26 @@ model JobStaffingRequirement {
 /// A pending crew invitation. The token is the acceptance credential; the actual
 /// auth account is created by the existing setup flow (see the invitation docs).
 model CrewInvitation {
-  id             String           @id @default(cuid())
-  email          String
-  name           String
-  phone          String?
-  role           UserRole         @default(CREW)
-  workerType     CrewWorkerType   @default(EMPLOYEE) @map("worker_type")
-  initialRateCents Int?           @map("initial_rate_cents")
-  initialSkills  CrewSkill[]      @default([]) @map("initial_skills")
-  canDrive       Boolean          @default(false) @map("can_drive")
-  token          String           @unique
-  status         InvitationStatus @default(PENDING)
-  expiresAt      DateTime         @map("expires_at")
-  invitedById    String           @map("invited_by_id")
-  acceptedByUserId String?        @map("accepted_by_user_id")
-  acceptedAt     DateTime?        @map("accepted_at")
-  cancelledAt    DateTime?        @map("cancelled_at")
-  cancelledById  String?          @map("cancelled_by_id")
-  resentAt       DateTime?        @map("resent_at")
-  resendCount    Int              @default(0) @map("resend_count")
-  createdAt      DateTime         @default(now()) @map("created_at")
+  id               String           @id @default(cuid())
+  email            String
+  name             String
+  phone            String?
+  role             UserRole         @default(CREW)
+  workerType       CrewWorkerType   @default(EMPLOYEE) @map("worker_type")
+  initialRateCents Int?             @map("initial_rate_cents")
+  initialSkills    CrewSkill[]      @default([]) @map("initial_skills")
+  canDrive         Boolean          @default(false) @map("can_drive")
+  token            String           @unique
+  status           InvitationStatus @default(PENDING)
+  expiresAt        DateTime         @map("expires_at")
+  invitedById      String           @map("invited_by_id")
+  acceptedByUserId String?          @map("accepted_by_user_id")
+  acceptedAt       DateTime?        @map("accepted_at")
+  cancelledAt      DateTime?        @map("cancelled_at")
+  cancelledById    String?          @map("cancelled_by_id")
+  resentAt         DateTime?        @map("resent_at")
+  resendCount      Int              @default(0) @map("resend_count")
+  createdAt        DateTime         @default(now()) @map("created_at")
 
   @@index([email])
   @@index([status])
@@ -1741,15 +1741,15 @@ model CrewInvitation {
 /// A documented override of a scheduling conflict. Records exactly what was
 /// waved through and by whom, so an overridden warning is auditable forever.
 model ConflictOverride {
-  id            String   @id @default(cuid())
-  jobId         String   @map("job_id")
-  jobCrewId     String?  @map("job_crew_id")
-  userId        String?  @map("user_id") // the worker the conflict was about
-  code          String
-  details       Json?
-  reason        String
-  overriddenById String  @map("overridden_by_id")
-  createdAt     DateTime @default(now()) @map("created_at")
+  id             String   @id @default(cuid())
+  jobId          String   @map("job_id")
+  jobCrewId      String?  @map("job_crew_id")
+  userId         String?  @map("user_id") // the worker the conflict was about
+  code           String
+  details        Json?
+  reason         String
+  overriddenById String   @map("overridden_by_id")
+  createdAt      DateTime @default(now()) @map("created_at")
 
   @@index([jobId])
   @@index([jobCrewId])
@@ -1952,18 +1952,18 @@ model Task {
 /// by the positive-review path and the day-5 fallback, so the customer gets at
 /// most ONE referral ask per booking.
 model FollowUpLedger {
-  id        String   @id @default(cuid())
-  bookingId String   @map("booking_id")
-  type      String // review-request | review-reminder | repeat-reminder | referral-ask
-  channel   String   @default("both") // sms | email | both
+  id              String    @id @default(cuid())
+  bookingId       String    @map("booking_id")
+  type            String // review-request | review-reminder | repeat-reminder | referral-ask
+  channel         String    @default("both") // sms | email | both
   /// OVERALL state (finding EMAIL-P1-10). This used to default to "sent" and be
   /// written BEFORE either channel delivered, so the ledger — and every report
   /// built on it — claimed a delivery that may never have happened. An SMS
   /// merely ENQUEUED counted as sent. Queueing is not delivery.
   ///   planned | claimed | deferred | partially_delivered | delivered
   ///   | failed_retryable | failed_terminal | cancelled | skipped
-  status    String   @default("planned")
-  error     String?
+  status          String    @default("planned")
+  error           String?
   /// Per-channel truth. `both` no longer hides that one side failed, and a
   /// retry can target ONLY the failed channel instead of re-sending the one
   /// that succeeded.
@@ -1985,7 +1985,7 @@ model FollowUpLedger {
   createdAt       DateTime  @default(now()) @map("created_at")
   updatedAt       DateTime  @updatedAt @map("updated_at")
   /// Retained for back-compat with existing rows/readers.
-  sentAt    DateTime @default(now()) @map("sent_at")
+  sentAt          DateTime  @default(now()) @map("sent_at")
 
   booking Booking @relation(fields: [bookingId], references: [id])
 
@@ -2142,19 +2142,19 @@ model Lead {
   //    form's Step-1 email; ordinary CRM leads leave these null. ──
   // Booking-session id from the form (localStorage). PRIMARY dedup key so a
   // refresh / reopen within one active request updates the SAME lead.
-  bookingSessionId String? @map("booking_session_id")
+  bookingSessionId         String?        @map("booking_session_id")
   // Furthest booking step the visitor reached ("card1".."card5"/"submitted").
-  formStep         String? @map("form_step")
+  formStep                 String?        @map("form_step")
   // Partial-lead lifecycle (see LeadLifecycle). Null = ordinary CRM lead.
-  lifecycle        LeadLifecycle?
+  lifecycle                LeadLifecycle?
   // TRI-STATE promotional consent: null = never interacted, true = deliberate
   // opt-in, false = explicit withdrawal. Entering an email is NOT consent.
-  emailMarketingConsent   Boolean?  @map("email_marketing_consent")
-  marketingConsentAt      DateTime? @map("marketing_consent_at")
+  emailMarketingConsent    Boolean?       @map("email_marketing_consent")
+  marketingConsentAt       DateTime?      @map("marketing_consent_at")
   // Where consent was captured, e.g. "booking_step_1".
-  marketingConsentSource  String?   @map("marketing_consent_source")
+  marketingConsentSource   String?        @map("marketing_consent_source")
   // Disclosure/consent-text version shown when consent was given.
-  marketingConsentVersion String?   @map("marketing_consent_version")
+  marketingConsentVersion  String?        @map("marketing_consent_version")
   // ── WAS THE QUESTION EVEN ASKED? (incident fix 2026-08-25) ─────────────
   //  emailMarketingConsent is tri-state, but `null` was carrying TWO facts at
   //  once: "this form has no checkbox" and "the checkbox was on screen and the
@@ -2167,7 +2167,7 @@ model Lead {
   //  NULL  = unknown; the record predates the client reporting it. NOT
   //          rewritten, because guessing which of the two it was is exactly
   //          the mistake being fixed.
-  marketingConsentPrompted Boolean? @map("marketing_consent_prompted")
+  marketingConsentPrompted Boolean?       @map("marketing_consent_prompted")
 
   // ── THE CUSTOMER'S OWN "HOW DID YOU HEAR ABOUT US?" ANSWER ─────────────
   //  Booking has carried `found_us` since the beginning; Lead never did, so
@@ -2177,7 +2177,7 @@ model Lead {
   //  column, which records the marketing CHANNEL our own tracking observed.
   //  Collapsing the two is what let a column default (`OTHER`) be printed as
   //  though the customer had chosen "Other".
-  foundUs        String?  @map("found_us")
+  foundUs         String?  @map("found_us")
   //  TRUE  = the question was actually put in front of them.
   //  FALSE = they had not reached that step of the form yet.
   //  NULL  = unknown (legacy, or a surface that never reports it).
@@ -2239,34 +2239,34 @@ model Lead {
   //  mileage. `quoteMileageStatus` says so out loud instead of letting a
   //  subtotal masquerade as a finished estimate.
   /// CENTS. The package price alone, before any truck line or mileage.
-  quoteBaseCents         Int?      @map("quote_base_cents")
+  quoteBaseCents         Int?     @map("quote_base_cents")
   /// CENTS. An APPROVED larger-truck upgrade. $0/absent for the truck the
   /// package already includes — that one is never charged.
-  quoteTruckCents        Int?      @map("quote_truck_cents")
+  quoteTruckCents        Int?     @map("quote_truck_cents")
   /// CENTS. base + truck. NOT a final price while mileage is pending.
-  quoteTotalCents        Int?      @map("quote_total_cents")
+  quoteTotalCents        Int?     @map("quote_total_cents")
   /// The truck the package price already covers ('10ft' | '15ft' | '26ft').
-  quoteIncludedTruck     String?   @map("quote_included_truck")
+  quoteIncludedTruck     String?  @map("quote_included_truck")
   /// 'pending' — the drive is not measured yet and is billed at $3 per routed
   /// mile; 'calculated' — a real routed figure is included in the total.
-  quoteMileageStatus     String?   @map("quote_mileage_status")
+  quoteMileageStatus     String?  @map("quote_mileage_status")
   /// The price book that produced the numbers above, e.g. '2026-08-22.2'.
-  quotePriceBookVersion  String?   @map("quote_price_book_version")
+  quotePriceBookVersion  String?  @map("quote_price_book_version")
   /// CENTS of routed-mileage actually billed. Set ONLY with
   /// quoteMileageStatus='calculated' — a total that includes a drive must be
   /// able to explain it, or it is just a bigger unexplained number.
-  quoteMileageCents      Int?      @map("quote_mileage_cents")
+  quoteMileageCents      Int?     @map("quote_mileage_cents")
   /// The whole miles that produced quoteMileageCents (rounded up, per the
   /// published rule). Stored beside the money so the arithmetic is checkable.
-  quoteBillableMiles     Int?      @map("quote_billable_miles")
+  quoteBillableMiles     Int?     @map("quote_billable_miles")
   /// Server-calculated: this quote may not be auto-confirmed.
-  quoteRequiresReview    Boolean?  @map("quote_requires_review")
+  quoteRequiresReview    Boolean? @map("quote_requires_review")
   /// WHY, one reason per line. Shown on the owner's card and alert — the flag
   /// alone told nobody what to look at.
-  quoteReviewReasons     String?   @map("quote_review_reasons")
+  quoteReviewReasons     String?  @map("quote_review_reasons")
   /// Send count. Also the `version` in the guard's idempotency key, so an owner
   /// resend is a NEW key rather than a refused duplicate.
-  quoteConfirmationCount       Int       @default(0) @map("quote_confirmation_count")
+  quoteConfirmationCount Int      @default(0) @map("quote_confirmation_count")
 
   /// Fingerprint of the facts that justify re-alerting the owner (move date,
   /// estimate, contact preference, first phone). Unchanged fingerprint = the
@@ -2277,12 +2277,12 @@ model Lead {
   alertStatus      String?   @map("alert_status")
   alertDeliveredAt DateTime? @map("alert_delivered_at")
 
-  contactedAt    DateTime? @map("contacted_at")
-  quotedAt       DateTime? @map("quoted_at")
-  bookedAt       DateTime? @map("booked_at")
-  lostAt         DateTime? @map("lost_at")
-  createdAt      DateTime  @default(now()) @map("created_at")
-  updatedAt      DateTime  @updatedAt @map("updated_at")
+  contactedAt DateTime? @map("contacted_at")
+  quotedAt    DateTime? @map("quoted_at")
+  bookedAt    DateTime? @map("booked_at")
+  lostAt      DateTime? @map("lost_at")
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
 
   @@index([status])
   @@index([source])
@@ -2771,7 +2771,7 @@ model MarketingCampaign {
   createdAt     DateTime @default(now()) @map("created_at")
   updatedAt     DateTime @updatedAt @map("updated_at")
 
-  spend MarketingSpend[]
+  spend       MarketingSpend[]
   // ── Email campaign extension (owner spec 2026-07-21) ──
   // The email specifics live in a 1:1 side table rather than as more nullable
   // columns here: a door hanger has no template, audience or send window, and
@@ -2969,11 +2969,11 @@ model EmailSend {
   /// exclusive and arrive OUT OF ORDER: a message can be delivered and then
   /// generate a complaint, and a late `delivered` webhook must never erase a
   /// recorded bounce. Precedence lives in `applyDeliveryState()`.
-  deliveredAt   DateTime? @map("delivered_at")
-  bouncedAt     DateTime? @map("bounced_at")
-  complainedAt  DateTime? @map("complained_at")
+  deliveredAt    DateTime? @map("delivered_at")
+  bouncedAt      DateTime? @map("bounced_at")
+  complainedAt   DateTime? @map("complained_at")
   /// Bounce sub-type / complaint feedback type, for triage.
-  deliveryDetail String?  @map("delivery_detail")
+  deliveryDetail String?   @map("delivery_detail")
   createdAt      DateTime  @default(now()) @map("created_at")
   updatedAt      DateTime  @updatedAt @map("updated_at")
 
@@ -2998,7 +2998,7 @@ model EmailSend {
   /// already made for sends in flight.
   journeyConfigVersion Int? @map("journey_config_version")
 
-  events   EmailEvent[]
+  events      EmailEvent[]
   campaignRef MarketingCampaign? @relation(fields: [campaignId], references: [id], onDelete: SetNull)
 
   @@index([email])
@@ -3083,16 +3083,16 @@ model EmailEvent {
 /// A saved, VALIDATED audience definition. Stores approved filter keys and
 /// values only — never raw SQL, never a Prisma fragment, never JavaScript.
 model EmailAudience {
-  id          String @id @default(cuid())
-  name        String @unique
-  description String?
+  id               String    @id @default(cuid())
+  name             String    @unique
+  description      String?
   /// { segment: <approved key>, filters: { …approved keys only… } }
   /// Validated by src/lib/email-audience.ts on every write AND every read.
-  definition  Json
+  definition       Json
   /// Cached from the last preview. Advisory only — the real audience is ALWAYS
   /// recomputed at dispatch. A preview is not authorization to send.
-  lastPreviewCount   Int?      @map("last_preview_count")
-  lastPreviewAt      DateTime? @map("last_preview_at")
+  lastPreviewCount Int?      @map("last_preview_count")
+  lastPreviewAt    DateTime? @map("last_preview_at")
 
   createdById   String?  @map("created_by_id")
   createdByName String?  @map("created_by_name")
@@ -3126,14 +3126,14 @@ model EmailCampaignConfig {
   approvedAt     DateTime? @map("approved_at")
 
   // ── Attribution (mirrors the Stage 3 fields a booking carries) ──
-  utmSource   String? @map("utm_source")
-  utmMedium   String? @map("utm_medium")
-  utmCampaign String? @map("utm_campaign")
-  utmContent  String? @map("utm_content")
+  utmSource    String? @map("utm_source")
+  utmMedium    String? @map("utm_medium")
+  utmCampaign  String? @map("utm_campaign")
+  utmContent   String? @map("utm_content")
   discountCode String? @map("discount_code")
 
   /// Result of the last validation run: { ok, errors[], warnings[], checkedAt }.
-  validation Json?
+  validation         Json?
   /// Why a campaign is CANCELLED or FAILED, in words.
   /// Hash of the SEND-AFFECTING configuration at the moment of approval
   /// (owner spec 2026-07-26). Approval was previously invalidated by comparing
@@ -3147,15 +3147,15 @@ model EmailCampaignConfig {
   /// NULL on rows approved before this column existed — those fall back to the
   /// old timestamp rule, which is conservative (it asks for re-approval).
   approvedConfigHash String? @map("approved_config_hash")
-  statusNote String? @map("status_note")
+  statusNote         String? @map("status_note")
 
-  dispatchedAt DateTime? @map("dispatched_at")
+  dispatchedAt    DateTime? @map("dispatched_at")
   /// How many recipients were actually claimed at dispatch.
-  dispatchedCount Int? @map("dispatched_count")
+  dispatchedCount Int?      @map("dispatched_count")
 
-  createdById   String?  @map("created_by_id")
-  createdAt     DateTime @default(now()) @map("created_at")
-  updatedAt     DateTime @updatedAt @map("updated_at")
+  createdById String?  @map("created_by_id")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
 
   campaign MarketingCampaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
   audience EmailAudience?    @relation(fields: [audienceId], references: [id], onDelete: SetNull)
@@ -3171,8 +3171,8 @@ model EmailCampaignConfig {
 /// saved change and is stamped onto sends scheduled under it, so editing a
 /// delay never rewrites a decision already made.
 model EmailJourneyConfig {
-  id         String @id @default(cuid())
-  journeyKey String @unique @map("journey_key")
+  id         String  @id @default(cuid())
+  journeyKey String  @unique @map("journey_key")
   enabled    Boolean @default(true)
   version    Int     @default(1)
 
@@ -3192,13 +3192,13 @@ model EmailJourneyConfig {
 /// rules. Definitions are VERSIONED and immutable once used; an automation in
 /// flight keeps the version that scheduled it.
 model EmailAutomation {
-  id          String @id @default(cuid())
-  name        String @unique
-  description String?
+  id            String  @id @default(cuid())
+  name          String  @unique
+  description   String?
   /// DRAFT | VALIDATING | TEST | ACTIVE | PAUSED | ARCHIVED
-  status      String @default("DRAFT")
+  status        String  @default("DRAFT")
   /// Points at the version currently in force.
-  activeVersion Int? @map("active_version")
+  activeVersion Int?    @map("active_version")
 
   createdById   String?  @map("created_by_id")
   createdByName String?  @map("created_by_name")
@@ -3270,10 +3270,10 @@ model EmailCampaignRun {
   totalRecipients Int @default(0) @map("total_recipients")
   /// Denormalized progress counters — recomputed from recipient rows by the
   /// finalizer, never incremented blindly.
-  sentCount      Int @default(0) @map("sent_count")
-  skippedCount   Int @default(0) @map("skipped_count")
-  failedCount    Int @default(0) @map("failed_count")
-  cancelledCount Int @default(0) @map("cancelled_count")
+  sentCount       Int @default(0) @map("sent_count")
+  skippedCount    Int @default(0) @map("skipped_count")
+  failedCount     Int @default(0) @map("failed_count")
+  cancelledCount  Int @default(0) @map("cancelled_count")
 
   /// Why a FAILED run failed, in words.
   error String?
@@ -3323,7 +3323,7 @@ model EmailCampaignRecipient {
   /// Which bounded batch this recipient was queued in.
   batchIndex Int? @map("batch_index")
   /// Orchestration attempts (batch passes that reached this row).
-  attempts Int @default(0)
+  attempts   Int  @default(0)
 
   /// The canonical delivery ledger row, once a send was attempted.
   /// Opens/clicks/bounces live THERE (EmailSend → EmailEvent), not here.
@@ -3353,7 +3353,7 @@ model EmailAutomationEnrollment {
   automationId String @map("automation_id")
   /// The IMMUTABLE version this enrollment runs under. An edit that writes a
   /// new version never rewrites an enrollment already in flight.
-  version Int
+  version      Int
 
   /// `automation:<automationId>:v<version>:<subjectKey>` — see
   /// src/lib/email-automation-runtime.ts enrollmentDedupeKey().
@@ -3365,23 +3365,23 @@ model EmailAutomationEnrollment {
   leadId      String? @map("lead_id")
   customerId  String? @map("customer_id")
   /// Normalized recipient address at enrollment time.
-  email String
+  email       String
 
   /// The APPROVED_TRIGGERS key that fired this enrollment.
-  trigger String
+  trigger         String
   /// What was true when the trigger fired (ids + the values that qualified).
-  triggerSnapshot Json? @map("trigger_snapshot")
+  triggerSnapshot Json?  @map("trigger_snapshot")
 
   /// ACTIVE | COMPLETED | STOPPED | FAILED
-  status String @default("ACTIVE")
+  status     String  @default("ACTIVE")
   /// Machine-readable stop reason ('lead_converted', 'unsubscribed', …).
   stopReason String? @map("stop_reason")
 
   /// Index of the NEXT stage to execute (0-based).
-  currentStage Int @default(0) @map("current_stage")
+  currentStage Int       @default(0) @map("current_stage")
   /// When the next stage is due. Anchored to enrolledAt + stage delay, so a
   /// worker restart can never compress or stretch the sequence.
-  nextRunAt DateTime? @map("next_run_at")
+  nextRunAt    DateTime? @map("next_run_at")
 
   /// Per-stage execution history: [{ stage, key, at, outcome, reason }].
   history Json?
@@ -3446,13 +3446,13 @@ model EmailAgentSettings {
   //    off the deterministic checks, and pausing dispatch must not require
   //    disabling the agent that noticed the problem.
   /// false = deterministic checks still run; no model is ever called.
-  aiEnabled Boolean @default(true) @map("ai_enabled")
+  aiEnabled          Boolean @default(true) @map("ai_enabled")
   /// false = even in safe_auto, no corrective tool executes.
   autoActionsEnabled Boolean @default(true) @map("auto_actions_enabled")
   /// false = no Discord alerts at all (deterministic checks still record).
-  alertsEnabled Boolean @default(true) @map("alerts_enabled")
+  alertsEnabled      Boolean @default(true) @map("alerts_enabled")
   /// false = warnings alert individually instead of being digested.
-  digestWarnings Boolean @default(true) @map("digest_warnings")
+  digestWarnings     Boolean @default(true) @map("digest_warnings")
 
   /// THE GLOBAL EMAIL KILL SWITCH. Enforced inside the dispatch service.
   marketingDispatchPaused Boolean   @default(false) @map("marketing_dispatch_paused")
@@ -3465,15 +3465,15 @@ model EmailAgentSettings {
   maxAutoActionsPerRun Int @default(3) @map("max_auto_actions_per_run")
   /// Stage 2 recipient ceiling the checks compare against. The agent may never
   /// raise this itself — the tool that would is classified forbidden.
-  stageRecipientLimit Int @default(50) @map("stage_recipient_limit")
-  intervalMinutes     Int @default(5) @map("interval_minutes")
-  memoryRetentionDays Int @default(365) @map("memory_retention_days")
+  stageRecipientLimit  Int @default(50) @map("stage_recipient_limit")
+  intervalMinutes      Int @default(5) @map("interval_minutes")
+  memoryRetentionDays  Int @default(365) @map("memory_retention_days")
 
   // -- AI BUDGET (owner spec 2026-07-28) --------------------------------
   // Hard ceilings, enforced atomically against EmailAgentModelCall so two
   // Railway containers cannot each spend the same remaining dollar. The AI
   // may never raise these: no tool writes this block at all.
-  maxModelCallsPerCycle Int   @default(2)  @map("max_model_calls_per_cycle")
+  maxModelCallsPerCycle Int   @default(2) @map("max_model_calls_per_cycle")
   maxModelCallsPerDay   Int   @default(25) @map("max_model_calls_per_day")
   maxTokensPerDay       Int   @default(150000) @map("max_tokens_per_day")
   maxTokensPerMonth     Int   @default(3000000) @map("max_tokens_per_month")
@@ -3490,9 +3490,9 @@ model EmailAgentSettings {
   // -- SAFE-AUTO BLAST RADIUS (owner spec 2026-07-28) -------------------
   // Present and enforced even though safe_auto is off, because the time to
   // build a blast-radius limit is before somebody enables what it limits.
-  maxAutoActionsPerDay      Int @default(10) @map("max_auto_actions_per_day")
-  maxAutoActionsPerToolDay  Int @default(4)  @map("max_auto_actions_per_tool_day")
-  maxAutoActionsPerIncident Int @default(3)  @map("max_auto_actions_per_incident")
+  maxAutoActionsPerDay          Int @default(10) @map("max_auto_actions_per_day")
+  maxAutoActionsPerToolDay      Int @default(4) @map("max_auto_actions_per_tool_day")
+  maxAutoActionsPerIncident     Int @default(3) @map("max_auto_actions_per_incident")
   /// Minutes before the same tool may touch the same resource again.
   resourceActionCooldownMinutes Int @default(60) @map("resource_action_cooldown_minutes")
   /// Consecutive automatic-action failures before safe_auto downgrades itself.
@@ -3535,10 +3535,10 @@ model EmailAgentRun {
   /// scheduled | manual | dry_run
   trigger String @default("scheduled")
   /// running | completed | failed | skipped
-  status String @default("running")
+  status  String @default("running")
   /// The agent mode in force for THIS cycle, so a later mode change never
   /// rewrites what the cycle was allowed to do.
-  mode String
+  mode    String
 
   /// Aggregate verdict: healthy | warning | critical.
   overallStatus String? @map("overall_status")
@@ -3560,12 +3560,12 @@ model EmailAgentRun {
   aiInvoked       Boolean @default(false) @map("ai_invoked")
   aiSkippedReason String? @map("ai_skipped_reason")
   /// The owner-facing paragraph for this cycle.
-  summary String?
+  summary         String?
   /// Check ids that could not run, with their error text (never secrets).
-  checkErrors Json? @map("check_errors")
+  checkErrors     Json?   @map("check_errors")
   /// Redacted, bounded snapshot of the deterministic report for the admin.
-  report Json?
-  error  String?
+  report          Json?
+  error           String?
 
   durationMs  Int?      @map("duration_ms")
   startedAt   DateTime  @default(now()) @map("started_at")
@@ -3579,9 +3579,9 @@ model EmailAgentRun {
   // pointed at the production database describes the laptop, and without
   // these columns it is indistinguishable from a real production finding.
   /// production | staging | development | test
-  environment String @default("unknown")
+  environment  String  @default("unknown")
   /// worker | web | cli | test
-  service String @default("unknown")
+  service      String  @default("unknown")
   /// scheduled | manual | dry_run | test | api
   source       String  @default("scheduled")
   deploymentId String? @map("deployment_id")
@@ -3590,9 +3590,9 @@ model EmailAgentRun {
   /// the heartbeat cares that CHECKS ran, not that the AI answered.
   checksCompletedAt DateTime? @map("checks_completed_at")
   /// Investigations deliberately skipped, so "the AI did nothing" is explainable.
-  aiSkippedCount Int @default(0) @map("ai_skipped_count")
+  aiSkippedCount    Int       @default(0) @map("ai_skipped_count")
   /// Estimated USD spent by this cycle's model calls.
-  aiCostUsd Float @default(0) @map("ai_cost_usd")
+  aiCostUsd         Float     @default(0) @map("ai_cost_usd")
 
   findings   EmailAgentFinding[]
   actions    EmailAgentAction[]
@@ -3615,15 +3615,15 @@ model EmailAgentFinding {
   runId String @map("run_id")
 
   /// Stable identifier of the CHECK, e.g. "run.counters_mismatch".
-  checkId String @map("check_id")
+  checkId     String @map("check_id")
   /// Stable identity of THIS INSTANCE of the problem (check + subject).
   /// Deduplication and incident grouping both key on it.
   fingerprint String
   /// info | warning | critical
-  severity String
+  severity    String
   /// campaign | run | send | consent | suppression | webhook | provider |
   /// scheduler | infrastructure
-  category String
+  category    String
 
   title       String
   description String
@@ -3647,7 +3647,7 @@ model EmailAgentFinding {
   detectedAt      DateTime @default(now()) @map("detected_at")
   /// Provenance, denormalised from the run so a finding can be filtered
   /// without a join and can never be silently re-attributed.
-  environment String @default("unknown")
+  environment     String   @default("unknown")
 
   incidentId String?             @map("incident_id")
   incident   EmailAgentIncident? @relation(fields: [incidentId], references: [id], onDelete: SetNull)
@@ -3668,27 +3668,27 @@ model EmailAgentFinding {
 /// A problem, not an observation. Related findings collapse into one incident,
 /// so a provider outage is one alert rather than one alert per recipient.
 model EmailAgentIncident {
-  id String @id @default(cuid())
+  id        String @id @default(cuid())
   /// Human-quotable reference, e.g. INC-2026-00014.
   reference String @unique
 
   /// open | investigating | awaiting_approval | mitigated | resolved | ignored
-  status String @default("open")
+  status      String @default("open")
   /// info | warning | critical
-  severity String
-  category String
+  severity    String
+  category    String
   /// Grouping key. At most one OPEN incident per fingerprint, enforced in code
   /// by findOpenByFingerprint before create.
   fingerprint String
 
-  title String
+  title            String
   /// Plain English, for the owner.
-  summary String
+  summary          String
   /// The technical account, for whoever fixes it.
   technicalSummary String? @map("technical_summary")
   probableCause    String? @map("probable_cause")
   /// 0..1, from the AI investigator. Null when no model has looked at it.
-  confidence Float?
+  confidence       Float?
 
   /// Retained identifiers of everything this incident touches.
   affectedCampaignIds Json? @map("affected_campaign_ids")
@@ -3696,7 +3696,7 @@ model EmailAgentIncident {
   affectedSendIds     Json? @map("affected_send_ids")
   affectedEventIds    Json? @map("affected_event_ids")
   /// How many distinct subjects are affected — the escalation signal.
-  affectedCount Int @default(1) @map("affected_count")
+  affectedCount       Int   @default(1) @map("affected_count")
 
   /// The agent's current recommendation, validated and policy-classified.
   recommendation Json?
@@ -3714,7 +3714,7 @@ model EmailAgentIncident {
   /// Hash of the MATERIAL evidence: check ids, severity, affected resources
   /// and the evidence payloads. Detection count and timestamps are excluded
   /// on purpose -- "seen again" is not "changed".
-  evidenceHash String? @map("evidence_hash")
+  evidenceHash             String?   @map("evidence_hash")
   /// The evidence hash at the moment the AI last looked. Differing from
   /// `evidenceHash` means something materially changed since.
   investigatedEvidenceHash String?   @map("investigated_evidence_hash")
@@ -3722,7 +3722,7 @@ model EmailAgentIncident {
   /// Set by an operator asking for a fresh look; cleared once honoured.
   reinvestigateRequestedAt DateTime? @map("reinvestigate_requested_at")
   /// How many times a model has been spent on this incident.
-  investigationCount Int @default(0) @map("investigation_count")
+  investigationCount       Int       @default(0) @map("investigation_count")
 
   /// Provenance of the cycle that opened it.
   environment String @default("unknown")
@@ -3788,7 +3788,7 @@ model EmailAgentAction {
   id String @id @default(cuid())
 
   /// Allowlisted tool name. Anything not in the registry never reaches here.
-  toolName String @map("tool_name")
+  toolName  String @map("tool_name")
   /// Validated arguments, redacted.
   arguments Json
 
@@ -3808,8 +3808,8 @@ model EmailAgentAction {
   error       String?
 
   /// agent | owner:<userId>
-  actor     String  @default("agent")
-  actorName String? @map("actor_name")
+  actor      String  @default("agent")
+  actorName  String? @map("actor_name")
   /// Which provider recommended it, when one did.
   aiProvider String? @map("ai_provider")
   aiModel    String? @map("ai_model")
@@ -3871,12 +3871,12 @@ model EmailAgentApproval {
   arguments Json
 
   /// What is being asked, in the owner's language.
-  question String
-  reason   String
+  question       String
+  reason         String
   /// What will happen if approved.
   expectedEffect String @map("expected_effect")
   /// What could go wrong.
-  risk String
+  risk           String
 
   /// Retained identifiers of the resources the decision covers.
   campaignId String? @map("campaign_id")
@@ -3889,12 +3889,12 @@ model EmailAgentApproval {
   /// pending | approved | rejected | expired | invalidated | executed
   status String @default("pending")
 
-  decidedById   String?   @map("decided_by_id")
-  decidedByName String?   @map("decided_by_name")
-  decidedAt     DateTime? @map("decided_at")
-  decisionNote  String?   @map("decision_note")
+  decidedById        String?   @map("decided_by_id")
+  decidedByName      String?   @map("decided_by_name")
+  decidedAt          DateTime? @map("decided_at")
+  decisionNote       String?   @map("decision_note")
   /// Why an approval became unusable, when it did.
-  invalidationReason String? @map("invalidation_reason")
+  invalidationReason String?   @map("invalidation_reason")
 
   expiresAt DateTime @map("expires_at")
   createdAt DateTime @default(now()) @map("created_at")
@@ -3926,21 +3926,21 @@ model EmailAgentLesson {
   id         String @id @default(cuid())
   patternKey String @unique @map("pattern_key")
 
-  title String
+  title                String
   /// Observable symptoms, as an array of short strings.
-  symptoms      Json
-  probableCause String @map("probable_cause")
+  symptoms             Json
+  probableCause        String  @map("probable_cause")
   /// What actually fixed it, when something did.
   successfulResolution String? @map("successful_resolution")
   /// Things that were tried and did not work — the expensive knowledge.
-  failedApproaches Json @map("failed_approaches")
+  failedApproaches     Json    @map("failed_approaches")
 
   /// 0..1. Rises with each confirmation, falls when the lesson misleads.
-  confidence Float @default(0.5)
+  confidence     Float @default(0.5)
   /// How many incidents matched this pattern.
-  occurrences Int @default(1)
+  occurrences    Int   @default(1)
   /// Incidents that turned out to be false positives under this pattern.
-  falsePositives Int @default(0) @map("false_positives")
+  falsePositives Int   @default(0) @map("false_positives")
 
   /// Check ids this pattern has been observed under, for retrieval.
   relatedCheckIds Json? @map("related_check_ids")
@@ -3962,8 +3962,8 @@ model EmailAgentModelCall {
   id    String  @id @default(cuid())
   runId String? @map("run_id")
 
-  provider String
-  model    String
+  provider  String
+  model     String
   /// Provider request id, when the API returns one.
   requestId String? @map("request_id")
 
@@ -3973,36 +3973,36 @@ model EmailAgentModelCall {
   /// ok | invalid_output | error | timeout | disabled
   outcome String
   /// Short, redacted failure text.
-  error String?
+  error   String?
 
-  promptTokens     Int? @map("prompt_tokens")
-  completionTokens Int? @map("completion_tokens")
-  totalTokens      Int? @map("total_tokens")
-  latencyMs        Int? @map("latency_ms")
+  promptTokens      Int? @map("prompt_tokens")
+  completionTokens  Int? @map("completion_tokens")
+  totalTokens       Int? @map("total_tokens")
+  latencyMs         Int? @map("latency_ms")
   /// Tokens served from the provider's prompt cache. Billed far cheaper, and
   /// counted separately so the cost estimate is not silently wrong.
   cachedInputTokens Int? @map("cached_input_tokens")
   /// Reasoning tokens, where the provider reports them. They are billed as
   /// OUTPUT, and on a reasoning model they can exceed the visible answer.
-  reasoningTokens Int? @map("reasoning_tokens")
+  reasoningTokens   Int? @map("reasoning_tokens")
 
   /// Estimated cost in USD from the pricing table in code. An ESTIMATE -- the
   /// provider invoice is authoritative -- recorded so spend is visible without
   /// waiting for a bill.
-  estimatedCostUsd Float @default(0) @map("estimated_cost_usd")
+  estimatedCostUsd Float   @default(0) @map("estimated_cost_usd")
   /// Which pricing row produced that number, so an old call is never
   /// retroactively re-priced by a later table edit.
-  pricingVersion String? @map("pricing_version")
+  pricingVersion   String? @map("pricing_version")
 
   /// True when this call happened because the PRIMARY provider failed.
-  isFallback Boolean @default(false) @map("is_fallback")
+  isFallback     Boolean @default(false) @map("is_fallback")
   /// Why the fallback was used, in words.
   fallbackReason String? @map("fallback_reason")
 
   /// Provenance.
-  environment String @default("unknown")
+  environment String  @default("unknown")
   /// The incident this spend was for, so per-incident cost is answerable.
-  incidentId String? @map("incident_id")
+  incidentId  String? @map("incident_id")
 
   /// How many findings the model was shown, and what it recommended. Not the
   /// prompt itself.
@@ -4080,7 +4080,7 @@ model DepositRequest {
 
   /// The accepted quote total, in cents, when it is known. Display only —
   /// nothing recalculates a quote from it.
-  quoteTotalCents Int? @map("quote_total_cents")
+  quoteTotalCents    Int? @map("quote_total_cents")
   /// The unpaid balance at the moment the link was created, in cents. This is
   /// what "remaining balance after payment" is derived from, so the page cannot
   /// drift as other payments land. Null when it is genuinely unknown, in which
@@ -4102,31 +4102,31 @@ model DepositRequest {
 
   /// CUSTOMER-FACING headline for the job, one short line.
   /// e.g. "Labor-Only Move - 2 Movers". Rendered on the public deposit page.
-  serviceSummary String?   @map("service_summary")
+  serviceSummary String?  @map("service_summary")
   /// CUSTOMER-FACING detail bullets, short and scannable, rendered as a list.
   /// e.g. ["Apartment next door", "15 stairs at pickup - 7 stairs at drop-off"].
   /// A LIST, not a paragraph, so the page can never grow a wall of text again.
   /// Modelled on Booking.reviewReasons (String[]), the existing precedent here.
-  moveDetails    String[]  @map("move_details")
+  moveDetails    String[] @map("move_details")
   /// CUSTOMER-FACING, and the one thing on the page they must ACT on:
   /// "Customer to provide all necessary hardware/screws." One short line, kept
   /// out of `moveDetails` because a to-do buried in a list of facts gets
   /// skimmed past and then argued about on move day.
-  customerNote   String?   @map("customer_note")
+  customerNote   String?  @map("customer_note")
   /// PRIVATE. The crew/dispatch note. NEVER selected by the public projection
   /// in deposit-links.ts, and there is no code path that copies it into any
   /// customer-facing column.
-  internalNote   String?   @map("internal_note")
+  internalNote   String?  @map("internal_note")
 
   /// THE MOVE DATE, as a CALENDAR DATE — stored anchored at 12:00 UTC of that
   /// day, never as an arbitrary instant. See src/lib/move-date.ts for why:
   /// a date-only value written with `new Date("2026-08-22")` lands on
   /// 00:00:00.000Z and reads back a day early in America/New_York.
-  moveDate       DateTime? @map("move_date")
+  moveDate        DateTime? @map("move_date")
   /// The move's start time as MINUTES AFTER MIDNIGHT EASTERN (0-1439), or null
   /// when no time is known. Deliberately NOT folded into `moveDate`: a time
   /// that never enters a Date can never be shifted by a timezone or by DST.
-  moveTimeMinutes Int?     @map("move_time_minutes")
+  moveTimeMinutes Int?      @map("move_time_minutes")
 
   status    DepositRequestStatus @default(ACTIVE)
   expiresAt DateTime?            @map("expires_at")
@@ -4154,17 +4154,17 @@ model DepositRequest {
   createdById   String? @map("created_by_id")
   createdByName String? @map("created_by_name")
 
-  discordStatus      DepositNotifyStatus @default(NOT_APPLICABLE) @map("discord_status")
-  discordNotifiedAt  DateTime?           @map("discord_notified_at")
-  discordRetryCount  Int                 @default(0) @map("discord_retry_count")
+  discordStatus     DepositNotifyStatus @default(NOT_APPLICABLE) @map("discord_status")
+  discordNotifiedAt DateTime?           @map("discord_notified_at")
+  discordRetryCount Int                 @default(0) @map("discord_retry_count")
   /// Claim stamp for the exactly-once delivery lock. A SENDING row older than
   /// the stale window can be re-claimed, so a crashed worker cannot wedge a
   /// notification forever.
-  discordClaimedAt   DateTime?           @map("discord_claimed_at")
-  discordMessageId   String?             @map("discord_message_id")
+  discordClaimedAt  DateTime?           @map("discord_claimed_at")
+  discordMessageId  String?             @map("discord_message_id")
   /// Last failure reason, for the admin list. Never contains a webhook URL,
   /// a token or any Stripe secret.
-  discordError       String?             @map("discord_error")
+  discordError      String?             @map("discord_error")
 
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")

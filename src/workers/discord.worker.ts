@@ -50,27 +50,23 @@ async function processDiscordJob(job: Job<DiscordJobData>): Promise<void> {
     //  'lead-created' case below logs a failure and returns normally, which is
     //  exactly why its attempts: 5 never fired.
     case 'lead-notify': {
-      const {
-        claimNotification, beginProviderAttempt, recordSent, recordFailure,
-      } = await import('../lib/lead-notification-outbox')
+      //  DELEGATES to the SAME function the integration tests drive. Nothing
+      //  about this job's behaviour lives in the worker file any more, so a
+      //  test cannot pass against a clone while production does something else.
+      const { processLeadNotification } = await import('../lib/lead-notification-processor')
+      const { deliverLeadNotice } = await import('../lib/lead-notification-transport')
       const dedupeKey = String((payload as { dedupeKey?: string })?.dedupeKey ?? '')
       if (!dedupeKey) return
-      const claim = await claimNotification(dedupeKey)
-      //  Already sent, already claimed by another worker, terminal, or not yet
-      //  due. Every one of those means "not mine" — never a second message.
-      if (!claim) return
-
-      const { prisma } = await import('../lib/db')
-      const lead = await prisma.lead.findUnique({ where: { id: claim.leadId } })
-      if (!lead) { await recordSent(dedupeKey); return }
-
-      const { notifyNewLead, toLeadAlertInput } = await import('../lib/lead-alert')
-      await beginProviderAttempt(dedupeKey)
-      const res = await notifyNewLead(toLeadAlertInput(lead as never))
-      if (res.delivered) { await recordSent(dedupeKey); return }
-      const outcome = await recordFailure(dedupeKey, res.reason ?? 'not delivered', null)
-      //  THROW, or BullMQ marks this complete and the retry budget is dead.
-      if (outcome.status !== 'failed_terminal') throw new Error('lead notice delivery failed; retry scheduled')
+      await processLeadNotification(dedupeKey, deliverLeadNotice, {
+        //  A job that arrived before its due time is put BACK on the queue with
+        //  the remaining delay rather than being silently dropped.
+        reschedule: async (dueAt) => {
+          const { discordQueue } = await import('../lib/queues')
+          const delay = Math.max(0, dueAt.getTime() - Date.now())
+          await discordQueue.remove(dedupeKey).catch(() => {})
+          await discordQueue.add('lead-notify', { dedupeKey }, { jobId: dedupeKey, delay })
+        },
+      })
       return
     }
 

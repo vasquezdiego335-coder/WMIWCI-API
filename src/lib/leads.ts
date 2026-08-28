@@ -477,9 +477,13 @@ function notifyOwnerOfNewLead(leadId: string, context: string): void {
       let durable = false
       try {
         const { recordLeadNotification, dedupeKeyFor } = await import('./lead-notification-outbox')
+        //  The event was already committed IN THE SAME TRANSACTION as the lead.
+        //  This call is now an idempotent no-op that simply returns the existing
+        //  row; it exists so a caller whose lead was created by some other path
+        //  still gets a durable event rather than silently none.
         const rec = await recordLeadNotification(leadId, 'lead_created')
         durable = true
-        if (rec.created) {
+        if (true) {
           //  The queue job is only a NUDGE — the truth is the row above. The
           //  jobId is the same deterministic key, so BullMQ dedupes too.
           const { discordQueue } = await import('./queues')
@@ -1471,8 +1475,35 @@ export function defaultPartialLeadDeps(): PartialLeadDeps {
           select: SELECT,
         })
       },
+      // ── ATOMIC: THE LEAD AND ITS OWNER NOTICE COMMIT TOGETHER ──────────
+      //  The notification event used to be written AFTER the lead had already
+      //  committed, from a detached async block. That left a real crash window:
+      //  a process killed in between produced a lead nobody would ever be told
+      //  about, and no sweeper could find it, because the row that represents
+      //  "the owner is owed a message" did not exist yet.
+      //
+      //  Both rows now land in ONE transaction. Either the customer's lead and
+      //  the promise to notify about it both exist, or neither does. Queue
+      //  publication happens strictly AFTER the commit (see
+      //  notifyOwnerOfNewLead) and is allowed to fail — the durable row is what
+      //  the sweeper re-drives.
+      //
+      //  The dedupe key is deterministic and UNIQUE, so this can never produce
+      //  a second event for the same lead state.
       async create(data) {
-        return prisma.lead.create({ data, select: { id: true, status: true } })
+        return prisma.$transaction(async (tx) => {
+          const lead = await tx.lead.create({ data, select: { id: true, status: true } })
+          await tx.leadNotification.create({
+            data: {
+              leadId: lead.id,
+              eventType: 'lead_created',
+              dedupeKey: `lead-notify:lead_created:${lead.id}`,
+              status: 'pending',
+              nextAttemptAt: new Date(),
+            },
+          })
+          return lead
+        })
       },
       async update(id, data) {
         return prisma.lead.update({ where: { id }, data, select: { id: true, status: true } })
