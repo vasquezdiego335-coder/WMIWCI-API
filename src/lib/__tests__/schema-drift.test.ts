@@ -28,6 +28,8 @@ import { PrismaClient } from '@prisma/client'
 
 const skip = process.env.DATABASE_URL ? false : 'set DATABASE_URL to a disposable PostgreSQL to run the schema-drift gate'
 const INDEX = 'crm_leads_open_booking_session_key'
+/** The statuses the partial predicate covers. Everything else is CLOSED. */
+const OPEN_STATUSES = ['NEW', 'CONTACTED', 'QUOTE_SENT', 'FOLLOW_UP']
 const MIGRATIONS = resolve(__dirname, '../../../prisma/migrations')
 
 let prisma: PrismaClient
@@ -74,13 +76,40 @@ test('it is UNIQUE and PARTIAL — not silently rebuilt as a plain index', { ski
     /WHERE [\s\S]*booking_session_id IS NOT NULL/i,
     'partial on a present session id',
   )
-  for (const status of ['NEW', 'CONTACTED', 'QUOTE_SENT', 'FOLLOW_UP']) {
+  for (const status of OPEN_STATUSES) {
     assert.ok(row.indexdef.includes(status), `the predicate still covers ${status}`)
   }
-  //  A CLOSED status must NOT be in the predicate, or a customer who came back
-  //  later could never be captured again.
-  for (const closed of ['WON', 'LOST']) {
-    assert.ok(!row.indexdef.includes(closed), `${closed} must stay OUTSIDE the predicate`)
+  //  ── A CLOSED STATUS MUST NOT BE IN THE PREDICATE ──────────────────────
+  //  ...or a customer who came back later could never be captured again.
+  //
+  //  THIS CHECK USED TO BE VACUOUS. It asserted the absence of `'WON'` and
+  //  `'LOST'`. `LeadStatus` is NEW | CONTACTED | QUOTE_SENT | FOLLOW_UP |
+  //  BOOKED | LOST — there is no `WON`, so half the loop could never fail, and
+  //  `BOOKED` (the status that means the customer actually converted) was never
+  //  checked at all. A returning customer is precisely the person whose second
+  //  lead would be refused if BOOKED were ever added to the predicate.
+  //
+  //  The closed set is now DERIVED from the schema rather than typed here, so a
+  //  status added to the enum later forces a decision instead of silently
+  //  falling outside both lists.
+  const enumBlock = /enum LeadStatus \{([^}]*)\}/.exec(
+    readFileSync(resolve(__dirname, '../../../prisma/schema.prisma'), 'utf8'),
+  )
+  assert.ok(enumBlock, 'the LeadStatus enum must be findable')
+  const allStatuses = enumBlock[1]
+    .split('\n')
+    .map((l) => l.trim())
+    .filter((l) => /^[A-Z_]+$/.test(l))
+  assert.ok(allStatuses.length >= 5, `expected the full enum, got ${allStatuses.join(',')}`)
+
+  const closed = allStatuses.filter((st) => !OPEN_STATUSES.includes(st))
+  assert.deepEqual(closed.sort(), ['BOOKED', 'LOST'], 'the closed statuses, derived from the schema')
+  for (const st of closed) {
+    assert.ok(
+      !row.indexdef.includes(st),
+      `${st} is a CLOSED status and must stay OUTSIDE the predicate — with it in, a ` +
+        `customer who came back after booking could never be captured again`,
+    )
   }
 })
 
