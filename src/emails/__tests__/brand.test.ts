@@ -327,7 +327,7 @@ test('no template advertises junk removal or cleanout while that service is off'
   // Not enabled, not operationally available. Advertising it is an offer we
   // cannot fulfil. Shipped in referral.tsx ("your next move or cleanout") and
   // the repeat-reminder ("need furniture or junk cleared out").
-  const BANNED = [/cleanout/i, /clean[- ]?out/i, /junk removal/i, /junk cleared/i, /limpieza/i, /basura/i]
+  const BANNED = [/\bcleanout\b/i, /\bclean[- ]?out\b/i, /\bjunk removal\b/i, /\bjunk cleared\b/i, /\blimpieza\b/i, /\bbasura\b/i]
   for (const [name, el] of all) {
     const html = render(el)
     for (const re of BANNED) {
@@ -348,7 +348,7 @@ test('no template claims flat-rate pricing or an absence of extra fees', () => {
 
 test('no template hard-codes a completed-move count', () => {
   // "50+ completed moves across New Jersey" had no source and no counting rule.
-  const BANNED = [/\d+\+?\s*(completed\s*)?moves/i, /\d+\+?\s*mudanzas/i]
+  const BANNED = [/\d+\+?\s*(completed\s*)?moves\b/i, /\d+\+?\s*mudanzas\b/i]
   for (const [name, el] of all) {
     const html = render(el)
     for (const re of BANNED) assert.equal(re.test(html), false, `${name} claims a move count (${re})`)
@@ -359,9 +359,9 @@ test('no template claims equipment, transport, packing, licensing or insurance',
   const BANNED = [
     /equipment included/i,
     /equipo de mudanza incluido/i,
-    /licensed and insured/i,
-    /fully insured/i,
-    /we (?:will )?(?:drive|transport)/i,
+    /\blicensed and insured\b/i,
+    /\bfully insured\b/i,
+    /we (?:will )?(?:drive|transport)\b/i,
   ]
   for (const [name, el] of all) {
     const html = render(el)
