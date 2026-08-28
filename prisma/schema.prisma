@@ -1280,7 +1280,8 @@ model Booking {
 model LeadNotification {
   id            String    @id @default(cuid())
   leadId        String    @map("lead_id")
-  /// 'lead_created' | 'lead_enriched'. One row per meaningful transition.
+  /// 'lead_created'. One row per meaningful transition. Only this one is
+  /// produced today; see LeadNotificationEvent for why nothing else is listed.
   eventType     String    @map("event_type")
   /// Deterministic identity: lead + transition. UNIQUE, so a duplicate enqueue
   /// is a no-op rather than a second owner message.

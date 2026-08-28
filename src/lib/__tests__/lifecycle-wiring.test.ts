@@ -65,8 +65,17 @@ test('BOOKING STEP 1: /api/leads/partial enrols a consented lead instead of doin
 })
 
 test('CONTACT: /api/contact enrols through the same Sequence B entry point', () => {
-  const src = code('app/api/contact/route.ts')
-  assert.match(src, /onLeadCaptured\(/)
+  //  The route now performs its effects through `contact-route-deps` — the same
+  //  pattern the quick quote uses below — so the chain is asserted in BOTH
+  //  halves rather than by one regex over the route. A seam that quietly stopped
+  //  pointing at `onLeadCaptured` would pass a route-only check forever.
+  const route = code('app/api/contact/route.ts')
+  assert.match(route, /deps\.nurture\(/, 'the route asks for enrolment')
+  assert.match(route, /if \(lead\) fireAndForget\(deps\.nurture/, 'and only for a lead that exists')
+
+  const seam = code('src/lib/contact-route-deps.ts')
+  assert.match(seam, /nurture:\s*\(leadId: string\)/, 'the seam declares it')
+  assert.match(seam, /onLeadCaptured\(leadId\)/, 'and production binds it to Sequence B')
 })
 
 test('TRACKER: /api/notify/lead enrols through the same Sequence B entry point', () => {

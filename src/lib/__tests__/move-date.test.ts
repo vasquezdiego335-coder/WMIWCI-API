@@ -457,3 +457,92 @@ test('null and invalid dates never throw and never invent a day', () => {
   assert.equal(anchorFromInstant(null), null)
   assert.equal(easternTimeMinutes(null), null)
 })
+
+// ════════════════════════════════════════════════════════════════════════
+//  CALENDAR-DAY RANGES (2026-08-28)
+//
+//  THE DEFECT: the admin lead list built its filter with
+//  `new Date(from + 'T00:00:00')` — no zone designator, so the string is parsed
+//  in the SERVER's local time. The server runs in UTC and the business runs in
+//  Eastern, so "from the 5th" began at 8 PM on the 4th: a lead captured on a
+//  weekday evening was filed under the previous day, and the owner's own
+//  date filter disagreed with the timestamps on the rows it returned.
+//
+//  The scheduling window had the confident version of the same mistake,
+//  `T00:00:00Z`, which ends the day at 8 PM Eastern and drops evening jobs.
+//
+//  And neither validated: `?from=lol` reached Prisma as an Invalid Date, which
+//  it rejects, so a mistyped URL returned a 500 from an admin page.
+// ════════════════════════════════════════════════════════════════════════
+import { easternDayStart, easternDayEndExclusive, easternDayRange } from '../move-date'
+
+test('a calendar day starts at midnight EASTERN, not midnight UTC', () => {
+  //  5 August 2026 is inside EDT (UTC-4), so midnight Eastern is 04:00 UTC.
+  assert.equal(easternDayStart('2026-08-05')?.toISOString(), '2026-08-05T04:00:00.000Z')
+  //  ...and it ends when the SIXTH begins in Eastern, not at 23:59:59Z.
+  assert.equal(easternDayEndExclusive('2026-08-05')?.toISOString(), '2026-08-06T04:00:00.000Z')
+})
+
+test('the boundary follows DST rather than a fixed offset', () => {
+  //  January is EST (UTC-5). A fixed -4 would put this an hour early.
+  assert.equal(easternDayStart('2026-01-15')?.toISOString(), '2026-01-15T05:00:00.000Z')
+  //  The spring-forward day itself is 23 hours long: 8 March 2026, EST -> EDT.
+  const start = easternDayStart('2026-03-08')!
+  const end = easternDayEndExclusive('2026-03-08')!
+  assert.equal((end.getTime() - start.getTime()) / 3_600_000, 23, 'a 23-hour day')
+  //  ...and the autumn day is 25.
+  const fStart = easternDayStart('2026-11-01')!
+  const fEnd = easternDayEndExclusive('2026-11-01')!
+  assert.equal((fEnd.getTime() - fStart.getTime()) / 3_600_000, 25, 'a 25-hour day')
+})
+
+test('an evening lead falls inside the day the owner would call it', () => {
+  //  8 PM Eastern on the 5th. Under the old server-local parse this instant
+  //  (00:00Z on the 6th) sorted into the SIXTH.
+  const evening = new Date('2026-08-06T00:00:00.000Z')
+  const r = easternDayRange('2026-08-05', '2026-08-05')!
+  assert.ok(evening >= r.gte!, 'not before the start of the 5th')
+  assert.ok(evening < r.lt!, 'and still inside the 5th')
+})
+
+test('the interval is half-open, so the final second of the range is not lost', () => {
+  const r = easternDayRange('2026-08-05', '2026-08-07')!
+  //  23:59:59.999 Eastern on the 7th — the instant an inclusive `lte 23:59:59`
+  //  silently excluded.
+  const lastMoment = new Date('2026-08-08T03:59:59.999Z')
+  assert.ok(lastMoment < r.lt!, 'included')
+  assert.ok(new Date('2026-08-08T04:00:00.000Z') >= r.lt!, 'and the next day is not')
+})
+
+test('month and year ends roll over without a special case', () => {
+  assert.equal(easternDayEndExclusive('2026-01-31')?.toISOString(), '2026-02-01T05:00:00.000Z')
+  assert.equal(easternDayEndExclusive('2026-12-31')?.toISOString(), '2027-01-01T05:00:00.000Z')
+  //  A leap day is a real day; the day after it is the 1st of March.
+  assert.equal(easternDayEndExclusive('2028-02-29')?.toISOString(), '2028-03-01T05:00:00.000Z')
+})
+
+test('an unreadable bound is DROPPED, never turned into an Invalid Date', () => {
+  for (const junk of ['lol', '', '2026-13-01', '2026-02-30', 'null', '2026/08/05', 42, null, undefined, {}]) {
+    assert.equal(easternDayStart(junk), null, `rejected: ${String(junk)}`)
+  }
+  //  A filter with one good bound keeps that bound and ignores the other.
+  const half = easternDayRange('2026-08-05', 'lol')!
+  assert.ok(half.gte instanceof Date)
+  assert.equal(half.lt, undefined)
+  //  Both unreadable -> no filter at all, so the page shows an unfiltered list
+  //  instead of an error.
+  assert.equal(easternDayRange('lol', 'nope'), null)
+  assert.equal(easternDayRange(), null)
+})
+
+test('a transposed range is read as a transposition, not as a request for nothing', () => {
+  const backwards = easternDayRange('2026-08-07', '2026-08-05')!
+  const forwards = easternDayRange('2026-08-05', '2026-08-07')!
+  assert.equal(backwards.gte?.toISOString(), forwards.gte?.toISOString())
+  assert.equal(backwards.lt?.toISOString(), forwards.lt?.toISOString())
+})
+
+test('a single-day range is one real day wide, not empty', () => {
+  const r = easternDayRange('2026-08-05', '2026-08-05')!
+  assert.equal((r.lt!.getTime() - r.gte!.getTime()) / 3_600_000, 24)
+})

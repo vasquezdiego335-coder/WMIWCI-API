@@ -450,3 +450,74 @@ export function wouldShiftDay(at: Date, timeZone: string = MOVE_TZ): boolean {
   if (!et) return false
   return utc.year !== et.year || utc.month !== et.month || utc.day !== et.day
 }
+
+// ════════════════════════════════════════════════════════════════════════
+//  CALENDAR-DAY RANGES — the one way to turn "from=2026-08-05&to=2026-08-07"
+//  into a filter over stored INSTANTS.
+//
+//  Every place that needed this built its own, and each got it wrong in its own
+//  way:
+//
+//   * `new Date(from + 'T00:00:00')` — no zone designator at all, so it is
+//     parsed in the SERVER's local time. The server runs in UTC, the business
+//     runs in Eastern, so "from the 5th" actually began at 8 PM on the 4th and
+//     a lead captured that evening was filed under the wrong day.
+//   * `new Date(\`${start}T00:00:00Z\`)` — explicitly UTC, which is the same
+//     mistake stated more confidently.
+//   * Neither validated. `?from=lol` produced an Invalid Date, which Prisma
+//     rejects, which turned a mistyped URL into a 500 on an admin page.
+//
+//  A calendar day is a WALL-CLOCK span in the business's timezone. Eastern is
+//  the only timezone this company operates in, and DST moves the boundary twice
+//  a year, so the conversion has to be DST-correct rather than a fixed offset.
+//
+//  HALF-OPEN, deliberately: `gte` start, `lt` the start of the NEXT day. An
+//  inclusive `lte 23:59:59` silently drops the final second of the range, and
+//  "the last second of the day" is exactly the kind of edge that is never
+//  noticed until a report disagrees with a screen.
+// ════════════════════════════════════════════════════════════════════════
+
+/** Midnight Eastern on a YYYY-MM-DD, as an instant. Null if not a real day. */
+export function easternDayStart(input: unknown): Date | null {
+  const day = parseCalendarDate(input)
+  if (!day) return null
+  return etWallClockToInstant(day.getUTCFullYear(), day.getUTCMonth() + 1, day.getUTCDate(), 0, 0)
+}
+
+/**
+ * Midnight Eastern on the day AFTER a YYYY-MM-DD, as an instant.
+ *
+ * Hour 24 rolls into the next day through Date.UTC, so month and year ends need
+ * no special case — and the roll happens before the DST correction, so the
+ * boundary is right even across a transition.
+ */
+export function easternDayEndExclusive(input: unknown): Date | null {
+  const day = parseCalendarDate(input)
+  if (!day) return null
+  return etWallClockToInstant(day.getUTCFullYear(), day.getUTCMonth() + 1, day.getUTCDate(), 24, 0)
+}
+
+/**
+ * A `from`/`to` pair (either may be absent or junk) as a Prisma-shaped filter.
+ *
+ * Returns null when NEITHER bound is usable, so a caller can leave the field off
+ * the query entirely. An unparseable bound is DROPPED rather than throwing: a
+ * mistyped URL should show an unfiltered list, not an error page. Bounds are
+ * swapped when they arrive backwards, which otherwise silently returns nothing.
+ */
+export function easternDayRange(
+  from?: unknown,
+  to?: unknown,
+): { gte?: Date; lt?: Date } | null {
+  let gte = easternDayStart(from) ?? undefined
+  let lt = easternDayEndExclusive(to) ?? undefined
+  if (gte && lt && gte.getTime() >= lt.getTime()) {
+    //  "from the 7th to the 5th" is a transposition, not a request for nothing.
+    const swapped = easternDayEndExclusive(from) ?? undefined
+    const start = easternDayStart(to) ?? undefined
+    gte = start
+    lt = swapped
+  }
+  if (!gte && !lt) return null
+  return { ...(gte ? { gte } : {}), ...(lt ? { lt } : {}) }
+}

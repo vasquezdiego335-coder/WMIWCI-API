@@ -1,11 +1,10 @@
 import { randomUUID } from 'node:crypto'
 import { NextRequest, NextResponse } from 'next/server'
 import { z } from 'zod'
-import { discordQueue } from '@/lib/queues'
 import { apiLogger } from '@/lib/logger'
+import { contactRouteDeps, fireAndForget } from '@/lib/contact-route-deps'
 import { normalizeLocale } from '@/lib/i18n'
 import { rateLimit, tooManyRequests, LIMITS, clientIp } from '@/lib/rate-limit'
-import { ingestLeadSafe } from '@/lib/leads'
 import { CONSENT_VERSION, normaliseConsentSource } from '@/lib/consent'
 
 export const runtime = 'nodejs'
@@ -132,10 +131,18 @@ async function handleContact(req: NextRequest): Promise<NextResponse> {
   }
 
   const locale = normalizeLocale(data.locale)
-  apiLogger.debug(
-    { name: data.name, email: data.email, hasPhone: !!data.phone, locale, source: data.source },
-    '/api/contact — parsed payload',
-  )
+  //  NO PII IN LOGS. This line used to carry the customer's name and email into
+  //  the log stream on every submission. Log lines are copied into tickets,
+  //  shipped to third-party aggregators and kept far longer than the enquiry
+  //  itself, so the identifying fields are gone; what remains is what an
+  //  operator can act on. `errorRef` below is how a specific submission is
+  //  found without any of them.
+  //  `hasPhone` is derived BEFORE the log so no customer field appears inside a
+  //  logging call at all. The presence flag is not itself identifying, but a
+  //  guard that has to reason about which `data.*` uses are safe is a guard
+  //  that will eventually be argued into allowing the wrong one.
+  const hasPhone = !!data.phone
+  apiLogger.debug({ locale, hasPhone, source: data.source }, '/api/contact — parsed payload')
 
   // ── Persist the lead FIRST so no inquiry is lost if Discord is down ──
   //  CONSENT EVIDENCE travels with the boolean: the surface it was captured on
@@ -149,7 +156,8 @@ async function handleContact(req: NextRequest): Promise<NextResponse> {
   //  exact incident without asking them for anything identifying.
   const errorRef = randomUUID()
   let leadFailed = false
-  const lead = await ingestLeadSafe(
+  const deps = contactRouteDeps()
+  const lead = await deps.capture(
     {
       name: data.name,
       email: data.email,
@@ -174,15 +182,11 @@ async function handleContact(req: NextRequest): Promise<NextResponse> {
   //  has booked with us before — so this call is a no-op for most submissions,
   //  and that is the correct, expected outcome. Fire-and-forget: a Redis stall
   //  must never cost us the message.
-  if (lead) {
-    void import('@/lib/journeys')
-      .then((m) => m.onLeadCaptured(lead.lead.id))
-      .catch((err) => apiLogger.warn({ err: String(err).slice(0, 200) }, 'lead nurture trigger failed (non-fatal)'))
-  }
+  if (lead) fireAndForget(deps.nurture(lead.lead.id), 'lead nurture trigger')
 
   // ── 1) Alert the team in Discord (reliable, always attempted) ──
   try {
-    await discordQueue.add('contact-message', {
+    await deps.enqueue({
       type: 'contact-message',
       payload: {
         name: data.name,
@@ -218,12 +222,13 @@ async function handleContact(req: NextRequest): Promise<NextResponse> {
       { errorRef, locale, stage: 'contact_lead_persist' },
       '/api/contact — the enquiry was NOT persisted',
     )
-    void import('@/lib/ops-alert')
-      .then((m) => m.postOpsAlert?.('Contact form is failing', [
+    fireAndForget(
+      deps.alert('Contact form is failing', [
         { message: `A contact enquiry could not be persisted. Reference ${errorRef}.` },
         { message: 'Enquiries are being LOST while this continues. Check the database connection.' },
-      ]))
-      .catch(() => { /* the alert must never mask the 503 */ })
+      ]),
+      'contact failure ops alert',
+    )
     return NextResponse.json(
       {
         ok: false,

@@ -1,5 +1,6 @@
 import Link from 'next/link'
 import { getSession } from '@/lib/auth'
+import { easternDayStart, easternDayEndExclusive } from '@/lib/move-date'
 import { can, type Role } from '@/lib/permissions'
 import { loadSchedulingBoard, type BoardJob } from '@/lib/scheduling-service'
 import { PageHeader, Card, COLORS, Empty, Badge } from '../_ui'
@@ -28,8 +29,10 @@ export default async function SchedulingBoard({ searchParams }: { searchParams: 
     )
   }
 
-  const start = searchParams.start ? new Date(`${searchParams.start}T00:00:00Z`) : new Date()
-  const end = searchParams.end ? new Date(`${searchParams.end}T23:59:59Z`) : new Date(Date.now() + 14 * 24 * 60 * 60 * 1000)
+  //  Eastern calendar days, validated — see app/api/admin/scheduling/route.ts.
+  //  The page and the API must agree, or the same range shows two answers.
+  const start = easternDayStart(searchParams.start) ?? new Date()
+  const end = easternDayEndExclusive(searchParams.end) ?? new Date(Date.now() + 14 * 24 * 60 * 60 * 1000)
   const { jobs } = await loadSchedulingBoard({ start, end })
 
   const unstaffed = jobs.filter((j) => j.liveCount === 0)

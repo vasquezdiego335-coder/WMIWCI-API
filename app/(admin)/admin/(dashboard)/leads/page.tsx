@@ -1,4 +1,5 @@
 import { prisma } from '@/lib/db'
+import { easternDayRange } from '@/lib/move-date'
 import { getSession } from '@/lib/auth'
 import Link from 'next/link'
 import type { Prisma } from '@prisma/client'
@@ -41,11 +42,16 @@ export default async function AdminLeads({
     ]
   }
   if (campaign) where.utmCampaign = { contains: campaign, mode: 'insensitive' }
-  if (from || to) {
-    where.createdAt = {}
-    if (from) (where.createdAt as Prisma.DateTimeFilter).gte = new Date(from + 'T00:00:00')
-    if (to) (where.createdAt as Prisma.DateTimeFilter).lte = new Date(to + 'T23:59:59')
-  }
+  //  EASTERN CALENDAR DAYS, VALIDATED. This was `new Date(from + 'T00:00:00')`
+  //  — no zone designator, so it parsed in the SERVER's local time. The server
+  //  runs in UTC and the business runs in Eastern, so "from the 5th" actually
+  //  began at 8 PM on the 4th and an evening lead was filed under the wrong day.
+  //  It was also unvalidated: `?from=lol` produced an Invalid Date, which Prisma
+  //  rejects, so a mistyped URL 500'd this page. `easternDayRange` drops a bound
+  //  it cannot read rather than throwing, and returns a half-open interval so the
+  //  final second of `to` is included.
+  const createdAt = easternDayRange(from, to)
+  if (createdAt) where.createdAt = createdAt
   switch (view) {
     case 'partial': where.lifecycle = { in: [...PARTIAL_LIFECYCLES] }; break
     case 'converted': where.lifecycle = 'CONVERTED'; break

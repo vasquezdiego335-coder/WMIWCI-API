@@ -41,8 +41,23 @@ import { apiLogger } from './logger'
 
 const log = apiLogger.child({ mod: 'lead-notification-outbox' })
 
-/** The lifecycle transitions worth telling the owner about. */
-export type LeadNotificationEvent = 'lead_created' | 'lead_enriched'
+/**
+ * The lifecycle transitions worth telling the owner about.
+ *
+ * ONE MEMBER, DELIBERATELY. `'lead_enriched'` was declared here and named in
+ * the schema comment, but NOTHING EVER PRODUCED ONE — no call site, in any
+ * route, worker or script, ever recorded that event. A declared-but-unproduced
+ * event is worse than no event: the schema advertised a notice the owner would
+ * never receive, and a reader checking "does the owner hear when a partial lead
+ * fills in?" would have concluded yes. It is removed rather than documented,
+ * because a comment saying "not implemented" is a claim nobody re-reads.
+ *
+ * `dedupeKeyFor` still namespaces by event, so ADDING a second transition later
+ * is a one-line change that cannot collide with existing keys.
+ * `lead-notification-reachability.test.ts` fails if a member is declared here
+ * without a producer, so this cannot silently regrow.
+ */
+export type LeadNotificationEvent = 'lead_created'
 
 export const NOTIFICATION_STATUS = {
   pending: 'pending',

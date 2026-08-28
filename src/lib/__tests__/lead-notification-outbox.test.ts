@@ -92,7 +92,12 @@ beforeEach(async () => {
 
 test('event identity is deterministic and per-transition', { skip }, () => {
   assert.equal(dedupeKeyFor('lead_1', 'lead_created'), dedupeKeyFor('lead_1', 'lead_created'))
-  assert.notEqual(dedupeKeyFor('lead_1', 'lead_created'), dedupeKeyFor('lead_1', 'lead_enriched'))
+  //  The event dimension is RESERVED even though only one transition is
+  //  produced today: a second one added later must not collide with the keys
+  //  already in the table. The cast is the point — it proves the FORMAT
+  //  namespaces by event without pretending a producer exists.
+  const future = 'lead_enriched' as unknown as Parameters<typeof dedupeKeyFor>[1]
+  assert.notEqual(dedupeKeyFor('lead_1', 'lead_created'), dedupeKeyFor('lead_1', future))
   assert.notEqual(dedupeKeyFor('lead_1', 'lead_created'), dedupeKeyFor('lead_2', 'lead_created'))
 })
 
@@ -142,10 +147,15 @@ test('1. a committed lead produces exactly ONE event', { skip }, async () => {
   assert.equal(await prisma.leadNotification.count({ where: { leadId } }), 1)
 })
 
-test('16. initial and enrichment events have SEPARATE identities', { skip }, async () => {
+test('16. a second transition on the same lead gets its OWN row, not a merge', { skip }, async () => {
   const leadId = await seedLead()
   await recordLeadNotification(leadId, 'lead_created')
-  await recordLeadNotification(leadId, 'lead_enriched')
+  //  Only 'lead_created' is produced today. This drives the table through the
+  //  SHAPE a second transition would take, so the unique index is proven to be
+  //  per-(lead, event) and not per-lead — the constraint a future event relies
+  //  on. Casting is deliberate; see the identity test above.
+  const future = 'lead_enriched' as unknown as Parameters<typeof recordLeadNotification>[1]
+  await recordLeadNotification(leadId, future)
   assert.equal(await prisma.leadNotification.count({ where: { leadId } }), 2)
 })
 

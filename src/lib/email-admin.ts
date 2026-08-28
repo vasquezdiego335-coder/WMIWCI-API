@@ -103,6 +103,10 @@ export type Overview = {
   unsubscribed: number
   opened: number
   clicked: number
+  /** The three rates below share THIS denominator: messages SENT in the window
+   *  (anchored on `sentAt`), whose outcomes are read off the same rows. It can
+   *  differ from `sent` above, which is anchored on when the row was created. */
+  cohortSent: number
   deliveryRate: Rate
   bounceRate: Rate
   complaintRate: Rate
@@ -141,7 +145,22 @@ export async function getOverview(range: RangeKey = '30d'): Promise<Overview> {
     }
   }
 
-  const [statusRows, eventRows, blockRows, templateRows, suppressionRows, stuck] = await Promise.all([
+  //  ── ONE COHORT, ONE ANCHOR ──────────────────────────────────────────
+  //  The rates below used two different clocks: `sent` counted EmailSend rows by
+  //  `createdAt`, while `bounced`/`complained`/`delivered` counted EmailEvent
+  //  rows by `occurredAt`. A message sent BEFORE the window that bounced INSIDE
+  //  it therefore landed in the numerator and not the denominator, so the rate
+  //  could exceed 100% — which is how this screen reported a 133.33% hard-bounce
+  //  rate (4 of 3). A percentage above 100 is not a bad number, it is a broken
+  //  one, and it is the number an owner would pause campaigns over.
+  //
+  //  The fix is the same one `email-monitoring.ts` already applies to the
+  //  ALERTING path: count both halves off the SEND row, anchored on `sentAt`, so
+  //  every outcome counted belongs to a message the denominator also counted.
+  //  The event-derived totals are kept as raw activity counts — they are honest
+  //  as counts, they were only wrong as ratios.
+  const cohortWhere = { isTest: false, ...(since ? { sentAt: { gte: since } } : { sentAt: { not: null } }) }
+  const [statusRows, eventRows, blockRows, templateRows, suppressionRows, stuck, cohort] = await Promise.all([
     safe('send statuses', () => prisma.emailSend.groupBy({ by: ['status'], _count: true, where: sendWhere }), [] as Array<{ status: string; _count: number }>),
     safe('provider events', () => prisma.emailEvent.groupBy({ by: ['type'], _count: true, where: eventWhere }), [] as Array<{ type: string; _count: number }>),
     safe(
@@ -159,6 +178,19 @@ export async function getOverview(range: RangeKey = '30d'): Promise<Overview> {
     safe('per-template counts', () => prisma.emailSend.groupBy({ by: ['template', 'status'], _count: true, where: sendWhere }), [] as Array<{ template: string; status: string; _count: number }>),
     safe('suppressions', () => prisma.emailSuppression.groupBy({ by: ['reason'], _count: true }), [] as Array<{ reason: string; _count: number }>),
     safe('unfinished side effects', () => prisma.emailEvent.count({ where: { processingStatus: { in: ['side_effect_failed', 'dead_letter'] } } }), 0),
+    safe(
+      'outcome cohort',
+      async () => {
+        const [sent, delivered, bounced, complained] = await Promise.all([
+          prisma.emailSend.count({ where: cohortWhere }),
+          prisma.emailSend.count({ where: { ...cohortWhere, deliveredAt: { not: null } } }),
+          prisma.emailSend.count({ where: { ...cohortWhere, bouncedAt: { not: null } } }),
+          prisma.emailSend.count({ where: { ...cohortWhere, complainedAt: { not: null } } }),
+        ])
+        return { sent, delivered, bounced, complained }
+      },
+      { sent: 0, delivered: 0, bounced: 0, complained: 0 },
+    ),
   ])
 
   const byStatus: Record<string, number> = {}
@@ -210,9 +242,13 @@ export async function getOverview(range: RangeKey = '30d'): Promise<Overview> {
     clicked: byEvent['clicked'] ?? 0,
     // Denominator is provider ACCEPTANCE — the only population that could have
     // produced a delivery event at all.
-    deliveryRate: rate(confirmedDelivered, sent),
-    bounceRate: rate(bounced, sent),
-    complaintRate: rate(complained, sent),
+    //  RATES COME FROM THE COHORT, not from the two-clock counts above. Each
+    //  numerator is a strict subset of its own denominator by construction, so
+    //  none of these can exceed 100%.
+    deliveryRate: rate(cohort.delivered, cohort.sent),
+    bounceRate: rate(cohort.bounced, cohort.sent),
+    complaintRate: rate(cohort.complained, cohort.sent),
+    cohortSent: cohort.sent,
     topBlockReasons: blockRows
       .filter((r) => r.blockedReason)
       .map((r) => ({

@@ -175,3 +175,161 @@ test('running the monitor twice does not change the answer', { skip }, async () 
   const b = await checkBounceRate()
   assert.deepEqual({ v: a.value, s: a.severity }, { v: b.value, s: b.severity }, 'the monitor is read-only and stable')
 })
+
+// ════════════════════════════════════════════════════════════════════════
+//  THE SAME DEFECT ON THE ADMIN DASHBOARD (found 2026-08-28)
+//
+//  Fixing `checkBounceRate` corrected the ALERT. It did not correct the SCREEN.
+//  `getOverview()` in email-admin.ts computed all three headline rates from two
+//  different clocks:
+//
+//      sent       = EmailSend  rows WHERE createdAt >= since
+//      bounced    = EmailEvent rows WHERE occurredAt >= since
+//      complained = EmailEvent rows WHERE occurredAt >= since
+//
+//  A message sent before the window that bounces inside it is in the numerator
+//  and not the denominator. So the owner could fix the alert, open the
+//  dashboard, and read 133% there instead — and the complaint rate, which
+//  nobody had looked at, had the identical flaw.
+//
+//  These pin all three rates to one cohort anchored on `sentAt`.
+// ════════════════════════════════════════════════════════════════════════
+import { getOverview } from '../email-admin'
+
+/**
+ * `getOverview()` aggregates the WHOLE table — it has no template filter, and
+ * should not have one. So these tests measure the DELTA this suite's own rows
+ * cause rather than absolute totals: today this suite is the only one that
+ * writes EmailSend, but a suite added later would otherwise turn these exact
+ * counts into an intermittent failure, and a flaky gate is a gate people learn
+ * to re-run instead of read.
+ */
+async function delta(seed: () => Promise<void>) {
+  const before = await getOverview('30d')
+  await seed()
+  const after = await getOverview('30d')
+  const of = (k: 'deliveryRate' | 'bounceRate' | 'complaintRate') => ({
+    numerator: after[k].numerator - before[k].numerator,
+    denominator: after[k].denominator - before[k].denominator,
+  })
+  return {
+    after,
+    cohortSent: after.cohortSent - before.cohortSent,
+    delivery: of('deliveryRate'),
+    bounce: of('bounceRate'),
+    complaint: of('complaintRate'),
+  }
+}
+
+/** A send whose outcome is a COMPLAINT — the case that was never tested. */
+async function complaint(sentAt: Date, complainedAt: Date) {
+  seq += 1
+  return prisma.emailSend.create({
+    data: {
+      id: `cohort_${seq}`,
+      idempotencyKey: `cohort-gate:${seq}`,
+      email: `cohort.${seq}@example.com`,
+      template: 'cohort-gate',
+      emailClass: 'marketing',
+      status: 'delivered',
+      isTest: false,
+      sentAt,
+      complainedAt,
+    } as never,
+  })
+}
+
+test('DASHBOARD: no headline rate can exceed 100%, whatever the outcomes', { skip }, async () => {
+  await cohort(3, 4) // the incident's exact shape
+  const o = await getOverview('30d')
+  //  ABSOLUTE, deliberately: "no rate exceeds 100%" is a property of the whole
+  //  table and must hold no matter what else is in it.
+  for (const [label, r] of [
+    ['delivery', o.deliveryRate],
+    ['bounce', o.bounceRate],
+    ['complaint', o.complaintRate],
+  ] as const) {
+    if (r.bp === null) continue
+    assert.ok(r.bp <= 10_000, `${label} rate is ${r.bp / 100}% — a rate above 100% is a broken number`)
+    assert.ok(r.numerator <= r.denominator, `${label}: ${r.numerator} of ${r.denominator}`)
+  }
+})
+
+test('DASHBOARD: a message sent BEFORE the window cannot inflate the rate inside it', { skip }, async () => {
+  //  Sent 40 days ago, bounced an hour ago. Under the old two-clock counting
+  //  this bounce was in the numerator of the 30-day rate with nothing matching
+  //  it in the denominator.
+  const d = await delta(async () => {
+    await send({ sentAt: ago(24 * 40), bounced: ago(1) })
+    await cohort(2, 0)
+  })
+  assert.equal(d.bounce.denominator, 2, 'only messages SENT in the window are counted')
+  assert.equal(d.bounce.numerator, 0, 'and the stale bounce is not among them')
+  assert.equal(d.cohortSent, 2)
+})
+
+test('DASHBOARD: the complaint rate is measured, not assumed to be zero', { skip }, async () => {
+  const d = await delta(async () => {
+    await cohort(3, 0)
+    await complaint(ago(2), ago(1))
+  })
+  assert.equal(d.complaint.denominator, 4)
+  assert.equal(d.complaint.numerator, 1, 'the complaint is measured, not assumed to be zero')
+})
+
+test('DASHBOARD: a bounce and a complaint on the SAME message are both counted, once each', { skip }, async () => {
+  //  These are independent columns by design — the schema says a delivered
+  //  message can still generate a complaint — so neither may cancel the other.
+  const d = await delta(async () => {
+    seq += 1
+    await prisma.emailSend.create({
+      data: {
+        id: `cohort_${seq}`,
+        idempotencyKey: `cohort-gate:${seq}`,
+        email: `cohort.${seq}@example.com`,
+        template: 'cohort-gate',
+        emailClass: 'marketing',
+        status: 'delivered',
+        isTest: false,
+        sentAt: ago(2),
+        deliveredAt: ago(2),
+        complainedAt: ago(1),
+      } as never,
+    })
+  })
+  assert.equal(d.delivery.numerator, 1)
+  assert.equal(d.complaint.numerator, 1)
+  assert.equal(d.cohortSent, 1, 'one message, counted once in the denominator')
+})
+
+test('DASHBOARD: test sends never reach the rates', { skip }, async () => {
+  const d = await delta(async () => {
+    await send({ sentAt: ago(2), bounced: ago(1), isTest: true })
+    await cohort(2, 0)
+  })
+  assert.equal(d.bounce.denominator, 2)
+  assert.equal(d.bounce.numerator, 0)
+})
+
+test('DASHBOARD: an unsent row is in neither half — a rate needs a real denominator', { skip }, async () => {
+  const d = await delta(async () => {
+    seq += 1
+    await prisma.emailSend.create({
+      data: {
+        id: `cohort_${seq}`,
+        idempotencyKey: `cohort-gate:${seq}`,
+        email: `cohort.${seq}@example.com`,
+        template: 'cohort-gate',
+        emailClass: 'marketing',
+        //  Queued and never sent: sentAt is null.
+        status: 'sending',
+        isTest: false,
+      } as never,
+    })
+  })
+  assert.equal(d.cohortSent, 0, 'an unsent row is in neither half')
+  //  And with nothing at all in the table, no data is reported as NO data.
+  await prisma.emailSend.deleteMany({ where: { template: 'cohort-gate' } })
+  const empty = await getOverview('30d')
+  if (empty.cohortSent === 0) assert.equal(empty.bounceRate.bp, null, 'never 0% when there is nothing to measure')
+})

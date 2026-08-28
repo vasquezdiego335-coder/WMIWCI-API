@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getSession } from '@/lib/auth'
+import { easternDayStart, easternDayEndExclusive } from '@/lib/move-date'
 import { can, type Role } from '@/lib/permissions'
 import { loadSchedulingBoard } from '@/lib/scheduling-service'
 
@@ -17,8 +18,13 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
 
   const startStr = req.nextUrl.searchParams.get('start')
   const endStr = req.nextUrl.searchParams.get('end')
-  const start = startStr ? new Date(`${startStr}T00:00:00Z`) : new Date()
-  const end = endStr ? new Date(`${endStr}T23:59:59Z`) : new Date(Date.now() + 14 * 24 * 60 * 60 * 1000)
+  //  A calendar day is an EASTERN wall-clock span, not a UTC one: with
+  //  `T00:00:00Z` the window ended at 8 PM Eastern, so an evening job on the
+  //  last day of the range was missing from the schedule it belonged to. The
+  //  bounds are also validated now — an unreadable one falls back to the
+  //  default window instead of putting an Invalid Date into a Prisma filter.
+  const start = easternDayStart(startStr) ?? new Date()
+  const end = easternDayEndExclusive(endStr) ?? new Date(Date.now() + 14 * 24 * 60 * 60 * 1000)
   if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) {
     return NextResponse.json({ error: 'Invalid date range' }, { status: 422 })
   }
