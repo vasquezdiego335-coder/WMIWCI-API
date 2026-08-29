@@ -489,7 +489,7 @@ function notifyOwnerOfNewLead(leadId: string, context: string): void {
           const { discordQueue } = await import('./queues')
           const key = dedupeKeyFor(leadId, 'lead_created')
           await discordQueue.remove(key).catch(() => {})
-          await discordQueue.add('lead-notify', { dedupeKey: key }, { jobId: key })
+          await discordQueue.add('lead-notify', { type: 'lead-notify', dedupeKey: key }, { jobId: key })
         }
         //  A durable record exists and the worker owns delivery from here.
         return

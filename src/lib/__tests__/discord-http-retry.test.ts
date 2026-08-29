@@ -137,7 +137,7 @@ test('500, 500, then 204 — the REAL processor makes three provider requests', 
     const q = new Queue(QUEUE, { connection })
     const runs = { n: 0 }
     const w = startRealWorker(runs)
-    await q.add('lead-notify', { dedupeKey }, { jobId: dedupeKey, ...RETRY_OPTS })
+    await q.add('lead-notify', { type: 'lead-notify', dedupeKey }, { jobId: dedupeKey, ...RETRY_OPTS })
 
     //  Wait for the row to settle, without editing it.
     for (let i = 0; i < 120; i++) {
@@ -339,7 +339,7 @@ test('queue loss does not lose the notice — the sweeper re-drives it', { skip 
   try {
     const { dedupeKey } = await seedLeadWithEvent()
     const q = new Queue(QUEUE, { connection })
-    await q.add('lead-notify', { dedupeKey }, { jobId: dedupeKey })
+    await q.add('lead-notify', { type: 'lead-notify', dedupeKey }, { jobId: dedupeKey })
     await q.obliterate({ force: true })          // Redis wiped
     assert.equal(await q.getWaitingCount(), 0)
     await q.close()

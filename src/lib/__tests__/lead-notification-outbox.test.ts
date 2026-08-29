@@ -283,8 +283,8 @@ test('8. a duplicate enqueue produces ONE owner message (real BullMQ)', { skip }
   const q = new Queue(QUEUE, { connection })
 
   //  The deterministic jobId is what makes the queue dedupe too.
-  await q.add('lead-notify', { dedupeKey }, { jobId: dedupeKey })
-  await q.add('lead-notify', { dedupeKey }, { jobId: dedupeKey })
+  await q.add('lead-notify', { type: 'lead-notify', dedupeKey }, { jobId: dedupeKey })
+  await q.add('lead-notify', { type: 'lead-notify', dedupeKey }, { jobId: dedupeKey })
   assert.equal(await q.getWaitingCount(), 1, 'BullMQ must collapse the duplicate jobId')
 
   const delivered: string[] = []
@@ -313,17 +313,17 @@ test('14. a RETAINED FAILED job id does not block a later legitimate retry', { s
   const { dedupeKey } = await recordLeadNotification(leadId, 'lead_created')
   const q = new Queue(QUEUE, { connection })
 
-  const first = await q.add('lead-notify', { dedupeKey }, { jobId: dedupeKey, attempts: 1 })
+  const first = await q.add('lead-notify', { type: 'lead-notify', dedupeKey }, { jobId: dedupeKey, attempts: 1 })
   await first.moveToFailed(new Error('provider 500'), 'token-1', false).catch(() => {})
   await new Promise((r) => setTimeout(r, 200))
 
   //  Naively re-adding the same id is refused while the failed job is retained.
-  const naive = await q.add('lead-notify', { dedupeKey }, { jobId: dedupeKey })
+  const naive = await q.add('lead-notify', { type: 'lead-notify', dedupeKey }, { jobId: dedupeKey })
   const naiveBlocked = naive.id === first.id
 
   //  THE FIX: remove the retained job first, then re-enqueue.
   await q.remove(dedupeKey).catch(() => {})
-  const requeued = await q.add('lead-notify', { dedupeKey }, { jobId: dedupeKey })
+  const requeued = await q.add('lead-notify', { type: 'lead-notify', dedupeKey }, { jobId: dedupeKey })
   assert.ok(requeued.id, 're-enqueue must succeed after clearing the retained job')
   const state = await requeued.getState()
   assert.notEqual(state, 'failed', 'the re-enqueued job must be live, not the retained corpse')
@@ -337,7 +337,7 @@ test('15. a process restart does not lose the event', { skip }, async () => {
   const leadId = await seedLead()
   const { dedupeKey } = await recordLeadNotification(leadId, 'lead_created')
   const q = new Queue(QUEUE, { connection })
-  await q.add('lead-notify', { dedupeKey }, { jobId: dedupeKey })
+  await q.add('lead-notify', { type: 'lead-notify', dedupeKey }, { jobId: dedupeKey })
 
   //  Simulate the worst case: Redis is wiped entirely.
   await q.obliterate({ force: true })
@@ -357,7 +357,7 @@ test('a failing worker THROWS so BullMQ retries are reachable', { skip }, async 
   const leadId = await seedLead()
   const { dedupeKey } = await recordLeadNotification(leadId, 'lead_created')
   const q = new Queue(QUEUE, { connection })
-  await q.add('lead-notify', { dedupeKey }, { jobId: dedupeKey, attempts: 2, backoff: { type: 'fixed', delay: 100 } })
+  await q.add('lead-notify', { type: 'lead-notify', dedupeKey }, { jobId: dedupeKey, attempts: 2, backoff: { type: 'fixed', delay: 100 } })
 
   let handlerRuns = 0
   const w = new Worker(

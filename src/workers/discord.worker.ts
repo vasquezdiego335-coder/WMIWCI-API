@@ -64,7 +64,7 @@ async function processDiscordJob(job: Job<DiscordJobData>): Promise<void> {
           const { discordQueue } = await import('../lib/queues')
           const delay = Math.max(0, dueAt.getTime() - Date.now())
           await discordQueue.remove(dedupeKey).catch(() => {})
-          await discordQueue.add('lead-notify', { dedupeKey }, { jobId: dedupeKey, delay })
+          await discordQueue.add('lead-notify', { type: 'lead-notify', dedupeKey }, { jobId: dedupeKey, delay })
         },
       })
       return
