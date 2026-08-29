@@ -55,7 +55,7 @@ export async function verifyToken(token: string): Promise<SessionPayload | null>
 
 // ── Read session from HTTP-only cookie ────────────────────────
 export async function getSession(): Promise<SessionPayload | null> {
-  const token = cookies().get(COOKIE_NAME)?.value
+  const token = (await cookies()).get(COOKIE_NAME)?.value
   if (!token) return null
   return verifyToken(token)
 }

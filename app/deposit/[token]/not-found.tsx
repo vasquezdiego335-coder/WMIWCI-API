@@ -14,8 +14,8 @@ import { COPY, pickLang } from '@/lib/deposit-copy'
 //
 // Bilingual, because someone who mistypes a link should not fall out of Spanish
 // at the one moment they need to understand what went wrong.
-export default function DepositNotFound() {
-  const lang = pickLang(headers().get('accept-language'))
+export default async function DepositNotFound() {
+  const lang = pickLang((await headers()).get('accept-language'))
   const t = COPY[lang]
   const phone = businessPhone()
 

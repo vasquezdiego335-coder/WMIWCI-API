@@ -33,7 +33,7 @@ const LINKS: { href: string; label: string; blurb: string; action: Parameters<ty
 export default async function ReportsOverview({ searchParams }: { searchParams: SP }) {
   const session = await getSession()
   const role = session?.role as Role
-  const cookie = headers().get('cookie') ?? ''
+  const cookie = (await headers()).get('cookie') ?? ''
 
   const allowed = can(role, 'report.view_financial')
   const result = allowed ? await fetchReport('overview', searchParams, cookie) : null

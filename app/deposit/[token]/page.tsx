@@ -211,7 +211,7 @@ export default async function DepositPage({
   // shared in a chosen language; otherwise the browser decides.
   const requested = typeof searchParams.lang === 'string' ? searchParams.lang.toLowerCase() : null
   const initialLang: Lang =
-    requested === 'es' || requested === 'en' ? requested : pickLang(headers().get('accept-language'))
+    requested === 'es' || requested === 'en' ? requested : pickLang((await headers()).get('accept-language'))
 
   // `?return=1` is set on the Stripe success URL. It means "the customer came
   // back from Stripe" and NOTHING more — it is never treated as proof of
