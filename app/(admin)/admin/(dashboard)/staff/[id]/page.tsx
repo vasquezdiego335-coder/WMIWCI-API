@@ -16,7 +16,8 @@ const DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
 const day = (d: Date | null) => (d ? new Date(d).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'America/New_York' }) : '—')
 const STATUS_TONE: Record<string, string> = { ACTIVE: '#10B981', INACTIVE: '#9CA3AF', ON_LEAVE: '#F59E0B', UNAVAILABLE: '#F59E0B', SUSPENDED: '#EF4444' }
 
-export default async function StaffDetail({ params }: { params: { id: string } }) {
+export default async function StaffDetail(props: { params: Promise<{ id: string }> }) {
+  const params = await props.params;
   const session = await getSession()
   const isOwner = session?.role === 'OWNER'
 
@@ -180,7 +181,7 @@ export default async function StaffDetail({ params }: { params: { id: string } }
         <DeactivateControl userId={user.id} name={user.name} active={user.active} />
       )}
     </div>
-  )
+  );
 }
 
 function Field({ label, value, children }: { label: string; value?: string; children?: React.ReactNode }) {

@@ -21,7 +21,8 @@ import { buildReport, REPORT_TYPES } from '@/lib/report-builders'
 
 export const dynamic = 'force-dynamic'
 
-export async function GET(req: NextRequest, { params }: { params: { report: string } }): Promise<NextResponse> {
+export async function GET(req: NextRequest, props: { params: Promise<{ report: string }> }): Promise<NextResponse> {
+  const params = await props.params;
   const session = await getSession()
   if (!session) return NextResponse.json({ error: 'Authentication required' }, { status: 401 })
 

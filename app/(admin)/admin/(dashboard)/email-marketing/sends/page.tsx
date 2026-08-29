@@ -27,7 +27,8 @@ const STATUSES = [
   'sending',
 ]
 
-export default async function SendsPage({ searchParams }: { searchParams: SP }) {
+export default async function SendsPage(props: { searchParams: Promise<SP> }) {
+  const searchParams = await props.searchParams;
   const session = await getSession()
   const isOwner = session?.role === 'OWNER'
   const maySeeRecipients = can(session?.role as never, 'email.view_recipients')

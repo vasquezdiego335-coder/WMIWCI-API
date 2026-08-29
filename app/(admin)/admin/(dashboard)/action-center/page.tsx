@@ -21,7 +21,8 @@ const sevRank = (s: string) => { const i = REMINDER_SEVERITY_ORDER.indexOf(s); r
 
 type Search = { status?: string; severity?: string; category?: string; owner?: string; q?: string; group?: string }
 
-export default async function ActionCenterPage({ searchParams }: { searchParams: Search }) {
+export default async function ActionCenterPage(props: { searchParams: Promise<Search> }) {
+  const searchParams = await props.searchParams;
   // Opportunistic sync (PAGE_LOAD, cooldown-gated so a refresh never rescans in
   // a loop, advisory-locked so concurrent loads never overlap). Fail OPEN: the
   // page reads and renders existing reminders even if the scan throws — the
@@ -37,7 +38,7 @@ export default async function ActionCenterPage({ searchParams }: { searchParams:
   const isOwner = session?.role === 'OWNER'
 
   const now = new Date()
-  const todayEnd = new Date(now); todayEnd.setHours(23, 59, 59, 999)
+  const todayEnd = new Date(now);todayEnd.setHours(23, 59, 59, 999)
   const weekAgo = new Date(now.getTime() - 7 * 86_400_000)
 
   const all = await prisma.reminder.findMany({ orderBy: [{ createdAt: 'desc' }], take: 1000 })

@@ -10,7 +10,8 @@ import { z } from 'zod'
 //   POST create a recurring rule OR a date exception (discriminated by `type`)
 // ════════════════════════════════════════════════════════════════════════════
 
-export async function GET(_req: NextRequest, { params }: { params: { id: string } }): Promise<NextResponse> {
+export async function GET(_req: NextRequest, props: { params: Promise<{ id: string }> }): Promise<NextResponse> {
+  const params = await props.params;
   const session = await getSession()
   if (!session) return NextResponse.json({ error: 'Authentication required' }, { status: 401 })
   if (!can(session.role as Role, 'schedule.view')) return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
@@ -42,7 +43,8 @@ const ExceptionSchema = z.object({
 })
 const Schema = z.discriminatedUnion('type', [RuleSchema, ExceptionSchema])
 
-export async function POST(req: NextRequest, { params }: { params: { id: string } }): Promise<NextResponse> {
+export async function POST(req: NextRequest, props: { params: Promise<{ id: string }> }): Promise<NextResponse> {
+  const params = await props.params;
   const session = await getSession()
   if (!session) return NextResponse.json({ error: 'Authentication required' }, { status: 401 })
   if (!can(session.role as Role, 'staff.manage_availability')) return NextResponse.json({ error: 'You do not have permission to manage availability.' }, { status: 403 })

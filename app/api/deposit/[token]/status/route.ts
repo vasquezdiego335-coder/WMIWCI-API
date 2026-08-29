@@ -18,7 +18,8 @@ import { isValidPublicToken, effectiveStatus } from '@/lib/deposit-links'
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
 
-export async function GET(req: NextRequest, { params }: { params: { token: string } }): Promise<NextResponse> {
+export async function GET(req: NextRequest, props: { params: Promise<{ token: string }> }): Promise<NextResponse> {
+  const params = await props.params;
   const token = params.token
   if (!isValidPublicToken(token)) {
     return NextResponse.json({ error: 'not found' }, { status: 404 })

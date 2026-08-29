@@ -4,11 +4,12 @@ import Link from 'next/link'
 
 export const revalidate = 60
 
-export default async function AdminCustomers({
-  searchParams,
-}: {
-  searchParams: { q?: string; page?: string }
-}) {
+export default async function AdminCustomers(
+  props: {
+    searchParams: Promise<{ q?: string; page?: string }>
+  }
+) {
+  const searchParams = await props.searchParams;
   await getSession()
 
   const q = searchParams.q ?? ''
@@ -118,7 +119,7 @@ export default async function AdminCustomers({
                     )}
                   </td>
                 </tr>
-              )
+              );
             })}
           </tbody>
         </table>
@@ -146,7 +147,7 @@ export default async function AdminCustomers({
         </div>
       )}
     </div>
-  )
+  );
 }
 
 const h1: React.CSSProperties = { fontSize: '24px', fontWeight: '700', color: '#0A1628', margin: '0 0 4px' }

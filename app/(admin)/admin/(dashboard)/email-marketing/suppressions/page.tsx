@@ -28,7 +28,8 @@ const REASON_COLOR: Record<string, string> = {
   PROVIDER_REJECTED: COLORS.red,
 }
 
-export default async function SuppressionsPage({ searchParams }: { searchParams: SP }) {
+export default async function SuppressionsPage(props: { searchParams: Promise<SP> }) {
+  const searchParams = await props.searchParams;
   const session = await getSession()
   const isOwner = session?.role === 'OWNER'
   const maySeeRecipients = can(session?.role as never, 'email.view_recipients')
@@ -117,7 +118,7 @@ export default async function SuppressionsPage({ searchParams }: { searchParams:
                         </td>
                       )}
                     </tr>
-                  )
+                  );
                 })}
               </tbody>
             </table>
@@ -137,5 +138,5 @@ export default async function SuppressionsPage({ searchParams }: { searchParams:
         the address on the customer record.
       </div>
     </div>
-  )
+  );
 }

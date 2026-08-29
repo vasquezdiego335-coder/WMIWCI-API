@@ -8,7 +8,8 @@ import { BIZ_PHONE } from '@/lib/i18n'
 import { outboxEnabled, emitNewDatePicked } from '@/outbox/integration'
 import { customerBookingProjection } from '@/lib/booking-projections'
 
-export async function GET(_req: NextRequest, { params }: { params: { token: string } }): Promise<NextResponse> {
+export async function GET(_req: NextRequest, props: { params: Promise<{ token: string }> }): Promise<NextResponse> {
+  const params = await props.params;
   const booking = await prisma.booking.findFirst({
     where: {
       customerToken: params.token,
@@ -41,7 +42,8 @@ const RescheduleSchema = z.object({
 
 const MAX_RESCHEDULES = parseInt(process.env.MAX_RESCHEDULES ?? '2', 10)
 
-export async function PATCH(req: NextRequest, { params }: { params: { token: string } }): Promise<NextResponse> {
+export async function PATCH(req: NextRequest, props: { params: Promise<{ token: string }> }): Promise<NextResponse> {
+  const params = await props.params;
   const booking = await prisma.booking.findFirst({
     where: {
       customerToken: params.token,

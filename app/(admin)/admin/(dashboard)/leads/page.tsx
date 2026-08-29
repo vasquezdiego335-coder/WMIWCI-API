@@ -19,11 +19,12 @@ type View = 'all' | 'partial' | 'converted' | 'abandoned' | 'opted_in' | 'no_con
 
 const PARTIAL_LIFECYCLES = ['PARTIAL', 'IN_PROGRESS', 'ABANDONED'] as const
 
-export default async function AdminLeads({
-  searchParams,
-}: {
-  searchParams: { q?: string; view?: string; campaign?: string; from?: string; to?: string; page?: string }
-}) {
+export default async function AdminLeads(
+  props: {
+    searchParams: Promise<{ q?: string; view?: string; campaign?: string; from?: string; to?: string; page?: string }>
+  }
+) {
+  const searchParams = await props.searchParams;
   await getSession()
 
   const q = (searchParams.q ?? '').trim()
@@ -149,7 +150,7 @@ export default async function AdminLeads({
                     {(l.lastActivityAt ?? l.createdAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'America/New_York' })}
                   </td>
                 </tr>
-              )
+              );
             })}
           </tbody>
         </table>
@@ -166,7 +167,7 @@ export default async function AdminLeads({
         </div>
       )}
     </div>
-  )
+  );
 }
 
 async function leadCounts() {
@@ -186,7 +187,7 @@ function statusBadge(lifecycle: string | null, status: string, convertedBookingI
     const label = lifecycle === 'ABANDONED' ? 'Abandoned' : 'Partial'
     return <span style={{ ...badge, background: '#FEF3C7', color: '#92400E' }}>{label}</span>
   }
-  return <span style={{ ...badge, background: '#EFF2F6', color: '#475569' }}>{status.replace(/_/g, ' ').toLowerCase()}</span>
+  return <span style={{ ...badge, background: '#EFF2F6', color: '#475569' }}>{status.replace(/_/g, ' ').toLowerCase()}</span>;
 }
 
 function marketingBadge(consent: boolean | null, supp?: { reason: string; scope: string }) {

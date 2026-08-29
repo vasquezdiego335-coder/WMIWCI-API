@@ -16,7 +16,8 @@ import { deliverDepositNotification, depositNotifyConfig } from '@/lib/discord-p
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
 
-export async function POST(_req: NextRequest, { params }: { params: { id: string } }): Promise<NextResponse> {
+export async function POST(_req: NextRequest, props: { params: Promise<{ id: string }> }): Promise<NextResponse> {
+  const params = await props.params;
   const session = await getSession()
   if (!session) return NextResponse.json({ error: 'Authentication required' }, { status: 401 })
   if (!can(session.role as Role, 'deposit.view')) return NextResponse.json({ error: 'Forbidden' }, { status: 403 })

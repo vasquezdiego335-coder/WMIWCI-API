@@ -41,11 +41,12 @@ const MONEY_INCLUDE = {
 const cityOf = (addr?: string | null) => {
   if (!addr) return '—'
   const parts = addr.split(',').map((p) => p.trim())
-  return parts.length >= 2 ? parts[parts.length - 2].replace(/\d{5}(-\d{4})?/, '').trim() || parts[0] : parts[0]
+  return parts.length >= 2 ? parts[parts.length - 2].replace(/\d{5}(-\d{4})?/, '').trim() || parts[0] : parts[0];
 }
 const dateTime = (d?: Date | null) => (d ? new Date(d).toLocaleString('en-US', { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', timeZone: 'America/New_York' }) : 'Unscheduled')
 
-export default async function JobsPage({ searchParams }: { searchParams: { status?: string; view?: string } }) {
+export default async function JobsPage(props: { searchParams: Promise<{ status?: string; view?: string }> }) {
+  const searchParams = await props.searchParams;
   const activeStatuses = STAGES.map((s) => s.status)
 
   // Counts per stage (operational only, excludes owner test bookings).

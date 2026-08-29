@@ -25,7 +25,8 @@ const Schema = z.object({
   performanceNotes: z.string().trim().max(2000).nullable().optional(),
 })
 
-export async function PATCH(req: NextRequest, { params }: { params: { id: string } }): Promise<NextResponse> {
+export async function PATCH(req: NextRequest, props: { params: Promise<{ id: string }> }): Promise<NextResponse> {
+  const params = await props.params;
   const session = await getSession()
   if (!session) return NextResponse.json({ error: 'Authentication required' }, { status: 401 })
   if (!can(session.role as Role, 'staff.manage')) return NextResponse.json({ error: 'Only an owner can edit a staff profile.' }, { status: 403 })

@@ -15,11 +15,12 @@ const STATUS_COLORS: Record<string, string> = {
   PENDING: '#F59E0B',
 }
 
-export default async function AdminPayments({
-  searchParams,
-}: {
-  searchParams: { status?: string; page?: string }
-}) {
+export default async function AdminPayments(
+  props: {
+    searchParams: Promise<{ status?: string; page?: string }>
+  }
+) {
+  const searchParams = await props.searchParams;
   await getSession()
 
   const status = searchParams.status ?? 'ALL'
@@ -186,7 +187,7 @@ export default async function AdminPayments({
         </div>
       )}
     </div>
-  )
+  );
 }
 
 function StatCard({ label, value, color, sub }: { label: string; value: string; color: string; sub?: string }) {

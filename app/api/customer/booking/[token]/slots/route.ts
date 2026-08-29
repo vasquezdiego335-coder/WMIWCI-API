@@ -8,10 +8,8 @@ import { findAvailableSlots, formatEastern, RESCHEDULE_MIN_NOTICE_HOURS } from '
 //
 // Response: { slots: [{ iso, display }] }  — `iso` goes back in the PATCH body,
 // `display` is the pre-formatted Eastern string for the UI.
-export async function GET(
-  _req: NextRequest,
-  { params }: { params: { token: string } }
-): Promise<NextResponse> {
+export async function GET(_req: NextRequest, props: { params: Promise<{ token: string }> }): Promise<NextResponse> {
+  const params = await props.params;
   const booking = await prisma.booking.findFirst({
     where: { customerToken: params.token, customerTokenExpiry: { gte: new Date() } },
     select: { id: true, status: true },

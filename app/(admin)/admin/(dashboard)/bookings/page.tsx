@@ -48,11 +48,12 @@ async function getBookings(status?: string, search?: string, page = 1) {
   return { bookings, total, pages: Math.ceil(total / 25) }
 }
 
-export default async function AdminBookings({
-  searchParams,
-}: {
-  searchParams: { status?: string; q?: string; page?: string }
-}) {
+export default async function AdminBookings(
+  props: {
+    searchParams: Promise<{ status?: string; q?: string; page?: string }>
+  }
+) {
+  const searchParams = await props.searchParams;
   await getSession()
   const status = searchParams.status ?? 'ALL'
   const search = searchParams.q ?? ''

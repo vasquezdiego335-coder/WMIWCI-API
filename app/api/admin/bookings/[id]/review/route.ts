@@ -15,7 +15,8 @@ const ReviewSchema = z.object({
   source: z.enum(['admin', 'discord', 'customer-portal']).optional(),
 })
 
-export async function POST(req: NextRequest, { params }: { params: { id: string } }): Promise<NextResponse> {
+export async function POST(req: NextRequest, props: { params: Promise<{ id: string }> }): Promise<NextResponse> {
+  const params = await props.params;
   const session = await getSession()
   if (!session || !['OWNER', 'MANAGER'].includes(session.role)) {
     return NextResponse.json({ error: 'Forbidden' }, { status: 403 })

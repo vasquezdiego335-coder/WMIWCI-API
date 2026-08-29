@@ -460,7 +460,8 @@ async function loadBooking(token: string) {
   })
 }
 
-export default async function BookingStatusPage({ params }: { params: { token: string } }) {
+export default async function BookingStatusPage(props: { params: Promise<{ token: string }> }) {
+  const params = await props.params;
   const booking = await loadBooking(params.token)
   if (!booking) notFound()
 

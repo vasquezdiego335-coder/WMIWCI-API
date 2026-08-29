@@ -12,7 +12,8 @@ import { z } from 'zod'
 
 const PatchSchema = z.object({ approvalStatus: z.nativeEnum(ApprovalStatus) })
 
-export async function PATCH(req: NextRequest, { params }: { params: { id: string } }): Promise<NextResponse> {
+export async function PATCH(req: NextRequest, props: { params: Promise<{ id: string }> }): Promise<NextResponse> {
+  const params = await props.params;
   const session = await getSession()
   if (!session) return NextResponse.json({ error: 'Authentication required' }, { status: 401 })
   if (!can(session.role as Role, 'money.approve_owner_transaction')) {
@@ -38,7 +39,8 @@ export async function PATCH(req: NextRequest, { params }: { params: { id: string
   return NextResponse.json(updated)
 }
 
-export async function DELETE(_req: NextRequest, { params }: { params: { id: string } }): Promise<NextResponse> {
+export async function DELETE(_req: NextRequest, props: { params: Promise<{ id: string }> }): Promise<NextResponse> {
+  const params = await props.params;
   const session = await getSession()
   if (!session || session.role !== 'OWNER') {
     return NextResponse.json({ error: 'Only an owner can delete an owner transaction' }, { status: 403 })

@@ -7,10 +7,8 @@ import { offerRescheduleToCustomer } from '@/lib/reschedule'
 // Admin clicks "Offer New Dates" in the dashboard. Thin wrapper around the
 // shared offerRescheduleToCustomer() helper (same logic the Discord button uses).
 // Emails + texts the customer a self-service link; the $49 hold stays attached.
-export async function POST(
-  _req: NextRequest,
-  { params }: { params: { id: string } }
-): Promise<NextResponse> {
+export async function POST(_req: NextRequest, props: { params: Promise<{ id: string }> }): Promise<NextResponse> {
+  const params = await props.params;
   const session = await getSession()
   if (!session || !['OWNER', 'MANAGER'].includes(session.role)) {
     return NextResponse.json({ error: 'Forbidden' }, { status: 403 })

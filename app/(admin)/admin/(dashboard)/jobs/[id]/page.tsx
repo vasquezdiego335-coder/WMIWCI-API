@@ -78,7 +78,8 @@ function parseItemsBlob(text?: string | null): { label: string | null; value: st
   })
 }
 
-export default async function JobDetail({ params }: { params: { id: string } }) {
+export default async function JobDetail(props: { params: Promise<{ id: string }> }) {
+  const params = await props.params;
   const session = await getSession()
   const isOwner = session?.role === 'OWNER'
 
@@ -912,7 +913,7 @@ export default async function JobDetail({ params }: { params: { id: string } }) 
         ))}
       </Card>
     </div>
-  )
+  );
 }
 
 // ── Presentational helpers ──────────────────────────────────────
@@ -963,7 +964,7 @@ function AddressCard({ title, icon, address, unit, floor, elevator, stairs, note
       <Row label="Access instructions" value={notes ?? '—'} />
       {code && <Row label="🔒 Gate / access code" value={code} />}
     </Card>
-  )
+  );
 }
 function Stat({ label, value }: { label: string; value: string }) {
   return <div><div style={{ fontSize: '11px', color: '#9CA3AF', marginBottom: '2px' }}>{label}</div><div style={{ fontSize: '14px', fontWeight: 600, color: '#0A1628' }}>{value}</div></div>

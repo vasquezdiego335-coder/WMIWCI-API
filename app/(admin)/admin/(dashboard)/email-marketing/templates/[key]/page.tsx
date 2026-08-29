@@ -14,7 +14,8 @@ import { EmailTabs, ClassBadge, ToneBadge, dt } from '../../_shared'
 
 export const dynamic = 'force-dynamic'
 
-export default async function TemplateDetail({ params }: { params: { key: string } }) {
+export default async function TemplateDetail(props: { params: Promise<{ key: string }> }) {
+  const params = await props.params;
   const session = await getSession()
   const isOwner = session?.role === 'OWNER'
   const maySeeRecipients = can(session?.role as never, 'email.view_recipients')
