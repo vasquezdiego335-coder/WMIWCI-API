@@ -402,7 +402,7 @@ test('every state gets the same brand treatment, including not-found', () => {
   assert.match(css, /\.nf-h1\{font-family:Archivo/, 'and the same display face')
   assert.match(css, /\.nf-body\{background:#F5F1EA/, 'and the same bone body')
   assert.match(nf, /t\.titleLead/, 'and the same headline lockup')
-  assert.match(nf, /pickLang\(headers\(\)\.get\('accept-language'\)\)/, 'and it is bilingual')
+  assert.match(nf, /pickLang\(\(await headers\(\)\)\.get\('accept-language'\)\)/, 'and it is bilingual')
 })
 
 test('only the approved palette is used', () => {
@@ -419,10 +419,17 @@ test('only the approved palette is used', () => {
 })
 
 // ── Page wiring ─────────────────────────────────────────────────────────────
+//
+//  The two assertions below pin `pickLang((await headers()).get('accept-language'))`.
+//  They used to pin the SYNCHRONOUS `headers()` form. Next 15 made the request
+//  APIs async, so the await is the code being correct rather than the test being
+//  relaxed: the property asserted is unchanged - first paint is chosen from the
+//  visitor's Accept-Language header, on the server, so the page is bilingual
+//  before a single byte of JavaScript runs.
 
 test('the server picks the language and passes real contact details', () => {
   const src = read(PAGE)
-  assert.match(src, /pickLang\(headers\(\)\.get\('accept-language'\)\)/, 'first paint in the customer’s language')
+  assert.match(src, /pickLang\(\(await headers\(\)\)\.get\('accept-language'\)\)/, 'first paint in the customer’s language')
   assert.match(src, /businessPhone\(\)/, 'contact details come from config, never hard-coded')
   assert.ok(!/862.?640.?0625/.test(src), 'no hard-coded phone number on the page')
   assert.ok(!/862.?640.?0625/.test(read(VIEW)), 'no hard-coded phone number in the view')

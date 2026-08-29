@@ -17,7 +17,8 @@ export const dynamic = 'force-dynamic'
 
 type SP = Record<string, string | string[] | undefined>
 
-export default async function JourneysPage({ searchParams }: { searchParams: SP }) {
+export default async function JourneysPage(props: { searchParams: Promise<SP> }) {
+  const searchParams = await props.searchParams;
   const session = await getSession()
   const isOwner = session?.role === 'OWNER'
   const maySeeMoney = can(session?.role as never, 'email.view_attribution')

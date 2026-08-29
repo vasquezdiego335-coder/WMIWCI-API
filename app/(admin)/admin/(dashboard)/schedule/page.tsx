@@ -24,11 +24,12 @@ const STATUS_COLORS: Record<string, string> = {
   CONFIRMED: '#3B82F6', SCHEDULED: '#6366F1', IN_PROGRESS: '#F59E0B', COMPLETED: '#10B981',
 }
 
-export default async function AdminSchedule({
-  searchParams,
-}: {
-  searchParams: { week?: string }
-}) {
+export default async function AdminSchedule(
+  props: {
+    searchParams: Promise<{ week?: string }>
+  }
+) {
+  const searchParams = await props.searchParams;
   await getSession()
 
   const now = new Date()

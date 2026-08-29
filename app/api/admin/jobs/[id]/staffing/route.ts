@@ -12,7 +12,8 @@ import { z } from 'zod'
 //   PUT  create/update the staffing requirement (owner or manager — operations)
 // ════════════════════════════════════════════════════════════════════════════
 
-export async function GET(_req: NextRequest, { params }: { params: { id: string } }): Promise<NextResponse> {
+export async function GET(_req: NextRequest, props: { params: Promise<{ id: string }> }): Promise<NextResponse> {
+  const params = await props.params;
   const session = await getSession()
   if (!session) return NextResponse.json({ error: 'Authentication required' }, { status: 401 })
   if (!can(session.role as Role, 'schedule.view')) return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
@@ -49,7 +50,8 @@ const Schema = z.object({
   privateNotes: z.string().trim().max(2000).nullable().optional(),
 })
 
-export async function PUT(req: NextRequest, { params }: { params: { id: string } }): Promise<NextResponse> {
+export async function PUT(req: NextRequest, props: { params: Promise<{ id: string }> }): Promise<NextResponse> {
+  const params = await props.params;
   const session = await getSession()
   if (!session) return NextResponse.json({ error: 'Authentication required' }, { status: 401 })
   if (!can(session.role as Role, 'schedule.manage')) return NextResponse.json({ error: 'Only an owner or manager can set staffing requirements.' }, { status: 403 })

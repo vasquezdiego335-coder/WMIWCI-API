@@ -20,7 +20,8 @@ type Search = { view?: string; status?: string; category?: string; priority?: st
 
 type Comment = { by: string; at: string; text: string }
 
-export default async function RoadmapPage({ searchParams }: { searchParams: Search }) {
+export default async function RoadmapPage(props: { searchParams: Promise<Search> }) {
+  const searchParams = await props.searchParams;
   const sp = searchParams
   const all = await prisma.roadmapItem.findMany({ orderBy: [{ updatedAt: 'desc' }], take: 500 })
 

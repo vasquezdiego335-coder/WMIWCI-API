@@ -30,10 +30,11 @@ const LINKS: { href: string; label: string; blurb: string; action: Parameters<ty
   { href: '/admin/reports/pricing', label: 'Pricing intelligence', blurb: 'Comparables, break-even and quote ranges', action: 'pricing.view_intelligence' },
 ]
 
-export default async function ReportsOverview({ searchParams }: { searchParams: SP }) {
+export default async function ReportsOverview(props: { searchParams: Promise<SP> }) {
+  const searchParams = await props.searchParams;
   const session = await getSession()
   const role = session?.role as Role
-  const cookie = headers().get('cookie') ?? ''
+  const cookie = (await headers()).get('cookie') ?? ''
 
   const allowed = can(role, 'report.view_financial')
   const result = allowed ? await fetchReport('overview', searchParams, cookie) : null

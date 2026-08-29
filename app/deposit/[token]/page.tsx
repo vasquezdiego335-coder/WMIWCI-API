@@ -50,7 +50,8 @@ const ORANGE = '#FF5A1F'
 // it to anyone the link is forwarded to. A name, an amount or a move date in
 // these tags would leak a customer's details into a cached card outside our
 // control — so every deposit link unfurls identically.
-export async function generateMetadata({ params }: { params: { token: string } }): Promise<Metadata> {
+export async function generateMetadata(props: { params: Promise<{ token: string }> }): Promise<Metadata> {
+  const params = await props.params;
   const url = depositUrl(params.token)
   const image = depositOgImageUrl()
   return {
@@ -169,7 +170,7 @@ function isMissingColumn(err: unknown): boolean {
   const e = err as { code?: string; meta?: { column?: string } } | null
   if (e?.code === 'P2022') return true
   const text = err instanceof Error ? err.message : String(err)
-  return /column .* does not exist|42703/i.test(text)
+  return /column .* does not exist|42703/i.test(text);
 }
 
 /**
@@ -197,13 +198,14 @@ async function fetchRow(token: string) {
   }
 }
 
-export default async function DepositPage({
-  params,
-  searchParams,
-}: {
-  params: { token: string }
-  searchParams: { [k: string]: string | string[] | undefined }
-}) {
+export default async function DepositPage(
+  props: {
+    params: Promise<{ token: string }>
+    searchParams: Promise<{ [k: string]: string | string[] | undefined }>
+  }
+) {
+  const searchParams = await props.searchParams;
+  const params = await props.params;
   const loaded = await loadView(params.token)
   if (loaded.kind === 'missing') notFound()
 
@@ -211,7 +213,7 @@ export default async function DepositPage({
   // shared in a chosen language; otherwise the browser decides.
   const requested = typeof searchParams.lang === 'string' ? searchParams.lang.toLowerCase() : null
   const initialLang: Lang =
-    requested === 'es' || requested === 'en' ? requested : pickLang(headers().get('accept-language'))
+    requested === 'es' || requested === 'en' ? requested : pickLang((await headers()).get('accept-language'))
 
   // `?return=1` is set on the Stripe success URL. It means "the customer came
   // back from Stripe" and NOTHING more — it is never treated as proof of

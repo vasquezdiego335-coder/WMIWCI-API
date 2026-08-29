@@ -58,7 +58,8 @@ function readLang(req: NextRequest): 'en' | 'es' {
   return req.nextUrl.searchParams.get('lang') === 'es' ? 'es' : 'en'
 }
 
-export async function POST(req: NextRequest, { params }: { params: { token: string } }): Promise<NextResponse> {
+export async function POST(req: NextRequest, props: { params: Promise<{ token: string }> }): Promise<NextResponse> {
+  const params = await props.params;
   const token = params.token
 
   // Shape-check before touching the database — a malformed token is never a

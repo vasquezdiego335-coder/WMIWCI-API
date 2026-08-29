@@ -51,7 +51,8 @@ const ACTION_COLOR: Record<string, string> = {
   USER_LOGIN: COLORS.muted,
 }
 
-export default async function ActivityLogPage({ searchParams }: { searchParams: SP }) {
+export default async function ActivityLogPage(props: { searchParams: Promise<SP> }) {
+  const searchParams = await props.searchParams;
   const session = await getSession()
   if (!session || !can(session.role as Role, 'audit.view')) {
     return (
@@ -172,7 +173,7 @@ export default async function ActivityLogPage({ searchParams }: { searchParams: 
                       </td>
                       <td style={{ ...tableStyles.td, color: COLORS.muted, textTransform: 'capitalize' }}>{src}</td>
                     </tr>
-                  )
+                  );
                 })}
               </tbody>
             </table>
@@ -189,7 +190,7 @@ export default async function ActivityLogPage({ searchParams }: { searchParams: 
         </div>
       </div>
     </div>
-  )
+  );
 }
 
 function Field({ label, children }: { label: string; children: React.ReactNode }) {

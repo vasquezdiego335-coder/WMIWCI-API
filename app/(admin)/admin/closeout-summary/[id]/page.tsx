@@ -27,7 +27,8 @@ const money = (c: number | null | undefined) =>
 const day = (d: Date | null | undefined) =>
   d ? new Date(d).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' }) : '—'
 
-export default async function CloseoutSummary({ params }: { params: { id: string } }) {
+export default async function CloseoutSummary(props: { params: Promise<{ id: string }> }) {
+  const params = await props.params;
   const session = await getSession()
   if (!session) redirect('/admin/login')
   // Money on paper is owner-financial information; the closeout view itself is

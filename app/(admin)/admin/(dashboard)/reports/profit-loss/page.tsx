@@ -13,10 +13,11 @@ import SavedViews from '../SavedViews'
 export const dynamic = 'force-dynamic'
 type SP = Record<string, string | string[] | undefined>
 
-export default async function ProfitLossReport({ searchParams }: { searchParams: SP }) {
+export default async function ProfitLossReport(props: { searchParams: Promise<SP> }) {
+  const searchParams = await props.searchParams;
   const session = await getSession()
   const role = session?.role as Role
-  const cookie = headers().get('cookie') ?? ''
+  const cookie = (await headers()).get('cookie') ?? ''
   const allowed = can(role, 'report.view_financial')
   const result = allowed ? await fetchReport('profit-loss', searchParams, cookie) : null
 
@@ -78,5 +79,5 @@ export default async function ProfitLossReport({ searchParams }: { searchParams:
         </>
       )}
     </PageShell>
-  )
+  );
 }

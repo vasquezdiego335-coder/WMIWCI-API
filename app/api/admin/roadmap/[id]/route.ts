@@ -31,7 +31,8 @@ const PatchSchema = z.object({
   comment: z.string().trim().min(1).max(1000).optional(), // append-only
 })
 
-export async function PATCH(req: NextRequest, { params }: { params: { id: string } }): Promise<NextResponse> {
+export async function PATCH(req: NextRequest, props: { params: Promise<{ id: string }> }): Promise<NextResponse> {
+  const params = await props.params;
   const session = await getSession()
   if (!session) return NextResponse.json({ error: 'Authentication required' }, { status: 401 })
 

@@ -12,7 +12,8 @@ import { z } from 'zod'
 
 const Schema = z.object({ action: z.enum(['RESEND', 'CANCEL']) })
 
-export async function POST(req: NextRequest, { params }: { params: { id: string } }): Promise<NextResponse> {
+export async function POST(req: NextRequest, props: { params: Promise<{ id: string }> }): Promise<NextResponse> {
+  const params = await props.params;
   const session = await getSession()
   if (!session) return NextResponse.json({ error: 'Authentication required' }, { status: 401 })
   if (session.role !== 'OWNER') return NextResponse.json({ error: 'Owner only' }, { status: 403 })

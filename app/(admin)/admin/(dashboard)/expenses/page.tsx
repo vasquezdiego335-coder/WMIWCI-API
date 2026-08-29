@@ -24,7 +24,10 @@ function monthRange(monthParam?: string) {
 }
 const dateOnly = (d: Date) => new Date(d).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'America/New_York' })
 
-export default async function ExpensesPage({ searchParams }: { searchParams: { month?: string; category?: string; status?: string; scope?: string } }) {
+export default async function ExpensesPage(
+  props: { searchParams: Promise<{ month?: string; category?: string; status?: string; scope?: string }> }
+) {
+  const searchParams = await props.searchParams;
   const session = await getSession()
   const isOwner = session?.role === 'OWNER'
   const { start, end, label, key } = monthRange(searchParams.month)

@@ -33,7 +33,8 @@ const STATUS_FOR: Record<string, AssignmentStatus> = {
   OFFER: 'OFFERED', DECLINE: 'DECLINED', CANCEL: 'CANCELLED', NO_SHOW: 'NO_SHOW', COMPLETE: 'COMPLETED', ACKNOWLEDGE: 'ACCEPTED',
 }
 
-export async function POST(req: NextRequest, { params }: { params: { id: string } }): Promise<NextResponse> {
+export async function POST(req: NextRequest, props: { params: Promise<{ id: string }> }): Promise<NextResponse> {
+  const params = await props.params;
   const session = await getSession()
   if (!session) return NextResponse.json({ error: 'Authentication required' }, { status: 401 })
   const role = session.role as Role

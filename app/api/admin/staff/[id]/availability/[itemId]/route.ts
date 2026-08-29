@@ -9,7 +9,11 @@ import { can, type Role } from '@/lib/permissions'
 //  Availability is not financial history, so deletion is allowed (with audit).
 // ════════════════════════════════════════════════════════════════════════════
 
-export async function DELETE(req: NextRequest, { params }: { params: { id: string; itemId: string } }): Promise<NextResponse> {
+export async function DELETE(
+  req: NextRequest,
+  props: { params: Promise<{ id: string; itemId: string }> }
+): Promise<NextResponse> {
+  const params = await props.params;
   const session = await getSession()
   if (!session) return NextResponse.json({ error: 'Authentication required' }, { status: 401 })
   if (!can(session.role as Role, 'staff.manage_availability')) return NextResponse.json({ error: 'You do not have permission to manage availability.' }, { status: 403 })

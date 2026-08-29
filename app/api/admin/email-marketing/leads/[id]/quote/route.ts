@@ -35,7 +35,8 @@ const Schema = z.object({
   estimatedValueCents: z.number().int().positive().max(10_000_000).optional(),
 })
 
-export async function POST(req: NextRequest, { params }: { params: { id: string } }): Promise<NextResponse> {
+export async function POST(req: NextRequest, props: { params: Promise<{ id: string }> }): Promise<NextResponse> {
+  const params = await props.params;
   const session = await getSession()
   const deny = denyReason(session?.role as Role, 'email.manage_journey')
   if (deny) return NextResponse.json({ error: deny }, { status: 403 })

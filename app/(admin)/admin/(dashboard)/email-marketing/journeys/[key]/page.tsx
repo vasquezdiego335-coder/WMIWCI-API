@@ -17,7 +17,8 @@ import JourneyConfigEditor from './JourneyConfigEditor'
 
 export const dynamic = 'force-dynamic'
 
-export default async function JourneyConfigPage({ params }: { params: { key: string } }) {
+export default async function JourneyConfigPage(props: { params: Promise<{ key: string }> }) {
+  const params = await props.params;
   const session = await getSession()
   const isOwner = session?.role === 'OWNER'
   const key = decodeURIComponent(params.key)

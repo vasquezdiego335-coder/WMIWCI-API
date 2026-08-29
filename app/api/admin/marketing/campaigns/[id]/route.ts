@@ -37,7 +37,7 @@ function parseDate(v: string | null | undefined): Date | null | 'invalid' | unde
   return Number.isNaN(d.getTime()) ? 'invalid' : d
 }
 
-export async function PATCH(req: NextRequest, ctx: { params: { id: string } }): Promise<NextResponse> {
+export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: string }> }): Promise<NextResponse> {
   const session = await getSession()
   if (!session) return NextResponse.json({ error: 'Authentication required' }, { status: 401 })
   if (!can(session.role as Role, 'marketing.manage_campaign')) {
@@ -51,7 +51,7 @@ export async function PATCH(req: NextRequest, ctx: { params: { id: string } }): 
   const d = parsed.data
 
   const existing = await prisma.marketingCampaign.findUnique({
-    where: { id: ctx.params.id },
+    where: { id: (await ctx.params).id },
     select: {
       id: true, name: true, channel: true, sourceKey: true, status: true,
       startDate: true, endDate: true, budgetCents: true,

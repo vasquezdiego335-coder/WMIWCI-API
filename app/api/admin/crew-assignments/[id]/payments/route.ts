@@ -34,7 +34,8 @@ const RecordSchema = z.object({
   allowOverpay: z.boolean().optional(),
 })
 
-export async function POST(req: NextRequest, { params }: { params: { id: string } }): Promise<NextResponse> {
+export async function POST(req: NextRequest, props: { params: Promise<{ id: string }> }): Promise<NextResponse> {
+  const params = await props.params;
   const session = await getSession()
   if (!session) return NextResponse.json({ error: 'Authentication required' }, { status: 401 })
 
@@ -114,7 +115,8 @@ export async function POST(req: NextRequest, { params }: { params: { id: string 
 const VoidSchema = z.object({ paymentId: z.string().min(1), reason: z.string().trim().min(1).max(500) })
 
 /** Void a recorded payment. Never deletes — the row stays, flagged, forever. */
-export async function DELETE(req: NextRequest, { params }: { params: { id: string } }): Promise<NextResponse> {
+export async function DELETE(req: NextRequest, props: { params: Promise<{ id: string }> }): Promise<NextResponse> {
+  const params = await props.params;
   const session = await getSession()
   if (!session) return NextResponse.json({ error: 'Authentication required' }, { status: 401 })
   const parsed = VoidSchema.safeParse(await req.json().catch(() => ({})))

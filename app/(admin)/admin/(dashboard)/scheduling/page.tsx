@@ -16,7 +16,8 @@ export const dynamic = 'force-dynamic'
 const day = (d: Date | null) => (d ? new Date(d).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', timeZone: 'America/New_York' }) : '—')
 const time = (d: Date | null) => (d ? new Date(d).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZone: 'America/New_York' }) : '')
 
-export default async function SchedulingBoard({ searchParams }: { searchParams: { start?: string; end?: string } }) {
+export default async function SchedulingBoard(props: { searchParams: Promise<{ start?: string; end?: string }> }) {
+  const searchParams = await props.searchParams;
   const session = await getSession()
   const role = session?.role as Role
 

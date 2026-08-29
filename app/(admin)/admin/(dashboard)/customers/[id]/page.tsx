@@ -27,7 +27,9 @@ type SP = Record<string, string | string[] | undefined>
 
 const TONES: Record<string, string> = { good: COLORS.green, warn: COLORS.amber, bad: COLORS.red, muted: COLORS.faint }
 
-export default async function CustomerDetail({ params, searchParams }: { params: { id: string }; searchParams: SP }) {
+export default async function CustomerDetail(props: { params: Promise<{ id: string }>; searchParams: Promise<SP> }) {
+  const searchParams = await props.searchParams;
+  const params = await props.params;
   const session = await getSession()
   const maySeeRecipients = can(session?.role as never, 'email.view_recipients')
   const maySeeMoney = can(session?.role as never, 'email.view_attribution')

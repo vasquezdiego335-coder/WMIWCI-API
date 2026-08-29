@@ -22,11 +22,11 @@ const PatchSchema = z.object({
   shared: z.boolean().optional(),
 })
 
-export async function GET(_req: NextRequest, ctx: { params: { id: string } }): Promise<NextResponse> {
+export async function GET(_req: NextRequest, ctx: { params: Promise<{ id: string }> }): Promise<NextResponse> {
   const session = await getSession()
   if (!session) return NextResponse.json({ error: 'Authentication required' }, { status: 401 })
 
-  const view = await prisma.savedReportView.findUnique({ where: { id: ctx.params.id } })
+  const view = await prisma.savedReportView.findUnique({ where: { id: (await ctx.params).id } })
   if (!view) return NextResponse.json({ error: 'View not found.' }, { status: 404 })
 
   const gate = canLoadView(session.role as Role, view, session.userId)
@@ -51,7 +51,7 @@ export async function GET(_req: NextRequest, ctx: { params: { id: string } }): P
   })
 }
 
-export async function PATCH(req: NextRequest, ctx: { params: { id: string } }): Promise<NextResponse> {
+export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: string }> }): Promise<NextResponse> {
   const session = await getSession()
   if (!session) return NextResponse.json({ error: 'Authentication required' }, { status: 401 })
   const role = session.role as Role
@@ -62,7 +62,7 @@ export async function PATCH(req: NextRequest, ctx: { params: { id: string } }): 
   }
   const d = parsed.data
 
-  const view = await prisma.savedReportView.findUnique({ where: { id: ctx.params.id } })
+  const view = await prisma.savedReportView.findUnique({ where: { id: (await ctx.params).id } })
   if (!view) return NextResponse.json({ error: 'View not found.' }, { status: 404 })
 
   const load = canLoadView(role, view, session.userId)
@@ -165,13 +165,13 @@ export async function PATCH(req: NextRequest, ctx: { params: { id: string } }): 
   return NextResponse.json({ view: updated, changed: true, droppedColumns: config.droppedColumns })
 }
 
-export async function DELETE(_req: NextRequest, ctx: { params: { id: string } }): Promise<NextResponse> {
+export async function DELETE(_req: NextRequest, ctx: { params: Promise<{ id: string }> }): Promise<NextResponse> {
   const session = await getSession()
   if (!session) return NextResponse.json({ error: 'Authentication required' }, { status: 401 })
   const role = session.role as Role
 
   const view = await prisma.savedReportView.findUnique({
-    where: { id: ctx.params.id },
+    where: { id: (await ctx.params).id },
     select: { id: true, name: true, reportType: true, shared: true, createdById: true },
   })
   if (!view) return NextResponse.json({ error: 'View not found.' }, { status: 404 })

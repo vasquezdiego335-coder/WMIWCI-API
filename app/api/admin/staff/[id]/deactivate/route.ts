@@ -21,7 +21,8 @@ const Schema = z.object({
   resolveFutureWork: z.boolean().default(false),
 })
 
-export async function POST(req: NextRequest, { params }: { params: { id: string } }): Promise<NextResponse> {
+export async function POST(req: NextRequest, props: { params: Promise<{ id: string }> }): Promise<NextResponse> {
+  const params = await props.params;
   const session = await getSession()
   if (!session) return NextResponse.json({ error: 'Authentication required' }, { status: 401 })
   const role = session.role as Role

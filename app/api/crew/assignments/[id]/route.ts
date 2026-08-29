@@ -17,7 +17,8 @@ const Schema = z.object({
   reason: z.string().trim().max(1000).optional(),
 })
 
-export async function POST(req: NextRequest, { params }: { params: { id: string } }): Promise<NextResponse> {
+export async function POST(req: NextRequest, props: { params: Promise<{ id: string }> }): Promise<NextResponse> {
+  const params = await props.params;
   const session = await getSession()
   if (!session) return NextResponse.json({ error: 'Authentication required' }, { status: 401 })
   const role = session.role as Role
@@ -54,7 +55,7 @@ export async function POST(req: NextRequest, { params }: { params: { id: string 
     } else if (status === 'ASSIGNED' || status === 'IN_PROGRESS') {
       data = { acknowledgedAt: new Date(), acknowledgmentStaleAt: null }
     } else {
-      return NextResponse.json({ error: `An assignment that is ${status.toLowerCase().replace(/_/g, ' ')} cannot be acknowledged.` }, { status: 409 })
+      return NextResponse.json({ error: `An assignment that is ${status.toLowerCase().replace(/_/g, ' ')} cannot be acknowledged.` }, { status: 409 });
     }
   } else {
     const t = evaluateTransition(status, 'DECLINED')

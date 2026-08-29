@@ -5,7 +5,8 @@ import { emailQueue } from '@/lib/queues'
 import { effectiveWaitingFeeCents, resolveWaiting } from '@/lib/waiting-time'
 import { customerBalance, JOB_MONEY_PAYMENT_SELECT } from '@/lib/job-money'
 
-export async function POST(_req: NextRequest, { params }: { params: { id: string } }): Promise<NextResponse> {
+export async function POST(_req: NextRequest, props: { params: Promise<{ id: string }> }): Promise<NextResponse> {
+  const params = await props.params;
   const session = await getSession()
   if (!session || !['OWNER', 'MANAGER'].includes(session.role)) {
     return NextResponse.json({ error: 'Forbidden' }, { status: 403 })

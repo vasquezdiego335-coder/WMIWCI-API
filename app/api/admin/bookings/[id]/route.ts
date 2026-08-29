@@ -2,7 +2,8 @@ import { NextRequest, NextResponse } from 'next/server'
 import { getSession } from '@/lib/auth'
 import { prisma } from '@/lib/db'
 
-export async function GET(_req: NextRequest, { params }: { params: { id: string } }): Promise<NextResponse> {
+export async function GET(_req: NextRequest, props: { params: Promise<{ id: string }> }): Promise<NextResponse> {
+  const params = await props.params;
   const session = await getSession()
   if (!session || !['OWNER', 'MANAGER'].includes(session.role)) {
     return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
@@ -25,7 +26,8 @@ export async function GET(_req: NextRequest, { params }: { params: { id: string 
   return NextResponse.json(booking)
 }
 
-export async function PATCH(req: NextRequest, { params }: { params: { id: string } }): Promise<NextResponse> {
+export async function PATCH(req: NextRequest, props: { params: Promise<{ id: string }> }): Promise<NextResponse> {
+  const params = await props.params;
   const session = await getSession()
   if (!session || !['OWNER', 'MANAGER'].includes(session.role)) {
     return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
