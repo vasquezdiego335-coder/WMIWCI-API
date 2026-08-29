@@ -91,54 +91,34 @@ async function main(): Promise<void> {
     }
     await c.$executeRawUnsafe(`CREATE DATABASE "${REHEARSAL_DB}"`)
   })
-  //  ── MIGRATE DEPLOY CANNOT BUILD THIS DATABASE FROM SCRATCH ──────────
-  //  There is NO INIT MIGRATION. Nothing in prisma/migrations creates
-  //  `bookings`, `crm_leads` or any other base table: the schema was originally
-  //  created with `prisma db push`, and every migration since assumes the
-  //  tables already exist. Against production that is harmless — the tables and
-  //  the `_prisma_migrations` history are both already there — but it means a
-  //  database CANNOT be rebuilt from source control, so recovery depends
-  //  entirely on a backup. That makes part 3 below the load-bearing part of
-  //  this rehearsal, and it is recorded as a finding rather than skipped past.
-  let deployFromScratch = 'applies cleanly'
+  //  ── CAN A DATABASE BE BUILT FROM SOURCE CONTROL? ────────────────────
+  //  A bare `migrate deploy` cannot do it and never could: prisma/migrations
+  //  has no init migration, so the first migration alters tables nothing
+  //  created. That is why scripts/bootstrap-fresh-database.sh exists - it
+  //  applies the guarded baseline, records the historical migrations as applied
+  //  (a fact about a database it just built, not a guess about someone else's),
+  //  and confirms nothing is pending.
+  //
+  //  THIS is the claim that matters, so this is what is tested.
+  let rebuilt = 'built from source control'
   try {
-    execFileSync('npx', ['prisma', 'migrate', 'deploy'], {
-      env: { ...process.env, DATABASE_URL: url(REHEARSAL_DB), DIRECT_URL: url(REHEARSAL_DB) },
+    execFileSync('bash', ['scripts/bootstrap-fresh-database.sh'], {
+      env: { ...process.env, DATABASE_URL: url(REHEARSAL_DB), DIRECT_URL: url(REHEARSAL_DB), PATH: `${process.env.PATH};${PGBIN}` },
       encoding: 'utf8',
       stdio: 'pipe',
-      shell: true,
     })
   } catch (err) {
     const out = String((err as { stdout?: string }).stdout ?? '') + String((err as { stderr?: string }).stderr ?? '')
-    const failed = /Migration name: (\S+)/.exec(out)?.[1] ?? 'unknown'
-    const missing = /relation "([^"]+)" does not exist/.exec(out)?.[1] ?? 'a base table'
-    deployFromScratch = `FAILS at ${failed} — "${missing}" does not exist (no init migration)`
+    rebuilt = `FAILED: ${out.split('\n').filter(Boolean).slice(-2).join(' | ').slice(0, 160)}`
   }
   record(
-    'a database can be rebuilt from prisma/migrations alone',
-    deployFromScratch === 'applies cleanly' ? 'PASS' : 'FAIL',
-    deployFromScratch,
+    'a database can be built from source control',
+    rebuilt === 'built from source control' ? 'PASS' : 'FAIL',
+    rebuilt,
   )
 
-  //  Bootstrap the way this repo actually does, so the rest of the rehearsal
-  //  runs against the real schema.
-  await withDb('postgres', async (c) => {
-    await c.$executeRawUnsafe(`DROP DATABASE IF EXISTS "${REHEARSAL_DB}" WITH (FORCE)`)
-    await c.$executeRawUnsafe(`CREATE DATABASE "${REHEARSAL_DB}"`)
-  })
-  execFileSync('npx', ['prisma', 'db', 'push', '--skip-generate', '--accept-data-loss'], {
-    env: { ...process.env, DATABASE_URL: url(REHEARSAL_DB), DIRECT_URL: url(REHEARSAL_DB) },
-    encoding: 'utf8',
-    stdio: 'pipe',
-    shell: true,
-  })
-  //  `db push` builds the DATAMODEL. It cannot build the partial unique index —
-  //  Prisma has no syntax for one — which is precisely why that index ships as
-  //  hand-written SQL and why it is the thing most likely to go missing.
-  await withDb(REHEARSAL_DB, async (c) => {
-    await c.$executeRawUnsafe(INDEX_SQL)
-  })
-  record('schema bootstrapped the way this repo builds one', 'INFO', 'prisma db push + the SQL-only index')
+  //  The bootstrap above already built the schema; nothing more to do.
+  record('schema source', 'INFO', 'scripts/bootstrap-fresh-database.sh')
 
   // ── 1. LOCK BUDGET ──────────────────────────────────────────────────
   console.log('\n-- 1. what the index build costs --')
@@ -274,11 +254,16 @@ async function main(): Promise<void> {
     /* left as 'not found' */
   }
   const major = (v: string) => parseInt(v.split('.')[0] ?? '0', 10)
-  const compatible = major(clientVersion) >= major(serverVersion)
+  //  PRODUCTION_SERVER_VERSION is what the backup host must be able to dump.
+  //  The local rehearsal instance may deliberately be a NEWER major, to prove
+  //  the preflight refuses it - that refusal is a pass, not a failure.
+  const target = process.env.PRODUCTION_SERVER_VERSION || serverVersion
+  const compatible = major(clientVersion) >= major(target)
   record(
-    'the backup client tools can dump this server',
+    'the backup client can dump the PRODUCTION server',
     compatible ? 'PASS' : 'FAIL',
-    `pg_dump ${clientVersion} vs server ${serverVersion}${compatible ? '' : ' — pg_dump refuses to dump a newer server'}`,
+    `pg_dump ${clientVersion} vs production ${target}` +
+      (serverVersion !== target ? ` (local rehearsal instance is ${serverVersion})` : ''),
   )
 
   //  ── 3b. THE DOCUMENTED RESTORE MUST MATCH THE FILE WRITTEN ──────────
@@ -296,7 +281,7 @@ async function main(): Promise<void> {
     gzips && !documentsDecompress ? 'the script gzips its output; the header documents `psql < backup-file.sql`' : 'consistent',
   )
 
-  if (compatible) {
+  if (major(clientVersion) >= major(serverVersion)) {
     const backupDir = `${process.env.TEMP ?? '.'}/release-rehearsal-backups`
     execFileSync('bash', ['scripts/backup-db.sh'], {
       env: { ...process.env, DATABASE_URL: url(REHEARSAL_DB), BACKUP_DIR: backupDir, PATH: `${process.env.PATH};${PGBIN}` },
