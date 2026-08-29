@@ -61,15 +61,36 @@ async function processDiscordJob(job: Job<DiscordJobData>): Promise<void> {
       //  DELEGATES to the SAME function the integration tests drive. Nothing
       //  about this job's behaviour lives in the worker file any more, so a
       //  test cannot pass against a clone while production does something else.
+      //  SHAPE, and why it is asserted rather than defaulted.
+      //
+      //  This read is `job.data.payload.dedupeKey`, matching every other case in
+      //  this file. The publishers used to put `dedupeKey` at the TOP level of
+      //  job.data, so `payload` was undefined, `dedupeKey` came out '', and the
+      //  `if (!dedupeKey) return` below completed the job in milliseconds having
+      //  done nothing at all. No error, no retry, no delivery — the owner simply
+      //  was not told about the lead.
+      //
+      //  A missing key now THROWS. A malformed job must fail loudly and land in
+      //  BullMQ's failed set where it can be seen; returning quietly is what made
+      //  this invisible for two deploys.
       const dedupeKey = String((payload as { dedupeKey?: string })?.dedupeKey ?? '')
-      if (!dedupeKey) return
+      if (!dedupeKey) {
+        throw new Error(
+          'lead-notify job has no payload.dedupeKey — the publisher and this handler disagree ' +
+            'about the job shape. Expected { type, payload: { dedupeKey } }.',
+        )
+      }
       await processLeadNotification(dedupeKey, deliverLeadNotice, {
         //  A job that arrived before its due time is put BACK on the queue with
         //  the remaining delay rather than being silently dropped.
         reschedule: async (dueAt) => {
           const delay = Math.max(0, dueAt.getTime() - Date.now())
           await discordQueue.remove(dedupeKey).catch(() => {})
-          await discordQueue.add('lead-notify', { type: 'lead-notify', dedupeKey }, { jobId: dedupeKey, delay })
+          await discordQueue.add(
+            'lead-notify',
+            { type: 'lead-notify', payload: { dedupeKey } },
+            { jobId: dedupeKey, delay },
+          )
         },
       })
       return

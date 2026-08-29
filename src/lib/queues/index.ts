@@ -251,6 +251,11 @@ export type ScheduledJobData = {
     // otherwise stay stranded forever. Bounded + idempotent; see
     // journeys.repairStrandedQuoteJourneys.
     | 'lifecycle-repair'
+    //  Re-drives the lead-notification outbox. Delivery normally happens
+    //  inline at capture; this is the safety net for the cases the inline
+    //  path cannot cover - the process dying mid-flight, Discord refusing,
+    //  a notice left `pending` by anything at all.
+    | 'lead-notification-sweep'
     // Daily: the marketing discovery sweep — deterministic reactivation
     // audiences -> at most ONE drafted campaign + a Discord ask. Never sends;
     // flag-gated on EMAIL_MARKETING_AGENT_ENABLED. See email-marketing-agent.ts.

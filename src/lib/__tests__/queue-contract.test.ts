@@ -37,6 +37,7 @@ import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 
 const API_ROOT = resolve(__dirname, '../../..')
+const NEWLINE = String.fromCharCode(10)
 
 /** Shipped source only — a test may publish a deliberately malformed job. */
 function shipped(): string[] {
@@ -111,6 +112,62 @@ test('every published discord job carries a type its worker handles', () => {
   }
 
   assert.deepEqual(problems, [], problems.join('\n'))
+})
+
+/** The body of one `case 'x':` in the worker's switch. */
+function caseBody(type: string): string {
+  const src = code('src/workers/discord.worker.ts')
+  const start = src.indexOf(`case '${type}':`)
+  if (start === -1) return ''
+  const next = src.slice(start + 1).search(/case\s+'[a-z-]+'\s*:|^\s*default\s*:/m)
+  return next === -1 ? src.slice(start) : src.slice(start, start + 1 + next)
+}
+
+test('if a handler reads job.data.payload, its publishers must send a payload', () => {
+  //  THE SECOND HALF OF THE SAME DEFECT, and the one that survived the first
+  //  fix. The handler reads `payload.dedupeKey` — that is `job.data.payload
+  //  .dedupeKey`, matching every other case in the file. The publishers put
+  //  `dedupeKey` at the TOP level of job.data, so `payload` was undefined,
+  //  `dedupeKey` came out '', and `if (!dedupeKey) return` completed the job in
+  //  milliseconds having done nothing.
+  //
+  //  Adding `type` fixed the dispatch and revealed this one underneath: the job
+  //  now reached the right branch and still did nothing. Both are the same
+  //  mistake — publisher and consumer disagreeing about a shape that no type
+  //  checks, because `job.data` is typed loosely enough to allow either.
+  const problems: string[] = []
+
+  for (const s of publishSites()) {
+    const t = /\btype\s*:\s*'([a-z-]+)'/.exec(s.data)?.[1]
+    if (!t) continue // covered by the test above
+    const body = caseBody(t)
+    if (!body) continue
+
+    const readsPayload = /\bpayload\b/.test(body)
+    const sendsPayload = /\bpayload\s*:/.test(s.data)
+
+    if (readsPayload && !sendsPayload) {
+      problems.push(
+        `${s.file}: the '${t}' handler reads job.data.payload, but this publisher sends no ` +
+          `\`payload\` — the handler would read undefined and do nothing.`,
+      )
+    }
+  }
+
+  assert.deepEqual(problems, [], problems.join(NEWLINE))
+})
+
+test('a lead-notify job with no payload.dedupeKey FAILS rather than completing', () => {
+  //  The silent `return` is what hid this for two deploys: a malformed job was
+  //  marked completed, so nothing retried and nothing surfaced. It must land in
+  //  BullMQ's failed set instead.
+  const body = caseBody('lead-notify')
+  assert.ok(body, "the worker still has a 'lead-notify' case")
+  assert.match(body, /throw new Error\(/, 'a missing dedupeKey throws')
+  assert.ok(
+    !/if\s*\(!dedupeKey\)\s*return/.test(body),
+    'it must NOT return quietly — that is what made the defect invisible',
+  )
 })
 
 test('lead notices are delivered INLINE, not handed to the worker queue', () => {

@@ -545,6 +545,35 @@ async function processScheduledJob(job: Job<ScheduledJobData>): Promise<void> {
       break
     }
 
+    case 'lead-notification-sweep': {
+      //  THE SAFETY NET, and the reason the outbox is durable in practice
+      //  rather than only on paper. Lead notices are delivered inline at
+      //  capture, which covers the ordinary case. It cannot cover the process
+      //  dying between the commit and the send, Discord being down for longer
+      //  than one request, or a row left `pending` by any future path.
+      //
+      //  A site with no visitors is exactly when a stuck notice matters most,
+      //  so this runs on a timer rather than on a request path. It is safe on
+      //  every replica: a PostgreSQL advisory lock means the losers return
+      //  immediately, and it works in bounded batches.
+      const { sweepLeadNotifications } = await import('../lib/lead-notification-sweeper')
+      const { discordQueue } = await import('../lib/queues')
+      const result = await sweepLeadNotifications(async (dedupeKey) => {
+        //  SHAPE MATTERS: the handler reads job.data.payload.dedupeKey. Sending
+        //  it at the top level is what made every notice a silent no-op for two
+        //  deploys - see queue-contract.test.ts.
+        await discordQueue.remove(dedupeKey).catch(() => {})
+        await discordQueue.add(
+          'lead-notify',
+          { type: 'lead-notify', payload: { dedupeKey } },
+          { jobId: dedupeKey },
+        )
+      })
+      if (result.scanned || result.staleRecovered || result.failed) {
+        log.info(result, 'lead-notification sweep complete')
+      }
+      break
+    }
     case 'campaign-sweep': {
       // Cron: dispatch due SCHEDULED campaigns, re-open stale claims,
       // re-enqueue lost batches, finalize settled runs.
@@ -704,6 +733,13 @@ async function registerCronJobs(): Promise<void> {
     'campaign-sweep',
     { type: 'campaign-sweep' },
     { repeat: { pattern: '*/5 * * * *' }, jobId: 'cron:campaign-sweep' }
+  )
+  //  Every two minutes: often enough that a missed notice is noticed while the
+  //  lead is still warm, cheap enough to be a no-op the rest of the time.
+  await scheduledQueue.add(
+    'lead-notification-sweep',
+    { type: 'lead-notification-sweep' },
+    { repeat: { pattern: '*/2 * * * *' }, jobId: 'cron:lead-notification-sweep' }
   )
   await scheduledQueue.add(
     'automation-sweep',
