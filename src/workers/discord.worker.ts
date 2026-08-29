@@ -11,6 +11,14 @@ import {
   postContactMessage,
   postLeadCard,
 } from '../bot/discord-rest'
+//  STATIC, like every other handler here. These were dynamic `await import()`
+//  calls inside the job branch, which is the one thing this file did
+//  differently from its other cases - and the lead-notify job hung the whole
+//  worker process in production, taking email, SMS and Discord cards down
+//  with it. A module graph resolved at start-up cannot stall a job handler.
+import { processLeadNotification } from '../lib/lead-notification-processor'
+import { deliverLeadNotice } from '../lib/lead-notification-transport'
+import { discordQueue } from '../lib/queues'
 
 async function processDiscordJob(job: Job<DiscordJobData>): Promise<void> {
   const { type, bookingId, payload } = job.data
@@ -53,15 +61,12 @@ async function processDiscordJob(job: Job<DiscordJobData>): Promise<void> {
       //  DELEGATES to the SAME function the integration tests drive. Nothing
       //  about this job's behaviour lives in the worker file any more, so a
       //  test cannot pass against a clone while production does something else.
-      const { processLeadNotification } = await import('../lib/lead-notification-processor')
-      const { deliverLeadNotice } = await import('../lib/lead-notification-transport')
       const dedupeKey = String((payload as { dedupeKey?: string })?.dedupeKey ?? '')
       if (!dedupeKey) return
       await processLeadNotification(dedupeKey, deliverLeadNotice, {
         //  A job that arrived before its due time is put BACK on the queue with
         //  the remaining delay rather than being silently dropped.
         reschedule: async (dueAt) => {
-          const { discordQueue } = await import('../lib/queues')
           const delay = Math.max(0, dueAt.getTime() - Date.now())
           await discordQueue.remove(dedupeKey).catch(() => {})
           await discordQueue.add('lead-notify', { type: 'lead-notify', dedupeKey }, { jobId: dedupeKey, delay })
