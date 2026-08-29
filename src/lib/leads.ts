@@ -483,15 +483,41 @@ function notifyOwnerOfNewLead(leadId: string, context: string): void {
         //  still gets a durable event rather than silently none.
         const rec = await recordLeadNotification(leadId, 'lead_created')
         durable = true
-        if (true) {
-          //  The queue job is only a NUDGE — the truth is the row above. The
-          //  jobId is the same deterministic key, so BullMQ dedupes too.
-          const { discordQueue } = await import('./queues')
-          const key = dedupeKeyFor(leadId, 'lead_created')
-          await discordQueue.remove(key).catch(() => {})
-          await discordQueue.add('lead-notify', { type: 'lead-notify', dedupeKey: key }, { jobId: key })
-        }
-        //  A durable record exists and the worker owns delivery from here.
+
+        //  ── DELIVERED HERE, NOT HANDED TO THE QUEUE ───────────────────
+        //  This used to publish a `lead-notify` job for the worker host. In
+        //  production that job WEDGED the worker: it logged "Processing discord
+        //  job" and then the process stopped logging entirely — no completion,
+        //  no failure, and the five-minute sweeps stopped too. One lead notice
+        //  took email, SMS and every Discord card down with it, which is far
+        //  worse than the problem the queue was solving.
+        //
+        //  The same two functions run perfectly in THIS process: pointed at the
+        //  production database they claimed and delivered three stuck notices in
+        //  under a second each. So delivery happens here, inline.
+        //
+        //  This whole block is already fire-and-forget (`void (async () => ...`),
+        //  so the visitor's request does not wait for Discord.
+        //
+        //  DURABILITY IS UNCHANGED, and that is the point: the row above is
+        //  written in the same transaction as the lead and is the truth. If this
+        //  delivery fails or this process dies mid-flight, the row stays
+        //  `pending` and `sweepLeadNotifications` re-drives it. The queue was
+        //  only ever a nudge.
+        //
+        //  The worker's `lead-notify` branch is left in place but is now dormant
+        //  — nothing publishes that job — until the wedge is root-caused.
+        const key = dedupeKeyFor(leadId, 'lead_created')
+        const { processLeadNotification } = await import('./lead-notification-processor')
+        const { deliverLeadNotice } = await import('./lead-notification-transport')
+        await processLeadNotification(key, deliverLeadNotice).catch((err) => {
+          //  A scheduled retry THROWS by design. The row carries the next
+          //  attempt time, so this is information, not a failure to handle.
+          apiLogger.info(
+            { leadId, err: String(err).slice(0, 200) },
+            'lead notice not delivered on this pass — the durable row will be re-driven',
+          )
+        })
         return
       } catch (err) {
         //  The outbox or Redis is unavailable. Fall through to the legacy

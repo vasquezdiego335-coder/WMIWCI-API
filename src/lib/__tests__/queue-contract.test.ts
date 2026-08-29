@@ -113,13 +113,47 @@ test('every published discord job carries a type its worker handles', () => {
   assert.deepEqual(problems, [], problems.join('\n'))
 })
 
-test('the lead-notify publishers specifically are well formed', () => {
-  //  Named separately because this is the one that actually broke, and a
-  //  regression here means the owner silently stops being told about leads.
-  const sites = publishSites().filter((s) => s.name === 'lead-notify')
-  assert.ok(sites.length >= 2, `expected the capture and reschedule publishers, found ${sites.length}`)
-  for (const s of sites) {
-    assert.match(s.data, /type\s*:\s*'lead-notify'/, `${s.file} must set type: 'lead-notify'`)
-    assert.match(s.data, /dedupeKey/, `${s.file} must carry the dedupeKey`)
-  }
+test('lead notices are delivered INLINE, not handed to the worker queue', () => {
+  //  ARCHITECTURE, pinned deliberately.
+  //
+  //  The capture path used to publish a `lead-notify` job. In production that
+  //  job wedged the worker host: it logged "Processing discord job" and then the
+  //  process stopped logging altogether — no completion, no failure, and the
+  //  five-minute sweeps stopped with it. One lead notice took email, SMS and
+  //  every Discord card down.
+  //
+  //  So delivery happens in the capture process, which is proven to work: the
+  //  same two functions, pointed at the production database, claimed and
+  //  delivered three stuck notices in under a second each.
+  //
+  //  Durability is unchanged and is the reason this is safe: the outbox row is
+  //  written in the SAME TRANSACTION as the lead, so a failure here leaves the
+  //  row `pending` for `sweepLeadNotifications` to re-drive. The queue was only
+  //  ever a nudge.
+  const leads = code('src/lib/leads.ts')
+
+  assert.match(
+    leads,
+    /processLeadNotification\(\s*key\s*,\s*deliverLeadNotice\s*\)/,
+    'the capture path delivers the notice itself',
+  )
+  assert.ok(
+    !/discordQueue\.add\(\s*'lead-notify'/.test(leads),
+    'the capture path must NOT publish a lead-notify job — that is what wedged the worker',
+  )
+  assert.match(
+    leads,
+    /recordLeadNotification\(leadId, 'lead_created'\)/,
+    'and the durable row is still written before any delivery is attempted',
+  )
+})
+
+test('the worker still HANDLES lead-notify, so anything already queued is drained', () => {
+  //  The branch is dormant, not deleted: jobs published before this change may
+  //  still be in Redis, and the sweeper may publish again in future. Removing
+  //  the case would turn those into "Unknown discord job type" — the original
+  //  defect, reintroduced from the other end.
+  const worker = code('src/workers/discord.worker.ts')
+  assert.match(worker, /case\s+'lead-notify'\s*:/, 'the worker keeps its handler')
+  assert.match(worker, /processLeadNotification\(/, 'and still delegates to the shared processor')
 })
