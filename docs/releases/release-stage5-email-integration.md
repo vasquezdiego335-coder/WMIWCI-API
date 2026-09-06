@@ -55,7 +55,7 @@ local Postgres refuses it).
 Queues (all created lazily, producer side in `src/lib/queues/index.ts`):
 `email`, `sms`, `discord`, `webhook-retry`, `scheduled`, `marketing`.
 Job types on `marketing`: `campaign-batch`, `campaign-recipient-retry`,
-`campaign-sweep` (cron */5), `automation-stage`, `automation-sweep` (cron */15).
+`campaign-sweep` (cron */15), `automation-stage`, `automation-sweep` (cron */15).
 
 - **Stage 5 adds NO queues** — crew notifications are ledger-only
   (`AssignmentNotification`; no delivery worker exists yet, by design).
@@ -155,7 +155,7 @@ adds the previously undocumented `EMAIL_PROMOTIONS_ENABLED`,
 | **EMAIL_PROMOTIONS_ENABLED** | worker + web | campaign/automation master switch — **stays false in production until the provider-level staging rehearsal passes** |
 | EMAIL_TEST_RECIPIENT | web | test-send target |
 | EMAIL_CAMPAIGN_BATCH_SIZE / EMAIL_CAMPAIGN_STALE_MS | worker | dispatch tuning |
-| OUTBOX_ENABLED | worker | legacy outbox poller |
+| OUTBOX_ENABLED | web + worker | transactional outbox; immediate queue nudge + aligned recovery drain |
 | TWILIO_* (if TWILIO_ENABLED) | worker | SMS |
 | Stage 5 adds **no** new environment variables | — | — |
 

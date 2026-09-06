@@ -86,7 +86,7 @@ test('the suite covers the problems the owner named', () => {
 
 test('a run that is mid-flight is NOT past the stuck threshold', () => {
   // A run whose rows moved four minutes ago is working. The campaign sweep runs
-  // every five minutes, so anything inside the grace window is normal.
+  // every fifteen minutes, so anything inside the grace window is normal.
   const idleMs = 4 * 60_000
   assert.ok(idleMs < RUN_MIDFLIGHT_GRACE_MS, 'a 4-minute-idle run must be inside the grace window')
   assert.ok(idleMs < RUN_STUCK_WARN_MS, 'a 4-minute-idle run must not warn')
@@ -107,9 +107,9 @@ test('PREPARING has a much shorter clock than a sending run', () => {
 })
 
 test('a schedule picked up slightly late by the normal sweep is not "missed"', () => {
-  // The sweep runs every 5 minutes, so 3 minutes late is the design working.
+  // The sweep runs every 15 minutes, so 3 minutes late is the design working.
   assert.ok(3 * 60_000 < SCHEDULE_GRACE_MS, '3 minutes late must be within grace')
-  assert.ok(SCHEDULE_GRACE_MS >= 10 * 60_000, 'grace must comfortably exceed the 5-minute sweep interval')
+  assert.ok(SCHEDULE_GRACE_MS >= 30 * 60_000, 'grace must cover a complete 15-minute retry window')
   assert.ok(SCHEDULE_GRACE_MS < SCHEDULE_MISSED_CRITICAL_MS, 'warning must precede critical')
 })
 

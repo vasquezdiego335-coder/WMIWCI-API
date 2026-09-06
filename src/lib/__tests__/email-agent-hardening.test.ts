@@ -1056,7 +1056,7 @@ test('the fallback provider needs its PROVIDER name, not just a model', () => {
 //  OPS ALERT DEDUPLICATION (owner report 2026-07-28)
 //
 //  MEASURED FAILURE: fifty identical CRITICAL Discord messages in eight hours
-//  from one stuck test campaign. The monitoring cron runs every ten minutes
+//  from one stuck test campaign. The monitoring cron runs every fifteen minutes
 //  and had no dedupe at all.
 // ════════════════════════════════════════════════════════════════════════
 

@@ -784,7 +784,7 @@ export async function sweepCampaignRuns(): Promise<{ dispatched: number; reopene
       log.warn({ campaignId: c.id, error: result.error }, 'scheduled dispatch refused')
       // ── THE REFUSAL MUST BE VISIBLE (audit E-09) ──────────────────────
       // Previously this was a log line and nothing else. A campaign the owner
-      // believed was scheduled would be refused every 5 minutes FOREVER — 288
+      // believed was scheduled would be refused every 15 minutes FOREVER — 96
       // times a day — while the UI showed a healthy "Scheduled" badge. That is
       // the exact silent-non-delivery trap behind bugs #2 and #8. The reason
       // now lands on the campaign row, where the card already renders it.

@@ -4,7 +4,7 @@
 //
 //    • an HTTP server (health checks + optional Stripe webhook)
 //    • 5 BullMQ workers — email / Discord cards / SMS / scheduled / marketing
-//    • the transactional-outbox email poller
+//    • event-driven transactional-outbox drains + an aligned recovery sweep
 //    • the Discord gateway bot — slash commands + interaction acks
 //
 //  WHY THE HTTP SERVER EXISTS
@@ -45,11 +45,11 @@ import { startSmsWorker } from './workers/sms.worker'
 import { startScheduledWorker } from './workers/scheduled.worker'
 import { startMarketingWorker } from './workers/marketing.worker'
 import { startWebhookWorker } from './workers/webhook.worker'
-import { startOutboxWorker } from './outbox/workers/emailWorker'
 import { getDiscordClient } from './bot/discord-actions'
 import { processStripeWebhook } from './lib/stripe-events'
 import { logger } from './lib/logger'
 import { checkEnv } from './lib/env'
+import { prisma } from './lib/db'
 
 // ── Liveness state surfaced by the health endpoints ─────────────────────
 const state = {
@@ -231,9 +231,11 @@ async function main(): Promise<void> {
   ]
   state.bullWorkers = bullWorkers.length
 
-  // 4) Transactional-outbox email poller (Postgres only)
-  const outbox = startOutboxWorker()
-  state.outbox = true
+  // 4) Transactional email outbox. There is deliberately NO Postgres timer
+  //    here: real events nudge the scheduled queue immediately and its aligned
+  //    recovery cron catches lost nudges. The old three-second poll was enough
+  //    to keep Neon's compute bill running around the clock while idle.
+  state.outbox = process.env.OUTBOX_ENABLED === 'true'
 
   // 5) Discord gateway bot (slash commands). Idempotent singleton; logs + skips
   //    cleanly if DISCORD_BOT_TOKEN is missing/placeholder.
@@ -241,13 +243,14 @@ async function main(): Promise<void> {
   state.discordBot = true
 
   logger.info(
-    '✓ Combined worker host running — HTTP server + 6 BullMQ workers (incl. webhook) + outbox poller + Discord bot'
+    `✓ Combined worker host running — HTTP server + 6 BullMQ workers (incl. webhook) + ` +
+      `${state.outbox ? 'event-driven outbox' : 'outbox disabled'} + Discord bot`
   )
 
   async function shutdown(signal: string): Promise<void> {
     logger.info({ signal }, 'Shutting down worker host…')
-    outbox.stop()
     await Promise.all(bullWorkers.map((w) => w.close())).catch(() => undefined)
+    await prisma.$disconnect().catch(() => undefined)
     logger.info('Worker host stopped')
     process.exit(0)
   }

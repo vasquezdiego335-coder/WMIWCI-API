@@ -2,7 +2,7 @@
 //  OPS ALERT DEDUPLICATION (owner report 2026-07-28)
 //  ---------------------------------------------------------------------
 //  WHAT HAPPENED. A single test campaign sat in a state the dispatch sweep
-//  refused. The monitoring cron runs every ten minutes, found the same
+//  refused. The monitoring cron runs every fifteen minutes, found the same
 //  CRITICAL every time, and posted it to Discord every time — FIFTY IDENTICAL
 //  MESSAGES over eight hours, all describing one problem that had not changed
 //  since the first one.

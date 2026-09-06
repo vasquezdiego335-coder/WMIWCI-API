@@ -3,7 +3,7 @@
 //  ---------------------------------------------------------------------
 //  The failure this family exists for is SILENT NON-DELIVERY: a campaign the
 //  owner believes is scheduled, showing a healthy badge, that the dispatch
-//  sweep refuses every five minutes forever. It has happened here (bugs #2
+//  sweep refuses every fifteen minutes forever. It has happened here (bugs #2
 //  and #8), and it is invisible from the campaign card alone.
 //
 //  The strongest check in the file is `campaign.cannot_dispatch`, and it is
@@ -74,7 +74,7 @@ const scheduleMissed: CheckDefinition = {
       const cfg = c.emailConfig
       if (!cfg?.scheduledAt || c.status !== 'SCHEDULED') continue
       const late = ageMs(ctx, cfg.scheduledAt)
-      // WITHIN GRACE = NORMAL. The sweep runs every 5 minutes; being 3 minutes
+      // WITHIN GRACE = NORMAL. The sweep runs every 15 minutes; being 3 minutes
       // past the scheduled minute is the design working, not a fault.
       if (late < SCHEDULE_GRACE_MS) continue
 

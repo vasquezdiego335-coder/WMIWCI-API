@@ -59,7 +59,7 @@ test('numeric settings are clamped, so a bad env cannot unbound the agent', () =
   const wild = envDefaults({ EMAIL_AGENT_ENABLED: 'true', EMAIL_AGENT_MAX_AUTO_ACTIONS_PER_RUN: '99999' } as never)
   assert.ok(wild.maxAutoActionsPerRun <= 25, 'the per-cycle action cap must be bounded')
   const junk = envDefaults({ EMAIL_AGENT_ENABLED: 'true', EMAIL_AGENT_INTERVAL_MINUTES: 'banana' } as never)
-  assert.equal(junk.intervalMinutes, 5, 'unparseable values fall back to the default')
+  assert.equal(junk.intervalMinutes, 15, 'unparseable values fall back to the cost-aligned default')
 })
 
 test('the pause message tells an operator what to do', () => {

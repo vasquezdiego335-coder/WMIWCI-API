@@ -112,7 +112,7 @@ export function envDefaults(env: NodeJS.ProcessEnv = process.env): AgentSettings
     pausedBy: null,
     maxAutoActionsPerRun: num(env.EMAIL_AGENT_MAX_AUTO_ACTIONS_PER_RUN, 3, 0, 25),
     stageRecipientLimit: num(env.EMAIL_AGENT_STAGE_RECIPIENT_LIMIT, 50, 1, 100000),
-    intervalMinutes: num(env.EMAIL_AGENT_INTERVAL_MINUTES, 5, 1, 1440),
+    intervalMinutes: num(env.EMAIL_AGENT_INTERVAL_MINUTES, 15, 1, 1440),
     memoryRetentionDays: num(env.EMAIL_AGENT_MEMORY_RETENTION_DAYS, 365, 1, 3650),
     provider: env.EMAIL_AGENT_PROVIDER?.trim() || null,
     model: env.EMAIL_AGENT_MODEL?.trim() || null,

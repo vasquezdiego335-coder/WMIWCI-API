@@ -141,7 +141,7 @@ const stuckRuns: CheckDefinition = {
             `Run ${r.id} is ${r.status} and nothing in it has changed for ${minutes(idle)} minutes (started ${minutes(total)} minutes ago). ` +
             `${openRows} ${plural(openRows, 'recipient is', 'recipients are')} still open. ` +
             (critical
-              ? 'The sweep re-opens stale claims every five minutes, so at this age the run is not recovering on its own.'
+              ? 'The sweep re-opens stale claims every fifteen minutes, so at this age the run is not recovering on its own.'
               : 'This is past the point where the recovery sweep should have moved it.'),
           evidence: { status: r.status, minutesIdle: minutes(idle), minutesSinceStart: minutes(total), recipientCounts: counts, totalRecipients: r.totalRecipients },
           suggestedActions: ['inspectCampaignRun', 'reconcileRunCounters', 'finalizeSettledRun', 'releaseExpiredLock'],

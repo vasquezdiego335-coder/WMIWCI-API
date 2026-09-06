@@ -14,7 +14,11 @@ import {
 //  two workers ever process the same row. Run: tsx src/outbox/workers/emailWorker.ts
 // ════════════════════════════════════════════════════════════════════════
 
-const POLL_INTERVAL_MS = Number(process.env.OUTBOX_POLL_MS ?? 3000)
+// Standalone compatibility mode only. Production's combined worker host uses
+// event-driven BullMQ nudges plus an aligned recovery cron instead of polling.
+// Keep this safely above Neon's default five-minute idle window so accidentally
+// launching `outbox:start` cannot recreate the always-on compute bill.
+const POLL_INTERVAL_MS = Number(process.env.OUTBOX_POLL_MS ?? 15 * 60 * 1000)
 const BATCH = Number(process.env.OUTBOX_BATCH ?? 20)
 const SEND_DATE_PICKED_EMAIL = process.env.OUTBOX_SEND_DATE_PICKED === 'true'
 // A job stuck in 'processing' longer than this (a crashed worker) is requeued.
@@ -66,22 +70,53 @@ export async function processOnce(): Promise<number> {
 }
 
 /** Requeue stale 'processing' jobs, throttled to REAP_INTERVAL_MS. */
-async function maybeReap(): Promise<void> {
-  if (Date.now() - lastReapAt < REAP_INTERVAL_MS) return
+async function maybeReap(force = false): Promise<number> {
+  if (!force && Date.now() - lastReapAt < REAP_INTERVAL_MS) return 0
   lastReapAt = Date.now()
   try {
     const reaped = await reapStaleProcessingJobs(STALE_PROCESSING_MS)
     if (reaped > 0) console.warn(`[outbox] reaped ${reaped} stale 'processing' job(s) → requeued`)
+    return reaped
   } catch (err) {
     console.error('[outbox] reaper error:', err)
+    return 0
   }
+}
+
+/**
+ * Drain all currently-due email jobs in bounded batches.
+ *
+ * Called by two event-driven paths in scheduled.worker.ts:
+ *   1. immediately after a real outbox event commits;
+ *   2. every aligned recovery interval in case that nudge was lost.
+ *
+ * The bound prevents a corrupt or enormous backlog from monopolising the
+ * scheduled worker. A later recovery pass continues where this one stopped.
+ */
+export async function drainOutbox(
+  maxBatches = 10,
+): Promise<{ processed: number; batches: number; reaped: number; truncated: boolean }> {
+  const reaped = await maybeReap(true)
+  let processed = 0
+  let batches = 0
+
+  while (batches < maxBatches) {
+    const claimed = await processOnce()
+    batches += 1
+    processed += claimed
+    if (claimed < BATCH) {
+      return { processed, batches, reaped, truncated: false }
+    }
+  }
+
+  return { processed, batches, reaped, truncated: true }
 }
 
 async function loop(): Promise<void> {
   console.log(
     `[outbox] worker started (poll=${POLL_INTERVAL_MS}ms batch=${BATCH} staleReap=${STALE_PROCESSING_MS}ms)`
   )
-  await maybeReap() // reap once at startup before claiming anything
+  await maybeReap(true) // reap once at startup before claiming anything
   while (running) {
     try {
       await maybeReap()
@@ -99,11 +134,9 @@ function shutdown(signal: string) {
   console.log(`[outbox] ${signal} — finishing current cycle…`)
   running = false
 }
-process.on('SIGINT', () => shutdown('SIGINT'))
-process.on('SIGTERM', () => shutdown('SIGTERM'))
 
-/** Start the outbox poller from another entrypoint (e.g. the combined worker
- *  host). Non-blocking; returns a stop handle. */
+/** Start the compatibility poller from another entrypoint. Production's
+ *  combined host intentionally does not call this; see drainOutbox(). */
 export function startOutboxWorker(): { stop: () => void } {
   void loop().catch((err) => console.error('[outbox] loop crashed:', err))
   return { stop: () => { running = false } }
@@ -111,6 +144,8 @@ export function startOutboxWorker(): { stop: () => void } {
 
 // Run directly: tsx src/outbox/workers/emailWorker.ts
 if (require.main === module) {
+  process.on('SIGINT', () => shutdown('SIGINT'))
+  process.on('SIGTERM', () => shutdown('SIGTERM'))
   loop().catch((err) => {
     console.error('[outbox] fatal:', err)
     process.exit(1)

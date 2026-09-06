@@ -8,7 +8,7 @@
 //  useful monitor and one the owner mutes in a week is whether it can tell
 //  "in flight" from "stuck". Every threshold here is stated with the reason
 //  it has the value it has, in terms of how the system actually behaves:
-//  the campaign sweep runs every five minutes, batches are bounded, and a
+//  the campaign sweep runs every fifteen minutes, batches are bounded, and a
 //  recipient claim goes stale at fifteen. A run that is four minutes old is
 //  not late; it is a snapshot of normal work.
 // ════════════════════════════════════════════════════════════════════════
@@ -21,10 +21,10 @@ import type { AgentSettings } from '../settings'
 
 /**
  * A campaign whose scheduled time has passed by less than this is NOT missed —
- * the dispatch sweep runs every 5 minutes, so up to ~5 minutes of lateness is
- * the design, and 15 gives room for a slow batch or a restart.
+ * the dispatch sweep runs every 15 minutes in the shared Neon wake window, so
+ * 30 gives one complete retry window plus room for ordering and a restart.
  */
-export const SCHEDULE_GRACE_MS = 15 * 60_000
+export const SCHEDULE_GRACE_MS = 30 * 60_000
 /** Past this, the schedule was not merely late; nothing is picking it up. */
 export const SCHEDULE_MISSED_CRITICAL_MS = 60 * 60_000
 

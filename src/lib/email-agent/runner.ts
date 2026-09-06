@@ -571,7 +571,7 @@ export async function runAgentCycle(options: { trigger?: CycleTrigger; now?: Dat
     // ── 6b. BUDGET THRESHOLD ALERT ──────────────────────────────────────
     // Once per threshold per billing period. An owner should learn that AI
     // analysis is about to stop BEFORE it stops, and should not be told the
-    // same thing every five minutes afterwards.
+    // same thing every fifteen minutes afterwards.
     try {
       const usage = await readUsage(settings, now)
       const alert = budgetAlertToRaise({

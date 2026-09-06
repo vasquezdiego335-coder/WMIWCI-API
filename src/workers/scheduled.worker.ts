@@ -513,6 +513,28 @@ async function processScheduledJob(job: Job<ScheduledJobData>): Promise<void> {
       break
     }
 
+    // ── TRANSACTIONAL OUTBOX — event driven, with durable recovery ──
+    // A real payment/approval/reschedule event publishes an immediate drain
+    // nudge after its email_jobs transaction commits. The recovery variant is
+    // registered on the shared 15-minute wake window and catches the one gap
+    // Redis cannot close: the process dying (or Redis failing) between commit
+    // and enqueue. Neither path runs when the outbox feature itself is off.
+    case 'outbox-email-drain':
+    case 'outbox-email-recovery': {
+      if (process.env.OUTBOX_ENABLED !== 'true') {
+        log.info('outbox drain skipped — OUTBOX_ENABLED is not true')
+        break
+      }
+      const { drainOutbox } = await import('../outbox/workers/emailWorker')
+      const result = await drainOutbox()
+      if (result.truncated) {
+        log.warn(result, 'outbox drain hit its safety bound; the next recovery pass will continue')
+      } else if (result.processed || result.reaped) {
+        log.info(result, 'outbox drain complete')
+      }
+      break
+    }
+
     // ── EMAIL FEEDBACK RECOVERY (audit E-02) ──────────────────────
     // `retryPendingSideEffects` existed, documented itself as the sweep that
     // recovers failed suppressions, and was NEVER SCHEDULED. A bounce whose
@@ -722,7 +744,12 @@ async function registerCronJobs(): Promise<void> {
   )
 
   // ── Email dispatch runtime sweeps (owner spec 2026-07-22) ──
-  // campaign-sweep: every 5 min — dispatches due SCHEDULED campaigns,
+  // Cost rule: recovery/monitoring work shares ONE quarter-hour wake window.
+  // Scattering two-, five- and ten-minute Postgres jobs across the hour kept
+  // Neon's compute permanently active. Real customer events still run
+  // immediately; only safety-net and batch maintenance work waits up to 15m.
+  //
+  // campaign-sweep: every 15 min — dispatches due SCHEDULED campaigns,
   // re-opens stale recipient claims, re-enqueues lost batches, finalizes
   // settled runs. automation-sweep: every 15 min — requeues due stages
   // (restart / un-pause recovery) and evaluates the grounded time-based
@@ -732,14 +759,14 @@ async function registerCronJobs(): Promise<void> {
   await scheduledQueue.add(
     'campaign-sweep',
     { type: 'campaign-sweep' },
-    { repeat: { pattern: '*/5 * * * *' }, jobId: 'cron:campaign-sweep' }
+    { repeat: { pattern: '*/15 * * * *' }, jobId: 'cron:campaign-sweep' }
   )
-  //  Every two minutes: often enough that a missed notice is noticed while the
-  //  lead is still warm, cheap enough to be a no-op the rest of the time.
+  // Lead delivery itself is inline and immediate. This is only the durable
+  // recovery path for an interrupted request or Discord outage.
   await scheduledQueue.add(
     'lead-notification-sweep',
     { type: 'lead-notification-sweep' },
-    { repeat: { pattern: '*/2 * * * *' }, jobId: 'cron:lead-notification-sweep' }
+    { repeat: { pattern: '*/15 * * * *' }, jobId: 'cron:lead-notification-sweep' }
   )
   await scheduledQueue.add(
     'automation-sweep',
@@ -747,25 +774,33 @@ async function registerCronJobs(): Promise<void> {
     { repeat: { pattern: '*/15 * * * *' }, jobId: 'cron:automation-sweep' }
   )
 
-  // email-side-effect-sweep: every 10 min — re-drives suppressions that failed
-  // to write. Cheap no-op when nothing is pending (audit E-02).
+  // Transactional email is event-driven for normal delivery. This sweep is
+  // the durable fallback when the post-commit Redis nudge could not be queued.
+  await scheduledQueue.add(
+    'outbox-email-recovery',
+    { type: 'outbox-email-recovery' },
+    { repeat: { pattern: '*/15 * * * *' }, jobId: 'cron:outbox-email-recovery' }
+  )
+
+  // email-side-effect-sweep: every 15 min — re-drives suppressions that failed
+  // to write, aligned with the other recovery jobs (audit E-02).
   await scheduledQueue.add(
     'email-side-effect-sweep',
     { type: 'email-side-effect-sweep' },
-    { repeat: { pattern: '*/10 * * * *' }, jobId: 'cron:email-side-effect-sweep' }
+    { repeat: { pattern: '*/15 * * * *' }, jobId: 'cron:email-side-effect-sweep' }
   )
 
-  // email-monitoring: every 10 min, offset from the sweep above so the two do
-  // not contend. Read-only; it repairs nothing, because a monitor that fixes
-  // things hides the problem it exists to reveal (audit E-04).
+  // email-monitoring is read-only; it repairs nothing, because a monitor that
+  // fixes things hides the problem it exists to reveal (audit E-04). Run it in
+  // the same quarter-hour window rather than waking Postgres separately.
   await scheduledQueue.add(
     'email-monitoring',
     { type: 'email-monitoring' },
-    { repeat: { pattern: '5-59/10 * * * *' }, jobId: 'cron:email-monitoring' }
+    { repeat: { pattern: '*/15 * * * *' }, jobId: 'cron:email-monitoring' }
   )
 
   // ── Email operations agent (owner spec 2026-07-27) ──
-  // Every 5 minutes by default (EMAIL_AGENT_INTERVAL_MINUTES documents the
+  // Every 15 minutes by default (EMAIL_AGENT_INTERVAL_MINUTES documents the
   // intent; the cron pattern is the schedule BullMQ actually honours, and the
   // agent's own `scheduler.agent_gap` check reports whenever the two disagree
   // in practice). Registered unconditionally: the cycle reads its own settings
@@ -814,19 +849,37 @@ async function registerCronJobs(): Promise<void> {
   await scheduledQueue.add(
     'lifecycle-repair',
     { type: 'lifecycle-repair' },
-    { repeat: { pattern: '35 * * * *' }, jobId: 'cron:lifecycle-repair' }
+    { repeat: { pattern: '0 * * * *' }, jobId: 'cron:lifecycle-repair' }
   )
 
-  // The agent cron previously ran every 5 minutes under the SAME jobId. BullMQ
-  // keys a repeatable job on (name, pattern, jobId), so changing the pattern
-  // leaves the old schedule in place and the agent would run on BOTH. Remove
-  // any repeatable whose pattern is not the current one.
+  // BullMQ keys a repeatable job on (name, pattern, jobId), so changing a
+  // pattern ADDS a schedule instead of replacing the old one. Prune every
+  // managed stale pattern or the old two-/five-/ten-minute jobs would survive
+  // deployment and silently erase the cost saving.
   try {
+    const desiredPatterns = new Map<string, string>([
+      ['daily-schedule-morning', '0 7 * * *'],
+      ['daily-schedule-evening', '0 19 * * *'],
+      ['campaign-sweep', '*/15 * * * *'],
+      ['lead-notification-sweep', '*/15 * * * *'],
+      ['automation-sweep', '*/15 * * * *'],
+      ['outbox-email-recovery', '*/15 * * * *'],
+      ['email-side-effect-sweep', '*/15 * * * *'],
+      ['email-monitoring', '*/15 * * * *'],
+      ['email-agent-cycle', '*/15 * * * *'],
+      ['lead-maintenance', '20 3 * * *'],
+      ['marketing-discovery', '5 10 * * *'],
+      ['lifecycle-repair', '0 * * * *'],
+    ])
     const repeatables = await scheduledQueue.getRepeatableJobs()
     for (const r of repeatables) {
-      if (r.name === 'email-agent-cycle' && r.pattern !== '*/15 * * * *') {
+      const desired = desiredPatterns.get(r.name)
+      if (desired && r.pattern !== desired) {
         await scheduledQueue.removeRepeatableByKey(r.key)
-        queueLogger.warn({ pattern: r.pattern }, 'removed a stale email-agent-cycle schedule')
+        queueLogger.warn(
+          { name: r.name, stalePattern: r.pattern, desiredPattern: desired },
+          'removed a stale recurring schedule',
+        )
       }
     }
   } catch (err) {

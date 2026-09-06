@@ -154,7 +154,7 @@ const unsettledSideEffects: CheckDefinition = {
           title: `${unsettled} suppression ${plural(unsettled, 'write is', 'writes are')} unfinished`,
           description:
             `${unsettled} bounce/complaint ${plural(unsettled, 'event has', 'events have')} a suppression that has not completed. Until it does, ` +
-            `${plural(unsettled, 'that address', 'those addresses')} can still receive email. The retry sweep runs every ten minutes; if this number is not falling, the write itself is failing.`,
+            `${plural(unsettled, 'that address', 'those addresses')} can still receive email. The retry sweep runs every fifteen minutes; if this number is not falling, the write itself is failing.`,
           evidence: { pending: counts.side_effect_pending ?? 0, failed: counts.side_effect_failed ?? 0 },
           suggestedActions: ['reprocessValidWebhookEvent', 'inspectWebhookEvent'],
         })

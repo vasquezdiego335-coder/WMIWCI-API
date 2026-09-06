@@ -314,7 +314,7 @@ export async function autoResolveAbsent(
     const fingerprints = uniqueStrings([incident.fingerprint].concat(incident.findings.map((f) => f.fingerprint)))
     const stillSeen = fingerprints.some((fp) => seenFingerprints.indexOf(fp) !== -1)
     if (stillSeen) continue
-    // One clear cycle is enough for a check that runs every five minutes; the
+    // One clear cycle is enough for a check that runs every fifteen minutes; the
     // finding either reproduces or it does not.
     await prisma.emailAgentIncident.update({
       where: { id: incident.id },

@@ -48,8 +48,8 @@ npm run host:start
 
 Expected in the log: all workers start, and
 `Cron jobs registered (daily digests + campaign/automation sweeps)`.
-In Bull Board (`/admin/queues`): repeatables `cron:campaign-sweep` (*/5) and
-`cron:automation-sweep` (*/15).
+In Bull Board (`/admin/queues`): repeatables `cron:campaign-sweep` (*/15) and
+`cron:automation-sweep` (*/15), with no stale */5 campaign schedule.
 
 ## 3. Fixture contacts (3) — eligible / unsubscribed / suppressed
 

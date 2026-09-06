@@ -58,7 +58,7 @@ staging pass; the runbook below assumes **after**.
 | Service | Start command | Why |
 |---|---|---|
 | **API** (Next.js) | `npm run start` | Serves `/admin/**` and `/api/**`, including `/api/email/webhook` |
-| **Worker host** | `npm run host:start` | ONE container running 5 BullMQ workers + the outbox poller + the Discord bot, and an HTTP health server on `$PORT` |
+| **Worker host** | `npm run host:start` | ONE container running BullMQ workers (including event-driven outbox drains) + the Discord bot, and an HTTP health server on `$PORT` |
 
 `host:start` is the single-container topology (`src/worker-host.ts`). Do **not**
 also run `workers:start` and `outbox:start` separately — you would get two

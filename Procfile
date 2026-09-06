@@ -1,5 +1,5 @@
 # ── Railway worker host ($5 plan) — ONE combined process ──
-# Runs the BullMQ workers + the outbox email poller + the Discord bot together
+# Runs BullMQ workers (including event-driven outbox drains) + the Discord bot
 # in a single container (cheapest RAM/CPU). The Next.js API stays on Vercel and
 # is never run here. Railway should create ONE service with this start command.
 #

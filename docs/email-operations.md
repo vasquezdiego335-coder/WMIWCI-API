@@ -40,7 +40,7 @@ sender (booking-approval.ts / fulfillment.ts / scheduled.worker.ts)
 | `APP_URL` | Portal + open-pixel base | Required for open tracking + portal links. |
 | `EMAIL_ASSET_BASE_URL` | Hosted PNG/GIF base | Default `https://moveitclearit.com/email`. |
 | `REFERRAL_SECRET` | Signs referral codes | Required only if `signReferralCode()` is used. |
-| `OUTBOX_ENABLED` | Route approval/confirmation via the outbox | When true, the legacy email is skipped (no double-send). |
+| `OUTBOX_ENABLED` | Route approval/confirmation via the outbox | When true, the legacy email is skipped; a post-commit queue nudge drains immediately and a 15-minute sweep recovers missed nudges. |
 | `ALLOW_TEST_PAYMENTS` | Enables the $1 controlled test | **Temporary toggle — leave OFF in prod except during a supervised test.** |
 | `DATABASE_URL`, `JWT_SECRET` | App/DB | Needed by the build's page-data step. |
 

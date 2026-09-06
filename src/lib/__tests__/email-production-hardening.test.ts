@@ -92,7 +92,7 @@ test('E-02 retryPendingSideEffects is registered as a cron, not just exported', 
   const worker = code(src('src/workers/scheduled.worker.ts'))
   assert.match(worker, /import \{ retryPendingSideEffects \}/, 'must import the sweep')
   assert.match(worker, /await retryPendingSideEffects\(/, 'must CALL it in a job handler')
-  assert.match(worker, /pattern: '\*\/10 \* \* \* \*' \}, jobId: 'cron:email-side-effect-sweep'/, 'must be registered every 10 minutes')
+  assert.match(worker, /pattern: '\*\/15 \* \* \* \*' \}, jobId: 'cron:email-side-effect-sweep'/, 'must be registered in the shared 15-minute recovery window')
 })
 
 test('E-02 a dead-lettered suppression raises a CRITICAL alert naming the risk', () => {
@@ -100,6 +100,71 @@ test('E-02 a dead-lettered suppression raises a CRITICAL alert naming the risk',
   assert.match(worker, /dead_letter/, 'must count dead-lettered events')
   assert.match(worker, /STILL SENDABLE/, 'the alert must say what the consequence is')
   assert.match(code(worker), /log\.error\(/, 'must log at error level so alerting catches it')
+})
+
+// ── NEON-COST: idle means zero database traffic ─────────────────────────
+
+test('NEON-COST production host does not start the legacy interval poller', () => {
+  // PREVENTS: an UPDATE...RETURNING transaction every three seconds with no
+  // mail to send, which keeps Neon's compute active around the clock.
+  const host = code(src('src/worker-host.ts'))
+  assert.doesNotMatch(host, /startOutboxWorker/, 'production must be event-driven, not interval-polled')
+  assert.match(host, /state\.outbox = process\.env\.OUTBOX_ENABLED === 'true'/)
+})
+
+test('NEON-COST a committed outbox event publishes an immediate drain nudge', () => {
+  const integration = code(src('src/outbox/integration.ts'))
+  assert.match(integration, /scheduledQueue\.add\(\s*'outbox-email-drain'/)
+  const commitAt = integration.indexOf('await fn()')
+  const nudgeAt = integration.indexOf('await nudgeOutbox(label, bookingId)')
+  assert.ok(commitAt >= 0 && nudgeAt > commitAt, 'the Redis nudge must happen only after the durable transaction returns')
+  assert.match(integration, /outbox drain nudge timed out after 3s/, 'a Redis outage must not hang the booking request')
+  assert.match(integration, /recovery sweep will retry/, 'a failed nudge must explicitly rely on durable recovery')
+})
+
+test('NEON-COST immediate and recovery outbox jobs use the same bounded drain', () => {
+  const worker = code(src('src/workers/scheduled.worker.ts'))
+  assert.match(worker, /case 'outbox-email-drain':\s*case 'outbox-email-recovery':/)
+  assert.match(worker, /await drainOutbox\(\)/)
+  assert.match(worker, /jobId: 'cron:outbox-email-recovery'/)
+
+  const processor = code(src('src/outbox/workers/emailWorker.ts'))
+  assert.match(processor, /export async function drainOutbox/)
+  assert.match(processor, /while \(batches < maxBatches\)/, 'a backlog drain must be bounded')
+})
+
+test('NEON-COST recurring database maintenance shares one 15-minute wake window', () => {
+  const worker = code(src('src/workers/scheduled.worker.ts'))
+  const aligned = [
+    'campaign-sweep',
+    'lead-notification-sweep',
+    'automation-sweep',
+    'outbox-email-recovery',
+    'email-side-effect-sweep',
+    'email-monitoring',
+    'email-agent-cycle',
+  ]
+  for (const name of aligned) {
+    assert.ok(
+      worker.includes(`{ repeat: { pattern: '*/15 * * * *' }, jobId: 'cron:${name}' }`),
+      `${name} must run in the shared quarter-hour window`,
+    )
+  }
+  for (const oldPattern of ['*/2 * * * *', '*/5 * * * *', '*/10 * * * *', '5-59/10 * * * *']) {
+    assert.ok(!worker.includes(`pattern: '${oldPattern}'`), `stale frequent pattern must be absent: ${oldPattern}`)
+  }
+  assert.ok(
+    worker.includes("{ repeat: { pattern: '0 * * * *' }, jobId: 'cron:lifecycle-repair' }"),
+    'the hourly repair must align with a quarter-hour wake',
+  )
+})
+
+test('NEON-COST deployment prunes old BullMQ repeatables instead of leaving both schedules live', () => {
+  const worker = code(src('src/workers/scheduled.worker.ts'))
+  assert.match(worker, /const desiredPatterns = new Map<string, string>/)
+  assert.match(worker, /const desired = desiredPatterns\.get\(r\.name\)/)
+  assert.match(worker, /r\.pattern !== desired/)
+  assert.match(worker, /removeRepeatableByKey\(r\.key\)/)
 })
 
 // ── E-03: cross-run duplicate protection ────────────────────────────────
@@ -211,7 +276,7 @@ test('E-08 the bug #7 invariant is MONITORED: terminal run ⇒ completedAt', () 
 })
 
 test('E-09 a refused scheduled dispatch is PERSISTED, not only logged', () => {
-  // PREVENTS: a campaign refused every 5 minutes for days while the UI shows a
+  // PREVENTS: a campaign refused every 15 minutes for days while the UI shows a
   // healthy SCHEDULED badge — the silent-non-delivery trap behind bugs #2/#8.
   const d = code(lib('email-campaign-dispatch.ts'))
   assert.match(d, /emailCampaignConfig[\s\S]{0,200}statusNote:/, 'the reason must land on the campaign row')

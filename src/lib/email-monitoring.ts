@@ -12,7 +12,7 @@
 //    • a complaint spike is invisible until the sending domain is blocked;
 //    • a run stranded in a terminal state keeps recipients PENDING with no
 //      trace (bug #7 — happened, in production, silently);
-//    • a SCHEDULED campaign refused every 5 minutes shows a healthy badge.
+//    • a SCHEDULED campaign refused every 15 minutes shows a healthy badge.
 //
 //  DESIGN RULES
 //   1. READ-ONLY. Nothing here mutates campaign, run, recipient or send state.
@@ -237,7 +237,7 @@ export async function checkUnsettledSideEffects(): Promise<Check> {
       value: pendingOrFailed,
       threshold: 0,
       message: `${pendingOrFailed} bounce/complaint event${pendingOrFailed === 1 ? ' has' : 's have'} an unfinished suppression — the address is sendable until it completes.`,
-      action: 'The retry sweep runs every 10 minutes. If the count is not falling, check database connectivity.',
+      action: 'The retry sweep runs every 15 minutes. If the count is not falling, check database connectivity.',
     }
   }
   return ok('side_effects', 'Every bounce and complaint has been applied to the suppression list.')
@@ -449,7 +449,7 @@ export async function runEmailMonitoring(): Promise<HealthReport> {
     const title = 'EMAIL SYSTEM - CRITICAL'
     const lines = criticals.map((c) => ({ message: c.message, action: c.action }))
 
-    // DEDUPLICATED (owner report 2026-07-28). This cron runs every ten minutes
+    // DEDUPLICATED (owner report 2026-07-28). This cron runs every fifteen minutes
     // and used to post EVERY critical EVERY run: one stuck test campaign
     // produced fifty identical Discord messages in eight hours. An owner who
     // mutes the channel because of that never sees the alert that matters.

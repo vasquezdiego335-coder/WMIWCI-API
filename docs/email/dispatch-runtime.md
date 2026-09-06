@@ -71,7 +71,7 @@ analytics system.
 **Controls** (admin Campaigns tab, `email.manage_campaign`, all audited):
 Start sending, Pause (holds unprocessed recipients within one send), Resume
 (re-enqueues pending batches), Cancel remaining, Retry failed. The
-`campaign-sweep` cron (every 5 min) dispatches due SCHEDULED campaigns,
+`campaign-sweep` cron (every 15 min, aligned with the shared Neon wake window) dispatches due SCHEDULED campaigns,
 re-opens stale SENDING claims, re-enqueues lost batches and finalizes settled
 runs — restart recovery is automatic.
 
