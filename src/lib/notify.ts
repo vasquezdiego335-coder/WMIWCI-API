@@ -4,8 +4,7 @@
 //  Self-contained on purpose. New messages are sent from HERE so the existing
 //  customer-email allowlist (src/workers/email.worker.ts), the React email
 //  templates, and the BullMQ EmailJobData union all stay UNTOUCHED:
-//    • SMS  → enqueued on the existing `sms` queue (free-form; the SMS worker
-//             still honors TWILIO_ENABLED, so an un-flagged deploy is a dry run).
+//    • SMS  → none. Move It Clear It no longer sends SMS (owner, 2026-09-15).
 //    • Email→ sent via a DIRECT Resend call (no template/allowlist needed for an
 //             internal alert or a simple bilingual auto-reply).
 //
@@ -18,11 +17,10 @@
 //  Every send is wrapped so a Redis stall or Resend hiccup is a logged, non-fatal
 //  skip — notifications must never break a lead/booking request.
 // ════════════════════════════════════════════════════════════════════════
-import { smsQueue } from './queues'
 import { resend, EMAIL_FROM, EMAIL_REPLY_TO } from './resend'
 import { guardedSend } from './email-guard'
 import { apiLogger } from './logger'
-import { normalizeLocale, t, BIZ_NAME, type Locale } from './i18n'
+import { normalizeLocale, BIZ_NAME, type Locale } from './i18n'
 
 const log = apiLogger.child({ mod: 'notify' })
 
@@ -239,12 +237,8 @@ export async function notifyLead(input: LeadInput): Promise<void> {
   await ownerEmail(`New lead: ${dash(input.name)}`, ownerLeadEmailHtml(input), 'owner-lead-alert', input.email)
 
   // Customer auto-reply (flag-gated; only when we have contact info).
+  // Email only — Move It Clear It no longer texts customers (owner, 2026-09-15).
   if (CUSTOMER_AUTOREPLY) {
-    if (input.phone) {
-      await safe('sms:lead-ack', () =>
-        smsQueue.add('lead-ack-sms', { to: input.phone!, message: t(locale, 'leadAck', { name: input.name || '' }) })
-      )
-    }
     if (input.email) {
       const subject = locale === 'es' ? 'Recibimos tu solicitud' : 'We got your request'
       // Stable per-address, per-day identity: a repeated form submission on the

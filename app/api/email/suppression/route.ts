@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import crypto from 'node:crypto'
 import { prisma } from '@/lib/db'
 import { normalizeEmail } from '@/lib/email-tokens'
-import { suppress } from '@/lib/email-suppression'
+import { suppress, isSuppressionSettled } from '@/lib/email-suppression'
 import type { SuppressionReason } from '@prisma/client'
 
 // ════════════════════════════════════════════════════════════════════════
@@ -107,13 +107,20 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ ok: false, error: 'invalid_reason' }, { status: 400 })
   }
 
-  const created = await suppress({
+  const outcome = await suppress({
     email,
     reason: reason as SuppressionReason,
     source: body.source ?? 'leadtracking',
     detail: body.detail,
   })
 
-  // `created: false` means it was already covered — still a success (idempotent).
-  return NextResponse.json({ ok: true, created })
+  // A FAILED WRITE IS NOT A SUCCESS (2026-09-15). This used to answer 200 even
+  // when the suppression could not be written, so the caller never retried and
+  // the unsubscribe/bounce was lost — the same defect the webhook already had
+  // fixed. Already-covered addresses are still a success (idempotent).
+  if (!isSuppressionSettled(outcome)) {
+    const status = outcome.status === 'write_failed' ? 500 : 400
+    return NextResponse.json({ ok: false, error: outcome.status, retry: status === 500 }, { status })
+  }
+  return NextResponse.json({ ok: true, status: outcome.status, created: outcome.status === 'created' })
 }

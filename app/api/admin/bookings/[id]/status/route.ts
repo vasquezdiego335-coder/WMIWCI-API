@@ -111,6 +111,13 @@ export async function POST(req: NextRequest, props: { params: Promise<{ id: stri
       const status = result.code === 'forbidden' ? 403 : 409
       return NextResponse.json({ error: result.message }, { status })
     }
+    // STOP RULE, same as the generic cancellation path below: a declined
+    // booking must not keep its recovery/reminder jobs or automation enrollments.
+    try {
+      await onBookingCancelled(params.id)
+    } catch (err) {
+      apiLogger.error({ err: err instanceof Error ? err.message : String(err), bookingId: params.id }, 'onBookingCancelled after decline failed (non-fatal)')
+    }
     const updated = await prisma.booking.findUnique({ where: { id: params.id } })
     return NextResponse.json(updated)
   }
@@ -139,9 +146,17 @@ export async function POST(req: NextRequest, props: { params: Promise<{ id: stri
     })
   }
   if (newStatus === 'COMPLETED') {
+    const completedAt = new Date()
+    // Booking.completedAt is written IN THE SAME UPDATE as the status flip
+    // (2026-09-15). The job-completion email and every post-job follow-up are
+    // gated on it (email-eligibility.ts WORKFLOW_CONDITIONS), but it used to be
+    // stamped later by onBookingCompleted — after the email was already queued.
+    // A fast worker then refused the email as `not_completed` and nothing ever
+    // retried it. First completion wins: an existing timestamp is never moved.
+    if (!booking.completedAt) data.completedAt = completedAt
     await prisma.job.updateMany({
       where: { bookingId: params.id },
-      data: { status: 'COMPLETED', completedAt: new Date() },
+      data: { status: 'COMPLETED', completedAt },
     })
   }
 

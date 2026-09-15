@@ -53,7 +53,7 @@ export async function scheduleAssignmentNotification(i: {
           data: { jobCrewId: i.jobCrewId, type: i.type, dedupeKey, scheduledFor: i.scheduledFor ?? null },
         })
     // The real send is enqueued by the caller's worker path; here we only own
-    // the ledger. (Wiring to getEmailQueue/getSmsQueue happens in the route's
+    // the ledger. (Wiring to getEmailQueue happens in the route's
     // notification helper, which passes the row id so the worker records
     // providerResult back onto it.)
     return { id: row.id, created: !existing }

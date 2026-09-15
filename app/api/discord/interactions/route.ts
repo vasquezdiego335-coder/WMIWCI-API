@@ -13,9 +13,8 @@ import {
   type Embed,
 } from "@/bot/task-service";
 import { approveBooking, declineBooking } from "@/lib/booking-approval";
-import { onBookingConfirmed } from "@/lib/journeys";
+import { onBookingCancelled, onBookingConfirmed } from "@/lib/journeys";
 import { offerRescheduleToCustomer } from "@/lib/reschedule";
-import { t } from "@/lib/i18n";
 import { formatEastern } from "@/lib/scheduling";
 import { authorizeOwnerAction, type DiscordActor } from "@/lib/discord-auth";
 import { accessSections } from "@/lib/booking-access";
@@ -262,6 +261,12 @@ async function handleDeny(bookingId: string | undefined, messageId: string | und
     }
     return ephemeral(`⚠️ ${result.message}`);
   }
+  // STOP RULE: a declined booking must stop its recovery/reminder jobs and
+  // automation enrollments, exactly like an admin cancellation. Best-effort and
+  // time-boxed inside journeys; the send-time rechecks remain the guarantee.
+  await onBookingCancelled(result.booking.id).catch((err) =>
+    apiLogger.error({ bookingId: result.booking.id, err: err instanceof Error ? err.message : String(err) }, "onBookingCancelled after deny failed (non-fatal)")
+  );
   return NextResponse.json({ type: RES_UPDATE_MESSAGE, data: deniedCard(result.booking, approverName) });
 }
 
@@ -299,7 +304,8 @@ async function handleOffer(bookingId: string | undefined, messageId: string | un
   if (outboxEnabled()) {
     await emitRescheduleRequested({
       bookingId: booking.id,
-      offeredDates: result.offeredDates,
+      // ISO, not the human labels: the email re-formats them per locale.
+      offeredDates: result.offeredDatesIso,
       rescheduleUrl: result.rescheduleUrl,
       customerName: booking.customer.name,
       customerEmail: booking.customer.email,

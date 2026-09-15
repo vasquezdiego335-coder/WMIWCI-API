@@ -3,7 +3,7 @@
 //  Optimized for Railway's $5 plan: a single container instead of three.
 //
 //    • an HTTP server (health checks + optional Stripe webhook)
-//    • 5 BullMQ workers — email / Discord cards / SMS / scheduled / marketing
+//    • BullMQ workers — email / Discord cards / scheduled / marketing / webhook (no SMS: owner, 2026-09-15)
 //    • event-driven transactional-outbox drains + an aligned recovery sweep
 //    • the Discord gateway bot — slash commands + interaction acks
 //
@@ -41,7 +41,6 @@ import express, { type Request, type Response } from 'express'
 
 import { startEmailWorker } from './workers/email.worker'
 import { startDiscordWorker } from './workers/discord.worker'
-import { startSmsWorker } from './workers/sms.worker'
 import { startScheduledWorker } from './workers/scheduled.worker'
 import { startMarketingWorker } from './workers/marketing.worker'
 import { startWebhookWorker } from './workers/webhook.worker'
@@ -50,17 +49,27 @@ import { processStripeWebhook } from './lib/stripe-events'
 import { logger } from './lib/logger'
 import { checkEnv } from './lib/env'
 import { prisma } from './lib/db'
+import type { Worker } from 'bullmq'
+import { pingAppRedis } from './lib/redis-health'
+import { evaluateWorkerHealth, CONFIG_FAILURE_EXIT_DEFAULT_MS } from './lib/worker-health'
+import { blockRecordFailureStats, numberFromEnv } from './lib/email-guard'
 
 // ── Liveness state surfaced by the health endpoints ─────────────────────
 const state = {
   startedAt: new Date().toISOString(),
-  redis: false,
   bullWorkers: 0,
   outbox: false,
-  discordBot: false,
   /// Names of required env vars that are missing. Non-empty ⇒ NO worker starts.
   envMissing: [] as string[],
+  /// Set when a configuration failure has scheduled the process to exit.
+  exitAt: null as string | null,
 }
+
+/** The running BullMQ workers, kept so health can ask each whether it is attached. */
+let runningWorkers: Worker[] = []
+/** How many queue workers this host starts (email, discord, scheduled, marketing, webhook). */
+const EXPECTED_WORKERS = 5
+let discordClient: { isReady(): boolean } | null = null
 
 // ── Never let a stray rejection/exception kill the whole host ───────────
 process.on('unhandledRejection', (reason) =>
@@ -87,20 +96,43 @@ function startHttpServer(): void {
   app.disable('x-powered-by')
 
   // ── Health endpoints ──────────────────────────────────────────────
-  // status is "ok" only when Redis is connected AND the workers registered.
-  const health = (_req: Request, res: Response): void => {
-    const ok = state.redis && state.bullWorkers > 0 && state.envMissing.length === 0
-    res.status(ok ? 200 : 503).json({
-      status: ok ? 'ok' : 'degraded',
+  // "ok" requires REAL observations, not configuration presence: no missing
+  // config, Redis answering a PING, and every queue worker running. It never
+  // queries Postgres, so polling it cannot keep Neon awake. No secret values,
+  // only booleans, names, counts and the deployed commit.
+  const health = async (_req: Request, res: Response): Promise<void> => {
+    const workers = runningWorkers.map((w) => ({ name: w.name, running: w.isRunning(), paused: w.isPaused() }))
+    const redis = runningWorkers.length > 0 || state.envMissing.length === 0 ? await pingAppRedis() : null
+    const verdict = evaluateWorkerHealth({ envMissing: state.envMissing, redis, workers, expectedWorkers: EXPECTED_WORKERS })
+    res.status(verdict.ok ? 200 : 503).json({
+      status: verdict.ok ? 'ok' : 'degraded',
       service: 'worker-host',
+      problems: verdict.problems,
       uptimeSeconds: Math.round(process.uptime()),
       ...state,
+      redis,
+      workers,
+      discordBot: { configured: Boolean(process.env.DISCORD_BOT_TOKEN?.trim()), ready: discordClient?.isReady() ?? false },
+      commit: (process.env.RAILWAY_GIT_COMMIT_SHA ?? '').slice(0, 12) || null,
+      flags: {
+        outboxEnabled: process.env.OUTBOX_ENABLED === 'true',
+        outboxDryRun: process.env.OUTBOX_EMAIL_DRYRUN === 'true',
+        emailSendingEnabled: process.env.EMAIL_SENDING_ENABLED !== 'false',
+        // Discovery runs on THIS service; the admin page reads the API's copy.
+        marketingAgentEnabled: process.env.EMAIL_MARKETING_AGENT_ENABLED === 'true',
+      },
+      emailBlockRecordFailures: blockRecordFailureStats(),
       now: new Date().toISOString(),
     })
   }
-  app.get('/', health)
-  app.get('/health', health)
-  app.get('/healthz', health) // point Railway's Healthcheck Path here
+  const healthRoute = (req: Request, res: Response): void => {
+    health(req, res).catch((err) =>
+      res.status(503).json({ status: 'degraded', service: 'worker-host', problems: [`health check failed: ${err instanceof Error ? err.message : String(err)}`] })
+    )
+  }
+  app.get('/', healthRoute)
+  app.get('/health', healthRoute)
+  app.get('/healthz', healthRoute) // point Railway's Healthcheck Path here
 
   // ── Email diagnostics ─────────────────────────────────────────────
   // The Next.js app exposes GET /api/email/health, but THIS process is a plain
@@ -199,37 +231,48 @@ async function main(): Promise<void> {
   const env = checkEnv()
   if (!env.ok) {
     state.envMissing = env.missingRequired
+    // FAIL VISIBLY, THEN FAIL (2026-09-15). This used to return and leave a live
+    // process that processed nothing: Railway saw a running container, its
+    // ON_FAILURE restart policy never fired, and no health check was configured
+    // to notice — a worker that silently did nothing forever. It now serves 503
+    // (naming the missing variables) for a grace window so the reason is
+    // readable, then exits non-zero so the deployment shows as crashed and the
+    // restart policy and Railway's crash notification both fire. The banner is
+    // re-printed on every restart, so the reason is never hidden.
+    const graceMs = numberFromEnv(process.env.WORKER_CONFIG_FAILURE_EXIT_MS, CONFIG_FAILURE_EXIT_DEFAULT_MS)
+    state.exitAt = new Date(Date.now() + graceMs).toISOString()
     logger.error(
-      { missing: env.missingRequired },
+      { missing: env.missingRequired, exitAt: state.exitAt },
       `STARTUP HALTED — missing required environment variables: ${env.missingRequired.join(', ')}. ` +
         'No queue worker has been started, so nothing will be processed with this configuration. ' +
-        'Set these in Railway and redeploy; /health lists them and returns 503 until they are present.'
+        `/health returns 503 and lists them; the process exits at ${state.exitAt} so the deployment is marked crashed.`
     )
+    setTimeout(() => {
+      logger.error({ missing: env.missingRequired }, 'exiting: required configuration is still missing')
+      process.exit(1)
+    }, graceMs)
     return
   }
   logger.info('  ✓ environment validated')
 
-  // 2) Redis is required for the BullMQ queues. If it's missing we DON'T crash:
-  //    the HTTP server stays up (health reports "degraded") so you can see the
-  //    misconfig in the browser/logs, fix REDIS_URL in Railway, and redeploy.
+  // 2) Redis is required for the BullMQ queues. In production redis.ts already
+  //    refuses to load without REDIS_URL; outside production this is the guard.
   if (!process.env.REDIS_URL) {
-    logger.error(
-      'REDIS_URL is not set — the BullMQ workers cannot run. HTTP/health stays up so you can see this; set REDIS_URL in Railway and redeploy.'
-    )
+    state.envMissing = ['REDIS_URL']
+    logger.error('REDIS_URL is not set — the BullMQ workers cannot run. /health reports it; set REDIS_URL and redeploy.')
     return
   }
-  state.redis = true
 
   // 3) BullMQ workers (return Worker instances so we can close them on shutdown)
   const bullWorkers = [
     startEmailWorker(),
     startDiscordWorker(),
-    startSmsWorker(),
     startScheduledWorker(),
     startMarketingWorker(),
     startWebhookWorker(), // consumes 'webhook-retry' — processes Stripe events
   ]
   state.bullWorkers = bullWorkers.length
+  runningWorkers = bullWorkers
 
   // 4) Transactional email outbox. There is deliberately NO Postgres timer
   //    here: real events nudge the scheduled queue immediately and its aligned
@@ -239,11 +282,10 @@ async function main(): Promise<void> {
 
   // 5) Discord gateway bot (slash commands). Idempotent singleton; logs + skips
   //    cleanly if DISCORD_BOT_TOKEN is missing/placeholder.
-  getDiscordClient()
-  state.discordBot = true
+  discordClient = getDiscordClient()
 
   logger.info(
-    `✓ Combined worker host running — HTTP server + 6 BullMQ workers (incl. webhook) + ` +
+    `✓ Combined worker host running — HTTP server + ${bullWorkers.length} BullMQ workers (incl. webhook) + ` +
       `${state.outbox ? 'event-driven outbox' : 'outbox disabled'} + Discord bot`
   )
 

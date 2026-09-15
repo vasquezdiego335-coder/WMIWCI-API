@@ -1,0 +1,780 @@
+{
+  "$comment": "Which Railway service reads which environment variable. Generated from the static import graph by src/lib/env-ownership-scan.ts and verified by src/lib/__tests__/env-ownership.test.ts. api = wonderful-strength (Next.js), worker = discord workers (src/worker-host.ts). \"none\" = read only by modules neither entrypoint reaches (scripts/dev entrypoints). A new variable read fails the test until it is listed here. Names only; never values.",
+  "version": 1,
+  "vars": {
+    "AGREEMENT_VERSION": {
+      "readBy": [
+        "api"
+      ],
+      "secret": false
+    },
+    "ALLOW_TEST_PAYMENTS": {
+      "readBy": [
+        "api"
+      ],
+      "secret": false
+    },
+    "APP_URL": {
+      "readBy": [
+        "api",
+        "worker"
+      ],
+      "secret": false,
+      "mustMatch": true
+    },
+    "BULL_BOARD_PORT": {
+      "readBy": [
+        "none"
+      ],
+      "secret": false
+    },
+    "BUSINESS_PHONE": {
+      "readBy": [
+        "api",
+        "worker"
+      ],
+      "secret": false
+    },
+    "BUSINESS_POSTAL_ADDRESS": {
+      "readBy": [
+        "api",
+        "worker"
+      ],
+      "secret": false,
+      "mustMatch": true
+    },
+    "CLOUDINARY_API_KEY": {
+      "readBy": [
+        "api",
+        "worker"
+      ],
+      "secret": true
+    },
+    "CLOUDINARY_API_SECRET": {
+      "readBy": [
+        "api",
+        "worker"
+      ],
+      "secret": true
+    },
+    "CLOUDINARY_CLOUD_NAME": {
+      "readBy": [
+        "api",
+        "worker"
+      ],
+      "secret": false
+    },
+    "COOKIE_DOMAIN": {
+      "readBy": [
+        "api"
+      ],
+      "secret": false
+    },
+    "CORS_ALLOWED_ORIGINS": {
+      "readBy": [
+        "api"
+      ],
+      "secret": false
+    },
+    "CUSTOMER_AUTOREPLY_ENABLED": {
+      "readBy": [
+        "api"
+      ],
+      "secret": false
+    },
+    "DATABASE_URL": {
+      "readBy": [
+        "none"
+      ],
+      "secret": true
+    },
+    "DEEPSEEK_API_KEY": {
+      "readBy": [
+        "api",
+        "worker"
+      ],
+      "secret": true
+    },
+    "DEEPSEEK_BASE_URL": {
+      "readBy": [
+        "api",
+        "worker"
+      ],
+      "secret": false
+    },
+    "DEFAULT_JOB_HOURS": {
+      "readBy": [
+        "api",
+        "worker"
+      ],
+      "secret": false
+    },
+    "DISCORD_API_BASE": {
+      "readBy": [
+        "api",
+        "worker"
+      ],
+      "secret": false
+    },
+    "DISCORD_APPLICATION_ID": {
+      "readBy": [
+        "none"
+      ],
+      "secret": false
+    },
+    "DISCORD_BOT_TOKEN": {
+      "readBy": [
+        "api",
+        "worker"
+      ],
+      "secret": true
+    },
+    "DISCORD_CHANNEL_ALERTS": {
+      "readBy": [
+        "api",
+        "worker"
+      ],
+      "secret": false
+    },
+    "DISCORD_CHANNEL_JOBS": {
+      "readBy": [
+        "none"
+      ],
+      "secret": false
+    },
+    "DISCORD_CHANNEL_LEADS": {
+      "readBy": [
+        "api",
+        "worker"
+      ],
+      "secret": false
+    },
+    "DISCORD_CHANNEL_MARKETING": {
+      "readBy": [
+        "api",
+        "worker"
+      ],
+      "secret": false,
+      "note": "Read by the discovery sweep on the worker; falls back to a hard-coded channel id when unset."
+    },
+    "DISCORD_CHANNEL_NEWS": {
+      "readBy": [
+        "api",
+        "worker"
+      ],
+      "secret": false
+    },
+    "DISCORD_CHANNEL_OPERATIONS": {
+      "readBy": [
+        "api",
+        "worker"
+      ],
+      "secret": false
+    },
+    "DISCORD_CHANNEL_SCHEDULING": {
+      "readBy": [
+        "none"
+      ],
+      "secret": false
+    },
+    "DISCORD_GUILD_ID": {
+      "readBy": [
+        "api"
+      ],
+      "secret": false
+    },
+    "DISCORD_OWNER_ROLE_ID": {
+      "readBy": [
+        "api"
+      ],
+      "secret": false
+    },
+    "DISCORD_OWNER_USER_IDS": {
+      "readBy": [
+        "api"
+      ],
+      "secret": false
+    },
+    "DISCORD_PUBLIC_KEY": {
+      "readBy": [
+        "api"
+      ],
+      "secret": true
+    },
+    "DISCORD_USER_DIEGO": {
+      "readBy": [
+        "api"
+      ],
+      "secret": false
+    },
+    "DISCORD_USER_SEBASTIAN": {
+      "readBy": [
+        "api"
+      ],
+      "secret": false
+    },
+    "EMAIL_AGENT_HEARTBEAT_TOKEN": {
+      "readBy": [
+        "api"
+      ],
+      "secret": true
+    },
+    "EMAIL_AGENT_MAX_OUTPUT_TOKENS": {
+      "readBy": [
+        "api",
+        "worker"
+      ],
+      "secret": false
+    },
+    "EMAIL_AGENT_TIMEOUT_MS": {
+      "readBy": [
+        "api",
+        "worker"
+      ],
+      "secret": false
+    },
+    "EMAIL_AMBIGUOUS_WINDOW_DAYS": {
+      "readBy": [
+        "api",
+        "worker"
+      ],
+      "secret": false
+    },
+    "EMAIL_ASSET_BASE_URL": {
+      "readBy": [
+        "api",
+        "worker"
+      ],
+      "secret": false
+    },
+    "EMAIL_CAMPAIGN_BATCH_SIZE": {
+      "readBy": [
+        "api",
+        "worker"
+      ],
+      "secret": false
+    },
+    "EMAIL_CAMPAIGN_STALE_MS": {
+      "readBy": [
+        "api",
+        "worker"
+      ],
+      "secret": false
+    },
+    "EMAIL_DKIM_SELECTORS": {
+      "readBy": [
+        "api",
+        "worker"
+      ],
+      "secret": false
+    },
+    "EMAIL_DNS_TIMEOUT_MS": {
+      "readBy": [
+        "api",
+        "worker"
+      ],
+      "secret": false
+    },
+    "EMAIL_DNS_VERIFIED_AT": {
+      "readBy": [
+        "api"
+      ],
+      "secret": false
+    },
+    "EMAIL_DUPLICATE_BOOKING_WINDOW_MINUTES": {
+      "readBy": [
+        "api",
+        "worker"
+      ],
+      "secret": false
+    },
+    "EMAIL_FROM": {
+      "readBy": [
+        "api",
+        "worker"
+      ],
+      "secret": false,
+      "mustMatch": true
+    },
+    "EMAIL_HERO_GIF_URL": {
+      "readBy": [
+        "worker"
+      ],
+      "secret": false
+    },
+    "EMAIL_JOURNEYS_ENABLED": {
+      "readBy": [
+        "api",
+        "worker"
+      ],
+      "secret": false,
+      "mustMatch": true
+    },
+    "EMAIL_MARKETING_AGENT_COOLDOWN_DAYS": {
+      "readBy": [
+        "api",
+        "worker"
+      ],
+      "secret": false
+    },
+    "EMAIL_MARKETING_AGENT_ENABLED": {
+      "readBy": [
+        "api",
+        "worker"
+      ],
+      "secret": false,
+      "mustMatch": true,
+      "note": "Discovery RUNS on the worker (scheduled marketing-discovery cron). The API copy only drives the admin card. Must match on both, or the card and reality disagree (incident 2026-09-14)."
+    },
+    "EMAIL_MARKETING_AGENT_MIN_AUDIENCE": {
+      "readBy": [
+        "api",
+        "worker"
+      ],
+      "secret": false
+    },
+    "EMAIL_MAX_SEND_ATTEMPTS": {
+      "readBy": [
+        "api",
+        "worker"
+      ],
+      "secret": false
+    },
+    "EMAIL_PROMOTIONAL_ALLOWLIST": {
+      "readBy": [
+        "api",
+        "worker"
+      ],
+      "secret": false,
+      "mustMatch": true
+    },
+    "EMAIL_PROMOTIONS_ENABLED": {
+      "readBy": [
+        "api",
+        "worker"
+      ],
+      "secret": false,
+      "mustMatch": true
+    },
+    "EMAIL_QUOTE_JOURNEY_MAX_AGE_DAYS": {
+      "readBy": [
+        "api",
+        "worker"
+      ],
+      "secret": false
+    },
+    "EMAIL_QUOTE_REPAIR_BATCH": {
+      "readBy": [
+        "api",
+        "worker"
+      ],
+      "secret": false
+    },
+    "EMAIL_REACTIVATION_AGE_DAYS": {
+      "readBy": [
+        "api",
+        "worker"
+      ],
+      "secret": false
+    },
+    "EMAIL_REPLY_ADDRESS": {
+      "readBy": [
+        "worker"
+      ],
+      "secret": false
+    },
+    "EMAIL_REPLY_TO": {
+      "readBy": [
+        "api",
+        "worker"
+      ],
+      "secret": false,
+      "mustMatch": true
+    },
+    "EMAIL_SENDING_ENABLED": {
+      "readBy": [
+        "api",
+        "worker"
+      ],
+      "secret": false,
+      "mustMatch": true
+    },
+    "EMAIL_SENDING_STALE_MS": {
+      "readBy": [
+        "api",
+        "worker"
+      ],
+      "secret": false
+    },
+    "EMAIL_SUPPRESSION_API_KEY": {
+      "readBy": [
+        "api",
+        "worker"
+      ],
+      "secret": true
+    },
+    "EMAIL_TEST_RECIPIENT": {
+      "readBy": [
+        "api"
+      ],
+      "secret": false
+    },
+    "EMAIL_TOKEN_SECRET": {
+      "readBy": [
+        "api",
+        "worker"
+      ],
+      "secret": true,
+      "mustMatch": true
+    },
+    "GOOGLE_MAPS_SERVER_KEY": {
+      "readBy": [
+        "api"
+      ],
+      "secret": true
+    },
+    "GOOGLE_REVIEW_URL": {
+      "readBy": [
+        "api",
+        "worker"
+      ],
+      "secret": false
+    },
+    "HOSTNAME": {
+      "readBy": [
+        "api"
+      ],
+      "secret": false
+    },
+    "INTERNAL_NOTIFY_TOKEN": {
+      "readBy": [
+        "api"
+      ],
+      "secret": true
+    },
+    "INTERNAL_REHEARSAL_DISABLED": {
+      "readBy": [
+        "api"
+      ],
+      "secret": false
+    },
+    "JWT_AUDIENCE": {
+      "readBy": [
+        "api"
+      ],
+      "secret": false
+    },
+    "JWT_EXPIRY": {
+      "readBy": [
+        "api"
+      ],
+      "secret": false
+    },
+    "JWT_ISSUER": {
+      "readBy": [
+        "api"
+      ],
+      "secret": false
+    },
+    "JWT_SECRET": {
+      "readBy": [
+        "api"
+      ],
+      "secret": true
+    },
+    "LEAD_ABANDON_AFTER_DAYS": {
+      "readBy": [
+        "api",
+        "worker"
+      ],
+      "secret": false
+    },
+    "LEAD_PURGE_AFTER_DAYS": {
+      "readBy": [
+        "api",
+        "worker"
+      ],
+      "secret": false
+    },
+    "MARKETING_API_KEY": {
+      "readBy": [
+        "worker"
+      ],
+      "secret": true
+    },
+    "MARKETING_FOLLOWUPS_ENABLED": {
+      "readBy": [
+        "api",
+        "worker"
+      ],
+      "secret": false,
+      "mustMatch": true
+    },
+    "MARKETING_LIST_ID": {
+      "readBy": [
+        "worker"
+      ],
+      "secret": false
+    },
+    "MARKETING_SITE_URL": {
+      "readBy": [
+        "api",
+        "worker"
+      ],
+      "secret": false,
+      "mustMatch": true
+    },
+    "MAX_JOBS_PER_DAY": {
+      "readBy": [
+        "api",
+        "worker"
+      ],
+      "secret": false
+    },
+    "MAX_RESCHEDULES": {
+      "readBy": [
+        "api"
+      ],
+      "secret": false
+    },
+    "NEXT_RUNTIME": {
+      "readBy": [
+        "api",
+        "worker"
+      ],
+      "secret": false
+    },
+    "NODE_ENV": {
+      "readBy": [
+        "api",
+        "worker"
+      ],
+      "secret": false
+    },
+    "OPENAI_API_KEY": {
+      "readBy": [
+        "api",
+        "worker"
+      ],
+      "secret": true
+    },
+    "OPENAI_BASE_URL": {
+      "readBy": [
+        "api",
+        "worker"
+      ],
+      "secret": false
+    },
+    "OPS_ALERT_COOLDOWN_MS": {
+      "readBy": [
+        "api",
+        "worker"
+      ],
+      "secret": false
+    },
+    "OUTBOX_BATCH": {
+      "readBy": [
+        "worker"
+      ],
+      "secret": false
+    },
+    "OUTBOX_EMAIL_DRYRUN": {
+      "readBy": [
+        "worker"
+      ],
+      "secret": false,
+      "note": "HOLDS outbox email rows (never marks them sent). Never set true in production."
+    },
+    "OUTBOX_ENABLED": {
+      "readBy": [
+        "api",
+        "worker"
+      ],
+      "secret": false,
+      "mustMatch": true
+    },
+    "OUTBOX_POLL_MS": {
+      "readBy": [
+        "worker"
+      ],
+      "secret": false
+    },
+    "OUTBOX_SEND_DATE_PICKED": {
+      "readBy": [
+        "worker"
+      ],
+      "secret": false
+    },
+    "OUTBOX_STALE_PROCESSING_MS": {
+      "readBy": [
+        "worker"
+      ],
+      "secret": false
+    },
+    "OWNER_EMAIL": {
+      "readBy": [
+        "api"
+      ],
+      "secret": false
+    },
+    "PARTIAL_BOOKING_EMAIL_CAPTURE_ENABLED": {
+      "readBy": [
+        "api"
+      ],
+      "secret": false
+    },
+    "PORT": {
+      "readBy": [
+        "worker"
+      ],
+      "secret": false
+    },
+    "QUOTE_LEAD_CAPTURE_ENABLED": {
+      "readBy": [
+        "api"
+      ],
+      "secret": false
+    },
+    "RAILWAY_GIT_COMMIT_SHA": {
+      "readBy": [
+        "api",
+        "worker"
+      ],
+      "secret": false
+    },
+    "RAILWAY_SERVICE_NAME": {
+      "readBy": [
+        "api",
+        "worker"
+      ],
+      "secret": false
+    },
+    "REDIS_URL": {
+      "readBy": [
+        "api",
+        "worker"
+      ],
+      "secret": true,
+      "mustMatch": true
+    },
+    "REFERRAL_CODE": {
+      "readBy": [
+        "api",
+        "worker"
+      ],
+      "secret": false
+    },
+    "REFERRAL_PROGRAM_ENABLED": {
+      "readBy": [
+        "api",
+        "worker"
+      ],
+      "secret": false,
+      "mustMatch": true
+    },
+    "REFERRAL_REQUIRE_STRIPE": {
+      "readBy": [
+        "api",
+        "worker"
+      ],
+      "secret": false
+    },
+    "REFERRAL_SECRET": {
+      "readBy": [
+        "api"
+      ],
+      "secret": true
+    },
+    "REFERRAL_URL": {
+      "readBy": [
+        "api",
+        "worker"
+      ],
+      "secret": false
+    },
+    "RESEND_API_KEY": {
+      "readBy": [
+        "api",
+        "worker"
+      ],
+      "secret": true,
+      "mustMatch": true
+    },
+    "RESEND_WEBHOOK_SECRET": {
+      "readBy": [
+        "api",
+        "worker"
+      ],
+      "secret": true
+    },
+    "STRIPE_ALLOW_TEST": {
+      "readBy": [
+        "api",
+        "worker"
+      ],
+      "secret": false
+    },
+    "STRIPE_BOOKING_FEE_CENTS": {
+      "readBy": [
+        "api",
+        "worker"
+      ],
+      "secret": false
+    },
+    "STRIPE_WEBHOOK_SECRET": {
+      "readBy": [
+        "api",
+        "worker"
+      ],
+      "secret": true
+    },
+    "TIMEZONE": {
+      "readBy": [
+        "api",
+        "worker"
+      ],
+      "secret": false,
+      "mustMatch": true
+    },
+    "TRACKER_INGEST_TOKEN": {
+      "readBy": [
+        "api",
+        "worker"
+      ],
+      "secret": true
+    },
+    "TRACKER_URL": {
+      "readBy": [
+        "api",
+        "worker"
+      ],
+      "secret": false
+    },
+    "TRAVEL_BUFFER_MINUTES": {
+      "readBy": [
+        "api",
+        "worker"
+      ],
+      "secret": false
+    },
+    "UPSTASH_REDIS_REST_TOKEN": {
+      "readBy": [
+        "api"
+      ],
+      "secret": true
+    },
+    "UPSTASH_REDIS_REST_URL": {
+      "readBy": [
+        "api"
+      ],
+      "secret": false
+    },
+    "WORKER_CONFIG_FAILURE_EXIT_MS": {
+      "readBy": [
+        "worker"
+      ],
+      "secret": false,
+      "note": "Grace window a worker with missing required configuration serves 503 before exiting non-zero."
+    }
+  }
+}

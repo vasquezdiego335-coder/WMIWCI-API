@@ -1,11 +1,21 @@
 import 'dotenv/config'
-import { fetchPendingJobs, markJobSent, markJobFailed, reapStaleProcessingJobs } from '../db/emailJobsRepo'
+import {
+  fetchPendingJobs,
+  markJobSent,
+  markJobFailed,
+  markJobSkipped,
+  markJobDeferred,
+  markJobTerminalFailure,
+  reapStaleProcessingJobs,
+} from '../db/emailJobsRepo'
 import { EmailJob, EventType } from '../domain/events'
 import {
   sendPreApprovalEmail,
   sendFinalConfirmationEmail,
   sendRescheduleRequestEmail,
   sendDatePickedEmail,
+  OutboxRetryLater,
+  type OutboxDelivery,
 } from '../services/emailService'
 
 // ════════════════════════════════════════════════════════════════════════
@@ -31,40 +41,96 @@ let lastReapAt = 0
 
 /** Map an event to its email. NEW_DATE_PICKED is optional (the controller
  *  already posts a fresh approval card). */
-async function routeAndSend(job: EmailJob): Promise<void> {
+async function routeAndSend(job: EmailJob): Promise<OutboxDelivery> {
   switch (job.eventType) {
     case EventType.PAYMENT_COMPLETED:
-      await sendPreApprovalEmail(job.payload as any)
-      return
+      return sendPreApprovalEmail(job.payload as any)
     case EventType.APPROVED:
-      await sendFinalConfirmationEmail(job.payload as any)
-      return
+      return sendFinalConfirmationEmail(job.payload as any)
     case EventType.RESCHEDULE_REQUESTED:
-      await sendRescheduleRequestEmail(job.payload as any)
-      return
+      return sendRescheduleRequestEmail(job.payload as any)
     case EventType.NEW_DATE_PICKED:
-      if (SEND_DATE_PICKED_EMAIL) await sendDatePickedEmail(job.payload as any)
-      return // otherwise a no-op success: the approval card already went out
+      if (SEND_DATE_PICKED_EMAIL) return sendDatePickedEmail(job.payload as any)
+      // Recorded as SKIPPED, never as sent: no email left this system.
+      return { status: 'skipped', reason: 'date_picked_email_disabled' }
     default:
       throw new Error(`Unknown event type: ${job.eventType}`)
   }
+}
+
+export type OutboxJobDeps = {
+  routeAndSend: (job: EmailJob) => Promise<OutboxDelivery>
+  markJobSent: typeof markJobSent
+  markJobSkipped: typeof markJobSkipped
+  markJobDeferred: typeof markJobDeferred
+  markJobFailed: typeof markJobFailed
+  markJobTerminalFailure: typeof markJobTerminalFailure
+}
+
+const defaultJobDeps: OutboxJobDeps = {
+  routeAndSend,
+  markJobSent,
+  markJobSkipped,
+  markJobDeferred,
+  markJobFailed,
+  markJobTerminalFailure,
+}
+
+/**
+ * Resolve ONE claimed job to its truthful state. Never throws: one bad row
+ * (malformed payload, render error, DB blip) is recorded against that row and
+ * the batch moves on to the next.
+ */
+export async function resolveOutboxJob(job: EmailJob, deps: OutboxJobDeps = defaultJobDeps): Promise<OutboxDelivery['status'] | 'retry' | 'held'> {
+  const tag = `${job.eventType} job=${job.id} booking=${job.bookingId}`
+  try {
+    const result = await deps.routeAndSend(job)
+    switch (result.status) {
+      case 'sent':
+        await deps.markJobSent(job, result.note)
+        console.log(`[outbox] sent ${tag}${result.note ? ` (${result.note})` : ''}`)
+        return 'sent'
+      case 'skipped':
+        await deps.markJobSkipped(job, result.reason)
+        console.log(`[outbox] skipped ${tag}: ${result.reason}`)
+        return 'skipped'
+      case 'ambiguous':
+        await deps.markJobTerminalFailure(
+          job,
+          `ambiguous:${result.reason} — the provider may have accepted this email; never auto-resent, reconcile against email_sends/Resend`
+        )
+        console.error(`[outbox] AMBIGUOUS ${tag}: closed without retry`)
+        return 'ambiguous'
+      case 'failed':
+        await deps.markJobTerminalFailure(job, `failed:${result.reason}`)
+        console.error(`[outbox] FAILED (terminal) ${tag}: ${result.reason}`)
+        return 'failed'
+    }
+  } catch (err) {
+    try {
+      if (err instanceof OutboxRetryLater && !err.consumeAttempt) {
+        await deps.markJobDeferred(job, err.reason, err.retryAt ?? new Date(Date.now() + 15 * 60_000))
+        console.warn(`[outbox] HELD ${tag}: ${err.reason}`)
+        return 'held'
+      }
+      const msg = err instanceof Error ? err.message : String(err)
+      await deps.markJobFailed(job, msg, err instanceof OutboxRetryLater ? err.retryAt : null)
+      console.error(`[outbox] attempt failed ${tag} attempt=${job.attempts}/${job.maxAttempts}: ${msg}`)
+    } catch (markErr) {
+      // The row stays 'processing'; the reaper returns it to pending (or closes
+      // it on its final attempt) after OUTBOX_STALE_PROCESSING_MS.
+      console.error(`[outbox] could not record the outcome of ${tag}:`, markErr instanceof Error ? markErr.message : markErr)
+    }
+    return 'retry'
+  }
+  return 'retry'
 }
 
 /** One poll cycle: claim due jobs and process each. Returns how many it claimed. */
 export async function processOnce(): Promise<number> {
   const jobs = await fetchPendingJobs(BATCH)
   for (const job of jobs) {
-    try {
-      await routeAndSend(job)
-      await markJobSent(job.id)
-      console.log(`[outbox] sent ${job.eventType} job=${job.id} booking=${job.bookingId}`)
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err)
-      await markJobFailed(job, msg)
-      console.error(
-        `[outbox] FAILED ${job.eventType} job=${job.id} attempt=${job.attempts}/${job.maxAttempts}: ${msg}`
-      )
-    }
+    await resolveOutboxJob(job)
   }
   return jobs.length
 }
@@ -75,7 +141,7 @@ async function maybeReap(force = false): Promise<number> {
   lastReapAt = Date.now()
   try {
     const reaped = await reapStaleProcessingJobs(STALE_PROCESSING_MS)
-    if (reaped > 0) console.warn(`[outbox] reaped ${reaped} stale 'processing' job(s) → requeued`)
+    if (reaped > 0) console.warn(`[outbox] reaper recovered ${reaped} job(s) (requeued, or closed as failed — see the breakdown above)`)
     return reaped
   } catch (err) {
     console.error('[outbox] reaper error:', err)

@@ -16,7 +16,7 @@ import { ExpressAdapter } from '@bull-board/express'
 import { Queue } from 'bullmq'
 import { bullConnection } from '@/lib/redis'
 
-const QUEUE_NAMES = ['email', 'sms', 'discord', 'webhook-retry', 'scheduled']
+const QUEUE_NAMES = ['email', 'discord', 'webhook-retry', 'scheduled']
 const PORT = parseInt(process.env.BULL_BOARD_PORT ?? '3001', 10)
 
 async function startBullBoard() {

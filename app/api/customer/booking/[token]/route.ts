@@ -129,11 +129,8 @@ export async function PATCH(req: NextRequest, props: { params: Promise<{ token: 
   const whenDisplay = formatEastern(newDate)
 
   // Re-post a fresh Discord approval card for the new date so an admin can
-  // approve it. MESSAGING POLICY: no customer email/SMS is sent here — the
-  // system sends exactly four customer messages (pre-approval + final-
-  // confirmation). When the admin approves the re-posted card, the customer
-  // gets the PRE-APPROVAL pair as usual. (Re-enable by adding 'booking-
-  // rescheduled' to ALLOWED_TEMPLATES and restoring the smsQueue.add.)
+  // approve it. MESSAGING POLICY: no customer email is sent at this point and no
+  // SMS is ever sent (owner, 2026-09-15).
   try {
     await discordQueue.add('reschedule-offer', {
       type: 'reschedule-offer',

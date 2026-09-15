@@ -18,6 +18,7 @@ import {
 //  with it. A module graph resolved at start-up cannot stall a job handler.
 import { processLeadNotification } from '../lib/lead-notification-processor'
 import { deliverLeadNotice } from '../lib/lead-notification-transport'
+import { queueSafeJobId } from '../lib/email-deferral'
 import { discordQueue } from '../lib/queues'
 
 async function processDiscordJob(job: Job<DiscordJobData>): Promise<void> {
@@ -85,11 +86,14 @@ async function processDiscordJob(job: Job<DiscordJobData>): Promise<void> {
         //  the remaining delay rather than being silently dropped.
         reschedule: async (dueAt) => {
           const delay = Math.max(0, dueAt.getTime() - Date.now())
-          await discordQueue.remove(dedupeKey).catch(() => {})
+          //  The DB dedupe key keeps its colons; only its QUEUE spelling is made
+          //  BullMQ-safe (src/lib/email-deferral.ts queueSafeJobId).
+          const jobId = queueSafeJobId(dedupeKey)
+          await discordQueue.remove(jobId).catch(() => {})
           await discordQueue.add(
             'lead-notify',
             { type: 'lead-notify', payload: { dedupeKey } },
-            { jobId: dedupeKey, delay },
+            { jobId, delay },
           )
         },
       })

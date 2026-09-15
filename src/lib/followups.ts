@@ -19,23 +19,24 @@
 //                      the window at schedule time and re-deferred at send time.
 //    • frequency cap — ≤1 follow-up / 24h and ≤4 / 30d per customer (safety net).
 //
-//  Everything is gated by MARKETING_FOLLOWUPS_ENABLED (default OFF). SMS go via
-//  the existing smsQueue (free-form; the worker honors TWILIO_ENABLED); emails
-//  via a DIRECT Resend call (the email-worker allowlist stays untouched). Every
-//  send is guarded — a Redis/Twilio/Resend hiccup is logged, never fatal.
+//  Everything is gated by MARKETING_FOLLOWUPS_ENABLED (default OFF). Follow-ups
+//  are EMAIL ONLY: Move It Clear It no longer sends SMS (owner, 2026-09-15), so
+//  the SMS channel is recorded 'not_applicable' and nothing is ever texted.
+//  Every email goes through the shared send guard — a Redis/Resend hiccup is
+//  logged, never fatal.
 // ════════════════════════════════════════════════════════════════════════
 import * as React from 'react'
 import { render } from '@react-email/render'
 import { prisma } from './db'
-import { smsQueue, scheduledQueue } from './queues'
+import { scheduledQueue } from './queues'
 import { queueLogger } from './logger'
-import { guardedSend } from './email-guard'
+import { guardedSend, type SendOutcome } from './email-guard'
 import { isSafeUrl } from '../emails/validation'
 import { unsubscribeUrl } from './email-tokens'
 import { checkReferralEligibility } from './referral-eligibility'
 import { bookingEligibility, bookingMarketingBlockReason, promotionalConsentBlockReason } from './email-eligibility'
 import { buildMarketingContext, applyMarketingContext } from './marketing-context'
-import { normalizeLocale, t, BIZ_NAME, BIZ_PHONE, type Locale } from './i18n'
+import { normalizeLocale, BIZ_NAME, BIZ_PHONE, type Locale } from './i18n'
 import ReviewRequestEmail from '../emails/review-request'
 import ReferralEmail from '../emails/referral'
 import QuoteFollowupEmail from '../emails/quote-followup'
@@ -218,15 +219,29 @@ export async function recordReviewAndMaybeReferral(input: {
 }
 
 // ── frequency caps ──────────────────────────────────────────────────────
-async function withinFrequencyCaps(customerId: string): Promise<boolean> {
+/**
+ * PURE: the ledger rows that count against a customer's follow-up budget.
+ *
+ * DEFECT FIXED (2026-09-15): this counted `status: 'sent'` — a value the
+ * ledger stopped writing in migration 20260720040000 (it became 'delivered',
+ * and the CHECK constraint now rejects 'sent'). Both counts were always 0 and
+ * the cap never fired. It also anchored on `sentAt`, which is set at CLAIM
+ * time. A follow-up counts once it actually shipped (`deliveredAt`), and the
+ * follow-up being evaluated never caps itself on a resume.
+ */
+export function followupCapWhere(customerId: string, since: Date, self: { bookingId: string; type: FollowupType }) {
+  return {
+    deliveredAt: { gte: since },
+    booking: { customerId },
+    NOT: { bookingId: self.bookingId, type: self.type },
+  }
+}
+
+async function withinFrequencyCaps(customerId: string, self: { bookingId: string; type: FollowupType }): Promise<boolean> {
   const now = Date.now()
   const [burst, windowCount] = await Promise.all([
-    prisma.followUpLedger.count({
-      where: { status: 'sent', sentAt: { gte: new Date(now - CAP_BURST_HOURS * HOUR) }, booking: { customerId } },
-    }),
-    prisma.followUpLedger.count({
-      where: { status: 'sent', sentAt: { gte: new Date(now - CAP_WINDOW_DAYS * DAY) }, booking: { customerId } },
-    }),
+    prisma.followUpLedger.count({ where: followupCapWhere(customerId, new Date(now - CAP_BURST_HOURS * HOUR), self) }),
+    prisma.followUpLedger.count({ where: followupCapWhere(customerId, new Date(now - CAP_WINDOW_DAYS * DAY), self) }),
   ])
   return burst < CAP_BURST_MAX && windowCount < CAP_WINDOW_MAX
 }
@@ -235,12 +250,101 @@ async function recordSkip(bookingId: string, type: FollowupType, reason: string)
   await prisma.followUpLedger
     .upsert({
       where: { bookingId_type: { bookingId, type } },
-      update: {}, // already recorded (sent/skipped) — leave as-is
-      create: { bookingId, type, channel: 'both', status: 'skipped', error: reason },
+      update: {}, // already recorded (delivered/skipped) — leave as-is
+      create: { bookingId, type, channel: 'email', status: 'skipped', error: reason },
     })
     .catch((err) => log.warn({ err: String(err), bookingId, type }, 'record skip failed'))
+  // A row left RETRYABLE by an earlier attempt must be closed when a resume is
+  // refused for good, or the retry sweep would re-read it forever.
+  await prisma.followUpLedger
+    .updateMany({
+      where: { bookingId, type, status: { in: ['claimed', 'failed_retryable', 'partially_delivered'] } },
+      data: { status: 'skipped', terminalReason: reason.slice(0, 500), nextAttemptAt: null },
+    })
+    .catch((err) => log.warn({ err: String(err), bookingId, type }, 'closing retryable follow-up failed'))
   log.info({ bookingId, type, reason }, 'follow-up skipped')
   return `skipped:${reason}`
+}
+
+/** PURE: the email channel status a guard outcome implies. */
+export function followupEmailStatus(outcome: SendOutcome): { status: 'delivered' | 'failed' | 'not_applicable'; error?: string } {
+  // 'duplicate' means this exact logical send was already delivered earlier.
+  if (outcome.sent || outcome.reason === 'duplicate') return { status: 'delivered' }
+  // Terminal refusals and AMBIGUOUS outcomes must never be retried: the first
+  // can never succeed, the second may already have reached the customer.
+  if (
+    outcome.outcomeClass === 'terminal' ||
+    outcome.outcomeClass === 'ambiguous' ||
+    outcome.reason === 'ambiguous' ||
+    outcome.reason === 'attempts_exhausted' ||
+    outcome.reason.startsWith('terminal:')
+  ) {
+    return { status: 'not_applicable', error: `refused:${outcome.reason}`.slice(0, 500) }
+  }
+  return { status: 'failed', error: `refused by send guard: ${outcome.reason}`.slice(0, 500) }
+}
+
+/** Email attempts a follow-up may use before it is closed as failed_terminal. */
+export const FOLLOWUP_MAX_EMAIL_ATTEMPTS = 5
+/**
+ * A retryable follow-up older than this is closed, never re-driven: a "how did
+ * we do?" email weeks after the move is worse than none. Rows written before
+ * 2026-09-15 had next_attempt_at set but nothing read it, so without this bound
+ * the first sweep after deploy would have re-sent every old refusal at once.
+ */
+export const FOLLOWUP_RETRY_MAX_AGE_MS = 7 * 24 * HOUR
+
+/**
+ * PURE: when the guard said "LATER" rather than "failed" — a policy deferral
+ * (caps, quiet hours, kill switch), a send not yet due, or a live claim — the
+ * time to look again. Such an outcome must not consume a follow-up attempt:
+ * a 24h cap retried hourly used to burn all five attempts in five hours and
+ * strand the row. null = an ordinary failure (or not a refusal at all).
+ */
+export function followupDeferUntil(outcome: SendOutcome, now = Date.now()): Date | null {
+  if (outcome.sent) return null
+  if (outcome.reason === 'in_flight') return new Date(now + 15 * 60_000)
+  if (outcome.outcomeClass === 'deferred' || outcome.reason === 'not_due') {
+    const at = outcome.retryAt ?? outcome.notDueUntil
+    return at && at.getTime() > now ? at : new Date(now + HOUR)
+  }
+  return null
+}
+
+/**
+ * Re-drive follow-ups left RETRYABLE. `next_attempt_at` was written by
+ * runFollowup but nothing ever read it, so a follow-up whose email failed
+ * temporarily was stranded forever. Every gate runs again on the resume and the
+ * email key dedupes at the guard. Bounded; called from the hourly
+ * lifecycle-repair sweep.
+ */
+export async function retryDueFollowups(limit = 25): Promise<number> {
+  if (!FOLLOWUPS_ENABLED) return 0
+  const cutoff = new Date(Date.now() - FOLLOWUP_RETRY_MAX_AGE_MS)
+  // Close stale retryable rows FIRST, so they are never re-driven.
+  await prisma.followUpLedger
+    .updateMany({
+      where: { status: { in: ['failed_retryable', 'partially_delivered'] }, createdAt: { lt: cutoff } },
+      data: { status: 'failed_terminal', terminalReason: 'stale:retry-window-expired', nextAttemptAt: null },
+    })
+    .catch((err) => log.warn({ err: err instanceof Error ? err.message : String(err) }, 'closing stale follow-ups failed'))
+  const due = await prisma.followUpLedger.findMany({
+    where: {
+      status: { in: ['failed_retryable', 'partially_delivered'] },
+      nextAttemptAt: { lte: new Date() },
+      emailAttempts: { lt: FOLLOWUP_MAX_EMAIL_ATTEMPTS },
+      createdAt: { gte: cutoff },
+    },
+    select: { bookingId: true, type: true },
+    orderBy: { nextAttemptAt: 'asc' },
+    take: limit,
+  })
+  for (const r of due) {
+    await runFollowup(r.bookingId, r.type as FollowupType).catch((err) =>
+      log.warn({ err: err instanceof Error ? err.message : String(err), bookingId: r.bookingId, type: r.type }, 'follow-up retry failed')
+    )
+  }
+  return due.length
 }
 
 // ── email (via the SHARED SEND GUARD — src/lib/email-guard) ─────────────
@@ -259,7 +363,7 @@ async function sendEmail(opts: {
   payload: Record<string, unknown>
   template: string
   bookingId: string
-}): Promise<boolean> {
+}): Promise<SendOutcome> {
   const outcome = await guardedSend({
     to: opts.to,
     subject: opts.subject,
@@ -282,9 +386,8 @@ async function sendEmail(opts: {
   })
   if (!outcome.sent) {
     log.info({ bookingId: opts.bookingId, template: opts.template, reason: outcome.reason }, 'follow-up email not sent')
-    return false
   }
-  return true
+  return outcome
 }
 
 const esc = (s: string): string => s.replace(/[<>&]/g, (c) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;' }[c] as string))
@@ -297,10 +400,6 @@ const esc = (s: string): string => s.replace(/[<>&]/g, (c) => ({ '<': '&lt;', '>
 // #1f6feb CTA survived in a four-colour brand). Every follow-up now renders
 // through the shared _ui kit like every other email.
 
-function withOptOut(sms: string, locale: Locale): string {
-  return `${sms} ${t(locale, 'smsOptOut')}`
-}
-
 /** Returns null when the message CANNOT be built truthfully (missing config). */
 function buildMessage(
   type: FollowupType,
@@ -308,18 +407,16 @@ function buildMessage(
   locale: Locale,
   /** Compliance block merged into the props BEFORE rendering (EMAIL-P1-06). */
   marketing: Record<string, unknown> = {}
-): { sms: string; subject: string; html: string; text: string; payload: Record<string, unknown> } | null {
+): { subject: string; html: string; text: string; payload: Record<string, unknown> } | null {
   const es = locale === 'es'
   switch (type) {
     case 'review-request':
     case 'review-reminder': {
-      const key = type === 'review-request' ? 'reviewRequest' : 'reviewReminder'
       // NO FALLBACK (finding EMAIL-P1-15). Without a verified review
       // destination there is no honest review email to send.
       const url = reviewUrl()
       if (!url) return null
       return {
-        sms: withOptOut(t(locale, key, { name, url }), locale),
         subject: es ? '¿Cómo lo hicimos? Deja tu reseña' : 'How did we do? Leave us a review',
         // Premium branded review email (shared _ui kit), matching the rest of the
         // transactional set. Replaces the old inline emailHtml() card.
@@ -333,7 +430,6 @@ function buildMessage(
     }
     case 'repeat-reminder':
       return {
-        sms: withOptOut(t(locale, 'repeatReminder', { name, url: BOOK_URL }), locale),
         // NO CLEANOUT / JUNK-REMOVAL COPY (finding EMAIL-P1-14). That service is
         // not enabled, so advertising it is an offer we cannot fulfil.
         subject: es ? '¿Otra mudanza?' : 'Moving again?',
@@ -354,7 +450,6 @@ function buildMessage(
       }
     case 'referral-ask':
       return {
-        sms: withOptOut(t(locale, 'referralAsk', { name, url: REFERRAL_URL }), locale),
         subject: es ? 'Da 15%. Recibe 15%.' : 'Give 15%. Get 15%.',
         // Premium branded referral email (shared _ui kit).
         ...renderWithPayload(ReferralEmail, {
@@ -434,7 +529,7 @@ export async function runFollowup(bookingId: string, type: FollowupType): Promis
   }
 
   // Frequency caps (per customer).
-  if (!(await withinFrequencyCaps(customer.id))) return recordSkip(bookingId, type, 'rate-capped')
+  if (!(await withinFrequencyCaps(customer.id, { bookingId, type }))) return recordSkip(bookingId, type, 'rate-capped')
 
   // ── CLAIM (finding EMAIL-P1-10) ───────────────────────────────────
   // Claimed BEFORE sending, so a retry or double-trigger cannot duplicate —
@@ -446,7 +541,8 @@ export async function runFollowup(bookingId: string, type: FollowupType): Promis
   // row left mid-flight by a crashed worker is RESUMED.
   try {
     await prisma.followUpLedger.create({
-      data: { bookingId, type, channel: 'both', status: 'claimed', emailStatus: 'pending', smsStatus: 'pending' },
+      // EMAIL ONLY: Move It Clear It no longer sends SMS (owner, 2026-09-15).
+      data: { bookingId, type, channel: 'email', status: 'claimed', emailStatus: 'pending', smsStatus: 'not_applicable' },
     })
   } catch (err: unknown) {
     if ((err as { code?: string })?.code !== 'P2002') throw err
@@ -462,11 +558,10 @@ export async function runFollowup(bookingId: string, type: FollowupType): Promis
   const ledger = await prisma.followUpLedger
     .findUnique({
       where: { bookingId_type: { bookingId, type } },
-      select: { emailStatus: true, smsStatus: true, emailAttempts: true, smsAttempts: true },
+      select: { emailStatus: true, emailAttempts: true, deliveredAt: true },
     })
     .catch(() => null)
   const emailAlreadyDelivered = ledger?.emailStatus === 'delivered'
-  const smsAlreadyDelivered = ledger?.smsStatus === 'delivered'
 
   // COMPLIANCE CONTEXT (finding EMAIL-P1-06). An incomplete context is a
   // configuration problem, so the send is skipped with a named reason rather
@@ -482,33 +577,18 @@ export async function runFollowup(bookingId: string, type: FollowupType): Promis
     // is visible instead of the send silently "succeeding" with a bad link.
     return recordSkip(bookingId, type, 'missing-configuration:review-url')
   }
-  // ── PER-CHANNEL DELIVERY ─────────────────────────────────────
-  // A channel that already delivered is NEVER re-sent on a resume.
-  const patch: Record<string, unknown> = {}
-
-  if (customer.phone && !smsAlreadyDelivered) {
-    try {
-      await smsQueue.add(`followup:${type}`, { to: customer.phone, message: msg.sms, bookingId })
-      // QUEUED, not delivered. The SMS worker owns actual delivery — recording
-      // 'delivered' at enqueue time is precisely the defect this finding names.
-      patch.smsStatus = 'queued'
-      patch.smsAttempts = (ledger?.smsAttempts ?? 0) + 1
-    } catch (err) {
-      const m = err instanceof Error ? err.message : String(err)
-      patch.smsStatus = 'failed'
-      patch.smsLastError = m.slice(0, 500)
-      patch.smsAttempts = (ledger?.smsAttempts ?? 0) + 1
-      log.warn({ err: m, bookingId, type }, 'follow-up SMS enqueue failed')
-    }
-  } else if (!customer.phone) {
-    patch.smsStatus = 'not_applicable'
-  }
+  // ── DELIVERY (email only) ────────────────────────────────────
+  // An email that already delivered is NEVER re-sent on a resume. SMS is not a
+  // channel any more (owner, 2026-09-15): nothing is ever texted.
+  const patch: Record<string, unknown> = { smsStatus: 'not_applicable' }
+  let deferUntil: Date | null = null
 
   if (customer.email && !emailAlreadyDelivered) {
     try {
-      // The guard owns suppression/caps/idempotency; `false` is a policy refusal
-      // (already recorded on the EmailSend row), not an exception.
-      const ok = await sendEmail({
+      // The guard owns suppression/caps/idempotency; a refusal is already
+      // recorded on the EmailSend row, and its CLASS decides whether this
+      // follow-up stays retryable.
+      const outcome = await sendEmail({
         to: customer.email,
         subject: msg.subject,
         html: msg.html,
@@ -517,9 +597,12 @@ export async function runFollowup(bookingId: string, type: FollowupType): Promis
         template: EMAIL_TEMPLATE[type],
         bookingId,
       })
-      patch.emailStatus = ok ? 'delivered' : 'failed'
-      if (!ok) patch.emailLastError = 'refused by send guard'
-      patch.emailAttempts = (ledger?.emailAttempts ?? 0) + 1
+      const mapped = followupEmailStatus(outcome)
+      patch.emailStatus = mapped.status
+      if (mapped.error) patch.emailLastError = mapped.error
+      deferUntil = mapped.status === 'failed' ? followupDeferUntil(outcome) : null
+      // A deferral is "later", not a failed attempt.
+      patch.emailAttempts = (ledger?.emailAttempts ?? 0) + (deferUntil ? 0 : 1)
     } catch (err) {
       const m = err instanceof Error ? err.message : String(err)
       patch.emailStatus = 'failed'
@@ -533,8 +616,8 @@ export async function runFollowup(bookingId: string, type: FollowupType): Promis
 
   // ── ROLL UP ──────────────────────────────────────────────
   const emailState = (patch.emailStatus as string) ?? ledger?.emailStatus ?? 'not_applicable'
-  const smsState = (patch.smsStatus as string) ?? ledger?.smsStatus ?? 'not_applicable'
-  const live = [emailState, smsState].filter((v) => v !== 'not_applicable' && v !== 'pending')
+  const smsState = 'not_applicable'
+  const live = [emailState].filter((v) => v !== 'not_applicable' && v !== 'pending')
   const good = live.filter((v) => v === 'delivered' || v === 'queued')
   const bad = live.filter((v) => v === 'failed')
 
@@ -544,19 +627,34 @@ export async function runFollowup(bookingId: string, type: FollowupType): Promis
   else if (good.length > 0) status = 'partially_delivered'
   else status = 'failed_retryable'
 
+  // Out of attempts: say so, instead of a 'retryable' row nothing will retry.
+  const attemptsUsed = Number(patch.emailAttempts ?? ledger?.emailAttempts ?? 0)
+  let terminalReason: string | undefined
+  if (status === 'failed_retryable' && attemptsUsed >= FOLLOWUP_MAX_EMAIL_ATTEMPTS) {
+    status = 'failed_terminal'
+    terminalReason = `attempts_exhausted:${String(patch.emailLastError ?? 'unknown').slice(0, 200)}`
+  }
+
   const retryable = status === 'failed_retryable' || status === 'partially_delivered'
 
+  // CONDITIONAL: a concurrent run of the same follow-up (the quiet-hours retry
+  // job and the hourly sweep can coincide) loses the guard claim and gets
+  // 'in_flight'. Its late roll-up must never overwrite a row the winner already
+  // closed — e.g. flip 'delivered' back to failed_retryable.
   await prisma.followUpLedger
-    .update({
-      where: { bookingId_type: { bookingId, type } },
+    .updateMany({
+      where: { bookingId, type, status: { notIn: ['delivered', 'failed_terminal', 'cancelled', 'skipped'] } },
       data: {
         ...patch,
         status,
-        deliveredAt: good.length > 0 ? new Date() : null,
+        ...(terminalReason ? { terminalReason } : {}),
+        // Keep the FIRST delivery time: a resume must not move it (the cap reads it).
+        deliveredAt: good.length > 0 ? (ledger?.deliveredAt ?? new Date()) : (ledger?.deliveredAt ?? null),
         error: bad.length ? 'one or more channels failed' : null,
         // Stays retryable — and only the FAILED channel is retried, because a
         // delivered channel is skipped on resume.
-        nextAttemptAt: retryable ? new Date(Date.now() + 60 * 60_000) : null,
+        // A guard deferral carries its own due time; anything else waits an hour.
+        nextAttemptAt: retryable ? (deferUntil ?? new Date(Date.now() + 60 * 60_000)) : null,
       },
     })
     .catch((err) => log.warn({ err: String(err), bookingId, type }, 'ledger roll-up failed'))

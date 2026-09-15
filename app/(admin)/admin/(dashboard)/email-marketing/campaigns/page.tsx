@@ -166,12 +166,32 @@ export default async function EmailCampaignsPage(props: { searchParams: Promise<
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: '18px 28px', alignItems: 'flex-start' }}>
             <div style={{ minWidth: '190px' }}>
               <p style={{ margin: 0, fontSize: '11px', fontWeight: 800, letterSpacing: '0.06em', color: COLORS.muted }}>AI CAMPAIGN DISCOVERY</p>
-              <p style={{ margin: '4px 0 0', fontSize: '15px', fontWeight: 800, color: agent.enabled ? '#10B981' : COLORS.muted }}>
-                {agent.enabled ? 'ACTIVE' : 'OFF'}
+              {/* TRUTH, not configuration: the flag on THIS (API) process is not
+                  proof that the worker — the only process that runs discovery —
+                  has it too. ACTIVE requires a real sweep in the last 36h. */}
+              <p
+                style={{
+                  margin: '4px 0 0',
+                  fontSize: '15px',
+                  fontWeight: 800,
+                  color: agent.runtimeState === 'active' ? '#10B981' : agent.runtimeState === 'not_running' ? '#D97706' : COLORS.muted,
+                }}
+              >
+                {agent.runtimeState === 'active' ? 'ACTIVE' : agent.runtimeState === 'not_running' ? 'ENABLED — NOT RUNNING' : 'OFF'}
               </p>
-              {agent.enabled ? (
+              {agent.runtimeState === 'not_running' ? (
                 <p style={{ margin: '3px 0 0', fontSize: '12px', color: COLORS.muted, lineHeight: 1.5 }}>
-                  {agent.schedule}. Last checked: {agent.lastSweep ? fmtDt(agent.lastSweep.at) : 'never (waiting for the first run)'}.
+                  The flag is on here, but no discovery sweep has run in the last 36 hours
+                  {agent.lastSweep ? ` (last sweep: ${fmtDt(agent.lastSweep.at)})` : ' (it has never run)'}.
+                  {agent.lastSkip
+                    ? ` The scheduled run on ${fmtDt(agent.lastSkip.at)} was skipped by ${agent.lastSkip.service ?? 'the worker'}: ${agent.lastSkip.reason === 'disabled' ? 'EMAIL_MARKETING_AGENT_ENABLED is not set to true on that service' : agent.lastSkip.reason}.`
+                    : ' Check that the worker service is running and has EMAIL_MARKETING_AGENT_ENABLED=true.'}
+                  <br />Discovery only ever drafts campaigns for your approval; it never sends.
+                </p>
+              ) : agent.runtimeState === 'active' ? (
+                <p style={{ margin: '3px 0 0', fontSize: '12px', color: COLORS.muted, lineHeight: 1.5 }}>
+                  {agent.schedule}. Last checked: {agent.lastSweep ? fmtDt(agent.lastSweep.at) : 'never'}.
+                  {!agent.enabled && ' (Running on the worker; the flag is not set on this service.)'}
                   <br />Next check: {fmtDt(agent.nextCheckAt)}.
                 </p>
               ) : (

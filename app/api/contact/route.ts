@@ -204,13 +204,11 @@ async function handleContact(req: NextRequest): Promise<NextResponse> {
     apiLogger.error({ err }, '/api/contact — Discord queue failed (non-fatal)')
   }
 
-  // ── 2) NO customer auto-reply email/SMS ──
-  // MESSAGING POLICY: the system sends exactly four customer messages
-  // (pre-approval + final-confirmation, each as email + SMS). The contact-form
-  // acknowledgement is NOT one of them, so we only alert the team in Discord
-  // above; the customer's confirmation is the inline JSON response below.
-  // (To re-enable: add 'contact-ack' to ALLOWED_TEMPLATES in the email worker
-  //  and restore the smsQueue.add for contact-ack-sms.)
+  // ── 2) NO customer auto-reply ──
+  // MESSAGING POLICY: the contact-form acknowledgement is not a customer email,
+  // and Move It Clear It sends no SMS at all (owner, 2026-09-15). We only alert
+  // the team in Discord above; the customer's confirmation is the inline JSON
+  // response below.
 
   // ── A LOST CONTACT MESSAGE MUST NOT LOOK LIKE A DELIVERED ONE ────────
   //  This route answered {ok:true} even when the lead was never persisted, so

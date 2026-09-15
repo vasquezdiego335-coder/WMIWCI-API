@@ -13,6 +13,7 @@
 import { prisma } from '../../db'
 import { safeErrorMessage } from '../redact'
 import {
+  DISCOVERY_SKIPPED_EVENT,
   DISCOVERY_SWEEP_EVENT,
   LEDGER_ACTION,
   NOTIFY_EVENT,
@@ -27,6 +28,9 @@ const DAY_MS = 24 * 3600_000
  *  36h = one full day plus generous restart slack. */
 const SWEEP_STALE_MS = 36 * 3600_000
 
+/** How long THIS process has been running (the flag's effective age here). */
+const processUptimeMs = (): number => Math.round(process.uptime() * 1000)
+
 // ── 1. The discovery cron stopped running ───────────────────────────────
 
 const discoveryStale: CheckDefinition = {
@@ -34,7 +38,11 @@ const discoveryStale: CheckDefinition = {
   category: 'scheduler',
   intent: 'Campaign discovery is switched on but has not actually run — opportunities are silently accumulating unseen.',
   run: async (ctx) => {
-    if (!marketingAgentEnabled()) return [] // off is a choice, not a failure
+    // Off is a choice, not a failure. The runner does NOT auto-resolve this
+    // check's incidents from a process where it is off: such a process cannot
+    // observe the problem (see UNOBSERVABLE_WHEN_FLAG_OFF), so its silence is
+    // not evidence of a fix.
+    if (!marketingAgentEnabled()) return []
     let last: { createdAt: Date } | null
     try {
       last = await prisma.auditLog.findFirst({
@@ -55,12 +63,52 @@ const discoveryStale: CheckDefinition = {
       ]
     }
     countInspected(ctx, 'marketingSweeps', last ? 1 : 0)
-    // Never ran at all: only report once the flag has plausibly been on for a
-    // cycle — a fresh enablement has simply not reached 10:05 ET yet. Without
-    // a first ledger row there is no timestamp to compare, so this stays
-    // quiet until the first sweep writes one, and the stale rule below owns
-    // everything after that. The enablement gap is at most one day.
-    if (!last) return []
+    // SPLIT CONFIGURATION (incident 2026-09-14): the flag is true HERE, but the
+    // service that runs the daily sweep recorded that it skipped because the
+    // flag is off THERE. The skip row is shared evidence, so this does not
+    // depend on how long either process has been up.
+    const skip = await prisma.auditLog
+      .findFirst({
+        where: { action: LEDGER_ACTION, details: { path: ['event'], equals: DISCOVERY_SKIPPED_EVENT } },
+        orderBy: { createdAt: 'desc' },
+        select: { createdAt: true, details: true },
+      })
+      .catch(() => null)
+    if (skip && (!last || skip.createdAt > last.createdAt)) {
+      const d = (skip.details ?? {}) as { reason?: string; service?: string | null }
+      return [
+        makeFinding(ctx, {
+          checkId: 'marketing.discovery_stale',
+          severity: 'warning',
+          category: 'scheduler',
+          title: 'Campaign discovery is enabled here but skipped where it runs',
+          description:
+            `EMAIL_MARKETING_AGENT_ENABLED is true in this service, but the daily sweep was skipped by ${d.service ?? 'the worker'} (${d.reason ?? 'unknown reason'}) ` +
+            `on ${skip.createdAt.toISOString()}. The flag must be set on the service that runs the discovery cron, or removed here.`,
+          evidence: { lastSweepAt: last?.createdAt.toISOString() ?? null, skippedAt: skip.createdAt.toISOString(), skippedBy: d.service ?? null, reason: d.reason ?? null },
+        }),
+      ]
+    }
+    // NEVER RAN AT ALL (incident 2026-09-14: this used to return [] here, so
+    // a drafter that had never run looked healthy forever). A fresh enablement
+    // has simply not reached 10:05 ET yet, so the anchor is how long the flag
+    // has been in effect in THIS process: an environment change redeploys the
+    // service, so process uptime is exactly "enabled since". Past the stale
+    // window with no sweep ever recorded, the schedule is not running.
+    if (!last) {
+      const enabledForMs = processUptimeMs()
+      if (enabledForMs <= SWEEP_STALE_MS) return []
+      return [
+        makeFinding(ctx, {
+          checkId: 'marketing.discovery_stale',
+          severity: 'warning',
+          category: 'scheduler',
+          title: 'Campaign discovery is enabled but has never run',
+          description: `EMAIL_MARKETING_AGENT_ENABLED is true and this process has been up ${hours(enabledForMs)}h, but no discovery sweep has ever been recorded (expected daily at 10:05 ET). The cron or the worker that runs it is not running, or the flag is missing on that service.`,
+          evidence: { lastSweepAt: null, enabledForHours: hours(enabledForMs) },
+        }),
+      ]
+    }
     const age = ctx.now.getTime() - last.createdAt.getTime()
     if (age <= SWEEP_STALE_MS) return []
     return [

@@ -301,6 +301,45 @@ async function postCampaignOpportunity(input: OpportunityNotice): Promise<boolea
 export const LEDGER_ACTION = 'EMAIL_CAMPAIGN_UPDATED' as const
 export const DISCOVERY_SWEEP_EVENT = 'discovery_sweep'
 export const NOTIFY_EVENT = 'discord_notification'
+/**
+ * The daily cron ran but the flag was OFF in the process that runs it.
+ *
+ * WHY IT IS RECORDED (incident 2026-09-14): the flag was set on the API and
+ * missing on the worker. The admin page reads the API's environment, so it
+ * said ACTIVE, while the worker — the only process that runs discovery —
+ * skipped every day and wrote nothing. A skip that leaves no trace is
+ * indistinguishable from "no opportunity today". One ledger row per daily
+ * skip lets every service report the SAME truth. It never drafts or sends.
+ */
+export const DISCOVERY_SKIPPED_EVENT = 'discovery_skipped'
+/** A daily cron whose last successful sweep is older than this is not running. */
+export const DISCOVERY_STALE_MS = 36 * 3600_000
+
+export type DiscoveryRuntimeState = 'off' | 'active' | 'not_running'
+
+/**
+ * PURE: what the discovery agent is ACTUALLY doing, from the flag in this
+ * process plus the shared ledger. The API and the worker have separate
+ * environments, so the ledger outranks this process's flag:
+ *   active       — a sweep ran within DISCOVERY_STALE_MS and no skip is newer
+ *                  (even if the flag is off HERE: the worker is sweeping).
+ *   not_running  — the flag is true here but no sweep in DISCOVERY_STALE_MS (or
+ *                  ever): the worker is down, or the flag is missing where the
+ *                  cron runs.
+ *   off          — the flag is not true here and nothing is sweeping.
+ */
+export function discoveryRuntimeState(input: {
+  enabled: boolean
+  lastSweepAt: Date | null
+  lastSkipAt?: Date | null
+  now: Date
+}): DiscoveryRuntimeState {
+  const recentSweep =
+    input.lastSweepAt !== null && input.now.getTime() - input.lastSweepAt.getTime() <= DISCOVERY_STALE_MS
+  const skippedSince = Boolean(input.lastSkipAt && (!input.lastSweepAt || input.lastSkipAt > input.lastSweepAt))
+  if (recentSweep && !skippedSince) return 'active'
+  return input.enabled ? 'not_running' : 'off'
+}
 
 export type AgentCampaignRow = { id: string; name: string; status: string; createdAt: Date }
 
@@ -322,6 +361,8 @@ export interface DiscoveryDeps {
   postDiscord(input: OpportunityNotice): Promise<boolean>
   recordNotification(campaignId: string, delivered: boolean): Promise<void>
   recordSweep(report: DiscoveryReport): Promise<void>
+  /** Record that the cron ran with the flag off here. Optional for test worlds. */
+  recordSkip?(reason: string): Promise<void>
 }
 
 let _deps: DiscoveryDeps | undefined
@@ -430,6 +471,22 @@ export function defaultDiscoveryDeps(): DiscoveryDeps {
         .create({ data: { action: LEDGER_ACTION, details: { event: DISCOVERY_SWEEP_EVENT, ...report } as never } })
         .catch((err) => log.warn({ err: String(err) }, 'sweep ledger write failed (non-fatal)'))
     },
+    async recordSkip(reason) {
+      await prisma.auditLog
+        .create({
+          data: {
+            action: LEDGER_ACTION,
+            details: {
+              event: DISCOVERY_SKIPPED_EVENT,
+              reason,
+              // The service NAME only (never a value of any secret), so the
+              // admin can say WHICH process has the flag off.
+              service: process.env.RAILWAY_SERVICE_NAME ?? null,
+            },
+          },
+        })
+        .catch((err) => log.warn({ err: String(err) }, 'skip ledger write failed (non-fatal)'))
+    },
   }
   return _deps
 }
@@ -461,6 +518,7 @@ export async function discoverCampaignOpportunities(
   const report: DiscoveryReport = { ran: false, considered: [], created: null }
   if (!marketingAgentEnabled()) {
     report.reason = 'disabled'
+    await deps.recordSkip?.('disabled')
     return report
   }
   report.ran = true
@@ -564,7 +622,12 @@ export async function discoverCampaignOpportunities(
 // ════════════════════════════════════════════════════════════════════════
 
 export type DiscoveryStatus = {
+  /** The flag in THIS process (the admin page runs in the API). */
   enabled: boolean
+  /** What discovery is actually doing — see discoveryRuntimeState. */
+  runtimeState: DiscoveryRuntimeState
+  /** Newest "cron ran but the flag was off there" ledger row, if any. */
+  lastSkip: { at: Date; reason: string; service: string | null } | null
   disabledReason: string | null
   minAudience: number
   cooldownDays: number
@@ -601,7 +664,7 @@ export function nextDiscoveryCheck(from: Date = new Date()): Date {
 
 export async function discoveryStatus(opts: { includePool?: boolean } = {}): Promise<DiscoveryStatus> {
   const enabled = marketingAgentEnabled()
-  const [lastSweepRow, lastNoticeRow, awaitingApproval] = await Promise.all([
+  const [lastSweepRow, lastNoticeRow, awaitingApproval, lastSkipRow] = await Promise.all([
     prisma.auditLog
       .findFirst({
         where: { action: LEDGER_ACTION, details: { path: ['event'], equals: DISCOVERY_SWEEP_EVENT } },
@@ -619,10 +682,30 @@ export async function discoveryStatus(opts: { includePool?: boolean } = {}): Pro
     prisma.marketingCampaign
       .count({ where: { channel: 'EMAIL', status: { in: ['DRAFT', 'READY'] } } })
       .catch(() => 0),
+    prisma.auditLog
+      .findFirst({
+        where: { action: LEDGER_ACTION, details: { path: ['event'], equals: DISCOVERY_SKIPPED_EVENT } },
+        orderBy: { createdAt: 'desc' },
+        select: { createdAt: true, details: true },
+      })
+      .catch(() => null),
   ])
 
+  const skipDetails = (lastSkipRow?.details ?? null) as { reason?: string; service?: string | null } | null
+  // A skip OLDER than the last sweep is history, not the cause of anything now.
+  const currentSkip =
+    lastSkipRow && (!lastSweepRow || lastSkipRow.createdAt > lastSweepRow.createdAt) ? lastSkipRow : null
   const status: DiscoveryStatus = {
     enabled,
+    runtimeState: discoveryRuntimeState({
+      enabled,
+      lastSweepAt: lastSweepRow?.createdAt ?? null,
+      lastSkipAt: currentSkip?.createdAt ?? null,
+      now: new Date(),
+    }),
+    lastSkip: currentSkip
+      ? { at: currentSkip.createdAt, reason: String(skipDetails?.reason ?? 'unknown'), service: skipDetails?.service ?? null }
+      : null,
     disabledReason: enabled ? null : 'EMAIL_MARKETING_AGENT_ENABLED is not set to true',
     minAudience: MIN_AUDIENCE,
     cooldownDays: SUGGESTION_COOLDOWN_DAYS,

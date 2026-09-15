@@ -69,6 +69,13 @@ export function movePassed(b: BookingSnapshot, now: Date = new Date()): boolean 
   return d ? d.getTime() + DAY_MS < now.getTime() : false
 }
 
+/** An abandoned-checkout email is only true while the booking still awaits its deposit. */
+function stillAwaitingCheckout(b: BookingSnapshot): string | null {
+  if (b.depositPaid) return 'deposit_already_paid'
+  if (b.status !== 'PENDING_PAYMENT') return `booking_advanced:${b.status}`
+  return null
+}
+
 /**
  * Templates whose truthfulness needs MORE than a status match.
  * A status is a label; these are the conditions the copy actually asserts.
@@ -79,10 +86,16 @@ const WORKFLOW_CONDITIONS: Record<string, (b: BookingSnapshot) => string | null>
   // the status alone is not proof of what this email claims.
   'final-confirmation': (b) => (b.depositPaid ? null : 'deposit_not_captured'),
 
-  // Recovery mail is only honest while the deposit is genuinely outstanding.
-  'abandoned-checkout': (b) => (b.depositPaid ? 'deposit_already_paid' : null),
-  'abandoned-checkout-2': (b) => (b.depositPaid ? 'deposit_already_paid' : null),
-  'abandoned-checkout-3': (b) => (b.depositPaid ? 'deposit_already_paid' : null),
+  // Recovery mail is only honest while the checkout is genuinely unfinished.
+  // `depositPaid` alone is NOT that proof: a paid $49 hold leaves the booking
+  // PENDING_APPROVAL with depositPaid still false until the owner captures, and
+  // a declined booking is CANCELLED with depositPaid false. A recovery stage
+  // deferred by quiet hours or the transactional gap could therefore tell a
+  // customer who had just paid "your date is still available" (2026-09-15).
+  // Only PENDING_PAYMENT is still an abandoned checkout.
+  'abandoned-checkout': stillAwaitingCheckout,
+  'abandoned-checkout-2': stillAwaitingCheckout,
+  'abandoned-checkout-3': stillAwaitingCheckout,
 
   // Post-job mail requires the job to have actually finished.
   'job-completion': (b) => (b.completedAt ? null : 'not_completed'),

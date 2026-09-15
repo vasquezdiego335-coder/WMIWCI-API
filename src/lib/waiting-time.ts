@@ -168,12 +168,6 @@ export const WAITING_POLICY = {
   emailReminder:
     'To help your move begin on time, please have everything packed and accessible before our crew arrives. Your booking includes a complimentary 30-minute grace period on arrival; additional waiting time is billed at $50 per 30 minutes.',
 
-  /** Day-of-move SMS (kept short for one segment where possible). */
-  sms:
-    'Move It Clear It: our crew is on the way! Please have everything packed and ready. Your move includes a complimentary 30-minute grace period on arrival — additional waiting time may result in waiting charges. Thank you!',
-  smsEs:
-    'Move It Clear It: ¡nuestro equipo va en camino! Por favor ten todo empacado y listo. Tu mudanza incluye 30 minutos de cortesía al llegar — el tiempo de espera adicional puede generar cargos. ¡Gracias!',
-
   /** Customer-portal status lines. */
   portalWaitingStarted: 'Your crew has arrived and is waiting for access.',
   portalBillableStarted:
@@ -196,11 +190,6 @@ export function effectiveWaitingFeeCents(booking: {
   if (booking.waitingFeeWaived) return 0
   if (booking.waitingFeeOverride != null) return Math.max(0, Math.round(booking.waitingFeeOverride))
   return Math.max(0, Math.round(booking.waitingFee ?? 0))
-}
-
-/** The automatic day-of-move reminder SMS, localized. */
-export function dayOfMoveSms(locale?: string | null): string {
-  return (locale ?? 'en').toLowerCase().startsWith('es') ? WAITING_POLICY.smsEs : WAITING_POLICY.sms
 }
 
 /** Receipt / invoice line-item label for a computed waiting fee. */

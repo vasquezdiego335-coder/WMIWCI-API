@@ -4,7 +4,15 @@ import { findAvailableSlots, formatEastern } from './scheduling'
 import { apiLogger } from './logger'
 
 export type OfferRescheduleResult = {
+  /** Human-readable Eastern labels, for Discord cards and the admin response. */
   offeredDates: string[]
+  /**
+   * The same slots as ISO timestamps — what the reschedule EMAIL must be given.
+   * The human labels ("Friday, September 18, 2026 at 9:00 AM") do not parse
+   * back into dates, so the email used to drop every offered date and tell the
+   * customer to reply instead.
+   */
+  offeredDatesIso: string[]
   rescheduleUrl: string
   customerEmail: string
 }
@@ -12,9 +20,10 @@ export type OfferRescheduleResult = {
 // Shared "Offer New Dates" logic — the single source of truth used by BOTH the
 // admin route (POST /api/admin/bookings/[id]/offer-reschedule) and the Discord
 // "📅 Offer New Dates" interaction button. Moves the booking back to
-// PENDING_APPROVAL, emails + texts the customer a self-service link with open
-// slots, audit-logs it, and (optionally) pings Discord. The $49 hold is never
-// touched. Returns null if the booking is missing.
+// PENDING_APPROVAL, audit-logs the offer, and (optionally) pings Discord. The
+// customer EMAIL is emitted by each caller through the transactional outbox;
+// no SMS is ever sent. The $49 hold is never touched. Returns null if the
+// booking is missing.
 //
 // Queue adds are timeout-guarded: BullMQ uses maxRetriesPerRequest:null, so a
 // Redis stall would otherwise hang the caller forever (and blow the Discord 3s
@@ -38,12 +47,11 @@ export async function offerRescheduleToCustomer(
   const appUrl = process.env.APP_URL ?? 'https://wmiwci-api.vercel.app'
   const rescheduleUrl = `${appUrl}/my-booking/${booking.customerToken}?reschedule=1`
 
-  // MESSAGING POLICY: no customer email/SMS is sent here. The whole system sends
-  // exactly four customer messages (pre-approval + final-confirmation, each as
-  // email + SMS). The reschedule link is surfaced through the customer portal and
-  // the (internal, team-only) Discord notice below — the customer is not
-  // auto-emailed/texted. To re-enable: add 'reschedule-offer' to ALLOWED_TEMPLATES
-  // in src/workers/email.worker.ts and restore the smsQueue.add here.
+  // MESSAGING POLICY: this helper sends no customer email itself, and no SMS is
+  // ever sent (Move It Clear It no longer texts customers, owner 2026-09-15). The
+  // reschedule link is surfaced through the customer portal and the (internal,
+  // team-only) Discord notice below; the customer EMAIL, when there is one, is
+  // emitted by the caller through the transactional outbox.
   if (opts.notifyDiscord) {
     try {
       await Promise.race([
@@ -77,5 +85,10 @@ export async function offerRescheduleToCustomer(
 
   apiLogger.info({ bookingId: booking.id, count: offeredDates.length }, 'Reschedule offer sent to customer')
 
-  return { offeredDates, rescheduleUrl, customerEmail: booking.customer.email }
+  return {
+    offeredDates,
+    offeredDatesIso: slots.map((d) => d.toISOString()),
+    rescheduleUrl,
+    customerEmail: booking.customer.email,
+  }
 }

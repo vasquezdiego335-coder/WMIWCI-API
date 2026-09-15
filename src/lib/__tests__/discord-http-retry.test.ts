@@ -17,6 +17,7 @@
 // ════════════════════════════════════════════════════════════════════════
 import { test, before, after, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
+import { assertNoProductionCredentials } from './_disposable-test-env'
 import http from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { PrismaClient } from '@prisma/client'
@@ -25,6 +26,9 @@ import { NOTIFICATION_STATUS, recordLeadNotification } from '../lead-notificatio
 import { processLeadNotification } from '../lead-notification-processor'
 import { deliverLeadNotice } from '../lead-notification-transport'
 
+// A production-looking DATABASE_URL / Redis URL / Resend key is a HARD FAILURE,
+// never a skip — see _disposable-test-env.ts.
+assertNoProductionCredentials()
 const REDIS_URL = process.env.REDIS_TEST_URL
 const skip = !process.env.DATABASE_URL
   ? 'set DATABASE_URL to a disposable PostgreSQL'
@@ -356,11 +360,20 @@ test('queue loss does not lose the notice — the sweeper re-drives it', { skip 
   } finally { await recv.close() }
 })
 
+test('consecutive sweeps each acquire the lock (it never leaks across pooled connections)', { skip }, async () => {
+  const { sweepLeadNotifications } = await import('../lead-notification-sweeper')
+  for (let i = 0; i < 5; i++) {
+    const r = await sweepLeadNotifications(async () => undefined)
+    assert.equal(r.ran, true, `sweep ${i + 1} was skipped as locked`)
+  }
+})
+
 test('a queue-publication failure leaves the event recoverable', { skip }, async () => {
   const { dedupeKey } = await seedLeadWithEvent()
   const { sweepLeadNotifications } = await import('../lead-notification-sweeper')
   //  The publisher throws, as it would with Redis down.
   const swept = await sweepLeadNotifications(async () => { throw new Error('redis unavailable') })
+  assert.ok(swept.ran, 'the sweep must acquire its lock: a lock leaked by an earlier sweep on another pooled connection made this skip')
   //  The sweep covers every due row, not only this one, so assert the PROPERTY
   //  rather than a count that other tests in this file also contribute to.
   assert.ok(swept.failed >= 1, `publication failures must be COUNTED, not swallowed (got ${swept.failed})`)

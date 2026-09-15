@@ -102,7 +102,6 @@ constrains the quote journey; see [segmentation.md](./segmentation.md).
 |---|---|---|
 | `email` | `src/workers/email.worker.ts` | renders + sends; `ALLOWED_TEMPLATES` is the choke point |
 | `scheduled` | `src/workers/scheduled.worker.ts` | fires journey stages, digests, follow-ups |
-| `sms` | `src/workers/sms.worker.ts` | Twilio (gated) |
 | `discord` | `src/workers/discord.worker.ts` | owner alerts |
 | `marketing` | `src/workers/marketing.worker.ts` | **STUB** — `enrollCustomer()` has a TODO and no provider call |
 

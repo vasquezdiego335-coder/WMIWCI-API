@@ -45,6 +45,9 @@ export const STALE_LEASE_MS = 5 * 60 * 1000
 /** Bounded batch: steady progress beats one enormous transaction. */
 export const SWEEP_BATCH = 200
 
+/** Upper bound on one sweep while it holds the lock (publishes are fast). */
+const SWEEP_LOCK_TIMEOUT_MS = 120_000
+
 export type SweepResult = {
   ran: boolean
   /** False when another replica held the lock — not an error. */
@@ -75,14 +78,31 @@ export async function sweepLeadNotifications(
   const batch = opts.batch ?? SWEEP_BATCH
   const staleMs = opts.staleMs ?? STALE_LEASE_MS
 
-  //  ONE RUNNER. pg_try_advisory_lock returns immediately rather than queueing,
-  //  so a second replica does not pile up waiting.
-  const [{ locked }] = await prisma.$queryRawUnsafe<Array<{ locked: boolean }>>(
-    `SELECT pg_try_advisory_lock(${ADVISORY_LOCK_KEY}) AS locked`,
+  //  ONE RUNNER. A TRANSACTION-scoped advisory lock, held by an open
+  //  transaction for the whole sweep and released by PostgreSQL when it ends.
+  //  The previous session-level pg_try_advisory_lock / pg_advisory_unlock pair
+  //  ran as two separate POOLED queries: they could land on different
+  //  connections (and, behind Neon's PgBouncer pooler, different server
+  //  sessions), so the unlock silently missed and the lock leaked. Every later
+  //  sweep on another connection then returned "skipped (locked)" and orphaned
+  //  notices were never re-driven. pg_try_advisory_xact_lock still returns
+  //  immediately, so a second replica does not pile up waiting.
+  return prisma.$transaction(
+    async (tx) => {
+      const [{ locked }] = await tx.$queryRawUnsafe<Array<{ locked: boolean }>>(
+        `SELECT pg_try_advisory_xact_lock(${ADVISORY_LOCK_KEY}) AS locked`,
+      )
+      if (!locked) return { ran: false, skippedLocked: true, scanned: 0, requeued: 0, staleRecovered: 0, failed: 0, truncated: false, oldestPendingMs: null, durationMs: Date.now() - started }
+      return runSweep(publish, { now, batch, staleMs, started })
+    },
+    { maxWait: 10_000, timeout: SWEEP_LOCK_TIMEOUT_MS },
   )
-  if (!locked) return { ran: false, skippedLocked: true, scanned: 0, requeued: 0, staleRecovered: 0, failed: 0, truncated: false, oldestPendingMs: null, durationMs: Date.now() - started }
+}
 
-  try {
+async function runSweep(
+  publish: (dedupeKey: string) => Promise<void>,
+  { now, batch, staleMs, started }: { now: Date; batch: number; staleMs: number; started: number },
+): Promise<SweepResult> {
     //  1. A worker that died mid-flight left a lease. Release it WITHOUT
     //     consuming an attempt — the provider was never actually called.
     const staleRecovered = await releaseStaleClaims(new Date(now.getTime() - staleMs), now)
@@ -129,9 +149,6 @@ export async function sweepLeadNotifications(
     }
     if (result.scanned || result.staleRecovered) log.info(result, 'lead-notification sweep')
     return result
-  } finally {
-    await prisma.$queryRawUnsafe(`SELECT pg_advisory_unlock(${ADVISORY_LOCK_KEY})`)
-  }
 }
 
 /**

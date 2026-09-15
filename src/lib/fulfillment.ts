@@ -1,8 +1,7 @@
 import { prisma } from './db'
 import { onBookingPaid } from './journeys'
-import { emailQueue, smsQueue, discordQueue, marketingQueue } from './queues'
+import { emailQueue, discordQueue, marketingQueue } from './queues'
 import { webhookLogger } from './logger'
-import { t } from './i18n'
 import { ingestBookingToTracker } from './tracker'
 import { outboxEnabled, emitPaymentCompleted } from '../outbox/integration'
 import { computeQuote } from './booking-quote'
@@ -201,23 +200,8 @@ export async function fulfillPaidCheckout(params: {
     )
   }
 
-  // 2) FINAL CONFIRMATION SMS (1 of 2 allowed texts) — bilingual
-  if (booking.customer.phone) {
-    log.info('[messaging] queueing FINAL CONFIRMATION sms')
-    tasks.push(
-      enqueue('sms:final-confirmation', () =>
-        smsQueue.add('final-confirmation-sms', {
-          to: booking.customer.phone!,
-          message: t(locale, 'finalConfirmation', {
-            name: booking.customer.name,
-            displayId: booking.displayId,
-            date: dateStr,
-          }),
-          bookingId,
-        })
-      )
-    )
-  }
+  // 2) No customer SMS: Move It Clear It no longer texts customers (owner,
+  //    2026-09-15). The confirmation email above is the customer's receipt.
 
   // 3) Discord booking approval card (the Approve / Offer / Deny card)
   tasks.push(

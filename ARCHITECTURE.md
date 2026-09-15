@@ -1,7 +1,7 @@
 # WMIWCI-API — Architecture Map
 
 > Backend for **We Move It. We Clear It.** (NJ labor-only moving / junk removal).
-> **Stack:** Next.js 14 (App Router) + TypeScript + Prisma (Postgres/Neon) + BullMQ (Upstash Redis) + Stripe + Discord + Resend + Twilio.
+> **Stack:** Next.js 14 (App Router) + TypeScript + Prisma (Postgres/Neon) + BullMQ (Upstash Redis) + Stripe + Discord + Resend. (No SMS: removed 2026-09-15.)
 > **This is NOT a Python/FastAPI app.** All server logic is TypeScript. API endpoints are Next.js route handlers at `app/api/**/route.ts` — the file path *is* the URL; they cannot be moved into other folders.
 
 This file is a guide for humans and LLMs. Each top-level folder below can be analyzed independently; the "Reads / Writes" notes say what each part touches.
@@ -13,7 +13,7 @@ This file is a guide for humans and LLMs. Each top-level folder below can be ana
 | Process | Runs on | Command | Notes |
 |---|---|---|---|
 | Next.js app (routes + admin UI) | **Vercel** (serverless) | `npm run dev` (:3000) | Handles HTTP only. **Cannot** run BullMQ workers (no persistent process). |
-| BullMQ workers | **Persistent host** (Railway/Render/VPS/local) | `npm run workers:dev` | Consume jobs from Upstash and actually send email/SMS/Discord. |
+| BullMQ workers | **Persistent host** (Railway/Render/VPS/local) | `npm run workers:dev` | Consume jobs from Upstash and actually send email/Discord. |
 | Discord gateway bot | **Persistent host** | `npm run bot:dev` | Receives slash commands / interactions over the gateway. |
 
 The webhook/route side only **queues** jobs to **Upstash Redis**; a worker must be running somewhere to process them. If no worker runs, a payment succeeds but nothing notifies.
@@ -32,20 +32,19 @@ The webhook/route side only **queues** jobs to **Upstash Redis**; a worker must 
    └─ Browser redirect → GET /api/stripe/checkout/success   (guaranteed; backup if webhook fails)
    Both call fulfillPaidCheckout() — IDEMPOTENT via an atomic status claim, so it runs exactly once.
    It: flips Booking → PENDING_APPROVAL, then queues:
-     • FINAL CONFIRMATION email + SMS   (customer-facing, 1 of 4)
+     • FINAL CONFIRMATION email          (customer-facing)
      • Discord approval card             (internal — the Approve/Deny/Offer buttons)
      • job card + marketing stub         (internal / no-op)
 
 3. Worker process drains Upstash:
      • email.worker  → Resend  (only allowed templates)
-     • sms.worker    → Twilio
      • discord.worker→ Discord REST (posts the approval card)
 
 4. Admin clicks ✅ Approve in Discord → POST /api/discord/interactions (Ed25519-verified)
-   → capture the $49 hold → Booking CONFIRMED → queues PRE-APPROVAL email + SMS (customer-facing, 1 of 4).
+   → capture the $49 hold → Booking CONFIRMED → queues PRE-APPROVAL email (customer-facing).
 ```
 
-**Messaging policy:** the system sends **exactly four** customer messages — Pre-Approval (email+SMS) on admin approve, Final Confirmation (email+SMS) on payment. Hard-enforced by `ALLOWED_TEMPLATES` in `src/workers/email.worker.ts`. See `MESSAGING` notes per file below.
+**Messaging policy:** customer messages are EMAIL ONLY (SMS was removed on 2026-09-15). Hard-enforced by `ALLOWED_TEMPLATES` in `src/workers/email.worker.ts`. See `MESSAGING` notes per file below.
 
 ---
 
@@ -79,7 +78,7 @@ WMIWCI-API/
 │   ├── redis.ts                  [CORE] ioredis singleton + BullMQ connection options
 │   ├── db.ts                     [CORE] Prisma client singleton
 │   ├── logger.ts                 [CORE] pino loggers (api/webhook/queue/bot)
-│   ├── i18n.ts                   [CORE] bilingual EN/ES SMS strings + email subjects
+│   ├── i18n.ts                   [CORE] bilingual EN/ES email subjects
 │   ├── auth.ts                   [CORE] JWT session + CSRF (used by middleware)
 │   ├── resend.ts                 [CORE] Resend email client + from/reply-to
 │   ├── scheduling.ts             [non-critical] availability slots, Eastern formatting
@@ -92,7 +91,6 @@ WMIWCI-API/
 ├── src/workers/                  # BullMQ workers — run OFF Vercel
 │   ├── index.ts                  [CORE] entry: loads dotenv, starts all 5 workers
 │   ├── email.worker.ts           [CORE] Resend sender + 2-template ALLOWLIST
-│   ├── sms.worker.ts             [CORE] Twilio sender + config validation + logging
 │   ├── discord.worker.ts         [CORE] posts cards via discord-rest (REST, no gateway)
 │   ├── scheduled.worker.ts       [non-critical] cron digests + reminders (registers repeat jobs)
 │   ├── marketing.worker.ts       [non-critical] calls the marketing stub
@@ -139,10 +137,9 @@ WMIWCI-API/
 **App/URLs:** `NODE_ENV`, `APP_URL` (must reach this backend), `MARKETING_SITE_URL`, `CORS_ALLOWED_ORIGINS`
 **Data/queue:** `DATABASE_URL` (Neon), `REDIS_URL` (Upstash `rediss://…`)
 **Email (Resend):** `RESEND_API_KEY`, `EMAIL_FROM`, `EMAIL_REPLY_TO`
-**SMS (Twilio):** `TWILIO_ENABLED`, `TWILIO_ACCOUNT_SID` (`AC…`), `TWILIO_AUTH_TOKEN`, `TWILIO_PHONE_NUMBER` (E.164 `+1…`)
 **Discord:** `DISCORD_BOT_TOKEN`, `DISCORD_PUBLIC_KEY`, `DISCORD_APPLICATION_ID`, `DISCORD_GUILD_ID`, `DISCORD_CHANNEL_*`
 **Auth:** `JWT_SECRET`, `CSRF_SECRET`, `OWNER_*`, `MANAGER_*`
-**Optional/test:** `ALLOW_TEST_ENDPOINTS` (gate for `/api/test/sms` in prod), `MARKETING_*`, `CLOUDINARY_*`
+**Optional/test:** `ALLOW_TEST_ENDPOINTS`, `MARKETING_*`, `CLOUDINARY_*`
 
 ---
 

@@ -11,7 +11,7 @@ export enum EventType {
   NEW_DATE_PICKED = 'NEW_DATE_PICKED',
 }
 
-export type EmailJobStatus = 'pending' | 'processing' | 'sent' | 'failed'
+export type EmailJobStatus = 'pending' | 'processing' | 'sent' | 'skipped' | 'failed'
 
 /** Fields every email payload carries (denormalized so the worker never has to
  *  read the booking — the outbox stays self-contained). */

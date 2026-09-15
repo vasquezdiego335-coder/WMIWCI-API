@@ -18,6 +18,7 @@
 // ════════════════════════════════════════════════════════════════════════
 
 import { prisma } from '../../db'
+import { bounceFromEventDetail, isKnownSoftBounce } from '../../bounce-classification'
 import { maskEmail } from '../redact'
 import type { AgentFinding } from '../types'
 import {
@@ -46,24 +47,36 @@ const eventWithoutSuppression: CheckDefinition = {
     // Checked against REALITY, not against the processing flag. A row marked
     // 'processed' whose suppression is nevertheless missing is exactly the bug
     // that must not be able to hide, so the flag is not consulted here.
-    const rows = await prisma.$queryRaw<
-      Array<{ id: string; email: string; type: string; occurred_at: Date; processing_status: string; email_send_id: string | null }>
+    const candidates = await prisma.$queryRaw<
+      Array<{ id: string; email: string; type: string; occurred_at: Date; processing_status: string; email_send_id: string | null; detail: string | null }>
     >`
-      SELECT e.id, e.email, e.type, e.occurred_at, e.processing_status, e.email_send_id
+      SELECT e.id, e.email, e.type, e.occurred_at, e.processing_status, e.email_send_id, e.detail
       FROM email_events e
       LEFT JOIN email_suppressions s ON LOWER(s.email) = LOWER(e.email)
       WHERE e.type IN ('bounced', 'complained', 'unsubscribed')
         AND s.id IS NULL
       ORDER BY e.occurred_at DESC
-      LIMIT 50
+      LIMIT 500
     `
+    // A SOFT bounce is not an opt-out signal. Before 2026-09-15 the webhook
+    // recorded transient bounces under type 'bounced' too, so this check flagged
+    // every "550 4.4.7 Message expired" as an unapplied opt-out FOREVER and kept
+    // suggesting that a human suppress a real customer (INC-2026-00019). The
+    // compliance policy lives in bounce-classification; a bounce row is only a gap when
+    // that policy says it is hard.
+    // Dropped ONLY when the stored detail positively classifies the bounce as
+    // soft. The detail is truncated at 1000 chars, so an unreadable one stays
+    // visible: a hidden hard bounce is the gap this check exists to catch.
+    // Filtered in code, so the SQL reads a WIDER window (500) than the report
+    // (50): a backlog of legacy soft bounces must not crowd a real gap out.
+    const rows = candidates
+      .filter((r) => {
+        if (r.type !== 'bounced') return true
+        return !isKnownSoftBounce(bounceFromEventDetail(r.detail))
+      })
+      .slice(0, 50)
     countInspected(ctx, 'suppressing_events_unapplied', rows.length)
     if (rows.length === 0) return []
-
-    // A hard bounce is only suppressible when it IS hard; the provider also
-    // sends soft-bounce events under the same type. The compliance policy lives
-    // in isHardBounce() and this check does not second-guess it — it reports
-    // the gap and names the event so a human can look at the detail.
     const complaints = rows.filter((r) => r.type === 'complained').length
     const unsubscribes = rows.filter((r) => r.type === 'unsubscribed').length
 

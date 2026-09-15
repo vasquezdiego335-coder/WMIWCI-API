@@ -11,7 +11,6 @@ import 'dotenv/config'
 
 import { startEmailWorker } from './email.worker'
 import { startDiscordWorker } from './discord.worker'
-import { startSmsWorker } from './sms.worker'
 import { startScheduledWorker } from './scheduled.worker'
 import { startMarketingWorker } from './marketing.worker'
 import { startWebhookWorker } from './webhook.worker'
@@ -29,7 +28,6 @@ function printWorkerBanner(): void {
     REDIS_URL: safeRedis,
     DATABASE_URL: process.env.DATABASE_URL ? '✓ set' : '✗ NOT SET',
     RESEND_API_KEY: process.env.RESEND_API_KEY && !process.env.RESEND_API_KEY.includes('REPLACE') ? '✓ set' : '✗ NOT SET',
-    TWILIO_ENABLED: process.env.TWILIO_ENABLED ?? 'false',
     DISCORD_BOT_TOKEN: process.env.DISCORD_BOT_TOKEN && !process.env.DISCORD_BOT_TOKEN.includes('REPLACE') ? '✓ set' : '✗ NOT SET',
     DISCORD_CHANNEL_SCHEDULING: process.env.DISCORD_CHANNEL_SCHEDULING && !process.env.DISCORD_CHANNEL_SCHEDULING.includes('REPLACE') ? '✓ set' : '✗ NOT SET',
     DISCORD_CHANNEL_JOBS: process.env.DISCORD_CHANNEL_JOBS && !process.env.DISCORD_CHANNEL_JOBS.includes('REPLACE') ? '✓ set' : '✗ NOT SET',
@@ -80,9 +78,6 @@ async function main() {
   const discordWorker = startDiscordWorker()
   logger.info('  ✓ discord worker started')
 
-  const smsWorker = startSmsWorker()
-  logger.info('  ✓ sms worker started')
-
   const scheduledWorker = startScheduledWorker()
   logger.info('  ✓ scheduled worker started')
 
@@ -92,7 +87,7 @@ async function main() {
   const webhookWorker = startWebhookWorker()
   logger.info('  ✓ webhook worker started (consumes webhook-retry → Stripe events)')
 
-  logger.info('All 6 workers running — waiting for jobs')
+  logger.info('All 5 workers running — waiting for jobs')
 
   // Graceful shutdown
   async function shutdown() {
@@ -100,7 +95,6 @@ async function main() {
     await Promise.all([
       emailWorker.close(),
       discordWorker.close(),
-      smsWorker.close(),
       scheduledWorker.close(),
       marketingWorker.close(),
       webhookWorker.close(),

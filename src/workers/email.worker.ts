@@ -1,10 +1,12 @@
-import { Worker, Job } from 'bullmq'
+import { Worker, Job, UnrecoverableError } from 'bullmq'
 import { randomUUID } from 'node:crypto'
 import { render } from '@react-email/render'
 import { bullConnection } from '../lib/redis'
 import { prisma } from '../lib/db'
 import { queueLogger } from '../lib/logger'
-import { guardedSend, classifyTemplate } from '../lib/email-guard'
+import { guardedSend, classifyTemplate, ProviderRejectedError } from '../lib/email-guard'
+import { DEFERRAL_BUFFER_MS, deferralDueAt, deferredJobId } from '../lib/email-deferral'
+import { validateEmailJobData } from '../lib/email-job-validation'
 import { buildMarketingContext, applyMarketingContext } from '../lib/marketing-context'
 import { emailQueue } from '../lib/queues'
 import { bookingEligibility } from '../lib/email-eligibility'
@@ -33,7 +35,7 @@ import ReferralRewardEmail from '../emails/referral-reward'
 import QuoteFollowupEmail from '../emails/quote-followup'
 import QuoteRequestReceivedEmail from '../emails/quote-request-received'
 import LeadNurtureEmail from '../emails/lead-nurture'
-import { emailSubject } from '../lib/i18n'
+import { localizedSubject } from '../lib/i18n'
 
 // ════════════════════════════════════════════════════════════════════════
 //  MESSAGING POLICY — the 11 React (_ui-kit) customer emails. Each is tied to a
@@ -122,7 +124,7 @@ const TEMPLATES: Record<
 
 // English fallbacks. Bilingual subjects come from emailSubject(template, locale)
 // when the job payload carries a `locale`.
-const SUBJECTS: Record<EmailJobData['template'], string> = {
+export const SUBJECTS: Record<EmailJobData['template'], string> = {
   'pre-approval': "We've received your booking request",
   'final-confirmation': 'Your booking is approved',
   'booking-declined': 'About your booking request',
@@ -170,19 +172,32 @@ function injectOpenPixel(html: string, src: string): string {
   return /<\/body>/i.test(html) ? html.replace(/<\/body>/i, `${pixel}</body>`) : html + pixel
 }
 
-async function processEmailJob(job: Job<EmailJobData>): Promise<void> {
-  const { template, to, bookingId, leadId, businessEventKey, notificationId, payload } = job.data
-  const log = queueLogger.child({ jobId: job.id, template, to, bookingId })
+export async function processEmailJob(job: Job<EmailJobData>): Promise<void> {
+  // ── MALFORMED JOB DATA ──────────────────────────────────────────────────
+  // A job whose data cannot describe a send (no template, no recipient, a
+  // non-object payload) is UNRECOVERABLE: retrying it three times cannot fix
+  // it. UnrecoverableError moves it straight to BullMQ's failed set, where it
+  // is visible, without burning retries — and without touching any other job,
+  // because each job is processed independently.
+  const invalid = validateEmailJobData(job.data)
+  if (invalid) {
+    queueLogger.error({ jobId: job.id, name: job.name, problem: invalid }, 'malformed email job — moved to failed without retry')
+    throw new UnrecoverableError(`malformed email job: ${invalid}`)
+  }
+  const { template, to, bookingId, leadId, businessEventKey, notificationId } = job.data
+  const payload: Record<string, unknown> = job.data.payload ?? {}
+  // Never log the recipient address itself.
+  const log = queueLogger.child({ jobId: job.id, template, bookingId, leadId })
 
   log.info('📧 Email job received')
 
   // ── MESSAGING POLICY GUARD ──────────────────────────────────────────────
-  // Only the 2 allowed customer emails are ever sent. Anything else is dropped
+  // Only templates in ALLOWED_TEMPLATES are ever sent. Anything else is dropped
   // here (not an error — a deliberate, logged skip) so retries don't pile up.
   if (!ALLOWED_TEMPLATES.has(template)) {
     log.warn(
       { template, allowed: Array.from(ALLOWED_TEMPLATES) },
-      '🚫 Email template not in allowlist — skipping (messaging is limited to pre-approval + final-confirmation)'
+      '🚫 Email template not in allowlist — skipping'
     )
     if (notificationId) {
       await prisma.notification
@@ -233,9 +248,12 @@ async function processEmailJob(job: Job<EmailJobData>): Promise<void> {
   }
   // Subject precedence: explicit payload.subject → bilingual catalog (if the
   // payload carries a locale) → English fallback.
+  // A template the bilingual catalog does not know falls back to its own
+  // English subject — never to the bare business name.
   const subject =
     (payload.subject as string) ||
-    (payload.locale ? emailSubject(template, payload.locale as string) : SUBJECTS[template])
+    (payload.locale ? localizedSubject(template, payload.locale as string) : null) ||
+    SUBJECTS[template]
 
   // ── THE SEND GATE ───────────────────────────────────────────────────────
   // guardedSend owns suppression, the live state recheck, frequency caps, quiet
@@ -268,7 +286,41 @@ async function processEmailJob(job: Job<EmailJobData>): Promise<void> {
       : leadId
       ? () => leadEligibility(leadId, template)
       : undefined,
+  }).catch(async (err: unknown) => {
+    // A DEFINITIVE provider rejection normally rides BullMQ's retry into the
+    // guard's not_due re-queue below. On the job's LAST attempt there is no
+    // retry left, and nothing else polls email_sends — the email would be lost
+    // with the row sitting in provider_rejected. Re-queue at the ledger's due
+    // time instead. Same idempotency key, so the hop cannot double-send; if the
+    // add itself fails, the original error still reaches BullMQ.
+    const lastAttempt = job.attemptsMade + 1 >= (job.opts?.attempts ?? 1)
+    if (err instanceof ProviderRejectedError && err.retryAt && lastAttempt) {
+      // The SAME due time and job id the not_due branch below computes for this
+      // row, so a stalled re-run of this job adds nothing BullMQ has not seen.
+      const dueAt = Math.max(err.retryAt.getTime(), Date.now()) + DEFERRAL_BUFFER_MS
+      try {
+        await emailQueue.add(template, job.data, {
+          delay: Math.max(0, dueAt - Date.now()),
+          jobId: deferredJobId(job.id, 'not_due', dueAt),
+        })
+      } catch (addErr) {
+        log.error(
+          { emailSendId: err.emailSendId, dueAt: new Date(dueAt).toISOString(), addErr: String(addErr) },
+          'could not re-queue a provider rejection on the last attempt — the row stays provider_rejected with no re-drive'
+        )
+        throw err
+      }
+      if (notificationId) {
+        await prisma.notification
+          .update({ where: { id: notificationId }, data: { status: 'DEFERRED', error: `provider_rejected: ${err.providerMessage}`.slice(0, 500) } })
+          .catch(() => undefined)
+      }
+      log.warn({ emailSendId: err.emailSendId, dueAt: new Date(dueAt).toISOString() }, 'provider rejected on the last queue attempt — re-queued at the ledger due time')
+      return null
+    }
+    throw err
   })
+  if (outcome === null) return
 
   // ── LEAD-SCOPED DELIVERY STATE ────────────────────────────────────────
   //  The API records only that a job was QUEUED. This is the one place that
@@ -276,9 +328,18 @@ async function processEmailJob(job: Job<EmailJobData>): Promise<void> {
   //  allowed to write 'delivered'. A DEFERRAL IS NOT A FAILURE: quiet hours and
   //  caps mean "later", and marking that failed would send the admin chasing a
   //  delivery problem that does not exist.
+  // A due time from EITHER a policy deferral (retryAt) or a send that already
+  // has a scheduled attempt (not_due after a provider rejection). null = do not
+  // re-drive automatically. See src/lib/email-deferral.ts.
+  const dueAt = deferralDueAt(outcome)
+
   if (template === 'quote-request-received' && leadId) {
-    const isDeferral = !outcome.sent && Boolean(outcome.retryAt)
-    if (!isDeferral) {
+    const isDeferral = !outcome.sent && dueAt !== null
+    // 'in_flight' / 'duplicate': ANOTHER attempt owns (or already delivered)
+    // this send. Its outcome is the truth; writing 'failed' from here could
+    // downgrade a confirmation that was delivered.
+    const ownedElsewhere = !outcome.sent && (outcome.reason === 'in_flight' || outcome.reason === 'duplicate')
+    if (!isDeferral && !ownedElsewhere) {
       await recordQuoteConfirmationOutcome(leadId, {
         delivered: outcome.sent,
         error: outcome.sent ? undefined : outcome.reason,
@@ -293,11 +354,9 @@ async function processEmailJob(job: Job<EmailJobData>): Promise<void> {
     // problem where policy had simply said "later". It also swallowed requeue
     // errors, meaning a Redis hiccup silently DROPPED a deferred email while
     // the job reported success.
-    const deferred = Boolean(outcome.retryAt)
-
-    if (deferred) {
-      const delay = Math.max(0, (outcome.retryAt as Date).getTime() - Date.now())
-      log.info({ reason: outcome.reason, delay }, '⏸️ Deferred — re-queueing inside the allowed window')
+    if (dueAt !== null) {
+      const delay = Math.max(0, dueAt - Date.now())
+      log.info({ reason: outcome.reason, delay }, '⏸️ Deferred — re-queueing at the exact due time')
 
       if (notificationId) {
         await prisma.notification
@@ -308,15 +367,25 @@ async function processEmailJob(job: Job<EmailJobData>): Promise<void> {
           .catch(() => undefined)
       }
 
-      // A stable jobId keyed on the DEFERRAL REASON (not the attempt) means
-      // repeated deferrals collapse onto one pending job instead of fanning out.
+      // Colon-free id rooted at the ORIGINAL job and unique per hop (it carries
+      // the due time). The old `${job.id}:deferred:${reason}` shape was rejected
+      // by BullMQ on the SECOND deferral ("Custom Id cannot contain :"), which
+      // exhausted the job and dropped the email. The idempotency key is
+      // unchanged, so a duplicate hop can never become a duplicate send.
       // NOT caught: if we cannot re-queue, the email would be lost silently.
       // Throwing hands it back to BullMQ's own retry, which is durable.
       await emailQueue.add(template, job.data, {
         delay,
-        jobId: `${job.id}:deferred:${outcome.reason}`,
+        jobId: deferredJobId(job.id, outcome.reason, dueAt),
       })
       return
+    }
+
+    // A refusal the guard could not WRITE to the ledger is invisible to every
+    // ledger-based check. Hand it back to BullMQ (bounded by the queue's
+    // attempts) instead of completing as if it had been recorded.
+    if (outcome.recorded === false) {
+      throw new Error(`send refused (${outcome.reason}) but the refusal could not be recorded — retrying`)
     }
 
     log.warn({ reason: outcome.reason, outcomeClass: outcome.outcomeClass }, '🚫 Send refused by the guard')

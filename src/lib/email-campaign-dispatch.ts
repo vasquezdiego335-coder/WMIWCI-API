@@ -409,8 +409,14 @@ async function sendToRecipient(
       const current = await prisma.emailCampaignRun.findUnique({ where: { id: run.id }, select: { status: true } })
       if (!current || !RUN_SENDABLE_STATES.has(current.status as RunState)) return 'run_not_sendable'
       if (recipient.bookingId) return bookingEligibility(template, recipient.bookingId)
-      if (recipient.leadId) return leadEligibility(recipient.leadId)
-      return null
+      // The TEMPLATE selects the eligibility matrix (2026-09-15). Without it every
+      // lead recipient was judged by the quote-follow-up matrix, so a
+      // contact-lead reactivation campaign (lead-nurture-final, audience
+      // quotedAt: null by definition) refused 100% of recipients as `no_quote`.
+      // Consent is still enforced by whichever matrix applies.
+      if (recipient.leadId) return leadEligibility(recipient.leadId, template)
+      // No subject to re-check means no live consent check: refuse, never pass.
+      return 'no_recheck_subject'
     },
   })
 

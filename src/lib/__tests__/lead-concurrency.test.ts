@@ -28,10 +28,14 @@
 // ════════════════════════════════════════════════════════════════════════
 import { test, before, after, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
+import { assertNoProductionCredentials } from './_disposable-test-env'
 import { PrismaClient } from '@prisma/client'
 import { capturePartialLead, defaultPartialLeadDeps } from '../leads'
 import { dedupeKeyFor } from '../lead-notification-outbox'
 
+// A production-looking DATABASE_URL / Redis URL / Resend key is a HARD FAILURE,
+// never a skip — see _disposable-test-env.ts.
+assertNoProductionCredentials()
 const skip = process.env.DATABASE_URL ? false : 'set DATABASE_URL to a disposable PostgreSQL'
 
 let prisma: PrismaClient

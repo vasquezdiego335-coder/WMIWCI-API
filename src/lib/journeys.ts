@@ -182,21 +182,26 @@ async function scheduleStages(
   data: Record<string, unknown>,
   anchor: number,
   opts: { moveDate?: Date | null } = {}
-): Promise<number> {
+): Promise<{ scheduled: number; failed: number }> {
   const plan = planStageTimes(stages, anchor, {
     now: deps.now().getTime(),
     moveDate: opts.moveDate ?? null,
   })
   let scheduled = 0
+  let failed = 0
   for (const p of plan) {
     if (p.skip) {
       log.info({ subjectId, stage: p.stage.type, reason: p.skip }, 'stage skipped')
       continue
     }
-    await deps.enqueue(p.stage.type, data, new Date(p.fireAt), jobIdFor(journey, p.stage.type, subjectId))
-    scheduled++
+    // An enqueue that FAILED must not be counted as scheduled (2026-09-15): the
+    // admin audit and the repair sweep both trust this number. `false` is a
+    // failure; a legacy dep resolving void is treated as success.
+    const ok = await deps.enqueue(p.stage.type, data, new Date(p.fireAt), jobIdFor(journey, p.stage.type, subjectId))
+    if (ok === false) failed++
+    else scheduled++
   }
-  return scheduled
+  return { scheduled, failed }
 }
 
 export type StagePlan = { stage: JourneyStage; fireAt: number; overdue: boolean; skip?: string }
@@ -252,17 +257,21 @@ async function enqueue(
   data: Record<string, unknown>,
   fireAt: Date,
   jobId: string
-): Promise<void> {
+): Promise<boolean> {
   // Shift promotional sends out of quiet hours at SCHEDULE time. The guard
   // re-checks at send time too — this just avoids pointless deferral churn.
   const when = nextAllowedTime(fireAt)
   const delay = Math.max(0, when.getTime() - Date.now())
 
-  await Promise.race([
+  return Promise.race([
     scheduledQueue.add(stage, { type: stage, ...data }, { delay, jobId }),
     new Promise((_, reject) => setTimeout(() => reject(new Error('scheduledQueue.add timed out (Redis?)')), 5000)),
-  ]).catch((err) =>
-    log.warn({ err: err instanceof Error ? err.message : String(err), stage, jobId }, 'enqueue failed (non-fatal)')
+  ]).then(
+    () => true,
+    (err) => {
+      log.warn({ err: err instanceof Error ? err.message : String(err), stage, jobId }, 'enqueue failed (non-fatal)')
+      return false
+    }
   )
 }
 
@@ -322,7 +331,8 @@ type StopOpts = Parameters<typeof stopEnrollmentsFor>[2]
 
 export interface JourneyDeps {
   now(): Date
-  enqueue(stage: string, data: Record<string, unknown>, fireAt: Date, jobId: string): Promise<void>
+  /** Resolves false when the job could not be queued (void = success, for older test worlds). */
+  enqueue(stage: string, data: Record<string, unknown>, fireAt: Date, jobId: string): Promise<boolean | void>
   cancel(jobId: string): Promise<void>
   loadLead(leadId: string): Promise<JourneyLead | null>
   /** Booking HISTORY, not lead status — see leads.hasEverBooked. */
@@ -824,9 +834,17 @@ export async function ensureQuoteJourney(
     return { scheduled: false, reason: 'not_in_rollout_allowlist' }
   }
 
-  const stages = await scheduleStages(deps, 'quote', QUOTE_STAGES, leadId, { leadId }, lead.quotedAt.getTime(), {
+  const { scheduled: stages, failed } = await scheduleStages(deps, 'quote', QUOTE_STAGES, leadId, { leadId }, lead.quotedAt.getTime(), {
     moveDate: lead.moveDate,
   })
+  if (failed > 0 && stages === 0) {
+    // Nothing was queued: report it, so the admin audit is truthful and the
+    // hourly repair sweep (which only skips leads the send ledger has seen)
+    // tries again.
+    log.error({ leadId, failed }, 'quote follow-up NOT scheduled — every enqueue failed')
+    return { scheduled: false, reason: 'enqueue_failed' }
+  }
+  if (failed > 0) log.warn({ leadId, stages, failed }, 'quote follow-up partially scheduled — some stages failed to enqueue')
   log.info({ leadId, stages }, 'quote follow-up scheduled')
   return { scheduled: true, stages }
 }
@@ -895,9 +913,12 @@ export async function repairStrandedQuoteJourneys(
 
   let leads: { id: string }[]
   try {
+    // Read a WIDER pool than the batch: already-attempted leads are filtered
+    // out below, and taking only `limit` first let recent attempted leads
+    // starve older stranded ones out of every pass.
     leads = await deps.repairCandidates({
       quotedSince: new Date(now.getTime() - QUOTE_JOURNEY_MAX_AGE_MS),
-      limit,
+      limit: limit * 10,
     })
   } catch (err) {
     log.error(
@@ -923,11 +944,15 @@ export async function repairStrandedQuoteJourneys(
     return report
   }
 
+  let stranded = 0
   for (const lead of leads) {
     if (attempted.has(lead.id)) {
       report.alreadyAttempted++
       continue
     }
+    // The BATCH bound applies to stranded leads actually re-enrolled per pass.
+    if (stranded >= limit) break
+    stranded++
     const outcome = await ensureQuoteJourney(lead.id, deps)
     if (outcome.scheduled) {
       report.scheduled++
@@ -979,7 +1004,7 @@ export async function onLeadCaptured(
   // Anchored on NOW, so no stage is ever overdue and the recovery stagger in
   // planStageTimes is never consulted. A nurture email landing after the
   // customer's own move date helps nobody and is dropped there.
-  const stages = await scheduleStages(
+  const { scheduled: stages, failed } = await scheduleStages(
     deps,
     'lead-nurture',
     LEAD_NURTURE_STAGES,
@@ -988,6 +1013,7 @@ export async function onLeadCaptured(
     deps.now().getTime(),
     { moveDate: lead.moveDate }
   )
+  if (failed > 0) log.error({ leadId, stages, failed }, 'lead nurture: some stages failed to enqueue')
   log.info({ leadId, stages }, 'lead nurture scheduled')
 }
 

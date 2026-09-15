@@ -9,7 +9,7 @@
 //                    a misconfigured deploy fails loudly instead of silently
 //                    dropping jobs).
 //
-//  "Optional" groups (Twilio, Cloudinary, marketing) are feature-gated — they
+//  "Optional" groups (Cloudinary, marketing) are feature-gated — they
 //  only matter when their *_ENABLED flag is set, so they never block startup.
 // ════════════════════════════════════════════════════════════════════════
 
@@ -80,9 +80,6 @@ const REQUIRED_EMAIL: EnvVar[] = [
 
 const OPTIONAL_NOTIFY: EnvVar[] = [
   { key: 'EMAIL_REPLY_TO', required: false, note: 'reply-to address (falls back to EMAIL_FROM)' },
-  { key: 'TWILIO_ACCOUNT_SID', required: false, note: 'SMS — only if TWILIO_ENABLED=true' },
-  { key: 'TWILIO_AUTH_TOKEN', required: false },
-  { key: 'TWILIO_PHONE_NUMBER', required: false },
 ]
 
 const PLACEHOLDERS = new Set(['', 'REPLACE_ME', 'placeholder', 'placeholder_public_key', 'sk_test_xxx'])
@@ -135,13 +132,6 @@ export function checkEnv(): EnvReport {
       if (required && !isPresent) missingRequired.push(v.key)
       return { key: v.key, present: isPresent, required, note: v.note }
     })
-  }
-
-  // If Twilio is enabled, its three vars become effectively required.
-  if (process.env.TWILIO_ENABLED === 'true') {
-    for (const k of ['TWILIO_ACCOUNT_SID', 'TWILIO_AUTH_TOKEN', 'TWILIO_PHONE_NUMBER']) {
-      if (!present(process.env[k])) missingRequired.push(`${k} (TWILIO_ENABLED=true)`)
-    }
   }
 
   return { ok: missingRequired.length === 0, missingRequired, groups }

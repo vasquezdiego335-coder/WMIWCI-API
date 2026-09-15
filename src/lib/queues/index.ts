@@ -18,7 +18,6 @@ import { getLazyBullConnection } from '../redis'
 
 // ── Cached singletons (undefined until first access) ────────────────
 let _emailQueue: Queue | undefined
-let _smsQueue: Queue | undefined
 let _discordQueue: Queue | undefined
 let _webhookRetryQueue: Queue | undefined
 let _scheduledQueue: Queue | undefined
@@ -52,19 +51,6 @@ export function getEmailQueue(): Queue {
     },
   }))
   return _emailQueue
-}
-
-export function getSmsQueue(): Queue {
-  if (!_smsQueue) _smsQueue = guardQueue(new Queue('sms', {
-    connection: getLazyBullConnection(),
-    defaultJobOptions: {
-      attempts: 3,
-      backoff: { type: 'exponential', delay: 5000 },
-      removeOnComplete: { count: 200 },
-      removeOnFail: { count: 100 },
-    },
-  }))
-  return _smsQueue
 }
 
 export function getDiscordQueue(): Queue {
@@ -142,7 +128,6 @@ function lazyQueue(getQueue: () => Queue): Queue {
 }
 
 export const emailQueue = lazyQueue(getEmailQueue)
-export const smsQueue = lazyQueue(getSmsQueue)
 export const discordQueue = lazyQueue(getDiscordQueue)
 export const webhookRetryQueue = lazyQueue(getWebhookRetryQueue)
 export const scheduledQueue = lazyQueue(getScheduledQueue)
@@ -193,12 +178,6 @@ export type EmailJobData = {
   businessEventKey?: string
   notificationId?: string
   payload: Record<string, unknown>
-}
-
-export type SmsJobData = {
-  to: string
-  message: string
-  bookingId?: string
 }
 
 export type DiscordJobData = {
