@@ -169,8 +169,15 @@ jobs:
         # The production path is what we want to prove builds — auth.ts refuses
         # to load without a JWT secret when NODE_ENV is production, and that
         # check must actually run.
+        #
+        # REDIS_URL: `next build` collects page data by importing route
+        # modules, and src/lib/redis.ts builds its BullMQ config at import time,
+        # refusing (since 2026-08-26) to fall back to localhost in production.
+        # Railway builds have the real variable; here it is this job's
+        # DISPOSABLE redis service. The build only parses it, never connects.
         env:
           NODE_ENV: production
+          REDIS_URL: redis://127.0.0.1:6379
         run: npm run build
 
       # ── WHAT THIS SCAN DOES AND DOES NOT COVER ─────────────────────────
