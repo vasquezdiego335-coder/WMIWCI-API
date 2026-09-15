@@ -120,7 +120,7 @@ export default function FinalConfirmationEmail({
         notesTitle: 'Notas',
         expectTitle: 'Qué esperar el día de la mudanza',
         expect: [
-          { title: 'Llega el equipo', desc: 'Puntuales y listos. Te avisamos cuando vamos en camino.' },
+          { title: 'Llega el equipo', desc: 'Puntuales y listos. Ten todo empacado y accesible para cuando lleguemos.' },
           { title: 'Recorrido', desc: 'Revisamos juntos tus artículos, el acceso y el plan.' },
           { title: 'Carga', desc: 'Cargamos todo con cuidado y seguridad.' },
           { title: 'Al destino', desc: 'Tú conduces el camión de alquiler al destino y nuestro equipo te encuentra allí.' },
@@ -153,7 +153,7 @@ export default function FinalConfirmationEmail({
         notesTitle: 'Notes',
         expectTitle: 'What to expect on move day',
         expect: [
-          { title: 'Crew arrives', desc: 'On time and ready. We’ll text you when we’re en route.' },
+          { title: 'Crew arrives', desc: 'On time and ready. Please have everything packed and accessible when we arrive.' },
           { title: 'Walkthrough', desc: 'We review your items, access, and the plan together.' },
           { title: 'Loading', desc: 'We load everything carefully and securely.' },
           { title: 'To the destination', desc: 'You drive the rental truck to your destination, and our crew meets you there.' },

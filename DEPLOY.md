@@ -135,10 +135,11 @@ BULL_BOARD_PORT=3001 node dist/workers/bull-board.js
 
 ## After Deploy — Activate Optional Services
 
-### Twilio SMS
-1. Add real Twilio credentials to Vercel env vars
-2. Set `TWILIO_ENABLED=true`
-3. Redeploy
+### SMS — removed
+Move It Clear It no longer sends SMS (owner decision, 2026-09-15). The Twilio
+worker, the `sms` queue and every customer text were deleted; there is nothing
+to activate. The inbound `/api/sms/inbound` STOP webhook only records opt-outs
+and sends nothing.
 
 ### Cloudflare Turnstile (CAPTCHA)
 1. Create Turnstile widget at dash.cloudflare.com
@@ -168,7 +169,32 @@ BACKUP_DIR=./backups DATABASE_URL="..." bash scripts/backup-db.sh
 
 ## Health Check
 
+Production runs on **Railway** (the Vercel sections above are historical):
+two services built from this repository's `main` branch, deployed together.
+
+| Service | Railway project / service | Health |
+|---|---|---|
+| API (Next.js) | `earnest-solace` / `wonderful-strength` | `GET /api/health` |
+| Worker host (BullMQ workers, scheduled worker, Discord bot) | `patient-communication` / `discord workers` | `GET /healthz` |
+
 ```bash
-curl https://wmiwci-backend.vercel.app/health
-# {"status":"ok","db":"connected","timestamp":"..."}
+curl -s https://wonderful-strength-production-a0f1.up.railway.app/api/health
+# status ok requires: db connected AND redis.ok (a real PING) AND required env AND a usable APP_URL.
+# Also reports emailQueue.workersAttached (0 = queued email waits for the worker) and the deployed commit.
+
+curl -s https://worker-production-4c70.up.railway.app/healthz
+# status ok requires: no missing config AND redis PONG AND every queue worker running (not paused).
+# Reports workers[], discordBot.ready, commit, flags (outbox / dry-run / marketing agent), emailBlockRecordFailures.
 ```
+
+A worker started with **missing required configuration** serves 503 naming the
+variables for `WORKER_CONFIG_FAILURE_EXIT_MS` (default 120 s), then exits
+non-zero so Railway marks the deployment crashed. Neither health endpoint ever
+prints a secret value.
+
+**Environment parity.** API and worker have SEPARATE variable sets.
+`docs/env-ownership.json` lists which service reads each variable (verified by
+`src/lib/__tests__/env-ownership.test.ts`; regenerate with
+`npx tsx scripts/gen-env-ownership.ts`). Before a deploy that adds a variable,
+set it on every service the manifest names, and keep `mustMatch` variables
+identical on both — compare names and hashes, never print values.

@@ -33,6 +33,11 @@ import { JSDOM, VirtualConsole, ResourceLoader } from 'jsdom'
 import { PrismaClient } from '@prisma/client'
 import { SKIP_WITHOUT_SITE, siteFile } from './site-dir'
 import { formatLeadAlert, toLeadAlertInput } from '../lead-alert'
+import { assertNoProductionCredentials } from './_disposable-test-env'
+
+// A production-looking DATABASE_URL / Redis URL / Resend key is a HARD FAILURE,
+// never a skip — see _disposable-test-env.ts.
+assertNoProductionCredentials()
 
 const FORM = siteFile('public/booking-form.html')
 const MIRROR = siteFile('public/js/pricing-config.js')

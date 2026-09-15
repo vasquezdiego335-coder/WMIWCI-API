@@ -30,6 +30,7 @@ import {
   STRUCTURAL_WINDOW_DAYS,
   ageMs,
   countInspected,
+  hours,
   makeFinding,
   minutes,
   plural,
@@ -471,7 +472,164 @@ const contradictoryState: CheckDefinition = {
   },
 }
 
+// ── 10. Demand without delivery (incident 2026-09-14) ──────────────────
+//
+//  THE BLIND SPOT THIS CLOSES. Every rate-based check here stays quiet below a
+//  sample floor, and email-monitoring reports zero sends as "no email sent in
+//  the window" — so a pipeline that silently stops would look exactly like a
+//  quiet week. Zero sends is only a problem when there was DEMAND: a customer
+//  asked for a quote and no email reached them. These checks are anchored on
+//  that demand, never on raw volume, so a genuinely quiet business stays
+//  healthy.
+//
+//  Read-only. Evidence carries lead ids and ages only — never an address.
+
+/** A confirmation queued longer than this has not been processed. */
+export const CONFIRMATION_STALL_MS = 30 * 60_000
+/** …and this long means the pipeline is down, not slow. */
+export const CONFIRMATION_STALL_CRITICAL_MS = 2 * 60 * 60_000
+/**
+ * Critical pages repeat hourly while an incident stays critical. A stall that
+ * nobody has touched for a day is known, not news: once even the NEWEST stuck
+ * confirmation is older than this, it drops to a warning (the daily digest)
+ * instead of paging every hour for the rest of the lookback.
+ */
+export const CONFIRMATION_STALL_CRITICAL_WINDOW_MS = 24 * 3600_000
+/** Only recent stalls are actionable; older rows are history. */
+export const STALL_LOOKBACK_MS = 7 * 24 * 3600_000
+/** How far back demand and delivery are compared. */
+export const SILENCE_WINDOW_MS = 72 * 3600_000
+/** A lead younger than this has not had a fair chance to be confirmed yet. */
+export const DEMAND_GRACE_MS = 30 * 60_000
+
+export type SilenceVerdict = 'ok' | 'warning' | 'critical'
+
+/**
+ * PURE: demand = qualifying leads in the window; delivered = real (non-test)
+ * provider-accepted sends in the same window.
+ *   zero demand            → ok, whatever the send volume
+ *   demand + any delivery  → ok
+ *   1 lead, no delivery    → warning
+ *   2+ leads, no delivery  → critical
+ */
+export function silenceVerdict(demand: number, delivered: number): SilenceVerdict {
+  if (demand <= 0 || delivered > 0) return 'ok'
+  return demand >= 2 ? 'critical' : 'warning'
+}
+
+/**
+ * PURE: severity from the OLDEST stalled confirmation, or null when none.
+ * `newestAgeMs` (the most recent stall) caps it: a set where every stall is
+ * past CONFIRMATION_STALL_CRITICAL_WINDOW_MS is a warning, not a page.
+ */
+export function confirmationStallSeverity(oldestAgeMs: number | null, newestAgeMs: number | null = oldestAgeMs): 'warning' | 'critical' | null {
+  if (oldestAgeMs === null || oldestAgeMs <= CONFIRMATION_STALL_MS) return null
+  if (oldestAgeMs <= CONFIRMATION_STALL_CRITICAL_MS) return 'warning'
+  if (newestAgeMs !== null && newestAgeMs > CONFIRMATION_STALL_CRITICAL_WINDOW_MS) return 'warning'
+  return 'critical'
+}
+
+/** Provider-accepted statuses — a bounced message was still accepted and sent. */
+const ACCEPTED_STATUSES = ['delivered', 'bounced', 'complained']
+
+const confirmationStalled: CheckDefinition = {
+  id: 'send.confirmation_stalled',
+  category: 'send',
+  intent: 'A customer asked for a quote and their confirmation email is stuck in the queue, or there was demand and nothing was delivered.',
+  emits: ['send.confirmation_stalled', 'send.silence_with_demand'],
+  run: async (ctx) => {
+    const findings: AgentFinding[] = []
+
+    // (a) Confirmations queued but never resolved.
+    const stalled = await prisma.lead.findMany({
+      where: {
+        quoteConfirmationStatus: 'queued',
+        quoteConfirmationQueuedAt: { gte: since(ctx, STALL_LOOKBACK_MS), lt: since(ctx, CONFIRMATION_STALL_MS) },
+      },
+      select: { id: true, quoteConfirmationQueuedAt: true },
+      orderBy: { quoteConfirmationQueuedAt: 'asc' },
+      take: 50,
+    })
+    countInspected(ctx, 'confirmations_stalled', stalled.length)
+    const oldest = stalled[0]?.quoteConfirmationQueuedAt ?? null
+    const newest = stalled[stalled.length - 1]?.quoteConfirmationQueuedAt ?? null
+    const stallSeverity = confirmationStallSeverity(oldest ? ageMs(ctx, oldest) : null, newest ? ageMs(ctx, newest) : null)
+    if (stallSeverity) {
+      findings.push(
+        makeFinding(ctx, {
+          checkId: 'send.confirmation_stalled',
+          severity: stallSeverity,
+          category: 'send',
+          // ONE incident while anything is stuck (members and count live in the
+          // evidence). An id-based fingerprint closed the incident as "cleared"
+          // every time a new lead got stuck. Hourly re-paging is bounded by the
+          // 24h severity window and the alert layer's per-cycle severity.
+          fingerprintParts: ['confirmation_stalled'],
+          title: `${stalled.length} quote ${plural(stalled.length, 'confirmation is', 'confirmations are')} stuck in the queue`,
+          description:
+            `${stalled.length} ${plural(stalled.length, 'customer', 'customers')} requested a quote and ${plural(stalled.length, 'its', 'their')} confirmation has been queued ` +
+            `for over ${minutes(CONFIRMATION_STALL_MS)} minutes (oldest: ${minutes(ageMs(ctx, oldest))} minutes). The email worker is not processing the queue, ` +
+            `the send is being held (kill switch), or Redis lost the job. Nothing will be resent automatically — check the worker first.`,
+          evidence: {
+            stalled: stalled.length,
+            oldestMinutes: minutes(ageMs(ctx, oldest)),
+            leads: stalled.slice(0, EVIDENCE_ROW_CAP).map((l) => ({
+              leadId: l.id,
+              queuedMinutesAgo: minutes(ageMs(ctx, l.quoteConfirmationQueuedAt)),
+            })),
+          },
+          suggestedActions: ['inspectEmailSend'],
+        })
+      )
+    }
+
+    // (b) Demand with no delivery at all.
+    const windowFrom = since(ctx, SILENCE_WINDOW_MS)
+    const [demandLeads, delivered] = await Promise.all([
+      prisma.lead.findMany({
+        where: {
+          createdAt: { gte: windowFrom, lt: since(ctx, DEMAND_GRACE_MS) },
+          email: { not: null },
+          OR: [{ source: 'QUICK_QUOTE_FORM' }, { quoteConfirmationQueuedAt: { not: null } }],
+        },
+        select: { id: true, createdAt: true },
+        orderBy: { createdAt: 'desc' },
+        take: 50,
+      }),
+      prisma.emailSend.count({
+        where: { isTest: false, status: { in: ACCEPTED_STATUSES }, sentAt: { gte: windowFrom } },
+      }),
+    ])
+    countInspected(ctx, 'demand_leads', demandLeads.length)
+    const verdict = silenceVerdict(demandLeads.length, delivered)
+    if (verdict !== 'ok') {
+      findings.push(
+        makeFinding(ctx, {
+          checkId: 'send.silence_with_demand',
+          severity: verdict,
+          category: 'send',
+          fingerprintParts: ['silence_with_demand'],
+          title: `${demandLeads.length} quote ${plural(demandLeads.length, 'request', 'requests')} in ${Math.round(SILENCE_WINDOW_MS / 3600_000)}h and no email delivered`,
+          description:
+            `${demandLeads.length} ${plural(demandLeads.length, 'customer', 'customers')} submitted a quote request in the last ${Math.round(SILENCE_WINDOW_MS / 3600_000)} hours, ` +
+            `but no real email was accepted by the provider in that time. Customers are asking and nobody is answering by email — ` +
+            `check the email worker, the queue and the provider before anything else.`,
+          evidence: {
+            demand: demandLeads.length,
+            deliveredInWindow: delivered,
+            windowHours: Math.round(SILENCE_WINDOW_MS / 3600_000),
+            leads: demandLeads.slice(0, EVIDENCE_ROW_CAP).map((l) => ({ leadId: l.id, hoursAgo: hours(ageMs(ctx, l.createdAt)) })),
+          },
+          suggestedActions: ['inspectEmailSend'],
+        })
+      )
+    }
+    return findings
+  },
+}
+
 export const sendChecks: CheckDefinition[] = [
+  confirmationStalled,
   inFlightStale,
   retryOverdue,
   missingProviderId,

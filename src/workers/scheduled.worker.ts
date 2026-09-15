@@ -1,7 +1,7 @@
 import { Worker, Job } from 'bullmq'
 import { bullConnection } from '../lib/redis'
 import { prisma } from '../lib/db'
-import { emailQueue, discordQueue, scheduledQueue, smsQueue } from '../lib/queues'
+import { emailQueue, discordQueue, scheduledQueue } from '../lib/queues'
 import { queueLogger } from '../lib/logger'
 import { deleteFiles } from '../lib/cloudinary'
 import { runFollowup, type FollowupType } from '../lib/followups'
@@ -10,13 +10,14 @@ import { isSafeUrl } from '../emails/validation'
 import { etDayRange, moveDateInRange, effectiveMoveDate } from '../lib/scheduling'
 import { bookingMarketingBlockReason } from '../lib/email-eligibility'
 import { hasEverBooked, markStaleLeadsAbandoned, purgeAbandonedLeads } from '../lib/leads'
-import { dayOfMoveSms } from '../lib/waiting-time'
 import { processCampaignBatch, processRecipientRetry, sweepCampaignRuns } from '../lib/email-campaign-dispatch'
 import { retryPendingSideEffects } from '../lib/email-events'
 import { runEmailMonitoring } from '../lib/email-monitoring'
 import { executeAutomationStage, sweepAutomationEnrollments } from '../lib/email-automation-runtime'
 import { customerBalance, JOB_MONEY_PAYMENT_SELECT } from '../lib/job-money'
 import type { ScheduledJobData } from '../lib/queues'
+import { jobReminderEventKey } from '../lib/email-event-keys'
+import { queueSafeJobId } from '../lib/email-deferral'
 
 type DigestBooking = {
   displayId: string
@@ -132,6 +133,12 @@ async function processScheduledJob(job: Job<ScheduledJobData>): Promise<void> {
         template: 'job-reminder',
         to: booking.customer.email,
         bookingId,
+        // DISTINCT per offset. Both reminders use ONE template, so without this
+        // the send key fell back to bookingId alone
+        // (email|job-reminder|none|<bookingId>|v1) and the 24h reminder was
+        // refused as a 'duplicate' of the delivered 72h one. Stable across
+        // scheduler retries, so a retry still dedupes.
+        businessEventKey: jobReminderEventKey(bookingId, type, effectiveMoveDate(booking)),
         payload: {
           customerName: booking.customer.name,
           displayId: booking.displayId,
@@ -300,6 +307,10 @@ async function processScheduledJob(job: Job<ScheduledJobData>): Promise<void> {
           portalUrl: `${process.env.APP_URL}/my-booking/${booking.customerToken}`,
           heroGifUrl: process.env.EMAIL_HERO_GIF_URL || 'https://moveitclearit.com/email/truck-hero.gif',
           locale: booking.customer.locale,
+          // SAME journey as the post-job follow-up sequence (followups.ts sends
+          // 'review-request' with journey 'post-job'), so the two paths share
+          // one idempotency key and can never both send a review request.
+          journey: 'post-job',
         },
       })
       log.info({ bookingId }, 'Review request queued')
@@ -361,6 +372,15 @@ async function processScheduledJob(job: Job<ScheduledJobData>): Promise<void> {
       } else {
         log.info(report, 'lifecycle repair sweep complete (nothing stranded)')
       }
+      // Post-job follow-ups left retryable (a temporary email failure) were
+      // never re-driven: runFollowup wrote next_attempt_at and nothing read it.
+      // Same hourly window, bounded, every gate re-runs.
+      const { retryDueFollowups } = await import('../lib/followups')
+      const retried = await retryDueFollowups().catch((err) => {
+        log.warn({ err: err instanceof Error ? err.message : String(err) }, 'follow-up retry sweep failed (non-fatal)')
+        return 0
+      })
+      if (retried > 0) log.info({ retried }, 'retryable post-job follow-ups re-driven')
       break
     }
 
@@ -408,33 +428,26 @@ async function processScheduledJob(job: Job<ScheduledJobData>): Promise<void> {
         timeZone: 'America/New_York',
       })
 
+      // LAST ACTIVITY (incident 2026-09-14): lead, email and booking recency
+      // side by side, so "emails stopped" and "customers stopped" never look
+      // alike again. Aggregate timestamps only; never blocks the digest.
+      const { lastActivitySnapshot, activityLines } = await import('../lib/ops-activity')
+      const activity = await lastActivitySnapshot()
+        .then((s) => activityLines(s))
+        .catch(() => null)
+
       await discordQueue.add('daily-schedule', {
         type: 'daily-schedule',
         payload: {
           title: `☀️ Today's Jobs — ${today}`,
           jobs: formatted,
+          ...(activity ? { activity } : {}),
         },
       })
 
-      // ── Day-of-move customer SMS (Late Arrival & Delay Policy) ──
-      // Automatic "crew is on the way — please be packed + ready; 30-min grace,
-      // then waiting charges" text to every customer with a move today. The
-      // morning digest is a once-daily cron, so this fires once per job. Only
-      // customers still awaiting the crew (not already IN_PROGRESS) are texted.
-      let smsSent = 0
-      for (const b of jobs) {
-        if (b.status === 'IN_PROGRESS') continue
-        const phone = b.customer?.phone
-        if (!phone) continue
-        await smsQueue.add('day-of-move-reminder', {
-          to: phone,
-          message: dayOfMoveSms(b.customer?.locale),
-          bookingId: b.id,
-        })
-        smsSent++
-      }
-
-      log.info({ count: formatted.length, smsSent }, 'Morning schedule digest + day-of SMS queued')
+      // No day-of-move customer SMS: Move It Clear It no longer texts customers
+      // (owner, 2026-09-15). The digest goes to the team on Discord only.
+      log.info({ count: formatted.length }, 'Morning schedule digest queued')
       break
     }
 
@@ -584,11 +597,14 @@ async function processScheduledJob(job: Job<ScheduledJobData>): Promise<void> {
         //  SHAPE MATTERS: the handler reads job.data.payload.dedupeKey. Sending
         //  it at the top level is what made every notice a silent no-op for two
         //  deploys - see queue-contract.test.ts.
-        await discordQueue.remove(dedupeKey).catch(() => {})
+        //  The DB dedupe key keeps its colons; the QUEUE id is its BullMQ-safe
+        //  spelling (src/lib/email-deferral.ts queueSafeJobId).
+        const jobId = queueSafeJobId(dedupeKey)
+        await discordQueue.remove(jobId).catch(() => {})
         await discordQueue.add(
           'lead-notify',
           { type: 'lead-notify', payload: { dedupeKey } },
-          { jobId: dedupeKey },
+          { jobId },
         )
       })
       if (result.scanned || result.staleRecovered || result.failed) {

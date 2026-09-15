@@ -14,6 +14,7 @@
 // ════════════════════════════════════════════════════════════════════════
 import { test, before, after, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
+import { assertNoProductionCredentials } from './_disposable-test-env'
 import { PrismaClient } from '@prisma/client'
 import { Queue, Worker, type Job } from 'bullmq'
 import {
@@ -32,6 +33,9 @@ import {
   terminalFailures,
 } from '../lead-notification-outbox'
 
+// A production-looking DATABASE_URL / Redis URL / Resend key is a HARD FAILURE,
+// never a skip — see _disposable-test-env.ts.
+assertNoProductionCredentials()
 const REDIS_URL = process.env.REDIS_TEST_URL
 const skip =
   !process.env.DATABASE_URL

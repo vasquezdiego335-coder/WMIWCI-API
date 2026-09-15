@@ -685,8 +685,13 @@ export async function markLeadConverted(
     // A SUPPRESSED address is never marketable, whatever this form claims.
     // Checked here so neither the Lead nor the Customer write below can
     // resurrect somebody who unsubscribed or complained.
+    // FAILS CLOSED: a suppression read that errors is treated as suppressed, so
+    // a database blip can never propagate marketing consent to an address that
+    // may have unsubscribed or complained.
     const suppressed = normalized
-      ? (await prisma.emailSuppression.findUnique({ where: { email: normalized }, select: { id: true } }).catch(() => null)) !== null
+      ? (await prisma.emailSuppression
+          .findUnique({ where: { email: normalized }, select: { id: true } })
+          .catch(() => ({ id: 'suppression-read-failed' }))) !== null
       : false
 
     if (lead) {

@@ -22,10 +22,14 @@
 // ════════════════════════════════════════════════════════════════════════
 import { test, before, after } from 'node:test'
 import assert from 'node:assert/strict'
+import { assertNoProductionCredentials } from './_disposable-test-env'
 import { readFileSync, readdirSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { PrismaClient } from '@prisma/client'
 
+// A production-looking DATABASE_URL / Redis URL / Resend key is a HARD FAILURE,
+// never a skip — see _disposable-test-env.ts.
+assertNoProductionCredentials()
 const skip = process.env.DATABASE_URL ? false : 'set DATABASE_URL to a disposable PostgreSQL to run the schema-drift gate'
 const INDEX = 'crm_leads_open_booking_session_key'
 /** The statuses the partial predicate covers. Everything else is CLOSED. */

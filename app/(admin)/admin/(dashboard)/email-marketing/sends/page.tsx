@@ -128,13 +128,13 @@ export default async function SendsPage(props: { searchParams: Promise<SP> }) {
                         </div>
                       </td>
                       <td style={T.td}>
-                        <ToneBadge tone={statusTone(r.status)}>{r.status}</ToneBadge>
+                        <ToneBadge tone={statusTone(r.status, r)}>{r.status}</ToneBadge>
                         {r.attempts > 1 && (
                           <div style={{ fontSize: '10px', color: COLORS.faint, marginTop: '4px' }}>{r.attempts} attempts</div>
                         )}
                       </td>
                       <td style={{ ...T.td, fontSize: '12px', color: COLORS.muted, maxWidth: '400px' }}>
-                        {explainSend(r.status, r.blockedReason, r.nextAttemptAt)}
+                        {explainSend(r.status, r.blockedReason, r.nextAttemptAt, r)}
                       </td>
                       <td style={T.td}>
                         {r.events.length === 0 ? (

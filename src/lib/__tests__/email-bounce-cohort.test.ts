@@ -19,9 +19,13 @@
 // ════════════════════════════════════════════════════════════════════════
 import { test, before, after, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
+import { assertNoProductionCredentials } from './_disposable-test-env'
 import { PrismaClient } from '@prisma/client'
 import { checkBounceRate, RATE_WINDOW_HOURS, RATE_MIN_SAMPLE, BOUNCE_RATE_CRITICAL } from '../email-monitoring'
 
+// A production-looking DATABASE_URL / Redis URL / Resend key is a HARD FAILURE,
+// never a skip — see _disposable-test-env.ts.
+assertNoProductionCredentials()
 const skip = process.env.DATABASE_URL ? false : 'set DATABASE_URL to a disposable PostgreSQL to run the bounce-cohort gate'
 
 let prisma: PrismaClient

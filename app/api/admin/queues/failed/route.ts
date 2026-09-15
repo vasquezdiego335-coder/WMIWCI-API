@@ -25,7 +25,7 @@ import { denyReason, type Role } from '@/lib/permissions'
 export const dynamic = 'force-dynamic'
 
 /** Queues an operator may inspect. Closed list — never a caller-supplied name. */
-const INSPECTABLE = ['scheduled', 'email', 'sms', 'discord', 'webhook-retry', 'marketing'] as const
+const INSPECTABLE = ['scheduled', 'email', 'discord', 'webhook-retry', 'marketing'] as const
 type QueueName = (typeof INSPECTABLE)[number]
 
 /** Hard cap on how many jobs are read, so a huge backlog cannot stall the request. */
@@ -48,7 +48,6 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     const map: Record<QueueName, unknown> = {
       scheduled: queues.scheduledQueue,
       email: queues.emailQueue,
-      sms: queues.smsQueue,
       discord: queues.discordQueue,
       'webhook-retry': queues.webhookRetryQueue,
       marketing: queues.marketingQueue,

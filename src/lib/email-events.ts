@@ -27,6 +27,7 @@ import { prisma } from './db'
 import { queueLogger } from './logger'
 import { normalizeEmail } from './email-tokens'
 import { suppress, isSuppressionSettled } from './email-suppression'
+import { isHardBounce } from './bounce-classification'
 import type { SuppressionReason } from '@prisma/client'
 
 const log = queueLogger.child({ mod: 'email-events' })
@@ -133,17 +134,8 @@ type ResendEvent = {
   [k: string]: unknown
 }
 
-/** Is this bounce permanent? Only permanent bounces suppress. */
-export function isHardBounce(bounce: { type?: string; subType?: string } | undefined): boolean {
-  const type = (bounce?.type ?? '').toLowerCase()
-  const sub = (bounce?.subType ?? '').toLowerCase()
-  if (type === 'transient' || type === 'soft') return false
-  if (sub === 'mailboxfull' || sub === 'messagetoolarge' || sub === 'contentrejected') return false
-  // Resend reports 'Permanent' for real dead addresses. An UNKNOWN type is
-  // treated as NOT hard — we would rather keep mailing a questionable address
-  // than silently drop a paying customer on ambiguous provider data.
-  return type === 'permanent' || sub === 'general' || sub === 'nosuchuser' || sub === 'suppressed'
-}
+/** Is this bounce permanent? Only permanent bounces suppress. (Pure; shared.) */
+export { isHardBounce }
 
 const firstRecipient = (to: string[] | string | undefined): string | null => {
   if (!to) return null
@@ -318,8 +310,15 @@ export async function handleEmailEvent(event: ResendEvent, svixId: string): Prom
   // The soft/hard distinction applies ONLY to email.bounced. A complaint and a
   // provider-side suppression are unconditional — there is no "soft" version of
   // either.
-  const needsSuppression =
-    Boolean(reason) && !(resendType === 'email.bounced' && !isHardBounce(event.data?.bounce))
+  const softBounce = resendType === 'email.bounced' && !isHardBounce(event.data?.bounce)
+  const needsSuppression = Boolean(reason) && !softBounce
+  // SOFT BOUNCES ARE NOT BOUNCES to anything downstream (2026-09-15). The event
+  // type 'bounced' and EmailSend.bouncedAt are read as HARD bounces by every
+  // bounce rate, alert and the suppression audit — so a transient
+  // "550 4.4.7 Message expired" used to inflate the bounce rate and be flagged as
+  // an opt-out nobody applied. It is recorded as 'soft_bounced': kept for signal,
+  // sets no delivery column, never suppresses.
+  const recordedType = softBounce ? 'soft_bounced' : mappedType
 
   // Correlate to the send we recorded, when we can.
   const providerId = event.data?.email_id
@@ -339,7 +338,7 @@ export async function handleEmailEvent(event: ResendEvent, svixId: string): Prom
         providerEventId: svixId,
         emailSendId: emailSend?.id ?? null,
         email,
-        type: mappedType,
+        type: recordedType,
         detail,
         occurredAt,
         // Written BEFORE the attempt, so a crash mid-suppression stays visible.
@@ -350,7 +349,7 @@ export async function handleEmailEvent(event: ResendEvent, svixId: string): Prom
     // TRUE DELIVERY STATE (audit E-06). Written AFTER the event row exists, so
     // the event is always the record of what the provider said and these
     // columns are a derived convenience for reporting.
-    if (emailSend) await applyDeliveryState(emailSend.id, mappedType, occurredAt, bounceDetail)
+    if (emailSend) await applyDeliveryState(emailSend.id, recordedType, occurredAt, bounceDetail)
   } catch (err) {
     if ((err as { code?: string })?.code === 'P2002') {
       // DUPLICATE DELIVERY. This is exactly where the old code gave up. Check
@@ -363,6 +362,10 @@ export async function handleEmailEvent(event: ResendEvent, svixId: string): Prom
         .catch(() => null)
 
       if (!existing) return unsettled('duplicate_lookup_failed')
+      // A replay re-applies the delivery column: if the first delivery's column
+      // write failed (it is non-fatal) the fact would otherwise be lost forever.
+      // Idempotent — the column is first-writer-wins.
+      if (emailSend) await applyDeliveryState(emailSend.id, recordedType, occurredAt, bounceDetail)
       if (existing.processingStatus === 'processed') {
         log.info({ svixId }, 'duplicate webhook delivery — already fully processed')
         return settled('duplicate')

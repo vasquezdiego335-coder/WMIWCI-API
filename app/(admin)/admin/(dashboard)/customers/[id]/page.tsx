@@ -87,8 +87,11 @@ export default async function CustomerDetail(props: { params: Promise<{ id: stri
     return `/admin/customers/${customer.id}${q ? `?${q}` : ''}`
   }
 
-  const delivered = timeline.rows.filter((r) => r.status === 'delivered').length
-  const blocked = timeline.rows.length - delivered
+  // Three cards that add up to every row: delivered clean, accepted-then-bounced
+  // or complained (the provider took it, so it is not "not sent"), and refused.
+  const delivered = timeline.rows.filter((r) => r.status === 'delivered' && !r.bouncedAt && !r.complainedAt).length
+  const bouncedOrComplained = timeline.rows.filter((r) => r.status === 'delivered' && (r.bouncedAt || r.complainedAt)).length
+  const blocked = timeline.rows.filter((r) => r.status !== 'delivered').length
 
   return (
     <div>
@@ -104,6 +107,7 @@ export default async function CustomerDetail(props: { params: Promise<{ id: stri
 
       <StatGrid min={190}>
         <StatCard label="Emails delivered" value={String(delivered)} accent={COLORS.green} />
+        <StatCard label="Bounced / complained" value={String(bouncedOrComplained)} accent={bouncedOrComplained > 0 ? COLORS.red : undefined} sub="Accepted, then reported by the provider" />
         <StatCard label="Not sent" value={String(blocked)} accent={blocked > 0 ? COLORS.amber : undefined} sub="With a recorded reason" />
         <StatCard label="Bookings" value={String(customer.bookings.filter((b) => !b.isInternalTest).length)} />
         {maySeeMoney && <StatCard label="Collected revenue" value={money(collected)} accent={COLORS.navy} />}
@@ -182,7 +186,7 @@ export default async function CustomerDetail(props: { params: Promise<{ id: stri
                     </td>
                     <td style={{ ...T.td, fontSize: '11px', color: COLORS.muted }}>{r.journey ?? '—'}</td>
                     <td style={T.td}>
-                      <SoftBadge color={TONES[statusTone(r.status)]}>{r.status}</SoftBadge>
+                      <SoftBadge color={TONES[statusTone(r.status, r)]}>{r.status}</SoftBadge>
                     </td>
                     <td style={T.td}>
                       {r.events.length === 0 ? (
@@ -194,7 +198,7 @@ export default async function CustomerDetail(props: { params: Promise<{ id: stri
                       )}
                     </td>
                     <td style={{ ...T.td, fontSize: '12px', color: COLORS.muted, maxWidth: '380px' }}>
-                      {r.status === 'delivered' ? 'Accepted by the email provider.' : explainSend(r.status, r.blockedReason, r.nextAttemptAt)}
+                      {explainSend(r.status, r.blockedReason, r.nextAttemptAt, r)}
                     </td>
                   </tr>
                 ))}

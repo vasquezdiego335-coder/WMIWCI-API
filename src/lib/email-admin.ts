@@ -472,6 +472,9 @@ export type TimelineEntry = {
   sentAt: Date | null
   nextAttemptAt: Date | null
   providerId: string | null
+  /** Set when the provider later reported a HARD bounce / a spam complaint. */
+  bouncedAt: Date | null
+  complainedAt: Date | null
   events: Array<{ type: string; occurredAt: Date }>
 }
 
@@ -505,12 +508,14 @@ export async function emailTimeline(opts: { bookingId?: string; email?: string; 
         status: r.status,
         outcomeClass: r.outcomeClass,
         blockedReason: r.blockedReason,
-        explanation: explainSend(r.status, r.blockedReason, r.nextAttemptAt),
+        explanation: explainSend(r.status, r.blockedReason, r.nextAttemptAt, r),
         attempts: r.attempts,
         createdAt: r.createdAt,
         sentAt: r.sentAt,
         nextAttemptAt: r.nextAttemptAt,
         providerId: r.providerId,
+        bouncedAt: r.bouncedAt,
+        complainedAt: r.complainedAt,
         events: r.events,
       })),
       error: null,
@@ -528,7 +533,29 @@ export async function emailTimeline(opts: { bookingId?: string; email?: string; 
  * NEVER guesses — an unrecognised reason is shown verbatim rather than
  * paraphrased into something that might be wrong.
  */
-export function explainSend(status: string, reason: string | null, nextAttemptAt?: Date | null): string {
+/**
+ * What the provider reported AFTER accepting a send. `status` stays 'delivered'
+ * (it means "the provider accepted the API call", and the database CHECK
+ * constraint pins the attempt vocabulary), so a later hard bounce or spam
+ * complaint lives in these columns — and must never be displayed as a success.
+ */
+export type SendDeliveryFacts = { bouncedAt?: Date | null; complainedAt?: Date | null }
+
+export function explainSend(
+  status: string,
+  reason: string | null,
+  nextAttemptAt?: Date | null,
+  delivery?: SendDeliveryFacts
+): string {
+  // These describe what the PROVIDER reported, never that a suppression exists:
+  // that write can fail independently (see suppression.event_not_applied), and
+  // before 2026-09-15 a soft bounce also set bouncedAt.
+  if (status === 'delivered' && delivery?.complainedAt) {
+    return 'Accepted by the provider, then the recipient marked it as spam. Check the suppression list for this address.'
+  }
+  if (status === 'delivered' && delivery?.bouncedAt) {
+    return 'Accepted by the provider, then the provider reported a bounce. Check the suppression list for this address; rows from before 2026-09-15 may be temporary soft bounces.'
+  }
   if (status === 'delivered') return 'Accepted by the email provider.'
   if (status === 'sending') return 'An attempt is in flight.'
   if (status === 'ambiguous') {
@@ -595,7 +622,8 @@ export function explainSend(status: string, reason: string | null, nextAttemptAt
 }
 
 /** Colour band for a send status, shared by every admin table. */
-export function statusTone(status: string): 'good' | 'warn' | 'bad' | 'muted' {
+export function statusTone(status: string, delivery?: SendDeliveryFacts): 'good' | 'warn' | 'bad' | 'muted' {
+  if (status === 'delivered' && (delivery?.bouncedAt || delivery?.complainedAt)) return 'bad'
   if (status === 'delivered') return 'good'
   if (status === 'sending') return 'muted'
   if (status === 'deferred' || status === 'blocked_retryable' || status === 'retry_pending' || status === 'provider_rejected') return 'warn'
@@ -607,7 +635,7 @@ export function statusTone(status: string): 'good' | 'warn' | 'bad' | 'muted' {
 /** Colour band for a provider event type. */
 export function eventTone(type: string): 'good' | 'warn' | 'bad' | 'muted' {
   if (type === 'delivered' || type === 'opened' || type === 'clicked') return 'good'
-  if (type === 'delivery_delayed') return 'warn'
+  if (type === 'delivery_delayed' || type === 'soft_bounced') return 'warn'
   if (type === 'bounced' || type === 'complained') return 'bad'
   return 'muted'
 }

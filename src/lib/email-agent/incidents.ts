@@ -300,17 +300,27 @@ export async function addIncidentEvent(
  * `awaiting_approval` is deliberately excluded: a problem a human was asked
  * about does not stop being a problem because the check window moved on.
  */
+/** How long an incident is protected from auto-resolution by a process that cannot observe it. */
+export const UNOBSERVABLE_GRACE_MS = 72 * 3600_000
+
 export async function autoResolveAbsent(
   seenFingerprints: string[],
-  context: { now: Date; correlationId: string }
+  context: { now: Date; correlationId: string; unobservableCheckIds?: string[] }
 ): Promise<number> {
   const open = await prisma.emailAgentIncident.findMany({
     where: { status: { in: ['open', 'investigating', 'mitigated'] } },
-    select: { id: true, reference: true, fingerprint: true, title: true, lastDetectedAt: true, findings: { select: { fingerprint: true }, take: 50 } },
+    select: { id: true, reference: true, fingerprint: true, title: true, lastDetectedAt: true, findings: { select: { fingerprint: true, checkId: true }, take: 50 } },
     take: 200,
   })
+  const unobservable = context.unobservableCheckIds ?? []
   let resolved = 0
   for (const incident of open) {
+    // A check that could not look in THIS process (e.g. a flag that is off
+    // here) says nothing about whether the condition cleared — but only while a
+    // process that CAN look has re-detected it recently. Otherwise an incident
+    // whose flag was turned off everywhere would stay open forever.
+    const recentlyDetected = context.now.getTime() - incident.lastDetectedAt.getTime() < UNOBSERVABLE_GRACE_MS
+    if (recentlyDetected && incident.findings.some((f) => unobservable.indexOf(f.checkId) !== -1)) continue
     const fingerprints = uniqueStrings([incident.fingerprint].concat(incident.findings.map((f) => f.fingerprint)))
     const stillSeen = fingerprints.some((fp) => seenFingerprints.indexOf(fp) !== -1)
     if (stillSeen) continue

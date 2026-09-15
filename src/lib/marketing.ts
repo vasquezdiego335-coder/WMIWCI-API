@@ -4,8 +4,7 @@
 //  STATUS: STUB. Wired into the booking flow but does nothing
 //  until you provide your marketing tool's details.
 //
-//  Pattern mirrors the SMS integration (src/workers/sms.worker.ts):
-//  it no-ops safely when not configured, so the rest of the flow
+//  It no-ops safely when not configured, so the rest of the flow
 //  never breaks.
 //
 //  TO ACTIVATE — set these env vars (see .env.example):

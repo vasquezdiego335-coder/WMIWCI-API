@@ -98,10 +98,17 @@ export function classifyTemplate(template: string): EmailClass {
 // ── Frequency caps + quiet hours (PROMOTIONAL only) ─────────────────────
 // Transactional mail is exempt by design: a receipt or a move-day reminder must
 // arrive when the event happens, not when a marketing window opens.
-const num = (name: string, fallback: number): number => {
-  const raw = Number(process.env[name])
-  return Number.isFinite(raw) && raw >= 0 ? raw : fallback
+//
+// BLANK MEANS DEFAULT. `Number('')` is 0, so a variable that exists but is empty
+// (a Railway row with no value, a template left blank) used to become a cap of 0
+// or a quiet window covering every hour — silently deferring every promotional
+// email forever. Only a real, non-negative number overrides the default.
+export const numberFromEnv = (raw: string | undefined, fallback: number): number => {
+  if (raw === undefined || raw.trim() === '') return fallback
+  const n = Number(raw.trim())
+  return Number.isFinite(n) && n >= 0 ? n : fallback
 }
+const num = (name: string, fallback: number): number => numberFromEnv(process.env[name], fallback)
 
 export const CAPS = {
   /** Max PROMOTIONAL emails per address per rolling 24h. */
@@ -332,13 +339,13 @@ const TERMINAL_STATUSES: ReadonlySet<string> = new Set([
 ])
 
 /** Max attempts against ONE logical send before it becomes failed_terminal. */
-export const MAX_SEND_ATTEMPTS = Number(process.env.EMAIL_MAX_SEND_ATTEMPTS) || 5
+export const MAX_SEND_ATTEMPTS = numberFromEnv(process.env.EMAIL_MAX_SEND_ATTEMPTS, 5) || 5
 
 /**
  * How long a row may sit in 'sending' before we assume the worker died and
  * allow a resume. Shorter than this and we risk two workers sending at once.
  */
-export const SENDING_STALE_MS = Number(process.env.EMAIL_SENDING_STALE_MS) || 10 * 60_000
+export const SENDING_STALE_MS = numberFromEnv(process.env.EMAIL_SENDING_STALE_MS, 10 * 60_000) || 10 * 60_000
 
 /**
  * Block reasons that are PERMANENT for this business event. Everything else is
@@ -408,7 +415,25 @@ const statusForBlock = (c: BlockClass): string =>
 // ── Result type ─────────────────────────────────────────────────────────
 export type SendOutcome =
   | { sent: true; providerId: string; emailSendId: string }
-  | { sent: false; reason: string; emailSendId?: string; retryAt?: Date; outcomeClass?: BlockClass | 'ambiguous' }
+  | {
+      sent: false
+      reason: string
+      emailSendId?: string
+      /** A POLICY deferral: try again at this time (quiet hours, caps, kill switch). */
+      retryAt?: Date
+      outcomeClass?: BlockClass | 'ambiguous'
+      /**
+       * Set only with reason 'not_due': the logical send already has a scheduled
+       * attempt (e.g. after a definitive provider rejection) at this time.
+       *
+       * Deliberately a SEPARATE field from `retryAt`. Campaign dispatch maps
+       * not_due to SKIPPED on purpose and automations re-queue on any retryAt;
+       * only the queue worker and the outbox opt in to re-driving at this time.
+       */
+      notDueUntil?: Date
+      /** false when the refusal could not be written to the ledger (DB failure). */
+      recorded?: boolean
+    }
 
 export type GuardedSendInput = {
   to: string
@@ -455,13 +480,38 @@ export type GuardedSendInput = {
  * Record a refusal against the logical send, classified so that a TEMPORARY
  * condition leaves the row resumable (finding EMAIL-P1-04).
  */
+// ── Ledger-write failure visibility ─────────────────────────────────────
+// A refusal that cannot be written to email_sends is invisible to every check
+// that reads the ledger — the database IS the monitor. So the failure is
+// counted in-process (surfaced on the worker's /health) and logged at ERROR
+// with a stable tag log-based alerting can match, and the caller is told
+// (`recorded: false`) so a queue job can retry instead of completing silently.
+export const BLOCK_RECORD_FAILED_TAG = 'EMAIL_BLOCK_RECORD_FAILED'
+const blockRecordFailures = { count: 0, lastAt: null as Date | null, lastReason: null as string | null }
+export function blockRecordFailureStats(): { count: number; lastAt: string | null; lastReason: string | null } {
+  return {
+    count: blockRecordFailures.count,
+    lastAt: blockRecordFailures.lastAt?.toISOString() ?? null,
+    lastReason: blockRecordFailures.lastReason,
+  }
+}
+function noteBlockRecordFailure(reason: string, err: unknown, stage: string): void {
+  blockRecordFailures.count += 1
+  blockRecordFailures.lastAt = new Date()
+  blockRecordFailures.lastReason = reason.slice(0, 120)
+  log.error(
+    { tag: BLOCK_RECORD_FAILED_TAG, stage, reason, err: err instanceof Error ? err.message : String(err) },
+    `${BLOCK_RECORD_FAILED_TAG}: a refused send could not be recorded in email_sends`
+  )
+}
+
 async function recordBlock(
   key: string,
   input: GuardedSendInput,
   emailClass: EmailClass,
   reason: string,
   retryAt?: Date
-): Promise<{ id?: string; blockClass: BlockClass }> {
+): Promise<{ id?: string; blockClass: BlockClass; recorded: boolean }> {
   const blockClass = classifyBlock(reason)
   const status = statusForBlock(blockClass)
   try {
@@ -491,9 +541,14 @@ async function recordBlock(
     })
     // Never downgrade a terminal row. `updateMany` with a status filter makes
     // this atomic: a row that reached 'delivered' concurrently is not matched.
+    // Never rewrite a 'sending' row either: it belongs to the claim owner (live)
+    // or to claimOrResumeSend's stale → ambiguous close (dead). Turning it into
+    // a resumable 'deferred'/'blocked_retryable' row let a later resume re-send
+    // an email the provider may already have accepted.
+    let recorded = true
     await prisma.emailSend
       .updateMany({
-        where: { id: row.id, status: { notIn: Array.from(TERMINAL_STATUSES) } },
+        where: { id: row.id, status: { notIn: [...Array.from(TERMINAL_STATUSES), 'sending'] } },
         data: {
           status,
           outcomeClass: blockClass,
@@ -501,11 +556,14 @@ async function recordBlock(
           nextAttemptAt: retryAt ?? null,
         },
       })
-      .catch(() => undefined)
-    return { id: row.id, blockClass }
+      .catch((err) => {
+        recorded = false
+        noteBlockRecordFailure(reason, err, 'update')
+      })
+    return { id: row.id, blockClass, recorded }
   } catch (err) {
-    log.warn({ err: String(err), reason }, 'failed to record blocked send (non-fatal)')
-    return { blockClass }
+    noteBlockRecordFailure(reason, err, 'upsert')
+    return { blockClass, recorded: false }
   }
 }
 
@@ -520,7 +578,7 @@ async function countSentSince(email: string, since: Date): Promise<number> {
 
 type ClaimResult =
   | { ok: true; id: string; attempts: number }
-  | { ok: false; reason: string; id?: string }
+  | { ok: false; reason: string; id?: string; notDueUntil?: Date }
 
 /**
  * Atomically claim a NEW logical send, or RESUME an existing non-terminal one.
@@ -579,9 +637,15 @@ async function claimOrResumeSend(
     }
   }
 
-  if (existing.attempts >= MAX_SEND_ATTEMPTS) {
+  // A 'sending' row is handled below (in flight, or stale → ambiguous) whatever
+  // its attempt count: calling a possibly-accepted send "exhausted" hid it from
+  // every ambiguity report.
+  if (existing.status !== 'sending' && existing.attempts >= MAX_SEND_ATTEMPTS) {
     await prisma.emailSend
-      .update({ where: { id: existing.id }, data: { status: 'failed_terminal', outcomeClass: 'terminal' } })
+      .updateMany({
+        where: { id: existing.id, status: existing.status, attempts: existing.attempts },
+        data: { status: 'failed_terminal', outcomeClass: 'terminal', nextAttemptAt: null },
+      })
       .catch(() => undefined)
     log.error({ key, attempts: existing.attempts }, 'send attempts exhausted — failed_terminal')
     return { ok: false, reason: 'attempts_exhausted', id: existing.id }
@@ -592,9 +656,52 @@ async function claimOrResumeSend(
     return { ok: false, reason: 'in_flight', id: existing.id }
   }
 
-  // A deferral is not due yet.
+  // A STALE 'sending' claim is an UNKNOWN outcome, not a free retry. The claim
+  // is written immediately before the provider call, so a claim that outlived
+  // its worker almost always died during or after that call — Resend may have
+  // accepted the message. Taking it over re-sent it (resend@3 has no
+  // Idempotency-Key), so it is closed as AMBIGUOUS for a human instead, exactly
+  // as send.inflight_stale tells the operator. The conditional where keeps a
+  // worker that finishes late free to record 'delivered' first.
+  if (existing.status === 'sending') {
+    let closed: number | null = null
+    try {
+      const r = await prisma.emailSend.updateMany({
+        where: { id: existing.id, status: 'sending', attempts: existing.attempts, updatedAt: existing.updatedAt },
+        data: {
+          status: 'ambiguous',
+          outcomeClass: 'ambiguous',
+          error: 'stale sending claim — the worker stopped mid-send; outcome unknown, never auto-resent',
+          nextAttemptAt: null,
+        },
+      })
+      closed = r.count
+    } catch (err) {
+      log.error({ key, err: String(err) }, 'could not close a stale sending claim as ambiguous')
+    }
+    if (closed === 0) {
+      // The late worker finished (or moved the row) between the read and the
+      // close. Report what the row says now, never a false 'ambiguous'.
+      const current = await prisma.emailSend
+        .findUnique({ where: { idempotencyKey: key }, select: { status: true } })
+        .catch(() => null)
+      if (current?.status === 'delivered') return { ok: false, reason: 'duplicate', id: existing.id }
+      if (current && TERMINAL_STATUSES.has(current.status)) return { ok: false, reason: `terminal:${current.status}`, id: existing.id }
+      return { ok: false, reason: 'in_flight', id: existing.id }
+    }
+    // closed === null (the write failed) is still reported ambiguous: the row
+    // stays 'sending' and is never taken over, so no path can re-send it.
+    log.error({ key, attempts: existing.attempts }, 'stale sending claim — AMBIGUOUS, not taking over')
+    return { ok: false, reason: 'ambiguous', id: existing.id }
+  }
+
+  // A deferral is not due yet. Carry the due time back: without it a BullMQ
+  // retry landing inside the provider-rejection backoff (5s queue backoff vs
+  // 60s × attempts here) completed the job silently, and nothing ever re-drove
+  // the row. Deliberately NOT done for 'in_flight' above — re-driving a live
+  // claim would race a stale takeover.
   if (existing.nextAttemptAt && existing.nextAttemptAt.getTime() > now.getTime()) {
-    return { ok: false, reason: 'not_due', id: existing.id }
+    return { ok: false, reason: 'not_due', id: existing.id, notDueUntil: existing.nextAttemptAt }
   }
 
   // RESUME the same logical send. The conditional `where` makes the takeover
@@ -632,8 +739,15 @@ export async function guardedSend(input: GuardedSendInput): Promise<SendOutcome>
   const l = log.child({ template: input.template, journey: input.journey, emailClass })
 
   const refuse = async (reason: string, retryAt?: Date): Promise<SendOutcome> => {
-    const { id, blockClass } = await recordBlock(key, input, emailClass, reason, retryAt)
-    return { sent: false, reason, emailSendId: id, retryAt, outcomeClass: blockClass }
+    const { id, blockClass, recorded } = await recordBlock(key, input, emailClass, reason, retryAt)
+    return {
+      sent: false,
+      reason,
+      emailSendId: id,
+      retryAt,
+      outcomeClass: blockClass,
+      ...(recorded ? {} : { recorded: false }),
+    }
   }
 
   // ── 0. GLOBAL KILL SWITCH (owner spec 2026-07-24) ─────────────────────
@@ -767,8 +881,14 @@ export async function guardedSend(input: GuardedSendInput): Promise<SendOutcome>
   // ── 6. CLAIM OR RESUME ────────────────────────────────────────────────
   const claim = await claimOrResumeSend(key, input, emailClass)
   if (!claim.ok) {
-    l.info({ key, reason: claim.reason }, 'not claiming')
-    return { sent: false, reason: claim.reason, emailSendId: claim.id }
+    l.info({ key, reason: claim.reason, notDueUntil: claim.notDueUntil }, 'not claiming')
+    return {
+      sent: false,
+      reason: claim.reason,
+      emailSendId: claim.id,
+      ...(claim.reason === 'ambiguous' ? { outcomeClass: 'ambiguous' as const } : {}),
+      ...(claim.notDueUntil ? { notDueUntil: claim.notDueUntil } : {}),
+    }
   }
   const emailSendId = claim.id
 
@@ -811,12 +931,42 @@ export async function guardedSend(input: GuardedSendInput): Promise<SendOutcome>
     return { sent: false, reason: 'ambiguous', emailSendId, outcomeClass: 'ambiguous' }
   }
 
+  // ── 7b. AMBIGUITY: an error, or a "success" with no message id ────────
+  // THE SDK DOES NOT THROW. resend@3.x fetchRequest() catches every transport
+  // failure — a timeout, a connection reset AFTER Resend accepted the message,
+  // a 2xx whose body failed to parse, a non-JSON 5xx — and RETURNS it as
+  // `{ name: 'application_error' }`. So the catch above almost never runs, and
+  // those unknown outcomes used to fall through to "definitively rejected" and
+  // be RETRIED — a duplicate to a real customer. Only a provider-issued 4xx is
+  // a definitive rejection (see isAmbiguousProviderError).
+  //
+  // Likewise a response with no error AND no message id is not proof of
+  // delivery: it used to be recorded 'delivered' with providerId 'unknown'. A
+  // delivered row must carry a provider id, so it is held as ambiguous instead.
+  const providerIdFromResponse = typeof data?.id === 'string' && data.id.trim() !== '' ? data.id : null
+  if ((providerError && isAmbiguousProviderError(providerError)) || (!providerError && !providerIdFromResponse)) {
+    const message = providerError
+      ? (providerError as { message?: string }).message ?? JSON.stringify(providerError)
+      : 'provider returned no error and no message id'
+    await prisma.emailSend
+      .update({
+        where: { id: emailSendId },
+        data: { status: 'ambiguous', outcomeClass: 'ambiguous', error: String(message).slice(0, 500), nextAttemptAt: null },
+      })
+      .catch((err) =>
+        l.error({ err: String(err), emailSendId }, 'could not mark the send ambiguous — the row stays in sending and is never auto-resent within SENDING_STALE_MS')
+      )
+    l.error({ error: message, attempt: claim.attempts }, 'AMBIGUOUS provider outcome — not auto-resending')
+    return { sent: false, reason: 'ambiguous', emailSendId, outcomeClass: 'ambiguous' }
+  }
+
   if (providerError) {
-    // A STRUCTURED rejection with no message id: the provider definitively did
-    // not accept it, so retrying cannot duplicate anything.
+    // A PROVIDER-ISSUED 4xx with no message id: Resend definitively did not
+    // accept it, so retrying cannot duplicate anything.
     const message =
       (providerError as { message?: string }).message ?? JSON.stringify(providerError)
     const exhausted = claim.attempts >= MAX_SEND_ATTEMPTS
+    const nextAt = exhausted ? null : new Date(Date.now() + 60_000 * claim.attempts)
     await prisma.emailSend
       .update({
         where: { id: emailSendId },
@@ -824,18 +974,20 @@ export async function guardedSend(input: GuardedSendInput): Promise<SendOutcome>
           status: exhausted ? 'failed_terminal' : 'provider_rejected',
           outcomeClass: exhausted ? 'terminal' : 'retryable',
           error: String(message).slice(0, 500),
-          nextAttemptAt: exhausted ? null : new Date(Date.now() + 60_000 * claim.attempts),
+          nextAttemptAt: nextAt,
         },
       })
       .catch(() => undefined)
     l.error({ error: message, attempt: claim.attempts, exhausted }, 'provider rejected the send')
     // Throw so BullMQ retries. The row is now resumable, so the retry RESUMES
-    // this same logical send instead of short-circuiting as a duplicate.
-    throw new Error(`Resend error: ${message}`)
+    // this same logical send instead of short-circuiting as a duplicate. The
+    // error carries the due time so a caller on its LAST queue attempt can
+    // re-queue instead of letting the job fail with nothing left to re-drive it.
+    throw new ProviderRejectedError(String(message), emailSendId, nextAt)
   }
 
   // ── 8. mark delivered ─────────────────────────────────────────────────
-  const providerId = data?.id ?? 'unknown'
+  const providerId = providerIdFromResponse as string
   await prisma.emailSend
     .update({
       where: { id: emailSendId },
@@ -850,6 +1002,74 @@ export async function guardedSend(input: GuardedSendInput): Promise<SendOutcome>
 
   l.info({ providerId }, 'email sent')
   return { sent: true, providerId, emailSendId }
+}
+
+/**
+ * A DEFINITIVE provider rejection (a provider-issued 4xx). Nothing was
+ * accepted, so a retry cannot duplicate. `retryAt` is when the ledger row may
+ * be resumed; null means the logical send used its last attempt.
+ */
+export class ProviderRejectedError extends Error {
+  constructor(
+    readonly providerMessage: string,
+    readonly emailSendId: string,
+    readonly retryAt: Date | null
+  ) {
+    super(`Resend error: ${providerMessage}`)
+    this.name = 'ProviderRejectedError'
+  }
+}
+
+/**
+ * Resend error names issued by the API for a request it REFUSED (HTTP 4xx).
+ * The 4xx keys of RESEND_ERROR_CODES_BY_KEY in resend@3.x (dist/index.d.ts,
+ * including its `invalid_api_Key` spelling) plus names the live API documents.
+ * NOT listed, on purpose: `application_error` (the SDK's own transport/parse
+ * failure) and `internal_server_error` — either may follow an accepted send.
+ */
+const DEFINITIVE_REJECTION_NAMES: ReadonlySet<string> = new Set([
+  'missing_required_field',
+  'invalid_access',
+  'invalid_parameter',
+  'invalid_region',
+  'rate_limit_exceeded',
+  'missing_api_key',
+  'invalid_api_Key',
+  'invalid_api_key',
+  'restricted_api_key',
+  'invalid_from_address',
+  'validation_error',
+  'invalid_idempotency_key',
+  'daily_quota_exceeded',
+  'monthly_quota_exceeded',
+  'security_error',
+  'not_found',
+  'method_not_allowed',
+])
+
+/**
+ * Could the provider have ACCEPTED this message despite reporting an error?
+ *
+ * Default YES. Only an explicit HTTP 4xx (other than 408 Request Timeout), or a
+ * known 4xx error name with no contradicting status code, proves the request
+ * was refused. Timeouts, network failures, 408, every 5xx, unparseable bodies
+ * and anything unrecognised are AMBIGUOUS: a wrongly-ambiguous send delays one
+ * email for a human to reconcile; a wrongly-rejected one can send a customer the
+ * same email twice (resend@3.x exposes no Idempotency-Key).
+ */
+export function isAmbiguousProviderError(err: unknown): boolean {
+  if (!err || typeof err !== 'object') return true
+  const e = err as { statusCode?: unknown; name?: unknown }
+  const code =
+    typeof e.statusCode === 'number'
+      ? e.statusCode
+      : typeof e.statusCode === 'string' && e.statusCode.trim() !== ''
+      ? Number(e.statusCode)
+      : NaN
+  if (Number.isFinite(code)) {
+    return !(code >= 400 && code < 500 && code !== 408)
+  }
+  return !(typeof e.name === 'string' && DEFINITIVE_REJECTION_NAMES.has(e.name))
 }
 
 /**
@@ -880,26 +1100,32 @@ export async function dueForRetry(limit = 100) {
 /**
  * DELIBERATE operator action: re-open a terminal row so it may be attempted
  * again. Refuses 'delivered' — that email reached the customer, and re-sending
- * it is a decision no automated path should be able to make.
+ * it is a decision no automated path should be able to make. Refuses 'sending'
+ * too: that attempt is live, or its worker died mid-send and the next claim
+ * closes it as 'ambiguous' — reconcile THAT against the provider first.
  */
-export async function reopenForRetry(idempotencyKey: string): Promise<'reopened' | 'refused_delivered' | 'not_found'> {
+export async function reopenForRetry(
+  idempotencyKey: string
+): Promise<'reopened' | 'refused_delivered' | 'refused_in_flight' | 'not_found'> {
   const row = await prisma.emailSend.findUnique({
     where: { idempotencyKey },
     select: { id: true, status: true },
   })
   if (!row) return 'not_found'
   if (row.status === 'delivered') return 'refused_delivered'
-  await prisma.emailSend.update({
-    where: { id: row.id },
+  if (row.status === 'sending') return 'refused_in_flight'
+  // Conditional: a claim that raced the operator is not overwritten.
+  const { count } = await prisma.emailSend.updateMany({
+    where: { id: row.id, status: row.status },
     data: { status: 'retry_pending', outcomeClass: 'retryable', attempts: 0, nextAttemptAt: null },
   })
-  return 'reopened'
+  return count === 0 ? 'refused_in_flight' : 'reopened'
 }
 
 /**
  * Rows stuck mid-attempt for longer than `olderThanMinutes` — a worker died
- * between the claim and the provider response. Surfaced for a human; the
- * claim logic will also take these over automatically once they go stale.
+ * between the claim and the provider response. Surfaced for a human; the next
+ * claim of the same key closes them as 'ambiguous' and never re-sends.
  */
 export async function staleClaims(olderThanMinutes = 30) {
   return prisma.emailSend.findMany({

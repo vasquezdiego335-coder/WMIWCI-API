@@ -11,6 +11,7 @@
 import { prisma } from './db'
 import { botLogger } from './logger'
 import { discordQueue } from './queues'
+import { queueSafeJobId } from './email-deferral'
 import {
   buildDepositPaidEmbed,
   sendPaymentEmbed,
@@ -52,7 +53,9 @@ export async function queueDepositNotification(depositRequestId: string): Promis
         { type: 'deposit-paid', payload: { depositRequestId } },
         // jobId dedupes at the queue level too: the same deposit can only ever
         // have one live job, whatever calls this.
-        { jobId: `deposit-paid:${depositRequestId}`, removeOnComplete: { count: 200 }, removeOnFail: { count: 200 } }
+        // BullMQ rejects a custom id with a single ":" ("Custom Id cannot
+        // contain :"), which sent EVERY deposit notice down the inline fallback.
+        { jobId: queueSafeJobId(`deposit-paid:${depositRequestId}`), removeOnComplete: { count: 200 }, removeOnFail: { count: 200 } }
       ),
       new Promise((_, reject) => setTimeout(() => reject(new Error('queue add timed out after 5s')), 5000)),
     ])

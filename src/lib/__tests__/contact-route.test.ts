@@ -286,7 +286,9 @@ const CODE = ROUTE_SRC.replace(/\/\*[\s\S]*?\*\//g, (m) => ' '.repeat(m.length))
 )
 
 test('no log line in the contact route carries a customer field', () => {
-  const calls = CODE.match(/apiLogger\.\w+\([\s\S]*?\)\n/g) ?? []
+  // `\r?\n`: a Windows checkout (core.autocrlf=true) has CRLF line endings, and a
+  // bare `\n` matched nothing there, failing "the route logs something".
+  const calls = CODE.match(/apiLogger\.\w+\([\s\S]*?\)\r?\n/g) ?? []
   assert.ok(calls.length > 0, 'the route logs something')
   for (const call of calls) {
     for (const field of ['data.name', 'data.email', 'data.phone', 'data.message', 'data.subject']) {

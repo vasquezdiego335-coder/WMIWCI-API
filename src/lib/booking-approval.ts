@@ -38,9 +38,8 @@
 import type { BookingStatus } from '@prisma/client'
 import { prisma } from './db'
 import { captureDeposit, cancelDeposit, retrieveChargeForIntent } from './stripe'
-import { emailQueue, smsQueue } from './queues'
+import { emailQueue } from './queues'
 import { confirmationScheduleData, formatEastern } from './scheduling'
-import { t } from './i18n'
 import { outboxEnabled, emitApproved } from '../outbox/integration'
 import { can, type Role } from './permissions'
 import { apiLogger } from './logger'
@@ -691,13 +690,7 @@ function queueApprovalNotifier(): ApprovalNotifier {
         })
       }
 
-      if (booking.customer.phone) {
-        await smsQueue.add('pre-approval-sms', {
-          to: booking.customer.phone,
-          message: t(locale, 'preApproval', { name: booking.customer.name, displayId: booking.displayId, date: dateStr }),
-          bookingId: booking.id,
-        })
-      }
+      // No customer SMS: Move It Clear It no longer texts customers (owner, 2026-09-15).
     },
     async sendDeclined(booking) {
       if (!booking.customer.email) return

@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server'
 import { prisma } from '@/lib/db'
 import { checkEnv } from '@/lib/env'
 import { unsafeUrlReason } from '@/emails/validation'
+import { pingAppRedis } from '@/lib/redis-health'
 
 export const revalidate = 0
 
@@ -75,13 +76,36 @@ function emailFlags() {
     MARKETING_FOLLOWUPS_ENABLED: flag('MARKETING_FOLLOWUPS_ENABLED'),
     REFERRAL_PROGRAM_ENABLED: flag('REFERRAL_PROGRAM_ENABLED'),
     PARTIAL_BOOKING_EMAIL_CAPTURE_ENABLED: flag('PARTIAL_BOOKING_EMAIL_CAPTURE_ENABLED'),
+    OUTBOX_ENABLED: flag('OUTBOX_ENABLED'),
+    OUTBOX_EMAIL_DRYRUN: flag('OUTBOX_EMAIL_DRYRUN'),
+    // THIS process's copy. Discovery runs on the WORKER, whose /health reports
+    // its own copy — compare the two when they disagree.
+    EMAIL_MARKETING_AGENT_ENABLED: flag('EMAIL_MARKETING_AGENT_ENABLED'),
+  }
+}
+
+/**
+ * How many BullMQ workers are attached to the email queue RIGHT NOW, as seen
+ * from this (API) process — i.e. whether anything will pick up the quote
+ * confirmation this API enqueues. Bounded: the shared queue connection retries
+ * forever during a Redis outage, so the question is raced against a timeout.
+ */
+async function emailQueueWorkers(): Promise<number | null> {
+  try {
+    const { emailQueue } = await import('@/lib/queues')
+    return await Promise.race([
+      emailQueue.getWorkersCount(),
+      new Promise<null>((resolve) => setTimeout(() => resolve(null), 2_000)),
+    ])
+  } catch {
+    return null
   }
 }
 
 // GET /api/health — liveness + readiness probe.
-// Returns 200 when the DB is reachable AND all required env vars are present
-// AND APP_URL is a usable URL; 503 otherwise. Only env-var PRESENCE is
-// reported, never secret values (APP_URL's host is public by design).
+// Returns 200 when the DB is reachable AND Redis answers a PING AND all required
+// env vars are present AND APP_URL is a usable URL; 503 otherwise. Only env-var
+// PRESENCE is reported, never secret values (APP_URL's host is public by design).
 export async function GET(): Promise<NextResponse> {
   const env = checkEnv()
   const appUrl = appUrlHealth()
@@ -95,13 +119,23 @@ export async function GET(): Promise<NextResponse> {
     db = 'unreachable'
   }
 
+  // A REAL PING. Every quote confirmation and booking email starts as a queue
+  // job this process adds; without Redis they are captured but never sent.
+  const redis = await pingAppRedis()
+  const workersAttached = redis.ok ? await emailQueueWorkers() : null
+
   // A placeholder/unusable APP_URL is a DEGRADED system: the app runs, but every
   // link it mails is broken. That must fail the readiness probe, not hide.
-  const ok = db === 'connected' && env.ok && appUrl.configured
+  const ok = db === 'connected' && redis.ok && env.ok && appUrl.configured
   return NextResponse.json(
     {
       status: ok ? 'ok' : 'degraded',
       db,
+      redis,
+      // Reported, not part of `ok`: the worker is a separate service. Zero here
+      // means emails this API queues will wait until the worker host is back.
+      emailQueue: { workersAttached },
+      commit: (process.env.RAILWAY_GIT_COMMIT_SHA ?? '').slice(0, 12) || null,
       appUrl,
       linkVars: linkVarsHealth(),
       emailFlags: emailFlags(),

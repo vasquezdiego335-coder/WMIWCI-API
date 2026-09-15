@@ -82,12 +82,14 @@ export async function saveEmailJob(
  * workers never grab the same row — the worker is safe to run many times.
  */
 export async function fetchPendingJobs(limit = 20): Promise<EmailJob[]> {
+  // `attempts < max_attempts`: a row that has used its budget must never be
+  // claimed again — reapStaleProcessingJobs closes those as 'failed' instead.
   const rows = await prisma.$queryRaw<Record<string, unknown>[]>`
     UPDATE email_jobs
        SET status = 'processing', attempts = attempts + 1, updated_at = now()
      WHERE id IN (
        SELECT id FROM email_jobs
-        WHERE status = 'pending' AND next_attempt_at <= now()
+        WHERE status = 'pending' AND next_attempt_at <= now() AND attempts < max_attempts
         ORDER BY created_at ASC
         LIMIT ${limit}
         FOR UPDATE SKIP LOCKED
@@ -98,45 +100,137 @@ export async function fetchPendingJobs(limit = 20): Promise<EmailJob[]> {
   return rows.map(mapRow)
 }
 
-export async function markJobSent(jobId: string): Promise<void> {
+// ── Terminal and retry outcomes ───────────────────────────────────────────
+//  `status` is plain TEXT (no CHECK constraint, prisma/baseline/00_init.sql),
+//  and only this module reads or writes it, so the truthful values below need
+//  no migration:
+//    sent       the provider accepted the email (or already had, for this key)
+//    skipped    a TERMINAL policy refusal — no email was sent, none will be
+//    failed     attempts exhausted, OR an ambiguous provider outcome (last_error
+//               says which) — never re-claimed, surfaced for a human
+//    pending    waiting for its next attempt (including deliberate HOLDS)
+//  Every update is guarded by `status = 'processing' AND attempts = <the
+//  claim's attempts>`: it only lands on THE CLAIM IT CAME FROM. A slow worker
+//  whose row was reaped and re-claimed by another drain (attempts moved on)
+//  can no longer overwrite that newer claim.
+
+/** The claim an update belongs to. */
+export type JobClaim = Pick<EmailJob, 'id' | 'attempts'>
+
+/** The provider accepted the email. */
+export async function markJobSent(job: JobClaim, note?: string): Promise<void> {
   await prisma.$executeRaw`
-    UPDATE email_jobs SET status = 'sent', last_error = NULL, updated_at = now() WHERE id = ${jobId}
+    UPDATE email_jobs SET status = 'sent', last_error = ${note ?? null}, updated_at = now()
+     WHERE id = ${job.id} AND status = 'processing' AND attempts = ${job.attempts}
   `
+}
+
+/** A terminal policy refusal: nothing was sent and nothing will be. */
+export async function markJobSkipped(job: JobClaim, reason: string): Promise<void> {
+  await prisma.$executeRaw`
+    UPDATE email_jobs
+       SET status = 'skipped', last_error = ${`skipped:${reason}`.slice(0, 1000)}, updated_at = now()
+     WHERE id = ${job.id} AND status = 'processing' AND attempts = ${job.attempts}
+  `
+}
+
+/**
+ * Closed WITHOUT a retry because retrying could duplicate (ambiguous) or has
+ * nothing left to try (attempts exhausted in the send ledger).
+ */
+export async function markJobTerminalFailure(job: JobClaim, reason: string): Promise<void> {
+  await prisma.$executeRaw`
+    UPDATE email_jobs
+       SET status = 'failed', last_error = ${reason.slice(0, 1000)}, updated_at = now()
+     WHERE id = ${job.id} AND status = 'processing' AND attempts = ${job.attempts}
+  `
+}
+
+/**
+ * A HOLD (kill switch, dry run): back to pending at `retryAt`, and the attempt
+ * the claim just consumed is given back — waiting on an operator must not
+ * exhaust the retry budget.
+ */
+export async function markJobDeferred(job: EmailJob, reason: string, retryAt: Date): Promise<void> {
+  await prisma.$executeRaw`
+    UPDATE email_jobs
+       SET status = 'pending',
+           attempts = GREATEST(attempts - 1, 0),
+           last_error = ${`held:${reason}`.slice(0, 1000)},
+           next_attempt_at = ${retryAt},
+           updated_at = now()
+     WHERE id = ${job.id} AND status = 'processing' AND attempts = ${job.attempts}
+  `
+}
+
+/** PURE: when a failed attempt may be retried. Honours a provider/guard due time. */
+export function nextAttemptAfterFailure(attempts: number, notBefore: Date | null | undefined, now = Date.now()): Date {
+  const backoffMs = Math.min(2 ** attempts * 1000, MAX_BACKOFF_MS)
+  const backoffAt = now + backoffMs
+  const due = notBefore && Number.isFinite(notBefore.getTime()) ? Math.max(backoffAt, notBefore.getTime()) : backoffAt
+  return new Date(due)
 }
 
 /**
  * Record a failed attempt. Below maxAttempts the job returns to 'pending' with
- * an exponential-backoff next_attempt_at; at the cap it becomes terminal 'failed'.
+ * an exponential-backoff next_attempt_at (never earlier than `notBefore`, the
+ * send ledger's own due time); at the cap it becomes terminal 'failed'.
  */
-export async function markJobFailed(job: EmailJob, error: string): Promise<void> {
-  const isFinal = job.attempts >= job.maxAttempts
-  const backoffMs = Math.min(2 ** job.attempts * 1000, MAX_BACKOFF_MS)
-  const nextAttemptAt = new Date(Date.now() + backoffMs)
+export async function markJobFailed(job: EmailJob, error: string, notBefore?: Date | null): Promise<void> {
+  const nextAttemptAt = nextAttemptAfterFailure(job.attempts, notBefore)
 
+  // Final-or-not is decided from the ROW, not the in-memory copy.
   await prisma.$executeRaw`
     UPDATE email_jobs
-       SET status = ${isFinal ? 'failed' : 'pending'},
+       SET status = CASE WHEN attempts >= max_attempts THEN 'failed' ELSE 'pending' END,
            last_error = ${error.slice(0, 1000)},
            next_attempt_at = ${nextAttemptAt},
            updated_at = now()
-     WHERE id = ${job.id}
+     WHERE id = ${job.id} AND status = 'processing' AND attempts = ${job.attempts}
   `
 }
 
 /**
- * Requeue jobs stuck in 'processing' — a worker that claimed a job and then
- * crashed before marking it sent/failed would otherwise orphan it forever
- * (fetchPendingJobs only claims 'pending'). Run this on a timer and at startup.
- * Returns how many rows were requeued.
+ * Recover jobs stuck in 'processing' — a worker that claimed a job and then
+ * crashed before resolving it would otherwise orphan it forever
+ * (fetchPendingJobs only claims 'pending'). Rows with attempts left return to
+ * 'pending'; a row that crashed on its FINAL attempt is closed as 'failed' so
+ * it cannot loop forever, and so is a row left 'pending' with no attempts left
+ * (the pre-2026-09-15 reaper re-pended final-attempt crashes), which
+ * fetchPendingJobs would otherwise never touch again.
+ *
+ * A re-claimed row re-enters guardedSend. A send that is still live answers
+ * 'in_flight' (the outbox waits out the stale window); one whose worker died
+ * mid-send is closed by the guard as 'ambiguous' and never re-sent; one that
+ * finished answers 'duplicate'. Returns how many rows were recovered.
  */
 export async function reapStaleProcessingJobs(staleMs = 5 * 60 * 1000): Promise<number> {
   const cutoff = new Date(Date.now() - staleMs)
-  const n = await prisma.$executeRaw`
+  const closed = await prisma.$executeRaw`
+    UPDATE email_jobs
+       SET status = 'failed',
+           last_error = 'stale processing on final attempt — worker died mid-send; check email_sends before any manual retry',
+           updated_at = now()
+     WHERE status = 'processing' AND updated_at < ${cutoff} AND attempts >= max_attempts
+  `
+  const requeued = await prisma.$executeRaw`
     UPDATE email_jobs
        SET status = 'pending', updated_at = now()
-     WHERE status = 'processing' AND updated_at < ${cutoff}
+     WHERE status = 'processing' AND updated_at < ${cutoff} AND attempts < max_attempts
   `
-  return n
+  const exhausted = await prisma.$executeRaw`
+    UPDATE email_jobs
+       SET status = 'failed',
+           last_error = 'attempts exhausted while pending (stale re-claim or legacy reaper) — check email_sends before any manual retry',
+           updated_at = now()
+     WHERE status = 'pending' AND attempts >= max_attempts
+  `
+  if (closed + exhausted > 0) {
+    console.warn(
+      `[outbox] reaper closed ${closed + exhausted} job(s) as failed (${closed} stale on the final attempt, ${exhausted} pending with no attempts left) — check email_sends before any manual retry`
+    )
+  }
+  return closed + requeued + exhausted
 }
 
 /** True if the (booking, event) pair was already recorded in the outbox. */

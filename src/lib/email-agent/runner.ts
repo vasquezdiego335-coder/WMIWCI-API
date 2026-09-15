@@ -39,6 +39,7 @@ import { downgradeSafeAuto, readBlastRadiusCounts, shouldDowngradeSafeAuto } fro
 import { canWriteAgentRecords, describeRuntime, provenance, type AgentSource } from './environment'
 import { evidenceHash, rankForInvestigation, shouldInvestigate, type InvestigationTrigger } from './investigation-policy'
 import { postOpsAlert } from '../ops-alert'
+import { marketingAgentEnabled } from '../email-marketing-agent'
 import { ensureSettings, type AgentSettings } from './settings'
 import { createApprovalRequest, executeTool, expireStaleApprovals, type ToolContext } from './tools'
 import { severityRank, type AgentFinding, type FindingSeverity } from './types'
@@ -285,7 +286,13 @@ export async function runAgentCycle(options: { trigger?: CycleTrigger; now?: Dat
       correlationId,
       now,
     })
-    const resolvedCount = await autoResolveAbsent(report.findings.map((f) => f.fingerprint), { now, correlationId })
+    const resolvedCount = await autoResolveAbsent(report.findings.map((f) => f.fingerprint), {
+      now,
+      correlationId,
+      // The worker (flag off) must not close a discovery incident the API (flag
+      // on) opened: it cannot see the condition at all.
+      unobservableCheckIds: marketingAgentEnabled() ? [] : ['marketing.discovery_stale'],
+    })
     await expireStaleApprovals(now)
 
     // ── 3. MEMORY CONTEXT ───────────────────────────────────────────────

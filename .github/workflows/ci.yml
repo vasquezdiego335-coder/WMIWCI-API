@@ -47,8 +47,10 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  # Prisma only needs a syntactically valid URL to validate + generate. No
-  # database is contacted anywhere in this workflow.
+  # Prisma only needs a syntactically valid URL to validate + generate. In the
+  # `verify` job this points at that job's DISPOSABLE postgres:16 service
+  # container, which is bootstrapped from source control and used only by the
+  # DB-gated test suites. It is never a production database.
   DATABASE_URL: postgresql://ci:ci@127.0.0.1:5432/ci?schema=public
   # `next build` collects page data, which imports src/lib/auth.ts, which
   # refuses to load without a JWT secret in production. A THROWAWAY value: it
@@ -71,7 +73,39 @@ jobs:
   verify:
     name: typecheck · lint · tests · build
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 30
+
+    # ── DISPOSABLE DATABASE + REDIS (2026-09-15) ─────────────────────────
+    #  The DB-gated suites (schema drift, lead concurrency, bounce cohort, the
+    #  outbox claim/reap tests…) decided whether to run from DATABASE_URL being
+    #  SET. The workflow sets it to 127.0.0.1 for `prisma generate`, but nothing
+    #  listened there — so every one of them FAILED on every run and main has
+    #  been red since. They now run for real against throwaway service
+    #  containers built from source control (scripts/bootstrap-fresh-database.sh).
+    #  Nothing here can reach production: the containers exist only for this
+    #  job, and the test guard (_disposable-test-env.ts) refuses neon.tech /
+    #  rlwy.net targets and real Resend keys outright.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: ci
+          POSTGRES_PASSWORD: ci
+          POSTGRES_DB: ci
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U ci -d ci"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+      redis:
+        image: redis:7-alpine
+        ports: ['6379:6379']
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 3s --health-retries 20
+
+    env:
+      SHADOW_DATABASE_URL: postgresql://ci:ci@127.0.0.1:5432/ci_shadow
+      REDIS_TEST_URL: redis://127.0.0.1:6379
 
     steps:
       - uses: actions/checkout@v4
@@ -89,10 +123,11 @@ jobs:
           npx prisma validate
           npx prisma generate
 
-      # ── MIGRATIONS ARE CHECKED, NOT APPLIED ─────────────────────────────
-      #  No database is reachable here by design. What CI can prove is that
-      #  every migration is present and consistently named; applying them is a
-      #  deploy step with its own review.
+      # ── MIGRATION FILES ARE LINTED HERE ─────────────────────────────────
+      #  Every migration must be present and consistently named. They are
+      #  recorded on the job's throwaway database just before the test suite
+      #  (bootstrap-fresh-database.sh). Applying them to production is still a
+      #  separate, reviewed deploy step.
       - name: Migration files are readable and named consistently
         run: |
           set -euo pipefail
@@ -117,10 +152,20 @@ jobs:
       # skip cleanly without it, and `pricing-parity` below is the job that
       # actually runs them. This step proves the server-side suite compiles and
       # passes on its own.
+      # Only the test suite needs the database, so a database setup problem
+      # (not a code defect) can never hide typecheck, lint or build results.
+      - name: Build the disposable test database from source control
+        run: |
+          set -euo pipefail
+          psql "postgresql://ci:ci@127.0.0.1:5432/ci" -c 'CREATE DATABASE ci_shadow'
+          bash scripts/bootstrap-fresh-database.sh
+          npx prisma migrate status
+
       - name: Test suite (server-side; cross-repo tests run in pricing-parity)
         run: npm test
 
       - name: Production build
+        if: ${{ !cancelled() }}
         # The production path is what we want to prove builds — auth.ts refuses
         # to load without a JWT secret when NODE_ENV is production, and that
         # check must actually run.
@@ -139,6 +184,7 @@ jobs:
       #  The actual guarantee that a customer cannot be quoted a retired price
       #  is the server refusal plus the browser allowlist, both covered by tests.
       - name: No retired package label in a customer-facing route bundle
+        if: ${{ !cancelled() }}
         run: |
           set -euo pipefail
           ROUTES="app/deposit app/my-booking app/api/leads app/api/services app/api/bookings app/terms app/privacy"

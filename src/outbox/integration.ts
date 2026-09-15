@@ -109,7 +109,14 @@ export async function emitRescheduleRequested(p: {
   requestedDate: string | null
 }): Promise<boolean> {
   if (!outboxEnabled()) return false
-  return safe('emitRescheduleRequested', p.bookingId, () => offerNewDates(p))
+  // TRUE only when a NEW email_jobs row was written. The outbox key is
+  // `bookingId::RESCHEDULE_REQUESTED`, so a second offer for the same booking
+  // is recorded but queues no email — callers must not claim one was sent.
+  let created = false
+  const ok = await safe('emitRescheduleRequested', p.bookingId, async () => {
+    created = (await offerNewDates(p)).emailJobCreated
+  })
+  return ok && created
 }
 
 export async function emitNewDatePicked(p: {

@@ -142,10 +142,10 @@ export default async function TemplateDetail(props: { params: Promise<{ key: str
                       {displayEmail(r.email, maySeeRecipients)}
                     </td>
                     <td style={T.td}>
-                      <ToneBadge tone={statusTone(r.status)}>{r.status}</ToneBadge>
+                      <ToneBadge tone={statusTone(r.status, r)}>{r.status}</ToneBadge>
                     </td>
                     <td style={{ ...T.td, fontSize: '12px', color: COLORS.muted, maxWidth: '460px' }}>
-                      {explainSend(r.status, r.blockedReason, r.nextAttemptAt)}
+                      {explainSend(r.status, r.blockedReason, r.nextAttemptAt, r)}
                     </td>
                   </tr>
                 ))}

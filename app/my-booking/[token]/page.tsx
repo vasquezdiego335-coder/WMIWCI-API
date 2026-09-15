@@ -317,7 +317,7 @@ function heroConfig(v: CustomerBookingView): HeroConfig {
         lede: (b) => `Hi, ${b.customerFirstName}. Your booking request and $${b.bookingFee.toFixed(0)} booking fee were received.`,
         reviewTitle: 'Under review',
         reviewBody:
-          'Our team is reviewing your requested date, route, inventory, and crew requirements. Your move is officially submitted — the requested time and final details are confirmed once you receive our confirmation email or text.',
+          'Our team is reviewing your requested date, route, inventory, and crew requirements. Your move is officially submitted — the requested time and final details are confirmed once you receive our confirmation email.',
         tone: 'success',
         showPaidChip: true,
       }
@@ -411,7 +411,7 @@ function nextSteps(v: CustomerBookingView): { t: string; b: string }[] {
       return [
         { t: 'We review your booking details', b: 'Your requested date, route, and inventory get a real set of eyes.' },
         { t: 'We verify crew availability and travel', b: 'We check the calendar and line up the right movers for your job.' },
-        { t: 'We send your final confirmation', b: 'You’ll get confirmation by text and email — usually within 24 hours.' },
+        { t: 'We send your final confirmation', b: 'You’ll get confirmation by email — usually within 24 hours.' },
         { t: 'Move day', b: 'Our crew arrives on time, ready to load, carefully wrap, and move everything.' },
       ]
     case 'confirmed':

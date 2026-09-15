@@ -116,7 +116,7 @@ export function recipientStateForOutcome(outcome: SendOutcome): { status: Recipi
   // Live-state recheck refusals: the audience claim is no longer true for them.
   if (
     /^status_not_allowed:|^booking_not_completed:|^booking_advanced:|^lead_status:/.test(reason) ||
-    ['lead_converted', 'lead_lost', 'move_date_passed', 'deposit_already_paid', 'booking_deleted', 'lead_deleted', 'no_quote', 'no_email'].includes(reason)
+    ['lead_converted', 'lead_lost', 'move_date_passed', 'deposit_already_paid', 'booking_deleted', 'lead_deleted', 'no_quote', 'no_email', 'has_quote', 'previous_customer', 'no_recheck_subject'].includes(reason)
   ) {
     return { status: 'INELIGIBLE', reason }
   }

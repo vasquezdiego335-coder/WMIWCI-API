@@ -38,6 +38,9 @@ if [[ -z "${DATABASE_URL:-}" ]]; then
 fi
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# psql (libpq) rejects Prisma-only query parameters such as ?schema=public, so
+# psql gets the URL without its query string; Prisma keeps DATABASE_URL.
+PSQL_URL="${DATABASE_URL%%\?*}"
 BASELINE="$HERE/prisma/baseline/00_init.sql"
 
 if [[ ! -f "$BASELINE" ]]; then
@@ -49,7 +52,7 @@ fi
 # The baseline is idempotent, so running it on an existing database would do no
 # harm — but marking 60-odd migrations applied on a database this script did not
 # build would be a guess. Refuse instead.
-EXISTING=$(psql "$DATABASE_URL" -tAc \
+EXISTING=$(psql "$PSQL_URL" -tAc \
   "SELECT count(*) FROM information_schema.tables WHERE table_schema='public' AND table_type='BASE TABLE'" 2>/dev/null || echo "?")
 
 if [[ "$EXISTING" == "?" ]]; then
@@ -64,11 +67,11 @@ if [[ "$EXISTING" -gt 0 ]]; then
 fi
 
 echo "== 1. applying the baseline =="
-psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -q -f "$BASELINE" || {
+psql "$PSQL_URL" -v ON_ERROR_STOP=1 -q -f "$BASELINE" || {
   echo "Error: the baseline failed to apply." >&2
   exit 1
 }
-TABLES=$(psql "$DATABASE_URL" -tAc \
+TABLES=$(psql "$PSQL_URL" -tAc \
   "SELECT count(*) FROM information_schema.tables WHERE table_schema='public' AND table_type='BASE TABLE'")
 echo "   ${TABLES} tables created"
 
@@ -94,7 +97,7 @@ else
 fi
 
 echo "== 4. verifying the objects Prisma cannot express =="
-IDX=$(psql "$DATABASE_URL" -tAc \
+IDX=$(psql "$PSQL_URL" -tAc \
   "SELECT count(*) FROM pg_indexes WHERE indexname='crm_leads_open_booking_session_key'")
 if [[ "$IDX" == "1" ]]; then
   echo "   partial unique index present"

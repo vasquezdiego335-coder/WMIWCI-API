@@ -8,7 +8,7 @@
 // That difference is the whole point. "Communications" can answer "what did we
 // send?". Only this can answer "why didn't they get the reminder?".
 
-import { emailTimeline, statusTone, displayEmail } from '@/lib/email-admin'
+import { emailTimeline, statusTone, eventTone, displayEmail } from '@/lib/email-admin'
 import { Card, COLORS, Empty, SoftBadge } from '../../_ui'
 
 const TONES: Record<string, string> = { good: COLORS.green, warn: COLORS.amber, bad: COLORS.red, muted: COLORS.faint }
@@ -28,14 +28,19 @@ export default async function EmailTimeline({
   const { rows, error } = await emailTimeline({ bookingId, email: customerEmail ?? undefined, take: 60 })
 
   const notSent = rows.filter((r) => r.status !== 'delivered').length
+  // Accepted by the provider, then bounced or reported as spam: not a success.
+  const bouncedOrComplained = rows.filter((r) => r.status === 'delivered' && (r.bouncedAt || r.complainedAt)).length
 
   return (
     <Card
       title={`Email Ledger (${rows.length})`}
       icon="📬"
       action={
-        notSent > 0 ? (
-          <SoftBadge color={COLORS.amber}>{notSent} not sent</SoftBadge>
+        notSent > 0 || bouncedOrComplained > 0 ? (
+          <span style={{ display: 'flex', gap: '5px' }}>
+            {notSent > 0 && <SoftBadge color={COLORS.amber}>{notSent} not sent</SoftBadge>}
+            {bouncedOrComplained > 0 && <SoftBadge color={COLORS.red}>{bouncedOrComplained} bounced / complained</SoftBadge>}
+          </span>
         ) : rows.length > 0 ? (
           <SoftBadge color={COLORS.green}>All delivered</SoftBadge>
         ) : undefined
@@ -67,14 +72,14 @@ export default async function EmailTimeline({
             </div>
             <div style={{ display: 'flex', gap: '5px', flexWrap: 'wrap', alignItems: 'center' }}>
               {r.events.map((e, k) => (
-                <SoftBadge key={k} color={e.type === 'bounced' || e.type === 'complained' ? COLORS.red : COLORS.green}>
+                <SoftBadge key={k} color={TONES[eventTone(e.type)]}>
                   {e.type}
                 </SoftBadge>
               ))}
-              <SoftBadge color={TONES[statusTone(r.status)]}>{r.status}</SoftBadge>
+              <SoftBadge color={TONES[statusTone(r.status, r)]}>{r.status}</SoftBadge>
             </div>
           </div>
-          {r.status !== 'delivered' && (
+          {(r.status !== 'delivered' || r.bouncedAt || r.complainedAt) && (
             <p style={{ fontSize: '11px', color: COLORS.muted, margin: '6px 0 0', lineHeight: 1.5 }}>{r.explanation}</p>
           )}
         </div>
@@ -83,7 +88,8 @@ export default async function EmailTimeline({
       {rows.length > 0 && (
         <p style={{ fontSize: '11px', color: COLORS.faint, margin: '12px 0 0', lineHeight: 1.5 }}>
           This is the send guard&apos;s own record. Rows that are not <em>delivered</em> were deliberately refused — the
-          reason above is the exact one the system recorded.
+          reason above is the exact one the system recorded. A <em>delivered</em> row with a reason was accepted by the
+          provider and later bounced or reported as spam.
         </p>
       )}
     </Card>

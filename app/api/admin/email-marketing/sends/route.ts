@@ -72,7 +72,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
       status: r.status,
       outcomeClass: r.outcomeClass,
       blockedReason: r.blockedReason,
-      explanation: explainSend(r.status, r.blockedReason, r.nextAttemptAt),
+      explanation: explainSend(r.status, r.blockedReason, r.nextAttemptAt, r),
       attempts: r.attempts,
       providerId: r.providerId,
       bookingId: r.bookingId,
@@ -106,6 +106,15 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   if (result === 'refused_delivered') {
     return NextResponse.json(
       { error: 'That email was already delivered to the customer. Re-sending it is not something this button will do.' },
+      { status: 409 }
+    )
+  }
+  if (result === 'refused_in_flight') {
+    return NextResponse.json(
+      {
+        error:
+          'That send is mid-attempt, or its worker stopped mid-send, so its outcome is unknown. Wait for it to finish or be closed as ambiguous, check the provider dashboard, then retry.',
+      },
       { status: 409 }
     )
   }

@@ -292,6 +292,11 @@ export async function postDailySchedule(payload: Record<string, unknown>): Promi
     }
     embed.setFooter({ text: `${jobs.length} job${jobs.length === 1 ? '' : 's'} scheduled` })
   }
+  // Last-activity lines (src/lib/ops-activity.ts) — timestamps only, no PII.
+  const activity = Array.isArray(payload.activity) ? (payload.activity as unknown[]).map(String) : []
+  if (activity.length > 0) {
+    embed.addFields({ name: '📈 Last activity', value: activity.join('\n').slice(0, 1024), inline: false })
+  }
   await restSendToChannel('DISCORD_CHANNEL_SCHEDULING', { embeds: [embed.toJSON()] })
 }
 

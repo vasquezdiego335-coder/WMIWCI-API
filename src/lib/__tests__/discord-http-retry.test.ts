@@ -17,6 +17,7 @@
 // ════════════════════════════════════════════════════════════════════════
 import { test, before, after, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
+import { assertNoProductionCredentials } from './_disposable-test-env'
 import http from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { PrismaClient } from '@prisma/client'
@@ -25,6 +26,9 @@ import { NOTIFICATION_STATUS, recordLeadNotification } from '../lead-notificatio
 import { processLeadNotification } from '../lead-notification-processor'
 import { deliverLeadNotice } from '../lead-notification-transport'
 
+// A production-looking DATABASE_URL / Redis URL / Resend key is a HARD FAILURE,
+// never a skip — see _disposable-test-env.ts.
+assertNoProductionCredentials()
 const REDIS_URL = process.env.REDIS_TEST_URL
 const skip = !process.env.DATABASE_URL
   ? 'set DATABASE_URL to a disposable PostgreSQL'

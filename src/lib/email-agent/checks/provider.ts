@@ -143,9 +143,15 @@ const bounceRate: CheckDefinition = {
   intent: 'The share of mail sent to addresses that do not exist — a measure of list quality.',
   run: async (ctx) => {
     const from = windowStart(ctx)
+    // ONE cohort, ONE anchor — the same shape as email-monitoring.checkBounceRate.
+    // The numerator used to be anchored on bouncedAt and the denominator on
+    // sentAt, so a bounce arriving for a message sent BEFORE the window pushed
+    // the rate over 100% (the 2026-08-25 "133%" alert). Now every counted bounce
+    // is also in the denominator, so 0 <= rate <= 1.
+    const cohort = { isTest: false, sentAt: { gte: from } } as const
     const [bounces, accepted] = await Promise.all([
-      prisma.emailSend.count({ where: { bouncedAt: { gte: from }, isTest: false } }),
-      prisma.emailSend.count({ where: { status: 'delivered', isTest: false, sentAt: { gte: from } } }),
+      prisma.emailSend.count({ where: { ...cohort, bouncedAt: { not: null } } }),
+      prisma.emailSend.count({ where: { ...cohort, OR: [{ deliveredAt: { not: null } }, { bouncedAt: { not: null } }] } }),
     ])
     if (accepted < RATE_MIN_SAMPLE || bounces === 0) return []
     const rate = bounces / accepted

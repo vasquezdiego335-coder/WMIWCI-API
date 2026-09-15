@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { getSession } from '@/lib/auth'
 import { prisma } from '@/lib/db'
 import { emailQueue } from '@/lib/queues'
+import { receiptResendEventKey } from '@/lib/email-event-keys'
 import { effectiveWaitingFeeCents, resolveWaiting } from '@/lib/waiting-time'
 import { customerBalance, JOB_MONEY_PAYMENT_SELECT } from '@/lib/job-money'
 
@@ -49,6 +50,10 @@ export async function POST(_req: NextRequest, props: { params: Promise<{ id: str
     template: 'payment-receipt',
     to: booking.customer.email,
     bookingId: booking.id,
+    // One logical send per deliberate click. Keyed on the booking alone, every
+    // resend after the first was refused as a 'duplicate' while this route
+    // still answered "Receipt queued".
+    businessEventKey: receiptResendEventKey(booking.id, new Date()),
     payload: {
       customerName: booking.customer.name,
       displayId: booking.displayId,

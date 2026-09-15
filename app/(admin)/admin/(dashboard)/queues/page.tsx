@@ -4,7 +4,7 @@ import Link from 'next/link'
 
 export const revalidate = 0
 
-const QUEUES = ['email', 'sms', 'discord', 'webhook-retry', 'scheduled']
+const QUEUES = ['email', 'discord', 'webhook-retry', 'scheduled']
 
 async function getQueueStats(name: string) {
   try {

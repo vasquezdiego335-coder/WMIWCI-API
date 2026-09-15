@@ -170,8 +170,13 @@ export async function alertForIncidents(
       if (!incident) continue
 
       const approvalReference = context.approvalsByIncident.get(outcome.incidentId) ?? null
+      // The stored incident severity only ever rises. A cooldown RE-PAGE follows
+      // what THIS cycle detected: a stall that has aged into a warning must stop
+      // paging hourly even though the incident once was critical. A new or
+      // escalated incident still alerts at its stored severity.
+      const pageSeverity = outcome.created || outcome.escalated ? incident.severity : outcome.severity
       const decision = decideAlert({
-        severity: incident.severity,
+        severity: pageSeverity,
         created: outcome.created,
         escalated: outcome.escalated,
         needsApproval: incident.status === 'awaiting_approval' || approvalReference !== null,
