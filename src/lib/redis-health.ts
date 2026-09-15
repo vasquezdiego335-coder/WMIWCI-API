@@ -8,6 +8,13 @@
 //  timeout, and never includes the URL or any credential in its output.
 // ════════════════════════════════════════════════════════════════════════
 
+// STATIC import, like src/lib/redis.ts. A dynamic import of ioredis is
+// resolved differently inside the Next.js server bundle: the named export came
+// back undefined and every API health check failed with "b is not a
+// constructor" (2026-09-15 deploy). Importing constructs nothing and opens no
+// connection; the probe client is still created lazily below.
+import { Redis } from 'ioredis'
+
 export type RedisPingResult = {
   ok: boolean
   latencyMs: number | null
@@ -63,7 +70,6 @@ let probe: ProbeClient | null = null
 
 async function probeClient(url: string): Promise<ProbeClient> {
   if (probe) return probe
-  const { Redis } = await import('ioredis')
   const host = (() => {
     try {
       return new URL(url).hostname
