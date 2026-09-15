@@ -115,6 +115,12 @@ test('worker host: health PINGs Redis, reports attachment, and a config failure 
   assert.ok(!/startSmsWorker/.test(src), 'no SMS worker: Move It Clear It no longer sends SMS')
 })
 
+test('the Redis probe imports ioredis statically (a dynamic import broke inside the Next.js bundle)', () => {
+  const src = readFileSync(resolve(__dirname, '../redis-health.ts'), 'utf8')
+  assert.ok(/^import \{ Redis \} from 'ioredis'/m.test(src), 'static import required')
+  assert.ok(!/import\(\s*'ioredis'\s*\)/.test(src), "no `await import('ioredis')`: its named export is undefined in the server bundle")
+})
+
 test('API health: PINGs Redis and reports email-queue worker attachment and the deployed commit', () => {
   const src = readFileSync(resolve(__dirname, '../../../app/api/health/route.ts'), 'utf8')
   assert.ok(src.includes('pingAppRedis()'))
