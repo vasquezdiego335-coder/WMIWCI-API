@@ -261,6 +261,10 @@ const src = (rel: string) => readFileSync(join(process.cwd(), rel), 'utf8').repl
 
 const durableInput = (queue: QueueLike, over: Partial<Parameters<typeof enqueueDurable>[0]> = {}) => ({
   queue,
+  // The CALLER names its queue. Never `queue.name` — that is the read the
+  // production bug depended on (see "a queue that throws on every property
+  // read" below).
+  queueName: 'scheduled',
   name: 'abandoned-checkout-recovery',
   data: { type: 'abandoned-checkout-recovery', bookingId: BOOKING },
   jobId: jobIdFor('abandoned', 'abandoned-checkout-recovery', BOOKING),
@@ -431,10 +435,12 @@ async function assertRecordedThenSwept(input: {
   queueName?: string
 }): Promise<void> {
   const { db, store, expected } = input
+  const queueName = input.queueName ?? 'scheduled'
   assert.equal(db.rows.length, expected.length, 'one retry row per stage that did not enqueue')
   for (const e of expected) {
     const row = db.byJobId(e.jobId)
     assert.ok(row, `a row for ${e.jobId}`)
+    assert.equal(row!.queueName, queueName, `${e.jobId} is routed back to the queue its caller named`)
     assert.equal(row!.jobName, e.name)
     assert.deepEqual(row!.data, e.data)
     assert.equal(row!.fireAt.getTime(), e.fireAt, `${e.jobId} keeps its INTENDED fire time`)
@@ -442,9 +448,17 @@ async function assertRecordedThenSwept(input: {
     assert.equal(row!.status, 'pending')
   }
 
-  const healthy = fakeQueue(input.queueName ?? 'scheduled')
-  const first = await sweep(store, { [input.queueName ?? 'scheduled']: healthy })
+  // Every other queue is present and healthy too, so "it landed on the right
+  // one" is a real assertion rather than the only option available.
+  const healthy = fakeQueue(queueName)
+  const others = Object.fromEntries(
+    ['scheduled', 'email', 'discord', 'marketing'].filter((n) => n !== queueName).map((n) => [n, fakeQueue(n)])
+  )
+  const first = await sweep(store, { ...others, [queueName]: healthy })
   assert.equal(first.enqueued, expected.length)
+  for (const [name, q] of Object.entries(others)) {
+    assert.equal(q.attempts.length, 0, `nothing was mis-routed onto the ${name} queue`)
+  }
   assert.deepEqual(
     addedIds(healthy).slice().sort(),
     expected.map((e) => e.jobId).sort(),
@@ -456,7 +470,7 @@ async function assertRecordedThenSwept(input: {
     assert.deepEqual(added.data, e.data, 'same payload — the handler re-reads and re-gates on it')
   }
 
-  const second = await sweep(store, { [input.queueName ?? 'scheduled']: healthy })
+  const second = await sweep(store, { [queueName]: healthy })
   assert.equal(second.examined, 0, 'a second sweep finds nothing: enqueued rows are closed')
   assert.equal(healthy.attempts.length, expected.length, 'and adds nothing a second time')
 }
@@ -643,7 +657,7 @@ test('PAYMENT FAN-OUT: a refused approval card is recorded and swept on its own 
   const { db, store } = memoryRetryStore()
   const data = { type: 'booking-created', bookingId: BOOKING, payload: { displayId: 'MIC-1' } }
   const at = mark()
-  const status = await enqueueFanout('discord:booking-created', { queue: discord, name: 'booking-created', kind: 'booking-created', data }, BOOKING, { store, now })
+  const status = await enqueueFanout('discord:booking-created', { queue: discord, queueName: 'discord', name: 'booking-created', kind: 'booking-created', data }, BOOKING, { store, now })
 
   assert.equal(status, 'recorded_for_retry')
   assert.ok(
@@ -660,6 +674,103 @@ test('PAYMENT FAN-OUT: a refused approval card is recorded and swept on its own 
       { jobId: fanoutJobId('booking-created', BOOKING), name: 'booking-created', data, fireAt: NOW.getTime(), path: 'payment-fanout' },
     ],
   })
+})
+
+test('PAYMENT FAN-OUT: every descriptor records its OWN queue, and the sweep routes each one back there', async () => {
+  // The whole paid-checkout fan-out at once, all four queues refusing. Getting
+  // any ONE of these names wrong is the defect: the sweep would hand a discord
+  // or marketing job to the scheduled worker, whose dispatch warns "unknown job
+  // type" and then COMPLETES it — the row reads 'enqueued', the backlog check
+  // reads clean, and the approval card for a customer whose $49 is already held
+  // is gone for good.
+  const { db, store } = memoryRetryStore()
+  const refusing = {
+    email: fakeQueue('email', 'false'),
+    discord: fakeQueue('discord', 'false'),
+    marketing: fakeQueue('marketing', 'false'),
+  }
+  const descriptors = [
+    { label: 'email:pre-approval', queue: refusing.email, queueName: 'email', name: 'pre-approval', kind: 'pre-approval' },
+    { label: 'discord:booking-created', queue: refusing.discord, queueName: 'discord', name: 'booking-created', kind: 'booking-created' },
+    { label: 'marketing:enroll', queue: refusing.marketing, queueName: 'marketing', name: 'booking-paid', kind: 'marketing-enroll' },
+    { label: 'discord:create-job-channels', queue: refusing.discord, queueName: 'discord', name: 'create-job-channels', kind: 'create-job-channels' },
+  ]
+  for (const d of descriptors) {
+    const status = await enqueueFanout(d.label, { queue: d.queue, queueName: d.queueName, name: d.name, kind: d.kind, data: { type: d.name, bookingId: BOOKING } }, BOOKING, { store, now })
+    assert.equal(status, 'recorded_for_retry', d.label)
+  }
+
+  for (const d of descriptors) {
+    const row = db.byJobId(fanoutJobId(d.kind, BOOKING))!
+    assert.ok(row, `a row for ${d.label}`)
+    assert.equal(row.queueName, d.queueName, `${d.label} must be routed back to the ${d.queueName} queue`)
+  }
+  assert.equal(db.rows.filter((r) => r.queueName === 'scheduled').length, 0, 'no fan-out row may name the scheduled queue')
+
+  const healthy = { scheduled: fakeQueue('scheduled'), email: fakeQueue('email'), discord: fakeQueue('discord'), marketing: fakeQueue('marketing') }
+  const counts = await sweep(store, healthy)
+
+  assert.equal(counts.enqueued, descriptors.length)
+  assert.deepEqual(addedIds(healthy.email), [fanoutJobId('pre-approval', BOOKING)])
+  assert.deepEqual(addedIds(healthy.discord).sort(), [fanoutJobId('booking-created', BOOKING), fanoutJobId('create-job-channels', BOOKING)].sort())
+  assert.deepEqual(addedIds(healthy.marketing), [fanoutJobId('marketing-enroll', BOOKING)])
+  assert.equal(healthy.scheduled.attempts.length, 0, 'the scheduled worker has no handler for any of these job names')
+})
+
+test('the queue name comes from the CALLER: a queue that throws on every property read still records the right route', async () => {
+  // THE PRODUCTION SHAPE. src/lib/queues/index.ts wraps each queue in a Proxy
+  // whose get trap constructs it, and getBullConnection() throws when REDIS_URL
+  // is unset. So `.name` throws exactly when `.add` throws — the code used to
+  // read the name off that object and fall back to the literal 'scheduled',
+  // guessing the route for the only rows that ever take this path.
+  const unbuildable = new Proxy({} as QueueLike, {
+    get() {
+      throw new Error('REDIS_URL is required in production')
+    },
+  })
+  const { db, store } = memoryRetryStore()
+  const status = await enqueueFanout(
+    'discord:booking-created',
+    { queue: unbuildable, queueName: 'discord', name: 'booking-created', kind: 'booking-created', data: { type: 'booking-created', bookingId: BOOKING } },
+    BOOKING,
+    { store, now }
+  )
+
+  assert.equal(status, 'recorded_for_retry', 'a queue that cannot even be constructed is still recorded, never thrown')
+  assert.equal(db.rows.length, 1)
+  assert.equal(db.rows[0].queueName, 'discord', 'the caller named it; the unbuildable object was never asked')
+  assert.notEqual(db.rows[0].queueName, 'scheduled')
+
+  // And it sweeps onto discord, not onto the queue the old fallback named.
+  const healthy = { scheduled: fakeQueue('scheduled'), discord: fakeQueue('discord') }
+  await sweep(store, healthy)
+  assert.deepEqual(addedIds(healthy.discord), [fanoutJobId('booking-created', BOOKING)])
+  assert.equal(healthy.scheduled.attempts.length, 0)
+})
+
+test('no caller infers its queue name from the queue object, and no fallback names a routable queue', () => {
+  const enqueueSrc = src('src/lib/lifecycle-enqueue.ts')
+  const body = enqueueSrc.slice(enqueueSrc.indexOf('export async function enqueueDurable'))
+  assert.ok(!/input\.queue\.name/.test(body), 'reading .name off a queue that failed to build throws — that is the whole defect')
+  assert.match(body, /const queueName = input\.queueName/, 'the caller supplies the name')
+
+  // Each fan-out descriptor names the queue it actually passes.
+  const fulfillment = src('src/lib/fulfillment.ts')
+  for (const [queue, name] of [
+    ['edge.email', 'email'],
+    ['edge.discord', 'discord'],
+    ['edge.marketing', 'marketing'],
+  ] as const) {
+    const at = fulfillment.indexOf(`queue: ${queue},`)
+    assert.ok(at > -1, `${queue} is still a fan-out queue`)
+    for (let i = at; i > -1; i = fulfillment.indexOf(`queue: ${queue},`, i + 1)) {
+      assert.match(fulfillment.slice(i, i + 120), new RegExp(`queueName: '${name}'`), `${queue} must be named '${name}'`)
+    }
+  }
+  // The lifecycle schedulers name the scheduled queue for themselves.
+  for (const file of ['src/lib/journeys.ts', 'src/lib/followups.ts']) {
+    assert.match(src(file), /queueName: 'scheduled',/, `${file} names its queue`)
+  }
 })
 
 test('PAYMENT FAN-OUT: "all jobs queued" is said only when all jobs were queued', () => {
@@ -730,16 +841,27 @@ test('the cancel closes the retry row even while Redis is still refusing', async
   assert.equal(row.lastError, CANCELLED_REASON)
 })
 
-test('a row naming a queue this process cannot route is abandoned, not retried forever', async () => {
+test('a row naming a queue this process cannot route is abandoned LOUDLY, never delivered to a default queue', async () => {
   const marketing = fakeQueue('marketing', 'false')
   const { db, store } = memoryRetryStore()
-  await enqueueFanout('marketing:enroll', { queue: marketing, name: 'booking-paid', kind: 'marketing-enroll', data: { bookingId: BOOKING } }, BOOKING, { store, now })
+  await enqueueFanout('marketing:enroll', { queue: marketing, queueName: 'marketing', name: 'booking-paid', kind: 'marketing-enroll', data: { bookingId: BOOKING } }, BOOKING, { store, now })
 
-  const counts = await sweep(store, { scheduled: fakeQueue('scheduled') })
+  const fallback = fakeQueue('scheduled')
+  const at = mark()
+  const counts = await sweep(store, { scheduled: fallback })
 
   assert.equal(counts.abandonedUnroutable, 1)
+  assert.equal(counts.enqueued, 0)
   assert.equal(db.rows[0].status, 'abandoned')
   assert.equal(db.rows[0].lastError, UNROUTABLE_REASON)
+  // The name the sweep cannot resolve is an operator error, not a routing
+  // decision: a job delivered to the wrong worker is warned-and-completed there
+  // and would be counted as repaired.
+  assert.equal(fallback.attempts.length, 0, 'an unknown queue name never falls through to another queue')
+  assert.ok(
+    since(at).some((l) => l.level === 'error' && l.msg.includes('unknown queue')),
+    'an unroutable row is an error line, not a silent default'
+  )
 })
 
 test('a sweep whose re-add fails backs off, keeps the row pending, and succeeds later', async () => {
@@ -900,7 +1022,7 @@ test('retry job ids stay BullMQ-safe and deterministic', async () => {
   await onBookingCompletedBalance(BOOKING, w.deps)
   const queue = fakeQueue('scheduled', 'false')
   await onBookingCompleted(BOOKING, followupDeps({ queue, store: w.store }))
-  await enqueueFanout('discord:booking-created', { queue: fakeQueue('discord', 'false'), name: 'booking-created', kind: 'booking-created', data: {} }, BOOKING, { store: w.store, now })
+  await enqueueFanout('discord:booking-created', { queue: fakeQueue('discord', 'false'), queueName: 'discord', name: 'booking-created', kind: 'booking-created', data: {} }, BOOKING, { store: w.store, now })
 
   assert.ok(w.db.rows.length > 0)
   for (const row of w.db.rows) {
@@ -937,10 +1059,22 @@ test('the retry table is declared, migrated, and unique on job_id', () => {
   assert.match(model, /@@index\(\[status, nextAttemptAt\]\)/, 'the sweep query is indexed')
 
   const migration = src('prisma/migrations/20260915120200_lifecycle_enqueue_retries/migration.sql')
-  assert.match(migration, /CREATE TABLE "lifecycle_enqueue_retries"/)
-  assert.match(migration, /CREATE UNIQUE INDEX "lifecycle_enqueue_retries_job_id_key"/)
+  assert.match(migration, /CREATE TABLE IF NOT EXISTS "lifecycle_enqueue_retries"/)
+  assert.match(migration, /CREATE UNIQUE INDEX IF NOT EXISTS "lifecycle_enqueue_retries_job_id_key"/)
   assert.match(migration, /DROP TABLE IF EXISTS "lifecycle_enqueue_retries"/, 'the rollback is written down')
   assert.ok(!/ALTER TABLE "(?!lifecycle_enqueue_retries)/.test(migration), 'additive only — no existing table is touched')
+
+  // RE-RUNNABLE, like its two siblings in this release. Reaching this file with
+  // the objects already present — applied by hand during an incident, or re-run
+  // after a partially applied deploy — would otherwise abort; `migrate deploy`
+  // then records the migration FAILED and blocks every subsequent deploy until
+  // someone runs `migrate resolve --rolled-back`.
+  const ddl = migration.split('\n').filter((l) => !l.trimStart().startsWith('--'))
+  const creates = ddl.filter((l) => /^CREATE /.test(l.trim()))
+  assert.equal(creates.length, 4, 'the table and all three indexes')
+  for (const stmt of creates) {
+    assert.match(stmt, /^CREATE (?:TABLE|(?:UNIQUE )?INDEX) IF NOT EXISTS /, `re-running the migration must not abort: ${stmt}`)
+  }
 })
 
 test('the email agent surfaces a retry backlog, with counts and no addresses', () => {

@@ -123,6 +123,33 @@ test('an unknown refusal stays DEFERRED (re-drivable), never silently terminal',
   assert.equal(recipientStateForOutcome({ sent: false, reason: 'some_new_reason' }).status, 'DEFERRED')
 })
 
+test('a refusal the guard itself classified terminal is SKIPPED, never DEFERRED', () => {
+  // classifyBlock (email-guard.ts) calls these final; deferring one would burn
+  // the whole retry budget on a refusal that can only repeat, and hold the run
+  // open while it did.
+  for (const reason of ['marketing_opted_out', 'some_future_terminal_reason']) {
+    const out = recipientStateForOutcome({ sent: false, reason, outcomeClass: 'terminal' })
+    assert.deepEqual(out, { status: 'SKIPPED', reason }, reason)
+    assert.equal(RECIPIENT_TERMINAL_STATES.has(out.status), true, `${reason} must close the recipient`)
+  }
+  // The more specific states still win over the generic SKIPPED bucket.
+  assert.equal(recipientStateForOutcome({ sent: false, reason: 'unsubscribed', outcomeClass: 'terminal' }).status, 'UNSUBSCRIBED')
+  assert.equal(recipientStateForOutcome({ sent: false, reason: 'hard_bounce', outcomeClass: 'terminal' }).status, 'SUPPRESSED')
+  assert.equal(recipientStateForOutcome({ sent: false, reason: 'spam_complaint', outcomeClass: 'terminal' }).status, 'SUPPRESSED')
+  assert.equal(recipientStateForOutcome({ sent: false, reason: 'admin_block', outcomeClass: 'terminal' }).status, 'SUPPRESSED')
+  assert.equal(recipientStateForOutcome({ sent: false, reason: 'lead_converted', outcomeClass: 'terminal' }).status, 'INELIGIBLE')
+  assert.equal(recipientStateForOutcome({ sent: false, reason: 'status_not_allowed:CANCELLED', outcomeClass: 'terminal' }).status, 'INELIGIBLE')
+  // A policy deferral carries a due time and stays DEFERRED whatever the class.
+  const at = new Date(Date.now() + 3_600_000)
+  assert.equal(recipientStateForOutcome({ sent: false, reason: 'quiet_hours', retryAt: at, outcomeClass: 'deferred' }).status, 'DEFERRED')
+})
+
+test('a RETRYABLE refusal stays DEFERRED — a canary exclusion or a missing config must not close the person out', () => {
+  for (const reason of ['no_marketing_consent', 'not_in_rollout_allowlist', 'validation: to', 'missing-configuration:marketing-context:address']) {
+    assert.equal(recipientStateForOutcome({ sent: false, reason, outcomeClass: 'retryable' }).status, 'DEFERRED', reason)
+  }
+})
+
 // ── Finalization ────────────────────────────────────────────────────────
 
 test('a run with pending, sending or deferred recipients is not settled', () => {
@@ -302,8 +329,76 @@ test('planRecipientRetry: a policy deferral wins and does NOT reset the transien
 test('planRecipientRetry: sent and terminal outcomes never retry and reset the budget', () => {
   assert.deepEqual(planRecipientRetry({ sent: true }, 'SENT', 3), { action: 'none', transientAttempts: 0 })
   assert.deepEqual(planRecipientRetry({ sent: false, reason: 'hard_bounce' }, 'SUPPRESSED', 3), { action: 'none', transientAttempts: 0 })
-  // An undated DEFERRED of another kind keeps the existing behaviour and its counter.
-  assert.deepEqual(planRecipientRetry({ sent: false, reason: 'no_marketing_consent' }, 'DEFERRED', 2), { action: 'none', transientAttempts: 2 })
+  assert.deepEqual(planRecipientRetry({ sent: false, reason: 'marketing_opted_out' }, 'SKIPPED', 3), { action: 'none', transientAttempts: 0 })
+})
+
+// ── A DEFERRED row ALWAYS carries a due time (2026-09-15) ───────────────
+//
+// THE DEFECT THIS PINS. planRecipientRetry used to answer `action: 'none'` for
+// any DEFERRED mapping that carried neither a guard retryAt nor a transient
+// read reason — a consent withdrawal caught by the send-time recheck, a canary
+// `not_in_rollout_allowlist` exclusion, `validation:`, `missing-configuration:`,
+// or simply an unrecognised reason. applyOutcome then settled the row DEFERRED
+// with next_attempt_at NULL and queued nothing. Sweep step 3b re-drives only
+// dated rows, and runIsSettled requires DEFERRED === 0 — so the run never
+// finalized, stayed SENDING, and (SENDING being in UNFINISHED_RUN_STATES, now
+// enforced by the partial unique index) the campaign could never be dispatched
+// again. One recipient could strand a whole campaign; during the documented
+// canary, the whole audience did.
+
+/** Refusals the guard can return with no retryAt of its own, with the class classifyBlock gives them. */
+const UNDATED_REFUSALS: Array<{ reason: string; outcomeClass: 'terminal' | 'retryable' }> = [
+  { reason: 'suppression_read_failed', outcomeClass: 'retryable' },
+  { reason: 'state_read_failed', outcomeClass: 'retryable' },
+  { reason: 'claim_lookup_failed', outcomeClass: 'retryable' },
+  { reason: 'context_error:connection terminated unexpectedly', outcomeClass: 'retryable' },
+  { reason: 'no_marketing_consent', outcomeClass: 'retryable' },
+  { reason: 'not_in_rollout_allowlist', outcomeClass: 'retryable' },
+  { reason: 'validation: to', outcomeClass: 'retryable' },
+  { reason: 'missing-configuration:marketing-context:address', outcomeClass: 'retryable' },
+  { reason: 'some_new_reason', outcomeClass: 'retryable' },
+  { reason: 'marketing_opted_out', outcomeClass: 'terminal' },
+  { reason: 'some_future_terminal_reason', outcomeClass: 'terminal' },
+]
+
+test('EVERY reason that maps to DEFERRED gets a plan with a due time — never action "none"', () => {
+  const now = 1_700_000_000_000
+  let deferred = 0
+  for (const outcome of UNDATED_REFUSALS) {
+    // Driven through the REAL mapping, so a reason reclassified later is
+    // re-checked here rather than silently escaping the invariant.
+    const mapped = recipientStateForOutcome({ sent: false, ...outcome })
+    if (mapped.status !== 'DEFERRED') continue
+    deferred++
+    for (const prior of [0, 1, 4, 5, 9]) {
+      const p = planRecipientRetry({ sent: false, reason: outcome.reason }, mapped.status, prior, now, 6)
+      assert.notEqual(p.action, 'none', `${outcome.reason} @${prior} would be written DEFERRED with no due time`)
+      if (p.action === 'exhausted') assert.equal(p.status, 'FAILED', outcome.reason)
+      else assert.ok(p.action !== 'none' && p.at instanceof Date && Number.isFinite(p.at.getTime()), `${outcome.reason} @${prior} must carry a due time`)
+    }
+  }
+  assert.ok(deferred >= 8, 'the list must still exercise the DEFERRED fall-through, not just terminal reasons')
+})
+
+test('planRecipientRetry: a retryable refusal is bounded too — FAILED at the cap, so the run can finalize', () => {
+  const now = 1_700_000_000_000
+  const p1 = planRecipientRetry({ sent: false, reason: 'not_in_rollout_allowlist' }, 'DEFERRED', 0, now, 6)
+  assert.equal(p1.action, 'transient')
+  if (p1.action === 'transient') {
+    assert.equal(p1.at.getTime(), now + 5 * 60_000, 'the same bounded backoff a read failure gets')
+    assert.equal(p1.transientAttempts, 1)
+  }
+  const p6 = planRecipientRetry({ sent: false, reason: 'not_in_rollout_allowlist' }, 'DEFERRED', 5, now, 6)
+  assert.equal(p6.action, 'exhausted')
+  if (p6.action === 'exhausted') {
+    assert.equal(p6.status, 'FAILED', 'FAILED is visible on the run and re-openable — a stuck DEFERRED is neither')
+    assert.equal(p6.reason, 'not_in_rollout_allowlist:retries_exhausted')
+    assert.equal(p6.transientAttempts, 6)
+  }
+  // A reason-less deferral is bounded too, and its reason is still readable.
+  const bare = planRecipientRetry({ sent: false }, 'DEFERRED', 5, now, 6)
+  assert.equal(bare.action === 'exhausted' && bare.reason, 'deferred:retries_exhausted')
+  assert.ok(runIsSettled({ SENT: 3, FAILED: 1, SKIPPED: 1 }), 'and the run settles once nothing is DEFERRED')
 })
 
 test('a transient-DEFERRED recipient blocks settlement; exhaustion settles COMPLETED_WITH_ERRORS', () => {

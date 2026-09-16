@@ -306,6 +306,8 @@ export function journeyQueueEdge(
       return enqueueDurable(
         {
           queue: queue(),
+          // Named here, not read off the proxy: see DurableEnqueueInput.
+          queueName: 'scheduled',
           name: stage,
           data: { type: stage, ...data },
           jobId,

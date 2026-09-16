@@ -10,6 +10,9 @@
 //    • one schedule failing never stops the other eleven, and is retried;
 //    • repeated startups never create duplicates (fake keyed exactly like BullMQ,
 //      plus a REDIS-GATED run against real BullMQ);
+//    • a schedule that is PRESENT but no longer firing (BullMQ failed to create
+//      its next iteration) is repaired by the latched forced re-add, and the
+//      request is never dropped by a pass that is already running;
 //    • a UTC schedule (tz undefined vs BullMQ's null) is never pruned;
 //    • readiness names a missing schedule.
 //  Offline except the gated test, which needs a disposable REDIS_TEST_URL.
@@ -41,6 +44,7 @@ function fakeQueue(seed: Live[] = []) {
   const live = new Map<string, Live>(seed.map((e) => [e.key, e]))
   const calls = { add: [] as string[], list: 0, remove: [] as string[] }
   let addFailure: (name: string, attempt: number) => Error | 'hang' | null = () => null
+  let addGate: (name: string) => Promise<void> | null = () => null
   const attempts = new Map<string, number>()
   let holes = 0
   const queue: CronQueue = {
@@ -52,6 +56,9 @@ function fakeQueue(seed: Live[] = []) {
       const failure = addFailure(name, n)
       if (failure === 'hang') return new Promise(() => undefined)
       if (failure) throw failure
+      // A releasable park, so a test can hold a pass open inside the loop.
+      const gate = addGate(name)
+      if (gate) await gate
       const key = legacyRepeatKey({ name: name as never, pattern: opts.repeat.pattern, tz: opts.repeat.tz, jobId: opts.jobId })
       // BullMQ normalises a missing tz to null (repeat.js getRepeatableData).
       live.set(key, { key, name, pattern: opts.repeat.pattern, tz: opts.repeat.tz || null })
@@ -75,10 +82,18 @@ function fakeQueue(seed: Live[] = []) {
     failAdd(fn: typeof addFailure) {
       addFailure = fn
     },
+    gateAdd(fn: typeof addGate) {
+      addGate = fn
+    },
     addHoles(n: number) {
       holes = n
     },
   }
+}
+
+/** Let every queued microtask and resolved promise run. */
+const settle = async () => {
+  for (let i = 0; i < 3; i++) await new Promise((res) => setImmediate(res))
 }
 
 const liveEntry = (name: string, pattern: string, tz: string | undefined, jobId = `cron:${name}`): Live => ({
@@ -240,7 +255,7 @@ test('Redis dropping mid-pass stops further queue commands for that pass', async
 
 // ── Idempotency / duplicates ────────────────────────────────────────────
 
-test('repeated startups and passes create no duplicates and no writes in steady state', async () => {
+test('repeated startups create no duplicates; one repair pass per startup, nothing afterwards', async () => {
   const q = fakeQueue()
   for (let startup = 0; startup < 3; startup++) {
     const r = reconciler(q)
@@ -248,15 +263,29 @@ test('repeated startups and passes create no duplicates and no writes in steady 
   }
   assert.equal(q.live.size, 12)
   for (const n of NAMES) assert.equal([...q.live.values()].filter((e) => e.name === n).length, 1, n)
-  assert.equal(q.calls.add.length, 12, 'only the very first pass writes')
+  // Every startup re-adds all twelve on its first pass — the boot repair the
+  // worker used to do inline — and the identical add hashes to the same repeat
+  // key, so three startups still leave exactly twelve entries. Later passes in
+  // the same process write nothing.
+  assert.equal(q.calls.add.length, 36, 'exactly one repair pass per startup')
+  for (let startup = 0; startup < 3; startup++) assert.deepEqual(q.calls.add.slice(startup * 12, startup * 12 + 12), NAMES, `startup ${startup}`)
   assert.deepEqual(q.calls.remove, [])
 })
 
-test('the production state (12 legacy entries already live) is left untouched', async () => {
+test('the production state (12 legacy entries already live): the boot pass re-adds in place, then leaves it alone', async () => {
   const q = fakeQueue(CRON_SCHEDULES.map((s) => liveEntry(s.name, s.pattern, s.tz)))
-  const s = await reconciler(q).reconcileOnce()
-  assert.equal(s.ok, true)
-  assert.deepEqual(q.calls.add, [])
+  const keysBefore = [...q.live.keys()].sort()
+  const r = reconciler(q)
+  assert.equal((await r.reconcileOnce()).ok, true)
+  // The first pass is a repair pass: it re-adds every schedule, which is how a
+  // delayed iteration lost while the worker was down comes back. The entries
+  // themselves are unchanged, because an identical add overwrites the same key.
+  assert.deepEqual([...q.calls.add].sort(), [...NAMES].sort())
+  assert.deepEqual([...q.live.keys()].sort(), keysBefore, 'an override re-add never creates a second entry')
+  assert.deepEqual(q.calls.remove, [])
+  q.calls.add.length = 0
+  assert.equal((await r.reconcileOnce()).ok, true)
+  assert.deepEqual(q.calls.add, [], 'the steady-state verification writes nothing')
   assert.deepEqual(q.calls.remove, [])
 })
 
@@ -264,10 +293,13 @@ test('UTC schedules are never pruned: tz undefined (desired) equals tz null/empt
   const seed = CRON_SCHEDULES.map((s) => liveEntry(s.name, s.pattern, s.tz))
   for (const e of seed) if (e.tz === null && e.name === 'campaign-sweep') (e as { tz: string | null }).tz = ''
   const q = fakeQueue(seed)
-  const s = await reconciler(q).reconcileOnce()
-  assert.equal(s.ok, true)
+  const r = reconciler(q)
+  assert.equal((await r.reconcileOnce()).ok, true)
   assert.deepEqual(q.calls.remove, [], 'a UTC entry must never be treated as stale')
-  assert.deepEqual(q.calls.add, [])
+  q.calls.add.length = 0
+  assert.equal((await r.reconcileOnce()).ok, true)
+  assert.deepEqual(q.calls.add, [], 'and once the repair pass has settled it is not re-added either')
+  assert.deepEqual(q.calls.remove, [])
 })
 
 test('same-name entries with a stale pattern or tz are pruned; unmanaged names and holes are never touched', async () => {
@@ -277,12 +309,21 @@ test('same-name entries with a stale pattern or tz are pruned; unmanaged names a
   const unmanaged = liveEntry('someone-elses-cron', '*/1 * * * *', undefined)
   const q = fakeQueue([...seed, staleTz, stalePattern, unmanaged])
   q.addHoles(2)
-  const s = await reconciler(q).reconcileOnce()
+  const r = reconciler(q)
+  const s = await r.reconcileOnce()
   assert.equal(s.ok, true, JSON.stringify(s.lastErrors))
   assert.deepEqual(q.calls.remove.sort(), [staleTz.key, stalePattern.key].sort())
   assert.ok(q.live.has(unmanaged.key), 'unmanaged names are never removed')
-  assert.deepEqual(q.calls.add.sort(), ['campaign-sweep', 'lead-maintenance'])
+  // The repair pass re-adds all twelve; the two that existed only under a stale
+  // key are the ones that must be, and each name ends up live exactly once.
+  assert.deepEqual([...q.calls.add].sort(), [...NAMES].sort())
   assert.equal([...q.live.values()].find((e) => e.name === 'lead-maintenance')?.tz, 'America/New_York')
+  for (const n of NAMES) assert.equal([...q.live.values()].filter((e) => e.name === n).length, 1, n)
+  q.calls.add.length = 0
+  q.calls.remove.length = 0
+  assert.equal((await r.reconcileOnce()).ok, true)
+  assert.deepEqual(q.calls.add, [], 'the settled state needs no further writes')
+  assert.deepEqual(q.calls.remove, [])
 })
 
 test('the desired schedule is added BEFORE a stale one is removed (a failed add never leaves a name with nothing)', async () => {
@@ -313,6 +354,93 @@ test('a Redis flush after verification is detected by the next verification pass
   const s = await r.reconcileOnce()
   assert.equal(s.ok, true)
   assert.equal(q.live.size, 12)
+})
+
+// ── Repair: a schedule that is PRESENT but no longer firing ─────────────
+// BullMQ leaves the repeat entry in place when it fails to create a
+// repeatable's next iteration, so the dead schedule still matches on
+// name/pattern/tz. A presence-only pass was therefore a guaranteed no-op for
+// the one error the scheduled worker wires requestReconcile to, and readiness
+// went on reporting the cron registered. These pin the latched repair.
+
+test('REPAIR: with all 12 already present, a forced request re-adds every schedule (a plain verification does not)', async () => {
+  const q = fakeQueue(CRON_SCHEDULES.map((s) => liveEntry(s.name, s.pattern, s.tz)))
+  const timers: Array<{ fn: () => void; ms: number }> = []
+  const r = reconciler(q, { setTimer: (fn, ms) => (timers.push({ fn, ms }), timers.length), clearTimer: () => undefined })
+  r.start()
+  await settle()
+  assert.equal(r.status().ok, true)
+  q.calls.add.length = 0
+
+  // The 10-minute verification with everything present and no repair pending.
+  assert.equal(timers.at(-1)?.ms, 600_000)
+  timers.at(-1)?.fn()
+  await settle()
+  assert.deepEqual(q.calls.add, [], 'a routine verification must not re-add')
+
+  // The repair the worker asks for on 'Failed to add repeatable job for next iteration'.
+  r.requestReconcile(5_000, { forceReadd: true })
+  assert.equal(timers.at(-1)?.ms, 5_000, 'the pass is also brought forward')
+  timers.at(-1)?.fn()
+  await settle()
+  assert.deepEqual([...q.calls.add].sort(), [...NAMES].sort(), 'every schedule is re-armed, present or not')
+  assert.equal(q.live.size, 12, 'an override re-add creates no duplicate')
+  for (const n of NAMES) assert.equal([...q.live.values()].filter((e) => e.name === n).length, 1, n)
+  assert.deepEqual(q.calls.remove, [])
+
+  // The latch is taken once: the pass after the repair is quiet again.
+  q.calls.add.length = 0
+  timers.at(-1)?.fn()
+  await settle()
+  assert.deepEqual(q.calls.add, [], 'the repair is not repeated on every later pass')
+})
+
+test('REPAIR: a request arriving while a pass is in flight is honoured by the next pass, never dropped', async () => {
+  const q = fakeQueue(CRON_SCHEDULES.map((s) => liveEntry(s.name, s.pattern, s.tz)))
+  const timers: Array<{ fn: () => void; ms: number }> = []
+  const r = reconciler(q, { setTimer: (fn, ms) => (timers.push({ fn, ms }), timers.length), clearTimer: () => undefined })
+  r.start()
+  await settle()
+  q.calls.add.length = 0
+
+  // Park the next pass INSIDE its add, i.e. after it has taken the latch.
+  const absent = CRON_SCHEDULES[5]
+  q.live.delete(legacyRepeatKey(absent))
+  let release: () => void = () => undefined
+  const parked = new Promise<void>((res) => {
+    release = res
+  })
+  q.gateAdd((name) => (name === absent.name ? parked : null))
+  timers.at(-1)?.fn()
+  await settle()
+  assert.deepEqual(q.calls.add, [absent.name], 'the pass is running and has already read the latch')
+
+  r.requestReconcile(5_000, { forceReadd: true })
+  q.gateAdd(() => null)
+  release()
+  await settle()
+  assert.deepEqual(q.calls.add, [absent.name], 'the pass already under way finishes as it was')
+  assert.equal(r.status().ok, true)
+
+  q.calls.add.length = 0
+  timers.at(-1)?.fn()
+  await settle()
+  assert.deepEqual([...q.calls.add].sort(), [...NAMES].sort(), 'the repair survived the in-flight pass')
+  assert.equal(q.live.size, 12)
+})
+
+test('REPAIR: a pass that could not verify re-arms the repair instead of consuming it', async () => {
+  const q = fakeQueue(CRON_SCHEDULES.map((s) => liveEntry(s.name, s.pattern, s.tz)))
+  let up = true
+  const r = reconciler(q, { redisOk: async () => up })
+  assert.equal((await r.reconcileOnce()).ok, true)
+  q.calls.add.length = 0
+  up = false
+  assert.equal((await r.reconcileOnce()).ok, true, 'a failed PING is not evidence the schedules vanished')
+  assert.deepEqual(q.calls.add, [], 'no queue command during an outage')
+  up = true
+  await r.reconcileOnce()
+  assert.deepEqual([...q.calls.add].sort(), [...NAMES].sort(), 'the outage re-armed the repair; the next good pass applies it')
 })
 
 // ── The background loop ─────────────────────────────────────────────────
@@ -379,7 +507,9 @@ test('source: the scheduled worker registers through the reconciler and nothing 
   const worker = code(readFileSync(resolve(__dirname, '../../workers/scheduled.worker.ts'), 'utf8'))
   const recon = code(readFileSync(resolve(__dirname, '../cron-schedules.ts'), 'utf8'))
   assert.match(worker, /redisOk: async \(\) => \(await pingAppRedis\(\)\)\.ok/, 'gated on the fail-fast probe')
-  assert.match(worker, /Failed to add repeatable job for next iteration[\s\S]{0,200}requestReconcile\(5_000\)/)
+  // FORCED, not just sooner: the repeat entry survives the failure, so a pass
+  // that only looks for absent schedules repairs nothing (behaviour above).
+  assert.match(worker, /Failed to add repeatable job for next iteration[\s\S]{0,200}requestReconcile\(5_000, \{ forceReadd: true \}\)/)
   assert.ok(!/upsertJobScheduler/.test(worker + recon), 'stay on the legacy repeat API')
   assert.ok(!/process\.exit/.test(recon) && !/process\.exit/.test(worker), 'a cron problem must never exit the process')
   assert.ok(!/registerCronJobs\(\)\.catch/.test(worker), 'no fire-and-forget registration')
@@ -387,7 +517,7 @@ test('source: the scheduled worker registers through the reconciler and nothing 
 
 // ── REDIS-GATED: real BullMQ ────────────────────────────────────────────
 
-test('REDIS-GATED: three startups against real BullMQ leave exactly one repeatable per managed name', { skip: redisSkip() }, async () => {
+test('REDIS-GATED: three startups leave exactly one repeatable per managed name, and a forced re-add revives a lost iteration', { skip: redisSkip() }, async () => {
   const { Queue } = await import('bullmq')
   const { Redis } = await import('ioredis')
   const { pingRedis } = await import('../redis-health')
@@ -422,6 +552,34 @@ test('REDIS-GATED: three startups against real BullMQ leave exactly one repeatab
     await queue.removeRepeatableByKey(legacyRepeatKey(CRON_SCHEDULES[5]))
     const healed = await createCronReconciler({ queue, redisOk }).reconcileOnce()
     assert.equal(healed.ok, true)
+    assert.equal((await queue.getRepeatableJobs()).length, 12)
+
+    // And the case a presence check cannot see: the repeat entry survives but
+    // its next ITERATION is gone, exactly as when BullMQ fails to create it.
+    // Only a forced re-add restores a firing schedule — and it must not leave a
+    // second repeatable behind.
+    const target = CRON_SCHEDULES[2] // campaign-sweep: the next run is minutes away
+    const delayedFor = async () => (await queue.getDelayed()).filter((j) => j.name === target.name)
+    const r = createCronReconciler({ queue, redisOk })
+    await r.reconcileOnce() // consume the boot repair, so the next pass is a plain verification
+
+    const pending = await delayedFor()
+    assert.equal(pending.length, 1, 'the repeatable must have a delayed next iteration to lose')
+    await pending[0].remove()
+    assert.equal((await delayedFor()).length, 0, 'the schedule is now dead but still present')
+    assert.equal((await queue.getRepeatableJobs()).filter((j) => j.name === target.name).length, 1)
+
+    const unrepaired = await r.reconcileOnce()
+    assert.equal(unrepaired.ok, true, 'presence still reports it registered — which is why a repair must be forced')
+    assert.equal((await delayedFor()).length, 0, 'a presence-only pass cannot see or fix it')
+
+    // requestReconcile latches before it checks whether the loop is running, so
+    // a repair can be asked for without starting the background timer.
+    r.requestReconcile(0, { forceReadd: true })
+    const repaired = await r.reconcileOnce()
+    assert.equal(repaired.ok, true, JSON.stringify(repaired.lastErrors))
+    assert.equal((await delayedFor()).length, 1, 'the forced re-add recreated the next iteration')
+    assert.equal((await queue.getRepeatableJobs()).filter((j) => j.name === target.name).length, 1, 'and only one repeatable for the name')
     assert.equal((await queue.getRepeatableJobs()).length, 12)
   } finally {
     for (const j of await queue.getRepeatableJobs().catch(() => [])) await queue.removeRepeatableByKey(j.key).catch(() => undefined)

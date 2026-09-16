@@ -167,6 +167,8 @@ async function addScheduled(
   return enqueueDurable(
     {
       queue: edge.queue ?? scheduledQueue,
+      // Named here, not read off the proxy: see DurableEnqueueInput.
+      queueName: 'scheduled',
       name: type,
       data: { type, bookingId },
       jobId,

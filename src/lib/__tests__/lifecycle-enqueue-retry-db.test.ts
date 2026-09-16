@@ -30,7 +30,7 @@ import {
   type QueueLike,
   type RetryStore,
 } from '../lifecycle-enqueue'
-import { runLifecycleRetrySweep, sweepShiftFor, type LifecycleRetrySweepDeps } from '../lifecycle-retry-sweep'
+import { UNROUTABLE_REASON, runLifecycleRetrySweep, sweepShiftFor, type LifecycleRetrySweepDeps } from '../lifecycle-retry-sweep'
 
 // A production-looking DATABASE_URL / Redis URL / Resend key is a HARD
 // FAILURE, never a skip — see _disposable-test-env.ts.
@@ -76,8 +76,11 @@ function fakeQueue(name = 'scheduled', mode: 'ok' | 'false' = 'false'): FakeQueu
   }
 }
 
-const input = (jobId: string, over: { fireAt?: Date; notAfter?: Date } = {}) => ({
+const input = (jobId: string, over: { fireAt?: Date; notAfter?: Date; queueName?: string } = {}) => ({
   queue: fakeQueue(),
+  // The CALLER names its queue — never read off the queue object, which throws
+  // on every property access when it could not be constructed.
+  queueName: over.queueName ?? 'scheduled',
   name: 'abandoned-checkout-recovery',
   data: { type: 'abandoned-checkout-recovery', bookingId: `${PREFIX}_booking` },
   jobId,
@@ -143,6 +146,48 @@ test('the sweep moves pending → enqueued, exactly once', { skip }, async () =>
   const before = queue.added.length
   await runLifecycleRetrySweep({ now: NOW, limit: 50, deps: sweepDeps({ scheduled: queue }) })
   assert.ok(!queue.added.slice(before).includes(jobId), 'a closed row is never re-added')
+})
+
+test('queue_name round-trips through the table, and the sweep routes each row to that queue', { skip }, async () => {
+  // The column is the ONLY thing that survives between the failed live add and
+  // the sweep an hour later. A row that named the wrong queue would be re-added
+  // onto a worker with no handler for its job name, warned-and-completed there,
+  // and then marked 'enqueued' — reported as repaired, silently lost.
+  const ids = { email: `${PREFIX}_q_email`, discord: `${PREFIX}_q_discord`, marketing: `${PREFIX}_q_marketing` }
+  for (const [queueName, jobId] of Object.entries(ids)) {
+    await enqueueDurable(input(jobId, { queueName }), { store, now })
+    assert.equal((await rowFor(jobId))!.queueName, queueName, `${queueName} survives the write`)
+  }
+
+  const queues = {
+    scheduled: fakeQueue('scheduled', 'ok'),
+    email: fakeQueue('email', 'ok'),
+    discord: fakeQueue('discord', 'ok'),
+    marketing: fakeQueue('marketing', 'ok'),
+  }
+  await runLifecycleRetrySweep({ now: NOW, limit: 200, deps: sweepDeps(queues) })
+
+  for (const [queueName, jobId] of Object.entries(ids)) {
+    assert.ok(queues[queueName as keyof typeof queues].added.includes(jobId), `${jobId} went back to the ${queueName} queue`)
+    assert.equal((await rowFor(jobId))!.status, 'enqueued')
+  }
+  for (const jobId of Object.values(ids)) {
+    assert.ok(!queues.scheduled.added.includes(jobId), 'and never onto the scheduled queue')
+  }
+})
+
+test('a row naming a queue this process cannot route is abandoned, not delivered elsewhere', { skip }, async () => {
+  const jobId = `${PREFIX}_q_unknown`
+  await enqueueDurable(input(jobId, { queueName: 'no-such-queue' }), { store, now })
+
+  const fallback = fakeQueue('scheduled', 'ok')
+  const counts = await runLifecycleRetrySweep({ now: NOW, limit: 200, deps: sweepDeps({ scheduled: fallback }) })
+
+  assert.ok(counts.abandonedUnroutable >= 1)
+  const row = (await rowFor(jobId))!
+  assert.equal(row.status, 'abandoned')
+  assert.equal(row.lastError, UNROUTABLE_REASON)
+  assert.ok(!fallback.added.includes(jobId), 'an unknown name is an error, never a default route')
 })
 
 test('a row past not_after is abandoned, and nothing is re-added', { skip }, async () => {

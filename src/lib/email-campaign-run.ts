@@ -135,7 +135,7 @@ export type RecipientState =
   | 'PENDING' // created, not yet processed
   | 'SENDING' // claimed by a batch pass
   | 'SENT' // provider accepted (EmailSend went 'delivered')
-  | 'DEFERRED' // quiet hours / frequency cap / transient read failure; retried at nextAttemptAt
+  | 'DEFERRED' // quiet hours / cap / read failure / retryable refusal; ALWAYS retried at nextAttemptAt
   | 'SUPPRESSED' // on the suppression list
   | 'UNSUBSCRIBED' // unsubscribe-scope suppression
   | 'INELIGIBLE' // live recheck said the claim is no longer true
@@ -237,9 +237,18 @@ export type RecipientRetryPlan =
  *  - a guard retryAt (quiet hours, caps) → policy deferral at retryAt. The
  *    counter is KEPT, so flapping reads cannot reset the budget by landing in
  *    quiet hours between failures.
- *  - a transient read failure → the next backoff step, or FAILED with
+ *  - EVERY other DEFERRED mapping — a transient read failure, and equally a
+ *    retryable refusal with no due time of its own (no_marketing_consent,
+ *    not_in_rollout_allowlist, validation:, missing-configuration:, an
+ *    unrecognised reason) → the next backoff step, or FAILED with
  *    `<reason>:retries_exhausted` once the budget is spent.
- *  - any other DEFERRED without a due time → none (unchanged behaviour).
+ *
+ * THE INVARIANT THIS ENFORCES: a DEFERRED recipient row ALWAYS carries a due
+ * time. Sweep step 3b re-drives only rows that have one, and runIsSettled
+ * requires DEFERRED === 0 — so an undated DEFERRED row is unreachable, holds
+ * its run in SENDING forever, and (SENDING being an unfinished state) makes the
+ * campaign permanently undispatchable. Until 2026-09-15 this function answered
+ * 'none' there, which wrote exactly such a row.
  */
 export function planRecipientRetry(
   outcome: { sent: boolean; reason?: string | null; retryAt?: Date | null },
@@ -251,14 +260,11 @@ export function planRecipientRetry(
   const prior = Math.max(0, priorTransientAttempts || 0)
   if (outcome.sent || mappedStatus !== 'DEFERRED') return { action: 'none', transientAttempts: 0 }
   if (outcome.retryAt) return { action: 'policy', at: outcome.retryAt, transientAttempts: prior }
-  if (isTransientReadFailure(outcome.reason)) {
-    const n = prior + 1
-    if (n >= max) {
-      return { action: 'exhausted', status: 'FAILED', reason: `${outcome.reason}:retries_exhausted`.slice(0, 300), transientAttempts: n }
-    }
-    return { action: 'transient', at: new Date(now + transientRetryDelayMs(n)), transientAttempts: n }
+  const n = prior + 1
+  if (n >= max) {
+    return { action: 'exhausted', status: 'FAILED', reason: `${outcome.reason ?? 'deferred'}:retries_exhausted`.slice(0, 300), transientAttempts: n }
   }
-  return { action: 'none', transientAttempts: prior }
+  return { action: 'transient', at: new Date(now + transientRetryDelayMs(n)), transientAttempts: n }
 }
 
 /**
@@ -294,8 +300,15 @@ export function recipientStateForOutcome(outcome: SendOutcome): { status: Recipi
     return { status: 'SKIPPED', reason }
   }
   if (reason === 'attempts_exhausted' || reason === 'ambiguous') return { status: 'FAILED', reason }
+  // THE GUARD ALREADY CALLED IT FINAL. classifyBlock marks marketing_opted_out,
+  // unsubscribed, status_not_allowed:… 'terminal'; a reason it classifies that
+  // way will refuse identically forever, so deferring it only burns the retry
+  // budget and holds the run open. SKIPPED is the "other terminal policy
+  // refusal" bucket. The specific terminal states above still win.
+  if (outcome.outcomeClass === 'terminal') return { status: 'SKIPPED', reason }
   // Retryable configuration/plumbing problems: keep the recipient re-drivable
-  // by the retry sweep rather than closing them out.
+  // by the retry sweep rather than closing them out. planRecipientRetry gives
+  // this row a due time and a bounded budget — never an undated deferral.
   return { status: 'DEFERRED', reason }
 }
 

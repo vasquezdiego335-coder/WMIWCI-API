@@ -60,6 +60,7 @@ import {
   CAMPAIGN_BATCH_SIZE,
   RUN_SENDABLE_STATES,
   RECIPIENT_RETRYABLE_STATES,
+  TRANSIENT_RETRY_BASE_MS,
   UNFINISHED_RUN_STATES,
   batchCount,
   campaignBatchJobId,
@@ -317,12 +318,26 @@ export async function settleRecipient(
   claimAttempt: number,
   data: { status: RecipientState; reason: string | null; emailSendId?: string; nextAttemptAt?: Date | null; transientAttempts?: number }
 ): Promise<boolean> {
+  // THE INVARIANT, GUARDED AT THE WRITE: a DEFERRED row without a due time is
+  // unreachable — sweep step 3b re-drives only dated rows and runIsSettled
+  // requires DEFERRED === 0 — so it hangs the run and blocks every later
+  // dispatch of that campaign. planRecipientRetry always plans one; this is the
+  // belt to that suspender for any future caller, loud and self-healing rather
+  // than silent and permanent.
+  let nextAttemptAt = data.nextAttemptAt ?? null
+  if (data.status === 'DEFERRED' && !nextAttemptAt) {
+    nextAttemptAt = new Date(Date.now() + TRANSIENT_RETRY_BASE_MS)
+    log.error(
+      { recipientId, claimAttempt, reason: data.reason, nextAttemptAt: nextAttemptAt.toISOString() },
+      'refused to write a DEFERRED recipient with no due time — the sweep could never re-drive it; defaulted to the base backoff'
+    )
+  }
   const { count } = await prisma.emailCampaignRecipient.updateMany({
     where: recipientSettlementWhere(recipientId, claimAttempt),
     data: {
       status: data.status,
       reason: data.reason,
-      nextAttemptAt: data.nextAttemptAt ?? null,
+      nextAttemptAt,
       ...(data.emailSendId ? { emailSendId: data.emailSendId } : {}),
       ...(data.transientAttempts !== undefined ? { transientAttempts: data.transientAttempts } : {}),
     },
@@ -638,7 +653,7 @@ export async function sendToRecipient(
       if (settled !== 'SUPERSEDED') {
         log.error(
           { event: 'CAMPAIGN_RECIPIENT_TRANSIENT_EXHAUSTED', runId: run.id, recipientId: recipient.id, reason: outcome.reason, transientAttempts: plan.transientAttempts },
-          'transient read failures exhausted — recipient FAILED (re-openable), never suppressed'
+          'retry budget exhausted — recipient FAILED (visible, re-openable), never suppressed and never stranded DEFERRED'
         )
       }
       return settled
@@ -662,7 +677,7 @@ export async function sendToRecipient(
             transientAttempts: plan.transientAttempts,
             nextAttemptAt: plan.at.toISOString(),
           },
-          'transient read failure — recipient deferred with backoff, nothing sent'
+          'retryable refusal (read failure, consent recheck, rollout gate, config) — recipient deferred with backoff, nothing sent'
         )
       }
       await scheduleRetry(plan.at)
@@ -672,9 +687,9 @@ export async function sendToRecipient(
       status: mapped.status,
       reason: mapped.reason,
       emailSendId,
-      // The transient budget resets on SENT or any terminal state; an undated
-      // DEFERRED (unchanged legacy behaviour) keeps it.
-      transientAttempts: mapped.status === 'DEFERRED' ? undefined : 0,
+      // Only SENT and terminal states reach here: planRecipientRetry always
+      // plans a due time for a DEFERRED mapping, so the budget always resets.
+      transientAttempts: 0,
       sent: outcome.sent,
     })
   }
@@ -1204,8 +1219,9 @@ const DISPATCHED_TERMINAL_RUN_STATES: RunState[] = ['COMPLETED', 'COMPLETED_WITH
  *     EmailSend claim below still guarantees no duplicate);
  *  3. re-enqueue batches that still have PENDING rows on sendable runs
  *     (lost queue jobs after a crash/restart);
- *  3b. re-drive overdue DEFERRED rows on sendable runs (lost retry jobs, or
- *     retries held by a pause) — skipped entirely while dispatch is paused;
+ *  3b. re-drive overdue DEFERRED rows on sendable runs (lost retry jobs,
+ *     retries held by a pause, and legacy rows with no due time at all) —
+ *     skipped entirely while dispatch is paused;
  *  4. finalize settled runs.
  */
 export async function sweepCampaignRuns(
@@ -1344,15 +1360,33 @@ export async function sweepCampaignRuns(
         requeued++
       }
 
-      // 3b. OVERDUE DEFERRALS. Only rows with a durable due time written by
-      // this code; legacy DEFERRED rows with a NULL next_attempt_at are
-      // deliberately left alone. The time-bucketed suffix keeps a retained
-      // completed job from swallowing the add; the DEFERRED → SENDING CAS makes
-      // a duplicate job harmless.
+      // 3b. OVERDUE DEFERRALS, on two counts.
+      //
+      //  - a row with a durable due time, once it is past the grace: its own
+      //    retry job normally fires first, so this is the lost-job recovery.
+      //  - a row with NO due time at all, once it has sat untouched for the
+      //    stale window. planRecipientRetry now guarantees every DEFERRED row
+      //    written by this code carries one, so such a row is LEGACY — written
+      //    before this deploy. Undated it is unreachable, and runIsSettled
+      //    requires DEFERRED === 0, so it would hold its run in SENDING forever
+      //    and block every later dispatch of that campaign. The retry re-reads
+      //    the row and re-applies the same refusal, which now settles it.
+      //
+      // The time-bucketed suffix keeps a retained completed job from swallowing
+      // the add; the DEFERRED → SENDING CAS makes a duplicate job harmless.
       if (!pause.paused) {
         const overdue = await prisma.emailCampaignRecipient.findMany({
-          where: { runId: run.id, status: 'DEFERRED', nextAttemptAt: { not: null, lte: new Date(deps.now() - DEFERRED_SWEEP_GRACE_MS) } },
+          where: {
+            runId: run.id,
+            status: 'DEFERRED',
+            OR: [
+              { nextAttemptAt: { not: null, lte: new Date(deps.now() - DEFERRED_SWEEP_GRACE_MS) } },
+              { nextAttemptAt: null, updatedAt: { lt: new Date(deps.now() - RECIPIENT_STALE_MS) } },
+            ],
+          },
           select: { id: true, attempts: true },
+          // Dated rows first (Postgres sorts NULLs last ascending): a legacy row
+          // that has already waited cannot starve a due retry inside the bound.
           orderBy: { nextAttemptAt: 'asc' },
           take: 200,
         })

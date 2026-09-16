@@ -30,7 +30,8 @@ import { assertNoProductionCredentials, assertTestRecipient } from './_disposabl
 //  under test are imported (the outbox-truthful-status.test.ts pattern). The
 //  provider, renderer, context builder and queue come in through
 //  CampaignDispatchDeps. `resend.emails.send` is mocked as a belt to that
-//  brace: this file asserts at the end that it was never called even once.
+//  brace: ONE spy for the whole file (see load()), so the assertion at the end
+//  that it was never called even once really covers every test above it.
 //  The REAL race (concurrent claims, a genuinely stale settlement) runs against
 //  Postgres in campaign-run-concurrency.test.ts — a fake store cannot race.
 //
@@ -101,6 +102,8 @@ function matchValue(actual: unknown, cond: unknown): boolean {
 function matchWhere(row: Row, where: Row | undefined): boolean {
   if (!where) return true
   return Object.entries(where).every(([field, cond]) => {
+    // Sweep step 3b matches dated-and-overdue OR undated-and-stale rows.
+    if (field === 'OR') return (cond as Row[]).some((c) => matchWhere(row, c))
     // The sweep's due-campaign query filters through the config relation.
     if (field === 'emailConfig') {
       const inner = (cond as { is?: Row }).is
@@ -196,11 +199,27 @@ const prismaFake = {
 ;(globalThis as unknown as { prisma: unknown }).prisma = prismaFake
 
 // Belt AND brace: the provider object itself must never be touched.
-const load = async () => {
+//
+// Installed EXACTLY ONCE for the whole file. mock.method() does not dedupe — a
+// second call wraps the current value again and hands back a fresh spy whose
+// callCount is 0 by construction — so a per-load() spy made the final
+// whole-file guard assert against a tracker created microseconds earlier and
+// unable to fail. Memoized here (the promise, not a top-level await: the
+// tsconfig target is ES2017 and this is not an ES module), which also keeps the
+// ordering guarantee — the spy is installed on the FIRST load(), before any
+// module under test is imported.
+async function installSendSpy() {
   const { resend } = await import('../resend')
-  const sendSpy = mock.method(resend.emails, 'send', async () => {
+  return mock.method(resend.emails, 'send', async () => {
     throw new Error('a test reached the real provider')
   })
+}
+
+let sendSpyPromise: ReturnType<typeof installSendSpy> | null = null
+
+const load = async () => {
+  sendSpyPromise ??= installSendSpy()
+  const sendSpy = await sendSpyPromise
   const dispatch = await import('../email-campaign-dispatch')
   const runtime = await import('../email-automation-runtime')
   const guard = await import('../email-guard')
@@ -464,6 +483,95 @@ test('an unsubscribe stays UNSUBSCRIBED, not a retryable deferral', async () => 
   assert.equal(retryJobs(h).length, 0)
 })
 
+// ── 2b. A DEFERRED row ALWAYS carries a due time ────────────────────────
+//
+//  THE DEFECT THIS PINS. A refusal with no retryAt of its own and no transient
+//  read reason — a consent withdrawal caught by the send-time recheck, a canary
+//  `not_in_rollout_allowlist` exclusion, `validation:`, `missing-configuration:`
+//  — was settled DEFERRED with next_attempt_at NULL and no retry job. Sweep
+//  step 3b re-drives only rows that have a due time and runIsSettled requires
+//  DEFERRED === 0, so the run never finalized: it sat in SENDING forever and,
+//  SENDING being an unfinished state, every later dispatch of that campaign
+//  answered `alreadyRunning`. One recipient could strand a whole campaign.
+
+/** Refusals guardedSend can return with NO retryAt, with the class classifyBlock gives them. */
+const UNDATED_REFUSALS: Outcome[] = [
+  { sent: false, reason: 'no_marketing_consent', outcomeClass: 'retryable' },
+  { sent: false, reason: 'not_in_rollout_allowlist', outcomeClass: 'retryable' },
+  { sent: false, reason: 'validation: to', outcomeClass: 'retryable' },
+  { sent: false, reason: 'missing-configuration:marketing-context:address', outcomeClass: 'retryable' },
+  { sent: false, reason: 'some_new_reason', outcomeClass: 'retryable' },
+]
+
+test('a consent withdrawal caught by the recheck defers WITH a durable due time and a retry job', async () => {
+  const { dispatch, sendSpy } = await load()
+  const h = harness({ outcomes: [{ sent: false, reason: 'no_marketing_consent', outcomeClass: 'retryable', emailSendId: 'es_c' }] })
+  await dispatch.processCampaignBatch(h.runId, 0, h.deps as never)
+
+  const r = h.recipient()
+  assert.equal(r.status, 'DEFERRED')
+  assert.equal(r.reason, 'no_marketing_consent')
+  assert.equal(time(r.nextAttemptAt), NOW + 5 * MINUTE, 'a DEFERRED row with no due time is unreachable forever')
+  assert.equal(r.transientAttempts, 1, 'and it is BOUNDED — not retried for ever')
+  assert.equal(sendSpy.mock.callCount(), 0, 'nothing is sent to someone who withdrew consent')
+
+  const jobs = retryJobs(h)
+  assert.equal(jobs.length, 1)
+  assert.equal(jobs[0].opts.delay, 5 * MINUTE)
+  assert.ok(!jobs[0].opts.jobId.includes(':'), 'BullMQ rejects a custom id containing ":"')
+})
+
+test('no refusal can write a DEFERRED recipient without a due time', async () => {
+  const { dispatch } = await load()
+  for (const outcome of UNDATED_REFUSALS) {
+    // Driven through the REAL mapping and the REAL settle path, so a reason
+    // reclassified later is re-checked here rather than escaping the invariant.
+    const h = harness({ outcomes: [{ ...outcome }] })
+    await dispatch.processCampaignBatch(h.runId, 0, h.deps as never)
+    const r = h.recipient()
+    if (r.status !== 'DEFERRED') {
+      assert.equal(r.nextAttemptAt, null, `${outcome.reason}: a settled row carries no due time`)
+      continue
+    }
+    assert.notEqual(r.nextAttemptAt, null, `${outcome.reason} would hang the run: DEFERRED with next_attempt_at NULL`)
+    assert.equal(time(r.nextAttemptAt), NOW + 5 * MINUTE, outcome.reason)
+    assert.equal(retryJobs(h).length, 1, `${outcome.reason} must also be queued, not only dated`)
+    assert.equal(h.run().status, 'SENDING', 'the run stays open while a recipient can still make progress')
+  }
+})
+
+test('a refusal the guard called terminal is SKIPPED — the run completes instead of hanging', async () => {
+  const { dispatch, sendSpy } = await load()
+  const h = harness({ outcomes: [{ sent: false, reason: 'marketing_opted_out', outcomeClass: 'terminal', emailSendId: 'es_o' }] })
+  await dispatch.processCampaignBatch(h.runId, 0, h.deps as never)
+
+  const r = h.recipient()
+  assert.equal(r.status, 'SKIPPED', 'DEFERRED would re-drive a refusal that can only repeat, and hold the run open')
+  assert.notEqual(r.status, 'DEFERRED')
+  assert.equal(r.reason, 'marketing_opted_out')
+  assert.equal(r.nextAttemptAt, null, 'a terminal refusal carries no due time')
+  assert.equal(retryJobs(h).length, 0)
+  assert.equal(h.run().status, 'COMPLETED')
+  assert.equal(sendSpy.mock.callCount(), 0)
+})
+
+test('a retryable refusal that never clears ends FAILED — visible on the run, never stranded DEFERRED', async () => {
+  const { dispatch } = await load()
+  const max = (await import('../email-campaign-run')).CAMPAIGN_TRANSIENT_MAX_ATTEMPTS
+  const h = harness({
+    outcomes: [{ sent: false, reason: 'not_in_rollout_allowlist', outcomeClass: 'retryable', emailSendId: 'es_a' }],
+    recipient: { status: 'DEFERRED', reason: 'not_in_rollout_allowlist', transientAttempts: max - 1, attempts: 1, nextAttemptAt: new Date(NOW - MINUTE) },
+  })
+  await dispatch.processRecipientRetry(h.recipientId, h.deps as never)
+
+  const r = h.recipient()
+  assert.equal(r.status, 'FAILED')
+  assert.equal(r.reason, 'not_in_rollout_allowlist:retries_exhausted')
+  assert.equal(r.nextAttemptAt, null)
+  assert.equal(retryJobs(h).length, 0, 'an exhausted recipient is not re-queued forever')
+  assert.equal(h.run().status, 'COMPLETED_WITH_ERRORS', 'the run FINALIZES — it no longer blocks the campaign')
+})
+
 // ── 3. Settlement CAS: a superseded attempt writes nothing ──────────────
 
 test('a claim superseded during preparation never reaches the provider', async () => {
@@ -502,6 +610,24 @@ test('settleRecipient refuses a stale token and writes nothing', async () => {
   // Once settled, the same token cannot re-open the row (status moved).
   assert.equal(await dispatch.settleRecipient(h.recipientId, 2, { status: 'PENDING', reason: 'run_not_sendable' }), false)
   assert.equal(h.recipient().status, 'SENT')
+})
+
+test('settleRecipient refuses to write a DEFERRED row with no due time — the last belt on the invariant', async () => {
+  const { dispatch } = await load()
+  const h = harness({ outcomes: [] })
+  const row = h.recipient()
+  row.status = 'SENDING'
+  row.attempts = 1
+
+  const before = Date.now()
+  assert.equal(await dispatch.settleRecipient(h.recipientId, 1, { status: 'DEFERRED', reason: 'some_future_caller' }), true)
+  const r = h.recipient()
+  assert.equal(r.status, 'DEFERRED')
+  assert.notEqual(r.nextAttemptAt, null, 'undated, no sweep and no job could ever reach it and the run would never finalize')
+  assert.ok(time(r.nextAttemptAt) >= before + 5 * MINUTE, 'it is defaulted to the base backoff, not to the epoch')
+  // The substitution does not weaken the CAS: the row left SENDING, so the same
+  // token owns nothing further.
+  assert.equal(await dispatch.settleRecipient(h.recipientId, 1, { status: 'SKIPPED', reason: 'terminal:x' }), false)
 })
 
 // ── 4. in_flight is a timed retry, never a terminal skip ────────────────
@@ -611,22 +737,33 @@ async function sweepHarness(rows: Array<Partial<Row> & { runStatus: string }>) {
   return { deps, enqueued, ids }
 }
 
-test('the sweep re-drives ONLY overdue deferrals that carry a due time, on sendable runs', async () => {
+test('the sweep re-drives overdue deferrals, and legacy rows with no due time at all, on sendable runs', async () => {
   const { dispatch } = await load()
   const { deps, enqueued, ids } = await sweepHarness([
     { runStatus: 'SENDING', nextAttemptAt: new Date(NOW - 10 * MINUTE) }, // A: overdue → re-driven
-    { runStatus: 'SENDING', nextAttemptAt: null }, // B: legacy row, deliberately untouched
+    { runStatus: 'SENDING', nextAttemptAt: null }, // B: undated but just touched → its own job still owns it
     { runStatus: 'CANCELLING', nextAttemptAt: new Date(NOW - 10 * MINUTE) }, // C: run not sendable
     { runStatus: 'SENDING', nextAttemptAt: new Date(NOW - MINUTE) }, // D: inside the grace window
+    // E: written by the PREVIOUS deploy — DEFERRED, no due time, untouched for
+    // half an hour. Nothing else can ever reach it, and while it sits there the
+    // run cannot finalize and the campaign cannot be dispatched again.
+    { runStatus: 'SENDING', nextAttemptAt: null, updatedAt: new Date(NOW - 30 * MINUTE) },
   ])
   const out = await dispatch.sweepCampaignRuns(deps as never)
 
   const retries = enqueued.filter((e) => e.name === 'campaign-recipient-retry')
-  assert.equal(retries.length, 1, 'exactly the overdue row on a sendable run')
-  assert.equal(out.redriven, 1)
-  assert.ok(retries[0].opts.jobId.includes(ids[0]), 'and it must be row A')
-  assert.match(retries[0].opts.jobId, /__sweep__\d+$/, 'a time bucket keeps a retained completed job from swallowing the add')
-  assert.ok(!retries[0].opts.jobId.includes(':'))
+  const drove = (id: string) => retries.some((r) => r.opts.jobId.includes(`__${id}__`))
+  assert.equal(retries.length, 2)
+  assert.equal(out.redriven, 2)
+  assert.ok(drove(ids[0]), 'row A: overdue and dated')
+  assert.ok(drove(ids[4]), 'row E: the legacy undated row — otherwise it hangs its run for good')
+  assert.ok(!drove(ids[1]), 'row B: undated but freshly written — give its own retry job the first go')
+  assert.ok(!drove(ids[2]), 'row C: the run is not sendable')
+  assert.ok(!drove(ids[3]), 'row D: still inside the grace window')
+  for (const r of retries) {
+    assert.match(r.opts.jobId, /__sweep__\d+$/, 'a time bucket keeps a retained completed job from swallowing the add')
+    assert.ok(!r.opts.jobId.includes(':'))
+  }
 })
 
 test('the sweep adds no re-drive jobs at all while dispatch is paused', async () => {
@@ -726,5 +863,10 @@ test('a stage whose enrollment moved on concurrently is not re-queued', async ()
 
 test('no test in this file reached the email provider', async () => {
   const { sendSpy } = await load()
+  // mock.method() does not dedupe: a per-load() spy would be a tracker created
+  // on the line above, with callCount 0 by construction, and this guard would
+  // pass however much provider traffic the tests above had made.
+  const again = await load()
+  assert.equal(again.sendSpy, sendSpy, 'ONE spy for the whole file, or this assertion only covers itself')
   assert.equal(sendSpy.mock.callCount(), 0)
 })

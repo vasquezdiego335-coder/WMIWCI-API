@@ -75,7 +75,7 @@ export function fanoutJobId(kind: string, bookingId: string): string {
 
 export async function enqueueFanout(
   label: string,
-  job: { queue: QueueLike; name: string; data: Record<string, unknown>; kind: string },
+  job: { queue: QueueLike; queueName: string; name: string; data: Record<string, unknown>; kind: string },
   bookingId: string,
   edge: Pick<FulfillmentEdge, 'store' | 'now'> = {}
 ): Promise<EnqueueStatus> {
@@ -83,6 +83,10 @@ export async function enqueueFanout(
   const { status } = await enqueueDurable(
     {
       queue: job.queue,
+      // Each descriptor below names its own queue. A retry row that guessed
+      // 'scheduled' here would be swept onto a worker with no handler for these
+      // job names, which warns and COMPLETES them — the card silently lost.
+      queueName: job.queueName,
       name: job.name,
       data: job.data,
       jobId: fanoutJobId(job.kind, bookingId),
@@ -239,6 +243,7 @@ export async function fulfillPaidCheckout(params: {
     fanout.push(
       enqueueFanout('email:pre-approval', {
         queue: edge.email,
+        queueName: 'email',
         name: 'pre-approval',
         kind: 'pre-approval',
         data: {
@@ -275,6 +280,7 @@ export async function fulfillPaidCheckout(params: {
   fanout.push(
     enqueueFanout('discord:booking-created', {
       queue: edge.discord,
+      queueName: 'discord',
       name: 'booking-created',
       kind: 'booking-created',
       data: {
@@ -350,6 +356,7 @@ export async function fulfillPaidCheckout(params: {
   fanout.push(
     enqueueFanout('marketing:enroll', {
       queue: edge.marketing,
+      queueName: 'marketing',
       name: 'booking-paid',
       kind: 'marketing-enroll',
       data: {
@@ -373,6 +380,7 @@ export async function fulfillPaidCheckout(params: {
   fanout.push(
     enqueueFanout('discord:create-job-channels', {
       queue: edge.discord,
+      queueName: 'discord',
       name: 'create-job-channels',
       kind: 'create-job-channels',
       data: {

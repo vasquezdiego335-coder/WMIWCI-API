@@ -14,6 +14,9 @@
 //    • a fail-fast Redis PING before any queue call, so an outage does not pile
 //      commands into ioredis's offline queue (BullMQ connections never give up);
 //    • presence is VERIFIED with getRepeatableJobs(), not assumed from add();
+//    • a latched REPAIR (first pass after start, and on request) re-adds every
+//      schedule unconditionally, because a repeatable whose next iteration was
+//      lost still looks present — see `forceReadd`;
 //    • a background loop: quick bounded backoff while anything is missing, then a
 //      slow verification pass, so a flushed Redis heals without a redeploy;
 //    • a status snapshot that readiness reports by schedule NAME.
@@ -169,8 +172,14 @@ export type CronReconciler = {
   stop(): void
   /** One pass (single-flight: concurrent callers share the in-flight pass). */
   reconcileOnce(): Promise<CronStatus>
-  /** Bring the next pass forward (never pushes it later). */
-  requestReconcile(delayMs: number): void
+  /**
+   * Bring the next pass forward (never pushes it later). `forceReadd` latches a
+   * REPAIR: the next pass re-adds every schedule instead of only the absent
+   * ones. The latch is set BEFORE every early return, so a repair asked for
+   * while a pass is already in flight is honoured by the following pass rather
+   * than dropped.
+   */
+  requestReconcile(delayMs: number, opts?: { forceReadd?: boolean }): void
   status(): CronStatus
 }
 
@@ -243,6 +252,30 @@ export function createCronReconciler(opts: CronReconcilerOptions): CronReconcile
   let timerDueAt: number | null = null
   let inFlight: Promise<CronStatus> | null = null
   let consecutiveFailures = 0
+  // ── Repair mode: presence is not liveness ──────────────────────────────
+  // When BullMQ cannot create a repeatable's NEXT iteration it emits 'Failed to
+  // add repeatable job for next iteration' and then schedules nothing further
+  // (worker.js nextJobFromJobData), but it leaves the `repeat` ZSET member and
+  // the repeat:<key> hash untouched — only the DELAYED job is gone. So
+  // getRepeatableJobs() still returns a fully matching entry for a schedule that
+  // will never fire again: a presence-only pass can neither see it nor fix it,
+  // and readiness would keep reporting it registered.
+  //
+  // The repair is a plain re-add of the identical schedule. queue.add(name,
+  // data, { repeat, jobId }) routes through updateRepeatableJob({override:true})
+  // → addRepeatableJob-2.lua, which ZADDs the SAME md5 member (one ZSET entry,
+  // so no duplicate schedule), and createNextJob() then recreates the delayed
+  // job under the deterministic id repeat:<key>:<nextMillis> computed from the
+  // cron pattern — the instant the lost occurrence would have had. Nothing
+  // drifts and nothing fires twice.
+  //
+  // LATCHED, not per-pass: re-adding on every pass would also re-key an
+  // occurrence that is merely OVERDUE (due but not yet promoted), and the lua's
+  // removal branch would drop that pending run. So the unconditional re-add
+  // happens on the FIRST pass only — restoring the boot-time registration the
+  // scheduled worker did before this module existed, which is what recreated a
+  // lost delayed job on every restart — and whenever a repair is requested.
+  let forceReadd = true
 
   const redisUp = async (): Promise<boolean> => {
     try {
@@ -309,7 +342,9 @@ export function createCronReconciler(opts: CronReconcilerOptions): CronReconcile
       }
     } else {
       // Nothing verified this pass: what was verified before stays; everything
-      // never verified is missing.
+      // never verified is missing. A repair this pass may have consumed could
+      // not be proven, so re-arm it — a repair is never lost to an outage.
+      forceReadd = true
       registered = current.registered.filter((n) => schedules.some((s) => s.name === n))
       missing = schedules.map((s) => s.name).filter((n) => !registered.includes(n))
     }
@@ -369,14 +404,19 @@ export function createCronReconciler(opts: CronReconcilerOptions): CronReconcile
       return finish(passAt, null, errors)
     }
 
-    // 3) Per schedule, isolated: add when absent, then prune same-name entries
-    //    whose pattern or tz differ. Adding first means a failed add never
-    //    leaves a name with no schedule at all. Unmanaged names are never touched.
+    // 3) Per schedule, isolated: add when absent — or unconditionally when a
+    //    repair is latched — then prune same-name entries whose pattern or tz
+    //    differ. Adding first means a failed add never leaves a name with no
+    //    schedule at all. Unmanaged names are never touched.
+    //    The latch is taken ONCE here, after the gates above, so a pass that
+    //    never reached the queue leaves the repair pending for the next one.
+    const force = forceReadd
+    forceReadd = false
     let wrote = false
     for (const s of schedules) {
       try {
         const sameName = existing.filter((r) => r.name === s.name)
-        if (!sameName.some((r) => sameSchedule(r, s))) {
+        if (force || !sameName.some((r) => sameSchedule(r, s))) {
           await addWithRetry(s)
           wrote = true
         }
@@ -393,8 +433,12 @@ export function createCronReconciler(opts: CronReconcilerOptions): CronReconcile
           }
         }
       } catch (err) {
+        // A latched repair whose add did not land stays pending; without this it
+        // would be silently consumed by the pass that failed to apply it.
+        if (force) forceReadd = true
         errors.push({ name: s.name, message: messageOf(err) })
         if (err instanceof RedisUnavailable) {
+          forceReadd = true
           errors.push({ name: 'redis', message: 'redis stopped answering PING; remaining schedules not attempted this pass' })
           break
         }
@@ -449,7 +493,11 @@ export function createCronReconciler(opts: CronReconcilerOptions): CronReconcile
       current = { ...current, nextPassAt: null }
     },
     reconcileOnce,
-    requestReconcile(delayMs: number) {
+    requestReconcile(delayMs: number, opts?: { forceReadd?: boolean }) {
+      // Latch FIRST: a repair requested while a pass is in flight (exactly when
+      // BullMQ's error fires — Redis trouble is also when a pass is most likely
+      // running) must be honoured by the next pass, not dropped with the timer.
+      if (opts?.forceReadd) forceReadd = true
       if (stopped || !started) return
       if (inFlight) return
       if (timerDueAt !== null && timerDueAt <= now() + delayMs) return

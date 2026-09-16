@@ -163,15 +163,24 @@ export function evaluateEmailDelivery(counts: QueueWorkerCounts): EmailDeliveryV
  * concurrent callers, so a polled health endpoint cannot multiply Redis or
  * Postgres work. A rejected load is not cached.
  */
-export function singleFlightCache<T>(load: () => Promise<T>, ttlMs: number, now: () => number = Date.now): () => Promise<T> {
-  let cached: { at: number; value: T } | null = null
+export function singleFlightCache<T>(
+  load: () => Promise<T>,
+  ttlMs: number,
+  now: () => number = Date.now,
+  // Per-VALUE lifetime. A window that answered nothing must not be pinned for
+  // the full TTL: one slow CLIENT LIST would hold public readiness at 503 long
+  // after Redis recovered. Defaults to the flat TTL, so existing callers are
+  // unchanged.
+  ttlFor: (value: T) => number = () => ttlMs
+): () => Promise<T> {
+  let cached: { at: number; ttl: number; value: T } | null = null
   let inFlight: Promise<T> | null = null
   return () => {
-    if (cached && now() - cached.at < ttlMs) return Promise.resolve(cached.value)
+    if (cached && now() - cached.at < cached.ttl) return Promise.resolve(cached.value)
     if (inFlight) return inFlight
     inFlight = load()
       .then((value) => {
-        cached = { at: now(), value }
+        cached = { at: now(), ttl: ttlFor(value), value }
         return value
       })
       .finally(() => {

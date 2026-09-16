@@ -434,7 +434,13 @@ table. Never edit an applied migration — production records its checksum.
 No migration writes a row and none backfills. Each file's header carries its own
 rationale and rollback SQL.
 
-**Order matters, and it is not the same for all three.**
+**All three go in together, before the merge.** `prisma migrate deploy` applies
+every pending migration in directory-name order and has no per-migration
+selector, so a two-phase split is not executable with it — `…120000` lands
+first whatever the intent. That is the safer outcome anyway: under the OLD code
+the unguarded dispatch race sends a campaign's recipients twice, while with the
+index in place a concurrent create surfaces as a `P2002` the admin sees. Both
+services then pick up the new code minutes later on merge.
 
 1. **Read-only preflight first.** Run `scripts/campaign-run-duplicate-preflight.sql`
    against production. Queries 1 and 2 **must** return zero rows. If query 1
@@ -443,20 +449,15 @@ rationale and rollback SQL.
    settle, and re-run the preflight. Query 6 counts existing
    `SUPPRESSED / 'suppression_read_failed'` recipients for the owner — re-opening
    any of them is a separate, deliberate decision, not part of this release.
-2. **Apply `…120100` (recipient columns) and `…120200` (retry table) BEFORE
-   either service runs the new code — therefore before the PR merges**, because
+2. **Apply all three with one `migrate deploy` BEFORE the PR merges**, because
    Railway auto-deploys on merge. The regenerated Prisma client selects
    `next_attempt_at` / `transient_attempts`, and an unmigrated database throws
    `P2022` on any default-select read of `email_campaign_recipients`. Until the
    retry table exists, a failed enqueue logs `LIFECYCLE_ENQUEUE_LOST` instead of
-   being recorded.
-3. **Apply `…120000` (the run-slot index) AFTER both services are confirmed on
-   the new code.** Once both run it, the advisory lock already serialises every
-   dispatch; landing the index while the OLD code still runs would surface a
-   concurrent create as an uncaught `P2002` (a 500 for the admin, a failed sweep
-   job). The duplicate-dispatch race stays open until both services are updated,
-   so do not leave a long gap.
-4. **If `…120000` fails** (production already holds two unfinished runs for one
+   being recorded. Between the migration and the merge, the only new exposure is
+   that a concurrent dispatch under the old code raises `P2002` instead of
+   silently creating a second run — so keep the gap short.
+3. **If `…120000` fails** (production already holds two unfinished runs for one
    campaign) `prisma migrate deploy` records it FAILED and blocks every later
    deploy. After resolving the duplicates, run
    `npx prisma migrate resolve --rolled-back 20260915120000_campaign_run_single_unfinished`

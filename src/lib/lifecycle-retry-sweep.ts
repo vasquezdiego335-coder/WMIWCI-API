@@ -103,6 +103,13 @@ let _defaultDeps: LifecycleRetrySweepDeps | undefined
 async function defaultSweepDeps(): Promise<LifecycleRetrySweepDeps> {
   if (_defaultDeps) return _defaultDeps
   // Lazy: importing the sweep must never construct a queue.
+  //
+  // The row's queue_name is the literal its caller passed to enqueueDurable, so
+  // this map is the ONLY thing that turns it back into a queue. An unrecognised
+  // name is an error (abandonedUnroutable + log.error below) and never a
+  // default: routing a discord/marketing job onto `scheduled` would hand it to a
+  // worker whose dispatch warns "unknown job type" and then COMPLETES it, which
+  // reports the row as repaired while the card is silently gone.
   const queues = await import('./queues')
   const byName: Record<string, QueueLike> = {
     scheduled: queues.scheduledQueue,

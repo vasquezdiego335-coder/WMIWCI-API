@@ -46,7 +46,16 @@ try {
   tsxCli = fileURLToPath(new URL(rel, tsxPkgUrl))
 } catch {
   // A hoisted install (tsx above this package) still resolves by module id.
-  tsxCli = require.resolve('tsx')
+  // MUST be 'tsx/cli': the bare 'tsx' specifier maps to dist/loader.mjs, the ESM
+  // hooks module, which ignores argv and exits 0 — the whole suite would report
+  // success having run nothing.
+  tsxCli = require.resolve('tsx/cli')
+}
+
+// Belt and brace for the same failure: only the CLI runs tests.
+if (!/[\\/]cli\.(mjs|cjs)$/.test(tsxCli)) {
+  console.error(`resolved tsx entry is not the CLI, refusing to report a vacuous pass: ${tsxCli}`)
+  process.exit(1)
 }
 
 const passthrough = process.argv.slice(2)

@@ -25,6 +25,16 @@
 --
 --  Additive only: a new table and its indexes. No existing table is touched.
 --
+--  RE-RUNNABLE, like its two siblings in this release (…120000 and …120100,
+--  which use IF NOT EXISTS throughout). Any route that reaches this file with
+--  the objects already present — a statement applied by hand during an incident,
+--  a re-run after a partially applied deploy — would otherwise abort with
+--  `relation "lifecycle_enqueue_retries" already exists`; `migrate deploy` then
+--  records the migration FAILED and blocks every later deploy until someone runs
+--  `migrate resolve --rolled-back`. These indexes are built non-concurrently
+--  inside the same transaction as the table, so IF NOT EXISTS cannot mask an
+--  INVALID index the way it could after a failed CREATE INDEX CONCURRENTLY.
+--
 --  Rollback:
 --    DROP TABLE IF EXISTS "lifecycle_enqueue_retries";
 --  (drops the table and its indexes; the application code must be rolled back
@@ -32,7 +42,7 @@
 -- ═══════════════════════════════════════════════════════════════════════════
 
 -- CreateTable
-CREATE TABLE "lifecycle_enqueue_retries" (
+CREATE TABLE IF NOT EXISTS "lifecycle_enqueue_retries" (
     "id" TEXT NOT NULL,
     "queue_name" TEXT NOT NULL,
     "job_name" TEXT NOT NULL,
@@ -55,10 +65,10 @@ CREATE TABLE "lifecycle_enqueue_retries" (
 );
 
 -- CreateIndex
-CREATE UNIQUE INDEX "lifecycle_enqueue_retries_job_id_key" ON "lifecycle_enqueue_retries"("job_id");
+CREATE UNIQUE INDEX IF NOT EXISTS "lifecycle_enqueue_retries_job_id_key" ON "lifecycle_enqueue_retries"("job_id");
 
 -- CreateIndex
-CREATE INDEX "lifecycle_enqueue_retries_status_next_attempt_at_idx" ON "lifecycle_enqueue_retries"("status", "next_attempt_at");
+CREATE INDEX IF NOT EXISTS "lifecycle_enqueue_retries_status_next_attempt_at_idx" ON "lifecycle_enqueue_retries"("status", "next_attempt_at");
 
 -- CreateIndex
-CREATE INDEX "lifecycle_enqueue_retries_subject_type_subject_id_idx" ON "lifecycle_enqueue_retries"("subject_type", "subject_id");
+CREATE INDEX IF NOT EXISTS "lifecycle_enqueue_retries_subject_type_subject_id_idx" ON "lifecycle_enqueue_retries"("subject_type", "subject_id");

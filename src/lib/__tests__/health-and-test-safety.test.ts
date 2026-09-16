@@ -138,7 +138,10 @@ test('API health: PINGs Redis and reports email-queue worker attachment and the 
   // 2026-09-15: a required queue with no consumer is not ready.
   assert.ok(/const ok = [^\n]*&& emailDelivery\.ready/.test(src), 'email-delivery worker attachment must be part of API readiness')
   assert.ok(/const counts = redis\.ok \? await queueWorkers\(\)/.test(src), 'worker counts are not asked while Redis is down')
-  assert.ok(/singleFlightCache\(loadQueueWorkers, 10_000\)/.test(src), 'worker counts are cached and single-flight')
+  assert.ok(/singleFlightCache\(loadQueueWorkers, WORKER_COUNT_TTL_MS/.test(src), 'worker counts are cached and single-flight')
+  // An UNKNOWN window is retried in a second: "unknown" still fails readiness,
+  // but a single slow CLIENT LIST must not hold 503 for the full interval.
+  assert.ok(/WORKER_COUNT_UNKNOWN_TTL_MS/.test(src) && /every\(\(c\) => c === null\)/.test(src), 'an unknown worker-count window gets a short retry TTL')
   for (const q of ['emailQueue', 'scheduledQueue', 'webhookRetryQueue', 'discordQueue']) assert.ok(src.includes(`count(${q})`), `${q} must be counted`)
 })
 

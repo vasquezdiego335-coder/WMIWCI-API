@@ -356,6 +356,15 @@ const errText = (err: unknown) => (err instanceof Error ? err.message : String(e
 
 export type DurableEnqueueInput = {
   queue: QueueLike
+  /**
+   * The queue's name, supplied by the CALLER as a literal — never read off
+   * `queue`. A lazily-constructed queue that could not be built (REDIS_URL
+   * missing) throws on EVERY property read, including `.name`, and that is
+   * exactly when a row is written. Inferring the name there guessed the route
+   * for the only rows that ever take this path, and the sweep then delivered a
+   * discord/marketing job to the scheduled worker, which warns and completes it.
+   */
+  queueName: string
   /** BullMQ job name. */
   name: string
   /** The job data EXACTLY as the worker should receive it. */
@@ -403,14 +412,9 @@ export async function enqueueDurable(input: DurableEnqueueInput, edge: DurableEn
     failure = errText(err)
   }
 
-  // Resolve the queue name defensively: a lazily-constructed queue that could
-  // not be built must still leave a row the sweep can route.
-  let queueName: string
-  try {
-    queueName = input.queue.name
-  } catch {
-    queueName = 'scheduled'
-  }
+  // The caller named its queue (see DurableEnqueueInput.queueName): the object
+  // that just refused the add is never asked what it is.
+  const queueName = input.queueName
 
   const logCtx = { path: input.path, jobId: input.jobId, queue: queueName, subjectType: input.subjectType, subjectId: input.subjectId }
   try {

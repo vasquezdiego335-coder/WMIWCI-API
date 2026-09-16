@@ -802,14 +802,16 @@ export function startScheduledWorker() {
   })
 
   // BullMQ emits 'Failed to add repeatable job for next iteration' (and then
-  // schedules NO next run) when it cannot create a repeatable's next iteration:
-  // bring the next verification forward so the schedule is repaired. The worker
+  // schedules NO next run) when it cannot create a repeatable's next iteration.
+  // The repeat entry itself survives, so the schedule still LOOKS registered and
+  // a presence check would repair nothing: ask for a FORCED reconcile, which
+  // re-adds every schedule and so recreates the lost delayed job. The worker
   // host attaches its own rate-limited error log; when this is the only listener
   // (the dev entrypoint) log here, rate-limited, so errors are never swallowed.
   worker.on('error', (err) => {
     const message = err instanceof Error ? err.message : String(err)
     if (/Failed to add repeatable job for next iteration/.test(message)) {
-      cronReconciler?.requestReconcile(5_000)
+      cronReconciler?.requestReconcile(5_000, { forceReadd: true })
     }
     if (worker.listenerCount('error') === 1 && scheduledErrorLog(message).log) {
       queueLogger.error({ queue: 'scheduled', err: sanitizeRedisError(message) }, 'Scheduled worker error')

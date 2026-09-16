@@ -125,7 +125,15 @@ async function loadQueueWorkers(): Promise<QueueWorkerCounts> {
     if (timer) clearTimeout(timer)
   }
 }
-const queueWorkers = singleFlightCache(loadQueueWorkers, 10_000)
+// A window that ANSWERED is cached for the full interval; one that could not
+// read the counts is retried a second later. "Unknown" still reads as not
+// ready — but a single slow CLIENT LIST must not pin this endpoint at 503 for
+// ten seconds after Redis has already recovered.
+const WORKER_COUNT_TTL_MS = 10_000
+const WORKER_COUNT_UNKNOWN_TTL_MS = 1_000
+const queueWorkers = singleFlightCache(loadQueueWorkers, WORKER_COUNT_TTL_MS, Date.now, (counts) =>
+  Object.values(counts).every((c) => c === null) ? WORKER_COUNT_UNKNOWN_TTL_MS : WORKER_COUNT_TTL_MS
+)
 
 // GET /api/health — readiness probe (GET /api/health/live is pure liveness).
 // Returns 200 when the DB is reachable AND Redis answers a PING AND all required

@@ -725,7 +725,8 @@ test('API health reports email delivery in its status, and /api/health/live stay
   assert.ok(/const ok = db === 'connected' && redis\.ok/.test(route), 'the existing API dependencies still decide readiness')
   assert.ok(/&& emailDelivery\.ready/.test(route), 'a required queue with no consumer must degrade API readiness')
   assert.ok(/status: ok \? 200 : 503/.test(route), 'and the HTTP code with it')
-  assert.ok(/singleFlightCache\(loadQueueWorkers, 10_000\)/.test(route), 'CLIENT LIST runs on Redis’s main thread: cache it')
+  assert.ok(/singleFlightCache\(loadQueueWorkers, WORKER_COUNT_TTL_MS/.test(route), 'CLIENT LIST runs on Redis’s main thread: cache it')
+  assert.ok(/WORKER_COUNT_UNKNOWN_TTL_MS/.test(route), 'but a window that answered nothing is retried quickly, not pinned at 503')
   assert.ok(/redis\.ok \? await queueWorkers\(\)/.test(route), 'worker counts are not asked while Redis is down')
 
   const live = readSrc('app/api/health/live/route.ts')
@@ -758,4 +759,36 @@ test('the worker-count cache is single-flight and does not cache a failure', asy
   clock += 10_001
   await cached()
   assert.equal(calls, 3, 'and re-read after it')
+})
+
+test('singleFlightCache: an UNKNOWN value can be given a shorter lifetime than a known one', async () => {
+  // The health route uses this so one slow CLIENT LIST cannot pin readiness at
+  // 503 for the full ten seconds after Redis has recovered.
+  let clock = 1_000_000
+  let calls = 0
+  let value: number | null = null
+  const cached = singleFlightCache(
+    async () => {
+      calls++
+      return value
+    },
+    10_000,
+    () => clock,
+    (v) => (v === null ? 1_000 : 10_000),
+  )
+
+  assert.equal(await cached(), null)
+  assert.equal(calls, 1)
+  clock += 1_001
+  value = 7
+  assert.equal(await cached(), 7, 'the unknown window expired after its short TTL')
+  assert.equal(calls, 2)
+
+  clock += 1_001
+  value = 9
+  assert.equal(await cached(), 7, 'a KNOWN value keeps the full TTL')
+  assert.equal(calls, 2)
+  clock += 9_000
+  assert.equal(await cached(), 9)
+  assert.equal(calls, 3)
 })
