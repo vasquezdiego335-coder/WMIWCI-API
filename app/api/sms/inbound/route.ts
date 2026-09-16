@@ -3,9 +3,16 @@ import { prisma } from '@/lib/db'
 import { apiLogger } from '@/lib/logger'
 
 // ════════════════════════════════════════════════════════════════════════
-//  Twilio inbound-SMS webhook — TCPA opt-out / opt-in.
+//  Inbound-SMS webhook (Twilio shape) — TCPA opt-out / opt-in, RECORD ONLY.
 //  ----------------------------------------------------------------------
-//  Point a Twilio number's "A MESSAGE COMES IN" webhook at POST /api/sms/inbound.
+//  THIS APP SENDS NO SMS (owner decision 2026-09-15: the Twilio worker, the
+//  `sms` queue and every customer text were deleted). This route survives so a
+//  STOP sent to the business number is still honoured in OUR state. It writes a
+//  flag and replies with empty TwiML; it never sends anything, and it is not an
+//  active messaging channel.
+//
+//  If a number is still pointed here, its "A MESSAGE COMES IN" webhook is
+//  POST /api/sms/inbound.
 //  STOP-family keywords set Customer.marketingOptOut = true (Phase-3 follow-ups
 //  are then suppressed); START-family keywords clear it. Twilio also enforces
 //  STOP at the carrier level — this just keeps OUR state in sync so we never even

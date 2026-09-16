@@ -41,6 +41,18 @@ import ReviewRequestEmail from '../emails/review-request'
 import ReferralEmail from '../emails/referral'
 import QuoteFollowupEmail from '../emails/quote-followup'
 import { C } from '../emails/_ui'
+import {
+  defaultRetryStore,
+  emptySummary,
+  enqueueDurable,
+  logScheduleSummary,
+  retryWindowFor,
+  tally,
+  type EnqueueResult,
+  type QueueLike,
+  type RetryStore,
+  type ScheduleSummary,
+} from './lifecycle-enqueue'
 
 const log = queueLogger.child({ mod: 'followups' })
 
@@ -97,7 +109,7 @@ const DAY = 24 * HOUR
 
 // Delays from completion. referral-ask here is the FALLBACK; a positive review
 // schedules its own referral-ask +24h, deduped by the ledger's unique key.
-const COMPLETION_DELAYS: Array<{ type: FollowupType; delay: number }> = [
+export const COMPLETION_DELAYS: Array<{ type: FollowupType; delay: number }> = [
   { type: 'review-request', delay: 2 * HOUR },
   { type: 'review-reminder', delay: 48 * HOUR },
   { type: 'referral-ask', delay: 5 * DAY },
@@ -119,8 +131,9 @@ function inQuietHours(d: Date): boolean {
   return h < QUIET_END || h >= QUIET_START
 }
 
-/** Walk a fire time forward in 1h steps until it lands in the allowed window. */
-function shiftIntoAllowedHours(target: Date): Date {
+/** Walk a fire time forward in 1h steps until it lands in the allowed window.
+ *  Exported so the lifecycle retry sweep re-applies EXACTLY this shift. */
+export function shiftIntoAllowedHours(target: Date): Date {
   const t = new Date(target.getTime())
   for (let i = 0; i < 48 && inQuietHours(t); i++) {
     t.setTime(t.getTime() + HOUR)
@@ -132,35 +145,87 @@ function msUntilAllowed(now = new Date()): number {
   return inQuietHours(now) ? shiftIntoAllowedHours(now).getTime() - now.getTime() : 0
 }
 
-// ── guarded queue add (a Redis stall must not hang the caller) ──────────
-async function addScheduled(type: FollowupType, bookingId: string, delay: number, jobId: string): Promise<void> {
-  await Promise.race([
-    scheduledQueue.add(type, { type, bookingId }, { delay: Math.max(0, delay), jobId }),
-    new Promise((_, reject) => setTimeout(() => reject(new Error('scheduledQueue.add timed out (Redis?)')), 5000)),
-  ])
-}
+// ── DURABLE queue add (production reliability release 2026-09-15) ───────
+//  The add is still time-boxed so a Redis stall cannot hang the caller, but a
+//  failure is no longer swallowed into a "non-fatal" warn: the exact job is
+//  recorded in lifecycle_enqueue_retries and the hourly lifecycle-repair sweep
+//  re-adds it under the same id (see lifecycle-enqueue.ts). runFollowup re-runs
+//  every gate when it fires, and the ledger claim stops a double send.
 
-async function enqueueFollowup(bookingId: string, type: FollowupType, fireAt: Date): Promise<void> {
-  const allowed = shiftIntoAllowedHours(fireAt)
-  const delay = allowed.getTime() - Date.now()
-  // Stable jobId => a second completion trigger can't create a duplicate job.
-  await addScheduled(type, bookingId, delay, `followup__${type}__${bookingId}`).catch((err) =>
-    log.warn({ err: err instanceof Error ? err.message : String(err), bookingId, type }, 'enqueue follow-up failed (non-fatal)')
+/** The queue + retry-store edge, injectable so the failure path is testable. */
+export type FollowupQueueEdge = { queue?: QueueLike; store?: RetryStore; now?: () => Date }
+
+async function addScheduled(
+  type: FollowupType,
+  bookingId: string,
+  fireAt: Date,
+  jobId: string,
+  edge: FollowupQueueEdge = {}
+): Promise<EnqueueResult> {
+  // Every FollowupType has a policy entry (lifecycle-enqueue STAGE_POLICY).
+  const window = retryWindowFor(type, fireAt)
+  return enqueueDurable(
+    {
+      queue: edge.queue ?? scheduledQueue,
+      name: type,
+      data: { type, bookingId },
+      jobId,
+      fireAt,
+      notAfter: window ? window.notAfter : fireAt,
+      path: 'post-job-followup',
+      subjectType: 'booking',
+      subjectId: bookingId,
+    },
+    { store: edge.store ?? defaultRetryStore(), now: edge.now, shift: shiftIntoAllowedHours }
   )
 }
 
+/** Schedule one follow-up stage. Quiet-hours-shifted; never throws. */
+export async function enqueueFollowupJob(
+  bookingId: string,
+  type: FollowupType,
+  fireAt: Date,
+  edge: FollowupQueueEdge = {}
+): Promise<EnqueueResult> {
+  // Stable jobId => a second completion trigger can't create a duplicate job.
+  return addScheduled(type, bookingId, fireAt, `followup__${type}__${bookingId}`, edge)
+}
+
 // ── public: schedule the post-completion sequence ───────────────────────
+/** The effects onBookingCompleted has on the world, injectable for tests. */
+export type FollowupScheduleDeps = {
+  now(): Date
+  stampCompleted(bookingId: string): Promise<void>
+  marketingBlock(bookingId: string): Promise<string | null>
+  edge: FollowupQueueEdge
+}
+
+export function defaultFollowupScheduleDeps(): FollowupScheduleDeps {
+  return {
+    now: () => new Date(),
+    async stampCompleted(bookingId) {
+      // First completion wins — never reset the anchor time on a re-trigger.
+      await prisma.booking
+        .updateMany({ where: { id: bookingId, completedAt: null }, data: { completedAt: new Date() } })
+        .catch((err) => log.warn({ err: String(err), bookingId }, 'stamp completedAt failed (non-fatal)'))
+    },
+    marketingBlock: bookingMarketingBlockReason,
+    edge: {},
+  }
+}
+
 /** Stamp completedAt (once) and schedule the follow-up sequence. Idempotent:
- *  stable jobIds dedupe at the queue and the ledger dedupes the actual sends. */
-export async function onBookingCompleted(bookingId: string): Promise<void> {
-  // First completion wins — never reset the anchor time on a re-trigger.
-  await prisma.booking
-    .updateMany({ where: { id: bookingId, completedAt: null }, data: { completedAt: new Date() } })
-    .catch((err) => log.warn({ err: String(err), bookingId }, 'stamp completedAt failed (non-fatal)'))
+ *  stable jobIds dedupe at the queue and the ledger dedupes the actual sends.
+ *  Returns what actually happened to the stages (null = nothing attempted). */
+export async function onBookingCompleted(
+  bookingId: string,
+  deps: FollowupScheduleDeps = defaultFollowupScheduleDeps()
+): Promise<ScheduleSummary | null> {
+  await deps.stampCompleted(bookingId)
 
   if (!FOLLOWUPS_ENABLED) {
     log.info({ bookingId }, 'MARKETING_FOLLOWUPS_ENABLED!=true — not scheduling follow-ups')
-    return
+    return null
   }
 
   // PROMOTIONAL CONSENT (owner spec 2026-08-06). Every stage of this sequence —
@@ -172,19 +237,24 @@ export async function onBookingCompleted(bookingId: string): Promise<void> {
   //
   // The stamp of `completedAt` above deliberately happens FIRST and
   // unconditionally: completion is a fact about the job, not about marketing.
-  const consentBlock = await bookingMarketingBlockReason(bookingId)
+  const consentBlock = await deps.marketingBlock(bookingId)
   if (consentBlock) {
     log.info({ bookingId, reason: consentBlock }, 'no promotional consent — post-move follow-ups not scheduled')
-    return
+    return null
   }
 
-  const now = Date.now()
+  const now = deps.now().getTime()
   // Enqueue in parallel (each self-guarded) so a Redis stall bounds the caller
   // to ~5s, not 4×5s — the admin "mark complete" request awaits this.
-  await Promise.all(
-    COMPLETION_DELAYS.map(({ type, delay }) => enqueueFollowup(bookingId, type, new Date(now + delay)))
+  const results = await Promise.all(
+    COMPLETION_DELAYS.map(({ type, delay }) =>
+      enqueueFollowupJob(bookingId, type, new Date(now + delay), { now: deps.now, ...deps.edge })
+    )
   )
-  log.info({ bookingId }, 'completion follow-ups scheduled')
+  // "scheduled" only when all four were (2026-09-15).
+  const summary = results.reduce<ScheduleSummary>((acc, r) => tally(acc, r.status), emptySummary())
+  logScheduleSummary(log, { bookingId }, 'completion follow-ups', summary)
+  return summary
 }
 
 // ── public: record a review; a positive one triggers ONE referral ask ───
@@ -210,7 +280,8 @@ export async function recordReviewAndMaybeReferral(input: {
     if (eligibility.eligible) {
       // Space the ask 24h after the review; shares the 'referral-ask' ledger type,
       // so the day-5 fallback won't also fire (at most one referral per booking).
-      await enqueueFollowup(input.bookingId, 'referral-ask', new Date(Date.now() + DAY))
+      const r = await enqueueFollowupJob(input.bookingId, 'referral-ask', new Date(Date.now() + DAY))
+      logScheduleSummary(log, { bookingId: input.bookingId }, 'positive-review referral ask', tally(emptySummary(), r.status))
     } else {
       log.info({ bookingId: input.bookingId, reason: eligibility.reason }, 'positive review, but referral not eligible')
     }
@@ -463,6 +534,32 @@ function buildMessage(
   }
 }
 
+/**
+ * The quiet-hours deferral re-add. It used to be `.catch(() => {})`: with no
+ * ledger row claimed yet, a failed re-add completed the job "successfully" and
+ * the follow-up was gone for good, with nothing recording it (2026-09-15).
+ *
+ *   scheduled           -> 'deferred-quiet-hours'
+ *   recorded_for_retry  -> 'deferred-quiet-hours:recorded-for-retry' (the sweep re-adds it)
+ *   lost                -> THROWS, so BullMQ's own retry runs this job again
+ *                          (still no ledger row, so nothing is claimed twice)
+ */
+export async function deferFollowupForQuietHours(
+  bookingId: string,
+  type: FollowupType,
+  waitMs: number,
+  edge: FollowupQueueEdge = {}
+): Promise<string> {
+  const now = edge.now ? edge.now() : new Date()
+  const r = await addScheduled(type, bookingId, new Date(now.getTime() + waitMs), `followup__${type}__${bookingId}__retry`, edge)
+  if (r.status === 'scheduled') return 'deferred-quiet-hours'
+  if (r.status === 'recorded_for_retry') {
+    log.warn({ bookingId, type }, 'quiet-hours deferral NOT scheduled — recorded for retry by lifecycle-repair')
+    return 'deferred-quiet-hours:recorded-for-retry'
+  }
+  throw new Error(`quiet-hours deferral for ${type} could not be enqueued or recorded (LIFECYCLE_ENQUEUE_LOST)`)
+}
+
 // ── public: process one follow-up (called by the scheduled worker) ──────
 export async function runFollowup(bookingId: string, type: FollowupType): Promise<string> {
   if (!FOLLOWUPS_ENABLED) return 'disabled'
@@ -523,10 +620,7 @@ export async function runFollowup(bookingId: string, type: FollowupType): Promis
 
   // Quiet hours — defer into the allowed window rather than sending now.
   const wait = msUntilAllowed()
-  if (wait > 0) {
-    await addScheduled(type, bookingId, wait, `followup__${type}__${bookingId}__retry`).catch(() => {})
-    return 'deferred-quiet-hours'
-  }
+  if (wait > 0) return deferFollowupForQuietHours(bookingId, type, wait)
 
   // Frequency caps (per customer).
   if (!(await withinFrequencyCaps(customer.id, { bookingId, type }))) return recordSkip(bookingId, type, 'rate-capped')

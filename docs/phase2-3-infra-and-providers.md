@@ -1,5 +1,13 @@
 # Phase 2 + Phase 3 — Architecture, Hosting, Deployment & SMS Providers
 
+> ## ⚠️ HISTORICAL (pre-2026-09-15)
+> A design-time document. Its hosting diagram (**Vercel** for the API,
+> **Upstash** Redis) and its whole SMS/Twilio provider comparison describe things
+> that no longer exist: the API runs on Railway, Redis is Railway Redis, and
+> **SMS was removed on 2026-09-15** (no Twilio worker, no `sms` queue,
+> `/api/sms/inbound` records STOP/START only). Current topology:
+> **[`DEPLOY.md`](../DEPLOY.md)**.
+
 > Architecture designed by **DeepSeek** (the `deepseek-chat` architect pass), implemented and
 > reconciled by Claude. The one material correction DeepSeek made to the original spec: the
 > **referral ask is NOT sent at payment** (texting a referral request the instant a $49 hold is

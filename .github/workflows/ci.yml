@@ -128,16 +128,43 @@ jobs:
       #  recorded on the job's throwaway database just before the test suite
       #  (bootstrap-fresh-database.sh). Applying them to production is still a
       #  separate, reviewed deploy step.
-      - name: Migration files are readable and named consistently
+      #
+      #  The ORDERING check is what makes the bootstrap honest. The baseline
+      #  represents exactly the names in prisma/baseline/REPRESENTED_MIGRATIONS.txt;
+      #  everything else is EXECUTED by `migrate deploy`. A rebased branch that
+      #  added a migration whose timestamp sorts BEFORE the last represented name
+      #  would be applied to production by `migrate deploy` (Prisma orders by
+      #  directory name) but would never run here, because the bootstrap records
+      #  the earlier ones first. Requiring every unlisted migration to sort after
+      #  the last listed one keeps CI's database and production's in the same order.
+      - name: Migration files are readable, named consistently and ordered after the baseline
         run: |
           set -euo pipefail
+          LC_ALL=C
+          export LC_ALL
+          sed -e 's/\r$//' -e 's/#.*//' -e 's/[[:space:]]*$//' prisma/baseline/REPRESENTED_MIGRATIONS.txt \
+            | grep -v '^$' | sort > /tmp/represented.txt
+          test -s /tmp/represented.txt \
+            || { echo "::error::prisma/baseline/REPRESENTED_MIGRATIONS.txt lists no migrations"; exit 1; }
+          LAST_REPRESENTED=$(tail -n 1 /tmp/represented.txt)
+          echo "baseline represents $(wc -l < /tmp/represented.txt) migration(s), last: $LAST_REPRESENTED"
           for d in prisma/migrations/*/; do
             [ "$d" = "prisma/migrations/*/" ] && continue
             test -f "$d/migration.sql" || { echo "::error::$d has no migration.sql"; exit 1; }
             base=$(basename "$d")
             echo "$base" | grep -Eq '^[0-9]{14}_[a-z0-9_]+$' \
               || { echo "::error::migration $base does not match <14-digit timestamp>_<snake_case>"; exit 1; }
+            if ! grep -Fxq "$base" /tmp/represented.txt; then
+              if ! [ "$base" \> "$LAST_REPRESENTED" ]; then
+                echo "::error::migration $base is not represented by the baseline but sorts at or before $LAST_REPRESENTED — it would never be executed in CI. Give it a timestamp after the last represented migration."
+                exit 1
+              fi
+            fi
           done
+          while read -r name; do
+            test -f "prisma/migrations/$name/migration.sql" \
+              || { echo "::error::REPRESENTED_MIGRATIONS.txt lists $name but prisma/migrations/$name/migration.sql does not exist"; exit 1; }
+          done < /tmp/represented.txt
 
       - name: Typecheck
         # `npm run typecheck`, never `npx tsc`: the script resolves the
@@ -154,6 +181,12 @@ jobs:
       # passes on its own.
       # Only the test suite needs the database, so a database setup problem
       # (not a code defect) can never hide typecheck, lint or build results.
+      #
+      # The bootstrap records only the migrations the baseline already contains
+      # (prisma/baseline/REPRESENTED_MIGRATIONS.txt) and then runs a real
+      # `prisma migrate deploy`, so every NEW migration's SQL actually executes
+      # here and a broken one fails this step. It also verifies afterwards that
+      # the objects Prisma cannot express in schema.prisma exist.
       - name: Build the disposable test database from source control
         run: |
           set -euo pipefail

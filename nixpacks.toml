@@ -1,15 +1,24 @@
-# Railway build + start config for the ADMIN service (wonderful-strength).
-# Serves ONLY the Next.js admin dashboard. The BullMQ workers + Discord bot
-# run in the SEPARATE worker service (patient-communication) via host:start —
-# do NOT run them here too, or the Discord bot logs in twice and customers get
-# duplicate emails/SMS.
+# Railway build + start config for the API service "wonderful-strength"
+# (project earnest-solace). Serves the Next.js API routes + the admin dashboard.
+# It PRODUCES queue jobs and never consumes one.
 #
-# NOTE: the worker service overrides build/start in its own Railway UI settings,
-# so this file only governs the admin service.
+# The BullMQ workers, the recurring schedules and the Discord bot run in the
+# SEPARATE worker service "discord workers" (project patient-communication) via
+# host:start — do NOT run them here too, or the Discord bot logs in twice and
+# customers get duplicate emails.
+#
+# NOTE: that worker service overrides build/start in its own Railway UI settings,
+# so this file only governs the API service.
+#
+# No Healthcheck Path is configured on either service today. GET /api/health is
+# READINESS (503 when the DB, Redis, required config or a queue consumer is
+# missing); GET /api/health/live is pure liveness. See DEPLOY.md §1.
 #
 # Migrations are NOT run in the build: build-time connections to Neon are flaky
 # (advisory-lock timeouts / cold endpoint) and blocked deploys. Run migrations
 # deliberately instead:  npx prisma migrate deploy  (locally, against prod URL).
+# Use the Neon DIRECT (non "-pooler") host — PgBouncer transaction mode breaks
+# the migration advisory lock and the datasource has no directUrl. DEPLOY.md §10.
 
 [phases.build]
 cmds = ["npx prisma generate", "npx next build"]

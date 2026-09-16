@@ -10,8 +10,8 @@ import { CONSENT_VERSION, normaliseConsentSource } from '@/lib/consent'
 // ════════════════════════════════════════════════════════════════════════
 //  POST /api/notify/lead — internal, server-to-server.
 //  Called by the marketing-tracker (Railway) whenever a new lead is created,
-//  so WMIWCI-API can fan out the owner alert + customer auto-reply (SMS+email)
-//  through its existing Twilio + Resend wiring.
+//  so WMIWCI-API can fan out the owner alert + the customer auto-reply through
+//  its existing Resend wiring. EMAIL ONLY — SMS sending was removed 2026-09-15.
 //
 //  Auth: shared secret in the `x-internal-token` header, compared in constant
 //  time against INTERNAL_NOTIFY_TOKEN. Fails CLOSED (401) when the token is

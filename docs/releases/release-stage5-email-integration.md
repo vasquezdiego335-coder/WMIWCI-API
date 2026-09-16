@@ -54,6 +54,8 @@ local Postgres refuses it).
 
 Queues (all created lazily, producer side in `src/lib/queues/index.ts`):
 `email`, `sms`, `discord`, `webhook-retry`, `scheduled`, `marketing`.
+*(Historical: the `sms` queue was removed with SMS on 2026-09-15. The live list
+is `email`, `discord`, `webhook-retry`, `scheduled`, `marketing`.)*
 Job types on `marketing`: `campaign-batch`, `campaign-recipient-retry`,
 `campaign-sweep` (cron */15), `automation-stage`, `automation-sweep` (cron */15).
 

@@ -6,7 +6,7 @@ import { resolve } from 'node:path'
 import { verifySvixSignature, isHardBounce } from '../email-events'
 import { renderTemplate, renderableTemplates } from '../email-render'
 import { templateRegistry, templateByKey } from '../email-registry'
-import { recipientStateForOutcome, RECIPIENT_RETRYABLE_STATES, campaignRunEventId } from '../email-campaign-run'
+import { recipientStateForOutcome, RECIPIENT_RETRYABLE_STATES, campaignRunEventId, recipientClaimWhere } from '../email-campaign-run'
 
 // ════════════════════════════════════════════════════════════════════════
 //  SCENARIO TESTS (owner spec 2026-07-26, audit §6 "Missing tests")
@@ -178,8 +178,13 @@ test('rendered HTML escapes a hostile customer name', async () => {
 test('the recipient claim is ATOMIC and a lost race is skipped, not double-sent', () => {
   // PREVENTS: two workers processing the same batch and sending twice.
   const d = code(lib('email-campaign-dispatch.ts'))
-  assert.match(d, /updateMany\(\{\s*where: \{ id: recipient\.id, status: 'PENDING' \}/, 'the claim must filter on the CURRENT status')
+  // The claim is compare-and-set on status AND the attempts value read
+  // (2026-09-15): attempts is the claim token settlement is conditioned on.
+  assert.match(d, /updateMany\(\{\s*where: recipientClaimWhere\(recipient\.id, 'PENDING', recipient\.attempts\)/, 'the claim must filter on the CURRENT status and attempts')
+  assert.match(d, /updateMany\(\{\s*where: recipientClaimWhere\(recipientId, 'DEFERRED', recipient\.attempts\)/, 'the retry claim must be the same compare-and-set')
+  assert.deepEqual(recipientClaimWhere('r1', 'PENDING', 3), { id: 'r1', status: 'PENDING', attempts: 3 }, 'the predicate must carry status and the token')
   assert.match(d, /if \(count === 0\) continue/, 'a lost race must skip the recipient entirely')
+  assert.ok(!/emailCampaignRecipient\s*\.update\(\{\s*where: \{ id: recipient(Id|\.id) \}/.test(d), 'no unconditional recipient write may settle a claimed row')
   assert.ok(!/update\(\{ where: \{ id: recipient\.id \}, data: \{ status: 'SENDING'/.test(d), 'an unconditional update would let both workers claim')
 })
 
@@ -261,8 +266,19 @@ test('DST: a scheduled send stored in UTC survives both US transitions', () => {
 
 test('DST: the daily crons are pinned to a timezone, not to UTC drift', () => {
   // A digest scheduled in bare UTC would arrive an hour early for half the year.
+  // The registry moved to src/lib/cron-schedules.ts (2026-09-15); pin the data
+  // itself: EVERY time-of-day schedule declares the business timezone, and only
+  // the interval sweeps run in UTC.
+  const { CRON_SCHEDULES } = require('../cron-schedules') as typeof import('../cron-schedules')
+  const timeOfDay = ['daily-schedule-morning', 'daily-schedule-evening', 'lead-maintenance', 'marketing-discovery']
+  for (const name of timeOfDay) {
+    assert.equal(CRON_SCHEDULES.find((s) => s.name === name)?.tz, 'America/New_York', `${name} must declare its timezone`)
+  }
+  for (const s of CRON_SCHEDULES.filter((x) => !timeOfDay.includes(x.name))) {
+    assert.match(s.pattern, /^(\*\/15|0) \* \* \* \*$/, `${s.name} is UTC only because it runs every quarter-hour or hour`)
+  }
   const worker = code(readFileSync(resolve(__dirname, '..', '..', 'workers', 'scheduled.worker.ts'), 'utf8'))
-  assert.match(worker, /tz: 'America\/New_York'/, 'time-of-day crons must declare their timezone')
+  assert.match(worker, /schedules: CRON_SCHEDULES/, 'the scheduled worker must register the registry')
 })
 
 test('the campaign sweep compares absolute time (lte on a Date), not a formatted string', () => {

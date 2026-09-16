@@ -98,12 +98,17 @@ constrains the quote journey; see [segmentation.md](./segmentation.md).
 
 ## Queues and workers
 
+All five workers run inside the single worker host (`npm run host:start`,
+Railway service `discord workers`). Queue settings and the read-only way to
+prove each queue has a consumer: [`DEPLOY.md`](../../DEPLOY.md) §6.
+
 | Queue | Worker | Role |
 |---|---|---|
 | `email` | `src/workers/email.worker.ts` | renders + sends; `ALLOWED_TEMPLATES` is the choke point |
-| `scheduled` | `src/workers/scheduled.worker.ts` | fires journey stages, digests, follow-ups |
+| `scheduled` | `src/workers/scheduled.worker.ts` | fires journey stages, digests, follow-ups, every recovery sweep |
 | `discord` | `src/workers/discord.worker.ts` | owner alerts |
-| `marketing` | `src/workers/marketing.worker.ts` | **STUB** — `enrollCustomer()` has a TODO and no provider call |
+| `marketing` | `src/workers/marketing.worker.ts` | campaign batches + automation stages. The ESP **enrollment** side (`src/lib/marketing.ts` `enrollCustomer()`) is still a stub with no provider call |
+| `webhook-retry` | `src/workers/webhook.worker.ts` | Stripe events enqueued by the API — paid-deposit fulfilment |
 
 Journey scheduling lives in [`src/lib/journeys.ts`](../../src/lib/journeys.ts).
 
@@ -115,15 +120,24 @@ Journey scheduling lives in [`src/lib/journeys.ts`](../../src/lib/journeys.ts).
 |---|---|---|---|
 | `/api/email/open` | GET | token | 1×1 open pixel → `Notification` |
 | `/api/email/unsubscribe` | GET, POST | signed HMAC token | RFC 8058 one-click + human page |
-| `/api/email/webhook` | POST | Svix signature | Resend bounce / complaint / delivery |
+| `/api/email/webhook` | POST | Svix signature | Resend bounce / complaint / delivery / failure / suppression ([`DEPLOY.md`](../../DEPLOY.md) §8) |
 | `/api/email/suppression` | GET, POST | shared secret header | cross-system suppression (Leadtracking) |
+| `/api/email/agent-heartbeat` | POST | token | email-agent liveness ping |
+
+---
+
+## Admin UI (it exists)
+
+`app/(admin)/admin/(dashboard)/email-marketing/` — `agent`, `audiences`,
+`automations`, `campaigns`, `deliverability`, `journeys`, `leads`, `scheduled`,
+`sends`, `settings`, `suppressions`, `templates`, `test-send`. See
+[admin-controls.md](./admin-controls.md).
 
 ---
 
 ## What is still a stub
 
 - `src/lib/marketing.ts` — `enrollCustomer()` logs and returns. No ESP call.
-- Admin email-marketing UI — does not exist. See [admin-controls.md](./admin-controls.md).
 - A/B testing — no assignment, no experiment records. Not built.
 - Revenue attribution — UTM tags are emitted on quote-journey links, but nothing
   reads them back. See [tracking-and-attribution.md](./tracking-and-attribution.md).

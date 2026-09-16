@@ -64,6 +64,11 @@ export async function POST(req: NextRequest, props: { params: Promise<{ id: stri
   )
   const followupScheduled = enrolment?.scheduled === true
   const followupReason = enrolment && !enrolment.scheduled ? enrolment.reason : undefined
+  // A PARTIAL failure still reports scheduled:true, so record how many stages
+  // only reached the durable retry table (lifecycle-repair re-adds them) and
+  // how many were lost outright (2026-09-15).
+  const followupRecordedForRetry = enrolment?.recordedForRetry ?? 0
+  const followupLost = enrolment?.lost ?? 0
 
   await prisma.auditLog
     .create({
@@ -79,6 +84,8 @@ export async function POST(req: NextRequest, props: { params: Promise<{ id: stri
           // how the stranded-lead bug stayed invisible for weeks.
           followupScheduled,
           followupReason: followupReason ?? null,
+          followupRecordedForRetry,
+          followupLost,
           estimatedValueCents: parsed.data.estimatedValueCents ?? null,
           by: session?.name ?? null,
         },

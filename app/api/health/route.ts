@@ -3,6 +3,7 @@ import { prisma } from '@/lib/db'
 import { checkEnv } from '@/lib/env'
 import { unsafeUrlReason } from '@/emails/validation'
 import { pingAppRedis } from '@/lib/redis-health'
+import { evaluateEmailDelivery, singleFlightCache, type QueueWorkerCounts } from '@/lib/worker-health'
 
 export const revalidate = 0
 
@@ -84,28 +85,54 @@ function emailFlags() {
   }
 }
 
+const UNKNOWN_COUNTS: QueueWorkerCounts = { email: null, scheduled: null, 'webhook-retry': null, discord: null }
+const WORKER_COUNT_TIMEOUT_MS = 2_000
+
 /**
- * How many BullMQ workers are attached to the email queue RIGHT NOW, as seen
- * from this (API) process — i.e. whether anything will pick up the quote
- * confirmation this API enqueues. Bounded: the shared queue connection retries
- * forever during a Redis outage, so the question is raced against a timeout.
+ * How many BullMQ workers are attached to each email-delivery queue RIGHT NOW,
+ * as seen from this (API) process — i.e. whether anything will pick up the
+ * quote confirmation, outbox drain or paid-deposit event this API enqueues.
+ *
+ * Bounded: the shared queue connection retries forever during a Redis outage,
+ * so the whole question is raced against ONE timeout (a timed-out queue reads
+ * null = unknown). Cached for 10s and single-flight: each getWorkersCount() is a
+ * CLIENT LIST on Redis's main thread, and this endpoint is public and polled.
  */
-async function emailQueueWorkers(): Promise<number | null> {
+async function loadQueueWorkers(): Promise<QueueWorkerCounts> {
+  let timer: ReturnType<typeof setTimeout> | undefined
   try {
-    const { emailQueue } = await import('@/lib/queues')
-    return await Promise.race([
-      emailQueue.getWorkersCount(),
-      new Promise<null>((resolve) => setTimeout(() => resolve(null), 2_000)),
+    const { emailQueue, scheduledQueue, webhookRetryQueue, discordQueue } = await import('@/lib/queues')
+    const count = async (q: { getWorkersCount(): Promise<number> }) => {
+      try {
+        return await q.getWorkersCount()
+      } catch {
+        return null
+      }
+    }
+    const all = Promise.all([count(emailQueue), count(scheduledQueue), count(webhookRetryQueue), count(discordQueue)])
+    const result = await Promise.race([
+      all,
+      new Promise<null>((resolve) => {
+        timer = setTimeout(() => resolve(null), WORKER_COUNT_TIMEOUT_MS)
+      }),
     ])
+    if (!result) return { ...UNKNOWN_COUNTS }
+    const [email, scheduled, webhookRetry, discord] = result
+    return { email, scheduled, 'webhook-retry': webhookRetry, discord }
   } catch {
-    return null
+    return { ...UNKNOWN_COUNTS }
+  } finally {
+    if (timer) clearTimeout(timer)
   }
 }
+const queueWorkers = singleFlightCache(loadQueueWorkers, 10_000)
 
-// GET /api/health — liveness + readiness probe.
+// GET /api/health — readiness probe (GET /api/health/live is pure liveness).
 // Returns 200 when the DB is reachable AND Redis answers a PING AND all required
-// env vars are present AND APP_URL is a usable URL; 503 otherwise. Only env-var
-// PRESENCE is reported, never secret values (APP_URL's host is public by design).
+// env vars are present AND APP_URL is a usable URL AND every email-delivery
+// queue (email, scheduled, webhook-retry) has a worker attached; 503 otherwise.
+// Only env-var PRESENCE is reported, never secret values (APP_URL's host is
+// public by design).
 export async function GET(): Promise<NextResponse> {
   const env = checkEnv()
   const appUrl = appUrlHealth()
@@ -122,19 +149,24 @@ export async function GET(): Promise<NextResponse> {
   // A REAL PING. Every quote confirmation and booking email starts as a queue
   // job this process adds; without Redis they are captured but never sent.
   const redis = await pingAppRedis()
-  const workersAttached = redis.ok ? await emailQueueWorkers() : null
+  // Not asked while Redis is down: every count would hang into the offline queue.
+  const counts = redis.ok ? await queueWorkers() : { ...UNKNOWN_COUNTS }
+  const emailDelivery = evaluateEmailDelivery(counts)
 
   // A placeholder/unusable APP_URL is a DEGRADED system: the app runs, but every
   // link it mails is broken. That must fail the readiness probe, not hide.
-  const ok = db === 'connected' && redis.ok && env.ok && appUrl.configured
+  // EMAIL DELIVERY IS PART OF READINESS (2026-09-15). It used to be reported
+  // beside a green status: zero workers on the email queue still said "ok",
+  // while every quote confirmation this API enqueued waited for nobody.
+  const ok = db === 'connected' && redis.ok && env.ok && appUrl.configured && emailDelivery.ready
   return NextResponse.json(
     {
       status: ok ? 'ok' : 'degraded',
       db,
       redis,
-      // Reported, not part of `ok`: the worker is a separate service. Zero here
-      // means emails this API queues will wait until the worker host is back.
-      emailQueue: { workersAttached },
+      emailDelivery,
+      // Kept for existing runbooks (docs/email-operations.md).
+      emailQueue: { workersAttached: counts.email },
       commit: (process.env.RAILWAY_GIT_COMMIT_SHA ?? '').slice(0, 12) || null,
       appUrl,
       linkVars: linkVarsHealth(),

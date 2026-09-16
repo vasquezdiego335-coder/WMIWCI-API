@@ -7,7 +7,7 @@ covers the engine. This document covers the **admin** scenarios.
 ## Environment
 
 Railway staging + staging Neon + Redis + a Resend test configuration +
-`EMAIL_TEST_RECIPIENT`. **Not** Vercel previews — those are not the real API.
+`EMAIL_TEST_RECIPIENT`. **Not** a preview build — that is not the real API.
 **No real customers**, and no production promotional sending for rehearsal.
 
 ## Required migration

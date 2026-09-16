@@ -48,9 +48,24 @@ git checkout main
 git merge admin-os-increment-2-1-hardening
 git push origin main
 ```
-Railway auto-deploys the admin service from `main`. The build runs
+Railway auto-deploys **both** services from `main`: the API/admin service
+(`earnest-solace` / `wonderful-strength`) and the worker host
+(`patient-communication` / `discord workers`). The API build runs
 `prisma generate && next build` (migrations are NOT run in the build — you ran
 them deliberately in step 3).
+
+**Confirm the worker actually redeployed.** The two services deploy
+independently, and a Prisma schema change reaches the worker only through its own
+build. They must end on the **same commit**:
+
+```
+curl -s https://<api-host>/api/health   | grep -o '"commit":"[^"]*"'
+curl -s https://<worker-host>/readyz    | grep -o '"commit":"[^"]*"'
+```
+
+Then check the worker is ready, not merely alive: `/readyz` should be 200 with
+`problems []`, five attached `workers[]` and `schedules.missing []`. Details in
+[`DEPLOY.md`](../DEPLOY.md) §4.
 
 ## 6. Smoke test
 ```

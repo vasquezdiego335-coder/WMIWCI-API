@@ -611,10 +611,13 @@ export async function postContactMessage(payload: Record<string, unknown>): Prom
   }
 }
 
-// ── Start the bot (kept from the original; idempotent singleton) ───────────
-// The discord worker imports the post* functions above; importing this module
-// boots the gateway client so the bot is online to receive slash commands.
-getDiscordClient()
+// ── Starting the bot ────────────────────────────────────────────────────────
+// Importing this module NO LONGER logs the gateway bot in (2026-09-15). It used
+// to call getDiscordClient() right here, so the bot came online while the worker
+// host was still resolving imports: before configuration was validated, and
+// even for a host that then halted on missing variables and served only 503.
+// Entrypoints start it explicitly (src/worker-runtime/host.ts after the workers
+// start, src/bot/index.ts), and getChannel() still logs in on first use.
 
 // ══════════════════════════════════════════════════════════════════════════
 //  New quick-quote lead — gateway twin of the REST sender.

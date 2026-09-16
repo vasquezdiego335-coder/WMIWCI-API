@@ -30,6 +30,22 @@ import { inRolloutAllowlist, nextAllowedTime, rolloutAllowlist } from './email-g
 import { bookingMarketingBlockReason, effectiveMoveDate } from './email-eligibility'
 import { fireBookingTrigger, fireLeadTrigger, stopEnrollmentsFor } from './email-automation-runtime'
 import { hasEverBooked, hasPromotionalConsent, markLeadConverted } from './leads'
+import {
+  CANCELLED_REASON,
+  defaultRetryStore,
+  emptySummary,
+  enqueueDurable,
+  enqueueStatusOf,
+  logScheduleSummary,
+  retryWindowFor,
+  tally,
+  timeboxed,
+  type EnqueueResult,
+  type EnqueueStatus,
+  type QueueLike,
+  type RetryStore,
+  type ScheduleSummary,
+} from './lifecycle-enqueue'
 
 const log = queueLogger.child({ mod: 'journeys' })
 
@@ -182,26 +198,25 @@ async function scheduleStages(
   data: Record<string, unknown>,
   anchor: number,
   opts: { moveDate?: Date | null } = {}
-): Promise<{ scheduled: number; failed: number }> {
+): Promise<ScheduleSummary> {
   const plan = planStageTimes(stages, anchor, {
     now: deps.now().getTime(),
     moveDate: opts.moveDate ?? null,
   })
-  let scheduled = 0
-  let failed = 0
+  const summary = emptySummary()
   for (const p of plan) {
     if (p.skip) {
       log.info({ subjectId, stage: p.stage.type, reason: p.skip }, 'stage skipped')
+      summary.skipped++
       continue
     }
     // An enqueue that FAILED must not be counted as scheduled (2026-09-15): the
-    // admin audit and the repair sweep both trust this number. `false` is a
-    // failure; a legacy dep resolving void is treated as success.
-    const ok = await deps.enqueue(p.stage.type, data, new Date(p.fireAt), jobIdFor(journey, p.stage.type, subjectId))
-    if (ok === false) failed++
-    else scheduled++
+    // admin audit and the repair sweep both trust this number. A failure is
+    // either durably recorded for retry or LOST — never "scheduled".
+    const r = await deps.enqueue(p.stage.type, data, new Date(p.fireAt), jobIdFor(journey, p.stage.type, subjectId))
+    tally(summary, enqueueStatusOf(r))
   }
-  return { scheduled, failed }
+  return summary
 }
 
 export type StagePlan = { stage: JourneyStage; fireAt: number; overdue: boolean; skip?: string }
@@ -251,52 +266,93 @@ export function planStageTimes(
   })
 }
 
-/** Enqueue one stage. Guarded so a Redis stall can never hang the caller. */
-async function enqueue(
-  stage: string,
-  data: Record<string, unknown>,
-  fireAt: Date,
-  jobId: string
-): Promise<boolean> {
-  // Shift promotional sends out of quiet hours at SCHEDULE time. The guard
-  // re-checks at send time too — this just avoids pointless deferral churn.
-  const when = nextAllowedTime(fireAt)
-  const delay = Math.max(0, when.getTime() - Date.now())
-
-  return Promise.race([
-    scheduledQueue.add(stage, { type: stage, ...data }, { delay, jobId }),
-    new Promise((_, reject) => setTimeout(() => reject(new Error('scheduledQueue.add timed out (Redis?)')), 5000)),
-  ]).then(
-    () => true,
-    (err) => {
-      log.warn({ err: err instanceof Error ? err.message : String(err), stage, jobId }, 'enqueue failed (non-fatal)')
-      return false
-    }
-  )
+/** The queue surface `cancel` needs, on top of adding. */
+export type JourneyQueue = QueueLike & {
+  getJob(jobId: string): Promise<{ remove(): Promise<unknown> } | undefined | null>
 }
 
-/** Best-effort removal of a pending stage. Absent/active jobs are not errors.
- *  Time-boxed like `enqueue` above: with `maxRetriesPerRequest: null` (the
- *  BullMQ requirement) ioredis retries a command FOREVER, so an un-raced
- *  `getJob` during a Redis outage would hang the booking cancel / confirm /
- *  reschedule REQUEST instead of failing soft. The send-time recheck is the
- *  real stop — losing one best-effort removal is never worse than that. */
-async function cancel(jobId: string): Promise<void> {
-  try {
-    const job = await Promise.race([
-      scheduledQueue.getJob(jobId),
-      new Promise<never>((_, reject) => setTimeout(() => reject(new Error('scheduledQueue.getJob timed out (Redis?)')), 5000)),
-    ])
-    if (job)
-      await Promise.race([
-        job.remove(),
-        new Promise<never>((_, reject) => setTimeout(() => reject(new Error('job.remove timed out (Redis?)')), 5000)),
-      ])
-  } catch (err) {
-    // A job that already started cannot be removed — the send-time recheck is
-    // what actually stops it. This is exactly why cancellation is not the only
-    // protection.
-    log.info({ jobId, err: err instanceof Error ? err.message : String(err) }, 'cancel skipped (job active or gone)')
+/**
+ * The queue edge of every journey: DURABLE enqueue + best-effort cancel.
+ *
+ * Enqueue goes through lifecycle-enqueue.enqueueDurable (2026-09-15): an add
+ * that fails or times out records the exact job for the hourly sweep instead
+ * of vanishing behind a "non-fatal" log. The path and its lateness bound come
+ * from the stage type (lifecycle-enqueue.retryWindowFor), and the quiet-hours
+ * shift is the same one this module always applied at schedule time.
+ *
+ * Injectable (queue, store, clock) so the failure paths are testable offline
+ * with the production code, not a copy of it.
+ */
+export function journeyQueueEdge(
+  edge: { queue?: JourneyQueue; store?: RetryStore; now?: () => Date } = {}
+): Pick<JourneyDeps, 'enqueue' | 'cancel'> {
+  // Resolved lazily: touching the queue proxy at construction would open Redis
+  // during `next build`.
+  const queue = (): JourneyQueue => edge.queue ?? (scheduledQueue as unknown as JourneyQueue)
+  const store = (): RetryStore => edge.store ?? defaultRetryStore()
+  const now = edge.now ?? (() => new Date())
+
+  return {
+    /** Enqueue one stage. Guarded so a Redis stall can never hang the caller. */
+    async enqueue(stage, data, fireAt, jobId): Promise<EnqueueResult> {
+      const window = retryWindowFor(stage, fireAt)
+      const subjectType = typeof data.leadId === 'string' ? 'lead' : 'booking'
+      const subjectId = String((subjectType === 'lead' ? data.leadId : data.bookingId) ?? '')
+      if (!window) {
+        // A stage with no retry policy is a programming error; it is still
+        // attempted, but a failure cannot be recorded without a bound.
+        log.error({ stage, jobId }, 'no lifecycle retry policy for this stage — a failed enqueue would be LOST')
+      }
+      return enqueueDurable(
+        {
+          queue: queue(),
+          name: stage,
+          data: { type: stage, ...data },
+          jobId,
+          fireAt,
+          // Without a policy the bound is the fire time itself: the sweep then
+          // abandons rather than guessing.
+          notAfter: window?.notAfter ?? fireAt,
+          path: window?.path ?? 'quote-journey',
+          subjectType,
+          subjectId,
+        },
+        {
+          store: store(),
+          now,
+          // Shift promotional sends out of quiet hours at SCHEDULE time. The
+          // guard re-checks at send time too — this just avoids deferral churn.
+          shift: (d) => nextAllowedTime(d),
+        }
+      )
+    },
+
+    /** Best-effort removal of a pending stage. Absent/active jobs are not errors.
+     *  Time-boxed like `enqueue` above: with `maxRetriesPerRequest: null` (the
+     *  BullMQ requirement) ioredis retries a command FOREVER, so an un-raced
+     *  `getJob` during a Redis outage would hang the booking cancel / confirm /
+     *  reschedule REQUEST instead of failing soft. The send-time recheck is the
+     *  real stop — losing one best-effort removal is never worse than that.
+     *
+     *  It ALSO closes any retry row for this job id (2026-09-15), FIRST and
+     *  independently of Redis: a cancel during an outage is exactly when a row
+     *  exists, and a sweep must never re-add a cancelled stage. */
+    async cancel(jobId) {
+      try {
+        await timeboxed(store().abandonForJobIds([jobId], CANCELLED_REASON, now()), 5000, 'retry row close')
+      } catch (err) {
+        log.warn({ jobId, err: err instanceof Error ? err.message : String(err) }, 'could not close retry row on cancel (the stage handler still rechecks)')
+      }
+      try {
+        const job = await timeboxed(queue().getJob(jobId), 5000, 'scheduledQueue.getJob (Redis?)')
+        if (job) await timeboxed(job.remove(), 5000, 'job.remove (Redis?)')
+      } catch (err) {
+        // A job that already started cannot be removed — the send-time recheck is
+        // what actually stops it. This is exactly why cancellation is not the only
+        // protection.
+        log.info({ jobId, err: err instanceof Error ? err.message : String(err) }, 'cancel skipped (job active or gone)')
+      }
+    },
   }
 }
 
@@ -331,8 +387,10 @@ type StopOpts = Parameters<typeof stopEnrollmentsFor>[2]
 
 export interface JourneyDeps {
   now(): Date
-  /** Resolves false when the job could not be queued (void = success, for older test worlds). */
-  enqueue(stage: string, data: Record<string, unknown>, fireAt: Date, jobId: string): Promise<boolean | void>
+  /** The durable outcome (lifecycle-enqueue). Older injected test worlds may
+   *  resolve a boolean: `false` = not queued and nothing recorded (LOST),
+   *  `true`/void = scheduled. */
+  enqueue(stage: string, data: Record<string, unknown>, fireAt: Date, jobId: string): Promise<EnqueueResult | boolean | void>
   cancel(jobId: string): Promise<void>
   loadLead(leadId: string): Promise<JourneyLead | null>
   /** Booking HISTORY, not lead status — see leads.hasEverBooked. */
@@ -371,8 +429,7 @@ export function defaultJourneyDeps(): JourneyDeps {
   if (_deps) return _deps
   _deps = {
     now: () => new Date(),
-    enqueue,
-    cancel,
+    ...journeyQueueEdge(),
     async loadLead(leadId) {
       return prisma.lead
         .findUnique({
@@ -518,7 +575,7 @@ async function siblingUnpaidBooking(bookingId: string): Promise<string | null> {
 export async function onCheckoutStarted(
   bookingId: string,
   deps: JourneyDeps = defaultJourneyDeps()
-): Promise<void> {
+): Promise<ScheduleSummary | null> {
   // Owner automations on this trigger enroll regardless of the journey flag —
   // they carry their own ACTIVE + EMAIL_PROMOTIONS_ENABLED gates. Fire-and-
   // forget: a trigger failure must never break checkout.
@@ -526,7 +583,7 @@ export async function onCheckoutStarted(
 
   if (!enabled('abandoned')) {
     log.info({ bookingId }, 'abandoned-recovery journey disabled — not scheduling')
-    return
+    return null
   }
 
   // PROMOTIONAL CONSENT (owner spec 2026-08-06). abandoned-checkout 1/2/3 are
@@ -536,22 +593,27 @@ export async function onCheckoutStarted(
   const consentBlock = await deps.bookingMarketingBlock(bookingId)
   if (consentBlock) {
     log.info({ bookingId, reason: consentBlock }, 'no promotional consent — abandoned-recovery not scheduled')
-    return
+    return null
   }
 
   const duplicateOf = await deps.siblingUnpaidBooking(bookingId)
   if (duplicateOf) {
     log.info({ bookingId, duplicateOf }, 'an earlier unpaid booking already owns a recovery sequence — not scheduling a second')
-    return
+    return null
   }
 
+  // Parallel (each self-guarded), so a Redis stall bounds checkout to ~5s. The
+  // outcomes are COUNTED, not discarded: "scheduled" is logged only when all
+  // three stages were (2026-09-15).
   const now = deps.now().getTime()
-  await Promise.all(
+  const results = await Promise.all(
     ABANDONED_STAGES.map((s) =>
       deps.enqueue(s.type, { bookingId }, new Date(now + s.delay), jobIdFor('abandoned', s.type, bookingId))
     )
   )
-  log.info({ bookingId, stages: ABANDONED_STAGES.length }, 'abandoned-recovery scheduled')
+  const summary = results.reduce<ScheduleSummary>((acc, r) => tally(acc, enqueueStatusOf(r)), emptySummary())
+  logScheduleSummary(log, { bookingId, stages: ABANDONED_STAGES.length }, 'abandoned-recovery', summary)
+  return summary
 }
 
 /**
@@ -588,9 +650,10 @@ export async function onBookingCreated(input: {
   marketingConsent?: boolean | null
   consentSource?: string | null
   consentVersion?: string | null
-}, deps: JourneyDeps = defaultJourneyDeps()): Promise<{ convertedLeadId: string | null }> {
+}, deps: JourneyDeps = defaultJourneyDeps()): Promise<{ convertedLeadId: string | null; abandoned: ScheduleSummary | null }> {
   const { bookingId } = input
   let convertedLeadId: string | null = null
+  let abandoned: ScheduleSummary | null = null
 
   // 1 + 2. Lead conversion is best-effort by contract (markLeadConverted never
   // throws for a business reason), but a thrown infrastructure error must not
@@ -612,7 +675,7 @@ export async function onBookingCreated(input: {
 
   // 3. Reads the consent written in step 1.
   try {
-    await onCheckoutStarted(bookingId, deps)
+    abandoned = await onCheckoutStarted(bookingId, deps)
   } catch (err) {
     log.error(
       { bookingId, err: err instanceof Error ? err.message : String(err) },
@@ -620,7 +683,7 @@ export async function onBookingCreated(input: {
     )
   }
 
-  return { convertedLeadId }
+  return { convertedLeadId, abandoned }
 }
 
 /**
@@ -647,22 +710,27 @@ export async function onMoveDateSet(
   bookingId: string,
   moveDate: Date | null,
   deps: JourneyDeps = defaultJourneyDeps()
-): Promise<void> {
-  if (!enabled('reminders') || !moveDate) return
+): Promise<ScheduleSummary | null> {
+  if (!enabled('reminders') || !moveDate) return null
 
   const now = deps.now().getTime()
+  const summary = emptySummary()
   for (const r of REMINDER_OFFSETS) {
     const fireAt = new Date(moveDate.getTime() - r.before)
     const jobId = jobIdFor('pre-move', r.type, bookingId)
-    // Re-anchoring after a reschedule: drop the old job first.
+    // Re-anchoring after a reschedule: drop the old job first. The cancel also
+    // closes any retry row for the old anchor, so the sweep cannot resurrect it;
+    // if the add below fails, a NEW row records the new anchor.
     await deps.cancel(jobId)
     if (fireAt.getTime() <= now) {
       log.info({ bookingId, stage: r.type }, 'reminder window already passed — skipping')
+      summary.skipped++
       continue
     }
-    await deps.enqueue(r.type, { bookingId }, fireAt, jobId)
+    tally(summary, enqueueStatusOf(await deps.enqueue(r.type, { bookingId }, fireAt, jobId)))
   }
-  log.info({ bookingId, moveDate }, 'pre-move reminders scheduled')
+  logScheduleSummary(log, { bookingId, moveDate }, 'pre-move reminders', summary)
+  return summary
 }
 
 /**
@@ -684,15 +752,19 @@ export async function onMoveDateSet(
 export async function onBookingConfirmed(
   bookingId: string,
   deps: JourneyDeps = defaultJourneyDeps()
-): Promise<void> {
+): Promise<ScheduleSummary | null> {
   // Owner automations enroll regardless of the journey flag (they have their
   // own gates); the pre-move reminder scheduling below keeps its flag.
   deps.fireBookingTrigger('booking_confirmed', bookingId)
 
-  if (!enabled('reminders')) return
+  if (!enabled('reminders')) return null
   const b = await deps.loadBookingDates(bookingId)
-  if (!b) return
-  await onMoveDateSet(bookingId, effectiveMoveDate(b), deps)
+  if (!b) {
+    // Said out loud: nothing was scheduled and nothing recorded a retry.
+    log.warn({ bookingId }, 'booking dates unavailable — pre-move reminders NOT scheduled')
+    return null
+  }
+  return onMoveDateSet(bookingId, effectiveMoveDate(b), deps)
 }
 
 /**
@@ -712,6 +784,12 @@ export async function onBookingCancelled(
     // cancelled booking. Covered by queue-jobid-safety.test.ts.
     ...['review-request', 'review-reminder', 'repeat-reminder', 'referral-ask'].map(
       (t) => `followup__${t}__${bookingId}`
+    ),
+    // ...and runFollowup's quiet-hours re-add, which uses its own `__retry` id.
+    // Cancelling it here also closes its retry row (2026-09-15), so a sweep can
+    // never re-add a deferred follow-up for a cancelled booking.
+    ...['review-request', 'review-reminder', 'repeat-reminder', 'referral-ask'].map(
+      (t) => `followup__${t}__${bookingId}__retry`
     ),
   ]
   await Promise.all(ids.map((id) => deps.cancel(id)))
@@ -736,18 +814,21 @@ export const BALANCE_REMINDER_DELAY_MS = 24 * HOUR
 export async function onBookingCompletedBalance(
   bookingId: string,
   deps: JourneyDeps = defaultJourneyDeps()
-): Promise<void> {
+): Promise<EnqueueStatus | null> {
   // Completion is also the move_completed automation trigger.
   deps.fireBookingTrigger('move_completed', bookingId)
 
-  if (!enabled('balance')) return
-  await deps.enqueue(
-    'balance-reminder-post',
-    { bookingId },
-    new Date(deps.now().getTime() + BALANCE_REMINDER_DELAY_MS),
-    jobIdFor('balance', 'balance-reminder-post', bookingId)
+  if (!enabled('balance')) return null
+  const status = enqueueStatusOf(
+    await deps.enqueue(
+      'balance-reminder-post',
+      { bookingId },
+      new Date(deps.now().getTime() + BALANCE_REMINDER_DELAY_MS),
+      jobIdFor('balance', 'balance-reminder-post', bookingId)
+    )
   )
-  log.info({ bookingId }, 'post-completion balance reminder scheduled')
+  logScheduleSummary(log, { bookingId }, 'post-completion balance reminder', tally(emptySummary(), status))
+  return status
 }
 
 /**
@@ -771,8 +852,10 @@ export async function onQuoteCreated(
 
 /** Why a quote sequence was not (re-)scheduled. `null` = it was. */
 export type EnrolmentOutcome =
-  | { scheduled: true; stages: number }
-  | { scheduled: false; reason: string }
+  // `recordedForRetry` / `lost` appear only when some stage did not enqueue, so
+  // a clean enrolment keeps its exact historical shape.
+  | { scheduled: true; stages: number; recordedForRetry?: number; lost?: number }
+  | { scheduled: false; reason: string; recordedForRetry?: number; lost?: number }
 
 /**
  * IDEMPOTENT + RETRYABLE quote-journey enrolment. Safe to call any number of
@@ -834,19 +917,19 @@ export async function ensureQuoteJourney(
     return { scheduled: false, reason: 'not_in_rollout_allowlist' }
   }
 
-  const { scheduled: stages, failed } = await scheduleStages(deps, 'quote', QUOTE_STAGES, leadId, { leadId }, lead.quotedAt.getTime(), {
+  const summary = await scheduleStages(deps, 'quote', QUOTE_STAGES, leadId, { leadId }, lead.quotedAt.getTime(), {
     moveDate: lead.moveDate,
   })
-  if (failed > 0 && stages === 0) {
-    // Nothing was queued: report it, so the admin audit is truthful and the
-    // hourly repair sweep (which only skips leads the send ledger has seen)
-    // tries again.
-    log.error({ leadId, failed }, 'quote follow-up NOT scheduled — every enqueue failed')
-    return { scheduled: false, reason: 'enqueue_failed' }
+  logScheduleSummary(log, { leadId }, 'quote follow-up', summary)
+  const { scheduled: stages, recordedForRetry, lost } = summary
+  const failures = recordedForRetry + lost > 0 ? { recordedForRetry, lost } : {}
+  if (recordedForRetry + lost > 0 && stages === 0) {
+    // Nothing was queued: report it, so the admin audit is truthful. A durable
+    // retry row re-adds the stages hourly; a LOST stage is re-attempted by the
+    // stranded-journey repair (no ledger row exists for it).
+    return { scheduled: false, reason: lost > 0 ? 'enqueue_failed' : 'recorded_for_retry', ...failures }
   }
-  if (failed > 0) log.warn({ leadId, stages, failed }, 'quote follow-up partially scheduled — some stages failed to enqueue')
-  log.info({ leadId, stages }, 'quote follow-up scheduled')
-  return { scheduled: true, stages }
+  return { scheduled: true, stages, ...failures }
 }
 
 /** Drop every pending Sequence-B stage for a lead. Best-effort, like `cancel`. */
@@ -981,30 +1064,30 @@ export async function repairStrandedQuoteJourneys(
 export async function onLeadCaptured(
   leadId: string,
   deps: JourneyDeps = defaultJourneyDeps()
-): Promise<void> {
-  if (!enabled('lead-nurture')) return
+): Promise<ScheduleSummary | null> {
+  if (!enabled('lead-nurture')) return null
 
   const lead = await deps.loadLead(leadId)
-  if (!lead) return
+  if (!lead) return null
 
   // Booking HISTORY, not lead status — see leads.hasEverBooked.
   const previousCustomer = await deps.hasEverBooked(lead.email)
   const block = leadNurtureBlockReason({ ...lead, previousCustomer }, deps.now())
   if (block) {
     log.info({ leadId, reason: block }, 'lead nurture not scheduled')
-    return
+    return null
   }
 
   // CONTROLLED ROLLOUT. Unset allowlist ⇒ no restriction; see email-guard.
   if (!inRolloutAllowlist(lead.email ?? '', rolloutAllowlist())) {
     log.info({ leadId }, 'outside the rollout allowlist — lead nurture not scheduled')
-    return
+    return null
   }
 
   // Anchored on NOW, so no stage is ever overdue and the recovery stagger in
   // planStageTimes is never consulted. A nurture email landing after the
   // customer's own move date helps nobody and is dropped there.
-  const { scheduled: stages, failed } = await scheduleStages(
+  const summary = await scheduleStages(
     deps,
     'lead-nurture',
     LEAD_NURTURE_STAGES,
@@ -1013,8 +1096,9 @@ export async function onLeadCaptured(
     deps.now().getTime(),
     { moveDate: lead.moveDate }
   )
-  if (failed > 0) log.error({ leadId, stages, failed }, 'lead nurture: some stages failed to enqueue')
-  log.info({ leadId, stages }, 'lead nurture scheduled')
+  // "scheduled" only when every stage was; see lifecycle-enqueue.logScheduleSummary.
+  logScheduleSummary(log, { leadId }, 'lead nurture', summary)
+  return summary
 }
 
 /**

@@ -44,7 +44,7 @@ import { validateAudienceDefinition, resolveCandidates, type Candidate } from '.
 import { hasPromotionalConsent } from './leads'
 import { isSuppressed } from './email-suppression'
 import { buildRecipientContext } from './email-recipient-context'
-import { promotionsEnabled } from './email-campaign-run'
+import { promotionsEnabled, isTransientReadFailure, transientRetryDelayMs } from './email-campaign-run'
 import type { StopRuleKey } from './email-journey-config'
 
 const log = queueLogger.child({ mod: 'email-automation-runtime' })
@@ -468,7 +468,15 @@ export async function fireLeadTrigger(
       // Suppression is only worth a query once consent is present — an
       // unconsented lead is refused either way.
       const consented = hasPromotionalConsent({ emailMarketingConsent: lead.emailMarketingConsent })
-      const suppressed = consented ? (await isSuppressed(lead.email, 'promotional')).suppressed : false
+      const suppression = consented ? await isSuppressed(lead.email, 'promotional') : null
+      if (suppression?.suppressed && suppression.reason === 'suppression_read_failed') {
+        // The suppression list could not be READ. Enrolling would be unsafe and
+        // "suppressed" would be false, so this is reported as unavailable — a
+        // logged, visible miss rather than a silent skip. Nothing is enrolled.
+        log.warn({ event: 'LEAD_TRIGGER_SUPPRESSION_READ_FAILED', trigger, leadId }, 'lead trigger not enrolled — suppression list unreadable')
+        return { status: 'unavailable', reason: 'suppression_read_failed' }
+      }
+      const suppressed = suppression?.suppressed ?? false
       const verdict = mayEnrollLeadSubject({
         email: lead.email,
         emailMarketingConsent: lead.emailMarketingConsent,
@@ -542,6 +550,97 @@ export type StageOutcome =
   | 'not_due'
   | 'automation_paused'
   | 'failed'
+
+// ── Transient read failures (2026-09-15) ────────────────────────────────
+//
+// A suppression-list or context READ that failed is an outage, not a verdict.
+// Before this, the stage was advanced as 'skipped' and that stage's email was
+// lost for good. Now the SAME stage is retried with bounded backoff; only when
+// the budget is spent is it skipped as '<reason>:retries_exhausted'.
+
+/** Consecutive transient failures one stage may have before it is skipped. */
+export const AUTOMATION_TRANSIENT_MAX_ATTEMPTS = (() => {
+  const n = Number(process.env.EMAIL_AUTOMATION_TRANSIENT_MAX_ATTEMPTS)
+  return Number.isInteger(n) && n > 0 ? n : 6
+})()
+
+/** How many transient retries this stage has already recorded in the enrollment history. */
+export function countTransientRetries(history: unknown, stageIndex: number): number {
+  if (!Array.isArray(history)) return 0
+  return history.filter((h) => {
+    const e = h as { stage?: unknown; outcome?: unknown } | null
+    return !!e && e.stage === stageIndex && e.outcome === 'transient_retry'
+  }).length
+}
+
+export type TransientStageDeferral =
+  | { deferred: true; at: Date; jobId: string; transientAttempts: number }
+  | { deferred: false; reason: 'exhausted'; transientAttempts: number }
+  | { deferred: false; reason: 'superseded' }
+
+export type AutomationTransientDeps = {
+  /** Guarded write of nextRunAt + history; returns the number of rows moved. */
+  writeDeferral: (enrollmentId: string, stageIndex: number, data: { nextRunAt: Date; history: unknown[]; lastEvaluatedAt: Date }) => Promise<number>
+  enqueue: (data: { type: 'automation-stage'; payload: { enrollmentId: string; stageIndex: number } }, opts: { delay: number; jobId: string }) => Promise<unknown>
+  now: () => number
+}
+
+export function defaultAutomationTransientDeps(): AutomationTransientDeps {
+  return {
+    writeDeferral: async (enrollmentId, stageIndex, data) => {
+      const { count } = await prisma.emailAutomationEnrollment.updateMany({
+        where: { id: enrollmentId, currentStage: stageIndex, status: 'ACTIVE' },
+        data: { nextRunAt: data.nextRunAt, history: data.history as never, lastEvaluatedAt: data.lastEvaluatedAt },
+      })
+      return count
+    },
+    enqueue: (data, opts) => scheduledQueue.add('automation-stage', data, opts),
+    now: () => Date.now(),
+  }
+}
+
+/**
+ * Defer ONE stage after a transient read failure.
+ *
+ * ORDER MATTERS: nextRunAt and the history entry are written FIRST, in one
+ * guarded update, and only then is the job enqueued. If the add is lost, the
+ * enrollment sweep re-queues the stage from nextRunAt. The job id is
+ * time-bucketed (like the retryAt branch), not derived from the history count,
+ * so a lost history write can never reuse the id of a retained completed job
+ * and have BullMQ silently drop the add.
+ */
+export async function deferStageForTransientFailure(
+  input: { enrollmentId: string; stageIndex: number; stageKey: string; history: unknown; reason: string; jobIdBase: string },
+  deps: AutomationTransientDeps = defaultAutomationTransientDeps()
+): Promise<TransientStageDeferral> {
+  const transientAttempts = countTransientRetries(input.history, input.stageIndex) + 1
+  if (transientAttempts >= AUTOMATION_TRANSIENT_MAX_ATTEMPTS) {
+    log.error(
+      { event: 'AUTOMATION_STAGE_TRANSIENT_EXHAUSTED', enrollmentId: input.enrollmentId, stageIndex: input.stageIndex, reason: input.reason, transientAttempts },
+      'transient read failures exhausted — stage will be skipped'
+    )
+    return { deferred: false, reason: 'exhausted', transientAttempts }
+  }
+  const now = deps.now()
+  const at = new Date(now + transientRetryDelayMs(transientAttempts))
+  const prior = Array.isArray(input.history) ? (input.history as unknown[]) : []
+  const history = [
+    ...prior,
+    { stage: input.stageIndex, key: input.stageKey, outcome: 'transient_retry', reason: input.reason, at: new Date(now).toISOString() },
+  ].slice(-50)
+  const moved = await deps.writeDeferral(input.enrollmentId, input.stageIndex, { nextRunAt: at, history, lastEvaluatedAt: new Date(now) })
+  if (moved === 0) return { deferred: false, reason: 'superseded' }
+
+  const jobId = `${input.jobIdBase}__transient__${Math.floor(at.getTime() / 60_000)}`
+  await deps
+    .enqueue({ type: 'automation-stage', payload: { enrollmentId: input.enrollmentId, stageIndex: input.stageIndex } }, { delay: Math.max(0, at.getTime() - now), jobId })
+    .catch((err) => log.warn({ err: String(err), enrollmentId: input.enrollmentId }, 'transient stage requeue failed — sweep will recover from nextRunAt'))
+  log.warn(
+    { event: 'AUTOMATION_STAGE_TRANSIENT_DEFERRED', enrollmentId: input.enrollmentId, stageIndex: input.stageIndex, reason: input.reason, transientAttempts, nextRunAt: at.toISOString() },
+    'transient read failure — stage deferred with backoff, nothing sent'
+  )
+  return { deferred: true, at, jobId, transientAttempts }
+}
 
 async function appendHistory(enrollmentId: string, entry: Record<string, unknown>): Promise<void> {
   const row = await prisma.emailAutomationEnrollment.findUnique({ where: { id: enrollmentId }, select: { history: true } })
@@ -642,6 +741,21 @@ export async function executeAutomationStage(enrollmentId: string, stageIndex: n
     return isLast ? 'completed' : (outcome as StageOutcome)
   }
 
+  // A failed READ retries THIS stage with backoff instead of spending it.
+  const deferTransient = async (reason: string): Promise<StageOutcome> => {
+    const result = await deferStageForTransientFailure({
+      enrollmentId,
+      stageIndex,
+      stageKey: stage.key,
+      history: enrollment.history,
+      reason,
+      jobIdBase: automationJobId(automation.id, enrollment.version, stage.key, enrollmentId),
+    })
+    if (result.deferred) return 'deferred'
+    if (result.reason === 'exhausted') return advance('skipped', `${reason}:retries_exhausted`)
+    return 'skipped' // the enrollment moved on concurrently
+  }
+
   // ── Automation-level cap ──────────────────────────────────────────────
   const cap = definition.caps.perRecipientPerMonth
   if (cap > 0) {
@@ -667,6 +781,9 @@ export async function executeAutomationStage(enrollmentId: string, stageIndex: n
   }
   const context = await buildRecipientContext(stage.template, candidate)
   if (!context.ok) {
+    // context_error: is a thrown read inside the builder — an outage, not a
+    // fact about the subject.
+    if (isTransientReadFailure(context.reason)) return deferTransient(context.reason)
     if (context.reason.startsWith('context_ineligible')) {
       await prisma.emailAutomationEnrollment.update({
         where: { id: enrollmentId },
@@ -727,8 +844,12 @@ export async function executeAutomationStage(enrollmentId: string, stageIndex: n
     return 'deferred'
   }
 
+  // A suppression/state read that FAILED (the guard refused, nothing sent) is
+  // retried, never recorded as a skip.
+  if (isTransientReadFailure(outcome.reason)) return deferTransient(outcome.reason)
+
   // Terminal refusals that end the whole enrollment.
-  if (['unsubscribed', 'hard_bounce', 'spam_complaint', 'admin_block', 'invalid_email'].includes(outcome.reason)) {
+  if (['unsubscribed', 'hard_bounce', 'spam_complaint', 'admin_block', 'invalid_email', 'invalid_address', 'provider_rejected'].includes(outcome.reason)) {
     await prisma.emailAutomationEnrollment.update({
       where: { id: enrollmentId },
       data: { status: 'STOPPED', stopReason: outcome.reason, ...stamp },

@@ -110,6 +110,11 @@ const WORKER_SURFACE = [
   '../discord-payments.ts',
   '../followups.ts',
   '../journeys.ts',
+  // Durable lifecycle enqueue + its hourly sweep, and the payment fan-out that
+  // now carries deterministic ids (2026-09-15).
+  '../lifecycle-enqueue.ts',
+  '../lifecycle-retry-sweep.ts',
+  '../fulfillment.ts',
   '../../outbox/integration.ts',
 ]
 

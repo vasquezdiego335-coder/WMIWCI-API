@@ -345,7 +345,9 @@ function world(opts: {
 test('ensureQuoteJourney reports enqueue_failed when every stage enqueue resolves false', async () => {
   const w = world({ enqueueResult: false, leads: [quotedLead('lead_q')] })
   const outcome = await ensureQuoteJourney('lead_q', w.deps)
-  assert.deepEqual(outcome, { scheduled: false, reason: 'enqueue_failed' })
+  // A bare `false` (a world with no retry store) means nothing recorded the
+  // failure: every stage is LOST, and the outcome says so by count (2026-09-15).
+  assert.deepEqual(outcome, { scheduled: false, reason: 'enqueue_failed', recordedForRetry: 0, lost: QUOTE_STAGES.length })
   assert.equal(w.calls.filter((c) => c.startsWith('enqueue:')).length, QUOTE_STAGES.length)
 })
 

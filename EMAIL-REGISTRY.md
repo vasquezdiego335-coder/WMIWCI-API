@@ -47,7 +47,8 @@ these two do not send. Everything else fires on its real event.
 - **pre-approval / final-confirmation / booking-updated** are rendered by the **outbox**
   (`src/outbox/services/premiumEmails.tsx`) when `OUTBOX_ENABLED=true` (the live setting). The
   legacy queue path is skipped in that mode, so the customer never gets two copies.
-- **review-request / referral** are rendered inline by `src/lib/followups.ts` (email + SMS).
+- **review-request / referral** are rendered inline by `src/lib/followups.ts` (email only —
+  SMS was removed on 2026-09-15 and the SMS channel is recorded `not_applicable`).
 - **Lead drip** (10, 12, 13, 15) is sent by **Leadtracking** (Railway + SendGrid),
   `lib/campaign.js` → `templates/emailN.html`.
 

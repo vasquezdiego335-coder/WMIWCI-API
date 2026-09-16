@@ -1,7 +1,7 @@
 import { Worker, Job, UnrecoverableError } from 'bullmq'
 import { randomUUID } from 'node:crypto'
 import { render } from '@react-email/render'
-import { bullConnection } from '../lib/redis'
+import { getLazyBullConnection } from '../lib/redis'
 import { prisma } from '../lib/db'
 import { queueLogger } from '../lib/logger'
 import { guardedSend, classifyTemplate, ProviderRejectedError } from '../lib/email-guard'
@@ -419,7 +419,7 @@ export async function processEmailJob(job: Job<EmailJobData>): Promise<void> {
 // ── Start the worker ──────────────────────────────────────────
 export function startEmailWorker() {
   const worker = new Worker<EmailJobData>('email', processEmailJob, {
-    connection: bullConnection,
+    connection: getLazyBullConnection(),
     concurrency: 5,
   })
 

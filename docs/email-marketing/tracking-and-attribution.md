@@ -17,17 +17,30 @@ _Last updated 2026-07-20._
 `EmailSend` carries `journey`, `campaign`, `bookingId`, `leadId` and `template`,
 so per-journey and per-template send/block counts are a single query today.
 
-## What is NOT built
+## What IS built (since this section was first written)
 
-**Revenue attribution is not implemented.** Be direct about this: nothing
-correlates a click to a booking to a payment. Specifically missing:
+`src/lib/email-attribution.ts` joins the email ledger to bookings and to the
+Stage 4 financial records — `attributionByJourney()` and
+`emailCampaignResults()`, surfaced on the admin email-marketing pages. It builds
+no second attribution system: campaign identity, first/last touch and the
+profit-ROAS arithmetic come from `marketing-profitability.ts` and
+`FinancialSnapshot`. Three rules keep it honest, and they are worth knowing
+before reading any number it produces:
+
+1. **A transactional email never claims a conversion** (a receipt is sent
+   *because* a booking happened). Only the `abandoned`, `quote` and `post-job`
+   journeys may be credited; everything else reports `null` with a stated
+   reason, never `0`.
+2. **The email must precede the conversion** — every conversion is time-ordered
+   against the send.
+3. **Attributed profit comes only from CURRENT `FinancialSnapshot` rows.**
+   Completed-but-not-closed-out moves are reported separately.
+
+## What is still NOT built
 
 - click tracking (no redirect route; `EmailEvent type='clicked'` only arrives if
   Resend link-tracking is enabled in the dashboard — unverified)
-- a first-touch / last-touch attribution model
-- any join from `EmailSend` → `Booking` → `Payment` revenue
 - discount-code-to-campaign correlation
-- campaign reporting queries or UI
 
 UTM parameters **are** emitted on quote-journey CTAs
 (`utm_source=email&utm_medium=lifecycle&utm_campaign=quote-followup&utm_content=stage-N`),

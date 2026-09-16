@@ -12,8 +12,21 @@
 import { readFileSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
 
-const testScript = JSON.parse(readFileSync('package.json', 'utf8')).scripts.test
-const inGate = new Set(testScript.match(/[\w/.\-[\]]+\.test\.ts/g) ?? [])
+const pkg = JSON.parse(readFileSync('package.json', 'utf8'))
+
+// The gate list lives in the "testFiles" ARRAY, which scripts/run-tests.mjs
+// runs verbatim. It used to be spelled out inside the "test" script string, but
+// at 187 files that command line passed the Windows 8191-character limit and
+// `npm test` died before running anything.
+if (!Array.isArray(pkg.testFiles) || pkg.testFiles.length === 0) {
+  console.error('FAIL: package.json "testFiles" must be a non-empty array of test paths.')
+  process.exit(1)
+}
+if (!String(pkg.scripts.test).includes('run-tests.mjs')) {
+  console.error('FAIL: the "test" script must run scripts/run-tests.mjs, which runs exactly "testFiles".')
+  process.exit(1)
+}
+const inGate = new Set(pkg.testFiles)
 
 /** Every *.test.ts that exists on disk, in POSIX form to match the gate list. */
 function findTests(dir) {

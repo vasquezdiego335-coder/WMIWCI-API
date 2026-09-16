@@ -72,8 +72,11 @@ Honest list, unchanged where nothing was built:
    `MarketingCampaign` rows with `channel=EMAIL`, created on the existing
    Marketing report. The email section reads and scores them; it does not
    duplicate the campaign record.
-4. **Audience segmentation / bulk composer.** Not built. Every send today is
-   triggered by a real customer event, which is the safer model.
+4. **Audience segmentation / bulk composer.** *Built since this list was
+   written* — `/admin/email-marketing/audiences` and
+   `/admin/email-marketing/campaigns` (the campaign composer, approval and
+   dispatch flow). Transactional mail is still triggered only by real customer
+   events; campaigns are the deliberate, consent-gated exception.
 5. **A/B test results** — experiments are not implemented, so there is nothing
    to show.
 6. **Open/click reporting** depends on provider tracking being enabled; the

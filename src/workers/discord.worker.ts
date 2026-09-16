@@ -1,5 +1,5 @@
 import { Worker, Job } from 'bullmq'
-import { bullConnection } from '../lib/redis'
+import { getLazyBullConnection } from '../lib/redis'
 import { queueLogger } from '../lib/logger'
 import type { DiscordJobData } from '../lib/queues'
 import {
@@ -146,7 +146,7 @@ async function processDiscordJob(job: Job<DiscordJobData>): Promise<void> {
 
 export function startDiscordWorker() {
   const worker = new Worker<DiscordJobData>('discord', processDiscordJob, {
-    connection: bullConnection,
+    connection: getLazyBullConnection(),
     concurrency: 2, // Discord rate limits — keep low
   })
 

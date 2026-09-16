@@ -49,6 +49,70 @@ export const RUN_TERMINAL_STATES: ReadonlySet<RunState> = new Set<RunState>([
 /** Run states in which a batch may still process recipients. */
 export const RUN_SENDABLE_STATES: ReadonlySet<RunState> = new Set<RunState>(['QUEUED', 'SENDING'])
 
+/** Every run state, in declaration order. */
+export const RUN_STATES: readonly RunState[] = Object.keys(RUN_TRANSITIONS) as RunState[]
+
+/**
+ * Run states that block a NEW dispatch of the same campaign — RUN_STATES minus
+ * RUN_TERMINAL_STATES.
+ *
+ * This list MUST equal the predicate of the partial unique index
+ * "email_campaign_runs_one_unfinished_per_campaign"
+ * (prisma/migrations/20260915120000_campaign_run_single_unfinished). The
+ * status column is TEXT, not an enum, so a state added here without a NEW
+ * migration silently falls outside the database's protection.
+ * campaign-run-slot.test.ts ties the two together.
+ */
+export const UNFINISHED_RUN_STATES: readonly RunState[] = ['PREPARING', 'QUEUED', 'SENDING', 'PAUSED', 'CANCELLING']
+
+/** The partial unique index that enforces one unfinished run per campaign. */
+export const RUN_SLOT_INDEX = 'email_campaign_runs_one_unfinished_per_campaign'
+
+/** Advisory-lock key serialising run-slot claims for ONE campaign. */
+export function runSlotLockKey(campaignId: string): string {
+  return `email_campaign_run:${campaignId}`
+}
+
+function errorCode(err: unknown): string | undefined {
+  if (!err || typeof err !== 'object') return undefined
+  const code = (err as { code?: unknown }).code
+  return typeof code === 'string' ? code : undefined
+}
+
+/**
+ * True when an error is the one-unfinished-run index firing.
+ *
+ * Prisma 5.22 maps Postgres 23505 from a model write to P2002; for an index the
+ * datamodel does not know, meta.target carries the index name (or is absent).
+ * A raw query surfaces it as P2010 with 23505 in the message. A P2002 on any
+ * OTHER unique target (e.g. recipients' run_id+email) is not a slot conflict.
+ * campaign-run-concurrency.test.ts pins the real shape against Postgres.
+ */
+export function isRunSlotConflict(err: unknown): boolean {
+  const code = errorCode(err)
+  if (!code && !(err instanceof Error)) return false
+  const message = err instanceof Error ? err.message : String((err as { message?: unknown } | null)?.message ?? '')
+  if (code === 'P2002') {
+    const target = (err as { meta?: { target?: unknown } }).meta?.target
+    if (target === undefined || target === null) return true
+    const t = Array.isArray(target) ? target.join(',') : String(target)
+    return t.includes(RUN_SLOT_INDEX) || t === 'campaign_id' || t === 'campaignId'
+  }
+  if (code === 'P2010' || message.includes('23505')) return message.includes(RUN_SLOT_INDEX)
+  return false
+}
+
+/**
+ * Transaction-level errors that mean "the database was busy", not "refused":
+ * P2024 pool timeout, P2028 transaction API error (maxWait/timeout expired),
+ * P2034 write conflict / deadlock. The caller retries later; nothing is wrong
+ * with the campaign, so nothing is written to its statusNote.
+ */
+export function isTransientTxError(err: unknown): boolean {
+  const code = errorCode(err)
+  return code === 'P2024' || code === 'P2028' || code === 'P2034'
+}
+
 export const isRunState = (v: unknown): v is RunState =>
   typeof v === 'string' && Object.prototype.hasOwnProperty.call(RUN_TRANSITIONS, v)
 
@@ -71,7 +135,7 @@ export type RecipientState =
   | 'PENDING' // created, not yet processed
   | 'SENDING' // claimed by a batch pass
   | 'SENT' // provider accepted (EmailSend went 'delivered')
-  | 'DEFERRED' // quiet hours / frequency cap; retried at retryAt
+  | 'DEFERRED' // quiet hours / frequency cap / transient read failure; retried at nextAttemptAt
   | 'SUPPRESSED' // on the suppression list
   | 'UNSUBSCRIBED' // unsubscribe-scope suppression
   | 'INELIGIBLE' // live recheck said the claim is no longer true
@@ -95,6 +159,108 @@ export const RECIPIENT_TERMINAL_STATES: ReadonlySet<RecipientState> = new Set<Re
 /** Recipient states a RETRY action may deliberately re-open. */
 export const RECIPIENT_RETRYABLE_STATES: ReadonlySet<RecipientState> = new Set<RecipientState>(['FAILED', 'DEFERRED'])
 
+// ── Recipient claim token ───────────────────────────────────────────────
+//
+// `attempts` is the claim token. Every move INTO SENDING increments it, and
+// nothing else writes it (the stale sweep, cancel, reconcile and manual retry
+// all leave it alone). So a claim made compare-and-set on the attempts value
+// that was read owns token read+1, and a settlement conditioned on
+// { status: SENDING, attempts: token } is refused once the sweep re-opened the
+// row (status moved) or a newer attempt re-claimed it (attempts moved). A stale
+// worker can therefore never overwrite a newer attempt's result.
+
+/** CAS predicate for PENDING/DEFERRED → SENDING. */
+export function recipientClaimWhere(id: string, from: 'PENDING' | 'DEFERRED', expectedAttempts: number) {
+  return { id, status: from, attempts: expectedAttempts }
+}
+
+/** CAS predicate for settling a row this attempt still owns. */
+export function recipientSettlementWhere(id: string, claimAttempt: number) {
+  return { id, status: 'SENDING' as const, attempts: claimAttempt }
+}
+
+// ── Transient read failures (2026-09-15) ────────────────────────────────
+//
+// A failed database READ is not a verdict about the recipient. The guard
+// already fails closed on `suppression_read_failed` (nothing is sent while the
+// suppression status is unknown); what it must never become is a recorded
+// SUPPRESSED row, or a spent automation stage. These reasons defer with a
+// bounded backoff and are retried; after the budget they are FAILED — visible
+// and re-openable — never SUPPRESSED.
+
+/** Suppression reasons that are real, permanent verdicts. */
+export const HARD_SUPPRESSION_REASONS: ReadonlySet<string> = new Set([
+  'hard_bounce',
+  'spam_complaint',
+  'admin_block',
+  'invalid_address',
+  'provider_rejected',
+])
+
+/** A reason that means "a read failed", not "this person must not be mailed". */
+export function isTransientReadFailure(reason: string | null | undefined): boolean {
+  if (!reason) return false
+  return reason.endsWith('_read_failed') || reason === 'claim_lookup_failed' || reason.startsWith('context_error:')
+}
+
+export const TRANSIENT_RETRY_BASE_MS = 5 * 60_000
+export const TRANSIENT_RETRY_CAP_MS = 2 * 60 * 60_000
+
+/** Exponential, capped: failure 1 waits 5m, then 10m, 20m, 40m, 80m, 120m… */
+export function transientRetryDelayMs(failureNumber: number, baseMs = TRANSIENT_RETRY_BASE_MS, capMs = TRANSIENT_RETRY_CAP_MS): number {
+  if (!Number.isFinite(failureNumber) || failureNumber < 1) return baseMs
+  return Math.min(capMs, baseMs * 2 ** (failureNumber - 1))
+}
+
+function positiveIntFromEnv(raw: string | undefined, fallback: number): number {
+  const n = Number(raw)
+  return Number.isInteger(n) && n > 0 ? n : fallback
+}
+
+/**
+ * How many consecutive transient failures a campaign recipient may have before
+ * it is FAILED. With 6 the waits are 5, 10, 20, 40 and 80 minutes (about 2.6h)
+ * and the sixth failure settles the row.
+ */
+export const CAMPAIGN_TRANSIENT_MAX_ATTEMPTS = positiveIntFromEnv(process.env.EMAIL_CAMPAIGN_TRANSIENT_MAX_ATTEMPTS, 6)
+
+export type RecipientRetryPlan =
+  | { action: 'none'; transientAttempts: number }
+  | { action: 'policy'; at: Date; transientAttempts: number }
+  | { action: 'transient'; at: Date; transientAttempts: number }
+  | { action: 'exhausted'; status: 'FAILED'; reason: string; transientAttempts: number }
+
+/**
+ * Decide the retry for a recipient whose outcome mapped to `mappedStatus`.
+ *
+ *  - sent, or any non-DEFERRED state → none; the transient counter resets.
+ *  - a guard retryAt (quiet hours, caps) → policy deferral at retryAt. The
+ *    counter is KEPT, so flapping reads cannot reset the budget by landing in
+ *    quiet hours between failures.
+ *  - a transient read failure → the next backoff step, or FAILED with
+ *    `<reason>:retries_exhausted` once the budget is spent.
+ *  - any other DEFERRED without a due time → none (unchanged behaviour).
+ */
+export function planRecipientRetry(
+  outcome: { sent: boolean; reason?: string | null; retryAt?: Date | null },
+  mappedStatus: RecipientState,
+  priorTransientAttempts: number,
+  now: number = Date.now(),
+  max: number = CAMPAIGN_TRANSIENT_MAX_ATTEMPTS
+): RecipientRetryPlan {
+  const prior = Math.max(0, priorTransientAttempts || 0)
+  if (outcome.sent || mappedStatus !== 'DEFERRED') return { action: 'none', transientAttempts: 0 }
+  if (outcome.retryAt) return { action: 'policy', at: outcome.retryAt, transientAttempts: prior }
+  if (isTransientReadFailure(outcome.reason)) {
+    const n = prior + 1
+    if (n >= max) {
+      return { action: 'exhausted', status: 'FAILED', reason: `${outcome.reason}:retries_exhausted`.slice(0, 300), transientAttempts: n }
+    }
+    return { action: 'transient', at: new Date(now + transientRetryDelayMs(n)), transientAttempts: n }
+  }
+  return { action: 'none', transientAttempts: prior }
+}
+
 /**
  * Map a guardedSend outcome onto a recipient state + machine-readable reason.
  *
@@ -108,11 +274,14 @@ export function recipientStateForOutcome(outcome: SendOutcome): { status: Recipi
   const reason = outcome.reason
   // Deferrals carry a retryAt — the send is legitimate, just not now.
   if (outcome.retryAt) return { status: 'DEFERRED', reason }
+  // A failed READ (suppression list, state, claim lookup, context) is not a
+  // verdict: nothing was sent, and the recipient is retried with backoff
+  // (planRecipientRetry). It was SUPPRESSED until 2026-09-15, which closed the
+  // recipient for good and made an outage look like a real suppression.
+  if (isTransientReadFailure(reason)) return { status: 'DEFERRED', reason }
 
   if (reason === 'unsubscribed') return { status: 'UNSUBSCRIBED', reason }
-  if (reason === 'hard_bounce' || reason === 'spam_complaint' || reason === 'admin_block' || reason === 'suppression_read_failed') {
-    return { status: 'SUPPRESSED', reason }
-  }
+  if (HARD_SUPPRESSION_REASONS.has(reason)) return { status: 'SUPPRESSED', reason }
   // Live-state recheck refusals: the audience claim is no longer true for them.
   if (
     /^status_not_allowed:|^booking_not_completed:|^booking_advanced:|^lead_status:/.test(reason) ||

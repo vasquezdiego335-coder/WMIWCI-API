@@ -9,8 +9,9 @@ import type { ConnectionOptions } from 'bullmq'
 //  1. `redis`          — a shared ioredis instance for direct commands
 //                        (admin queue stats, ad-hoc queries). Singleton.
 //
-//  2. `bullConnection` — a plain config object (NOT an instance) that
+//  2. `getLazyBullConnection()` — a plain config object (NOT an instance) that
 //                        BullMQ uses to create its OWN internal connections.
+//                        Built on first call, never at import.
 //                        This prevents the "Connection is closed" spam that
 //                        occurs when BullMQ duplicates a shared instance and
 //                        the duplicates' error events go unhandled.
@@ -185,18 +186,44 @@ export function getBullConnection(): ConnectionOptions {
   return opts as unknown as ConnectionOptions
 }
 
-// Lazy getter — config parsed on first access, not at import time.
-// getBullConnection() only parses a URL (no network call), so the
-// lazy wrapper is lightweight insurance against edge-case build failures.
+// Lazy getter — config parsed on FIRST USE, never at import time.
+//
+// IMPORTING THIS MODULE MUST NEVER THROW (2026-09-15). It used to end with
+// `export const bullConnection = getBullConnection()`, which ran the production
+// REDIS_URL refusal at import. Every worker module imported it, so a worker host
+// missing REDIS_URL crashed while its imports were still resolving: before the
+// HTTP server bound, before the diagnostic banner, with nothing on /health to
+// say why. The refusal is unchanged; it now fires where the connection is first
+// needed (a Worker or Queue constructor), after the host is already serving 503.
+//
+// A failure is never cached: in production with no REDIS_URL every call throws
+// the same error, so nothing can silently fall back to localhost later.
 let _bullConnection: ConnectionOptions | undefined
 export function getLazyBullConnection(): ConnectionOptions {
   if (!_bullConnection) _bullConnection = getBullConnection()
   return _bullConnection
 }
 
-// Pre-built config — safe to call eagerly because getBullConnection()
-// only parses the REDIS_URL string into host/port/password; it opens
-// NO network connections.  Workers (persistent processes) import this
-// directly; serverless routes go through the lazy Queue proxies in
-// @/lib/queues which call getLazyBullConnection() on first use.
-export const bullConnection: ConnectionOptions = getBullConnection()
+/** Test-only: forget the memoized config so a test can change REDIS_URL. */
+export function __resetBullConnectionForTests(): void {
+  _bullConnection = undefined
+}
+
+/**
+ * Why REDIS_URL cannot be used, or null when it can. Pure and silent: it never
+ * logs and never returns the value, only a reason naming the variable, so the
+ * worker host can list it on /readyz before anything touches Redis.
+ */
+export function redisConfigProblem(env: NodeJS.ProcessEnv = process.env): string | null {
+  const raw = env.REDIS_URL?.trim()
+  if (!raw) return env.NODE_ENV === 'production' ? 'REDIS_URL is not set' : null
+  let parsed: URL
+  try {
+    parsed = new URL(raw)
+  } catch {
+    return 'REDIS_URL is not a valid URL'
+  }
+  if (parsed.protocol !== 'redis:' && parsed.protocol !== 'rediss:') return 'REDIS_URL must use redis:// or rediss://'
+  if (!parsed.hostname) return 'REDIS_URL has no host'
+  return null
+}

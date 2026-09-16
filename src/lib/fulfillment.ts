@@ -5,6 +5,14 @@ import { webhookLogger } from './logger'
 import { ingestBookingToTracker } from './tracker'
 import { outboxEnabled, emitPaymentCompleted } from '../outbox/integration'
 import { computeQuote } from './booking-quote'
+import {
+  PAYMENT_FANOUT_RETRY_WINDOW_MS,
+  defaultRetryStore,
+  enqueueDurable,
+  type EnqueueStatus,
+  type QueueLike,
+  type RetryStore,
+} from './lifecycle-enqueue'
 
 // ════════════════════════════════════════════════════════════════════════
 //  Checkout fulfillment — the single source of truth for "a $49 hold was
@@ -32,26 +40,80 @@ export type FulfillResult = {
 }
 
 // Guard a single queue.add() so a Redis stall can't hang the caller.
-// BullMQ uses maxRetriesPerRequest:null, so when Upstash drops the idle
-// connection, queue.add() HANGS FOREVER (it never rejects). On the webhook
-// that means no 200 → Stripe retries → duplicates; on the success redirect it
-// means the customer's browser hangs. Promise.race converts the hang into a
-// logged, non-fatal skip. Never throws.
-async function enqueue(label: string, fn: () => Promise<unknown>): Promise<void> {
-  try {
-    await Promise.race([
-      fn(),
-      new Promise((_, reject) =>
-        setTimeout(() => reject(new Error('queue add timed out after 5s (Redis unreachable?)')), 5000)
-      ),
-    ])
-    webhookLogger.debug({ label }, 'fulfillment job enqueued')
-  } catch (err) {
-    webhookLogger.error(
-      { label, err: err instanceof Error ? err.message : String(err) },
-      'fulfillment enqueue failed/timed out (non-fatal — booking already moved to PENDING_APPROVAL)'
-    )
+// BullMQ uses maxRetriesPerRequest:null, so when the idle connection drops,
+// queue.add() HANGS FOREVER (it never rejects). On the webhook that means no
+// 200 → Stripe retries → duplicates; on the success redirect it means the
+// customer's browser hangs. The race converts the hang into a bounded failure.
+// Never throws.
+//
+// DURABLE (production reliability release 2026-09-15). A failed add used to be
+// logged as "non-fatal" and then the function logged "all jobs queued" anyway:
+// the Discord approval card, the job channels and the marketing enroll were
+// simply gone, for a customer whose $49 was already held. Each job now carries
+// a deterministic id and a failure is recorded in lifecycle_enqueue_retries; the
+// hourly lifecycle-repair sweep re-adds that exact job (within 24h). The atomic
+// status claim above guarantees this fan-out runs once per booking, so the
+// deterministic id never collides with a legitimate second job.
+
+/** The queues + retry store this fan-out writes to, injectable for tests. */
+export type FulfillmentEdge = {
+  email: QueueLike
+  discord: QueueLike
+  marketing: QueueLike
+  store?: RetryStore
+  now?: () => Date
+}
+
+export function defaultFulfillmentEdge(): FulfillmentEdge {
+  return { email: emailQueue, discord: discordQueue, marketing: marketingQueue }
+}
+
+/** Deterministic, BullMQ-safe (no ':') id for one fan-out job. */
+export function fanoutJobId(kind: string, bookingId: string): string {
+  return `fulfill__${kind}__${bookingId}`
+}
+
+export async function enqueueFanout(
+  label: string,
+  job: { queue: QueueLike; name: string; data: Record<string, unknown>; kind: string },
+  bookingId: string,
+  edge: Pick<FulfillmentEdge, 'store' | 'now'> = {}
+): Promise<EnqueueStatus> {
+  const now = edge.now ? edge.now() : new Date()
+  const { status } = await enqueueDurable(
+    {
+      queue: job.queue,
+      name: job.name,
+      data: job.data,
+      jobId: fanoutJobId(job.kind, bookingId),
+      fireAt: now,
+      notAfter: new Date(now.getTime() + PAYMENT_FANOUT_RETRY_WINDOW_MS),
+      path: 'payment-fanout',
+      subjectType: 'booking',
+      subjectId: bookingId,
+    },
+    { store: edge.store ?? defaultRetryStore(), now: () => now }
+  )
+  if (status === 'scheduled') webhookLogger.debug({ label, bookingId }, 'fulfillment job enqueued')
+  else if (status === 'recorded_for_retry') {
+    webhookLogger.warn({ label, bookingId }, 'fulfillment enqueue failed — recorded for retry by lifecycle-repair')
+  } else {
+    webhookLogger.error({ label, bookingId, tag: 'LIFECYCLE_ENQUEUE_LOST' }, 'fulfillment enqueue failed and was NOT recorded — job LOST')
   }
+  return status
+}
+
+/** PURE: the one truthful summary line for a fan-out. */
+export function fanoutSummary(statuses: EnqueueStatus[]): { level: 'info' | 'warn' | 'error'; message: string; counts: Record<EnqueueStatus, number> } {
+  const counts: Record<EnqueueStatus, number> = { scheduled: 0, recorded_for_retry: 0, lost: 0 }
+  for (const st of statuses) counts[st]++
+  if (counts.lost > 0) {
+    return { level: 'error', counts, message: `Checkout fulfilled — booking → PENDING_APPROVAL, but ${counts.lost} job(s) LOST (LIFECYCLE_ENQUEUE_LOST)` }
+  }
+  if (counts.recorded_for_retry > 0) {
+    return { level: 'warn', counts, message: `Checkout fulfilled — booking → PENDING_APPROVAL, ${counts.recorded_for_retry} job(s) recorded for retry` }
+  }
+  return { level: 'info', counts, message: 'Checkout fulfilled — booking → PENDING_APPROVAL, all jobs queued' }
 }
 
 /**
@@ -64,7 +126,7 @@ export async function fulfillPaidCheckout(params: {
   paymentIntentId: string | null
   amountTotalCents: number | null
   source: 'webhook' | 'success_redirect'
-}): Promise<FulfillResult> {
+}, edge: FulfillmentEdge = defaultFulfillmentEdge()): Promise<FulfillResult> {
   const { bookingId, paymentIntentId, amountTotalCents, source } = params
   const log = webhookLogger.child({ bookingId, source })
 
@@ -143,6 +205,9 @@ export async function fulfillPaidCheckout(params: {
   // Concurrent (not sequential) bounds the worst case to ~5s even if Redis is
   // down, which keeps the browser success redirect snappy.
   const tasks: Promise<void>[] = []
+  // Only the queue fan-out reports a status; the outbox and tracker are
+  // durable/self-guarded on their own.
+  const fanout: Promise<EnqueueStatus>[] = []
 
   // ════════════════════════════════════════════════════════════════════════
   //  MESSAGING POLICY — the PAYMENT step (booking → PENDING_APPROVAL, $49 held
@@ -171,9 +236,12 @@ export async function fulfillPaidCheckout(params: {
     )
   } else {
     log.info({ to: booking.customer.email }, '[messaging] queueing PRE-CONFIRMATION email')
-    tasks.push(
-      enqueue('email:pre-approval', () =>
-        emailQueue.add('pre-approval', {
+    fanout.push(
+      enqueueFanout('email:pre-approval', {
+        queue: edge.email,
+        name: 'pre-approval',
+        kind: 'pre-approval',
+        data: {
           template: 'pre-approval',
           to: booking.customer.email,
           bookingId,
@@ -195,8 +263,8 @@ export async function fulfillPaidCheckout(params: {
             manualReviewRequired: booking.manualReviewRequired ?? undefined,
             locale,
           },
-        })
-      )
+        },
+      }, bookingId, edge)
     )
   }
 
@@ -204,9 +272,12 @@ export async function fulfillPaidCheckout(params: {
   //    2026-09-15). The confirmation email above is the customer's receipt.
 
   // 3) Discord booking approval card (the Approve / Offer / Deny card)
-  tasks.push(
-    enqueue('discord:booking-created', () =>
-      discordQueue.add('booking-created', {
+  fanout.push(
+    enqueueFanout('discord:booking-created', {
+      queue: edge.discord,
+      name: 'booking-created',
+      kind: 'booking-created',
+      data: {
         type: 'booking-created',
         bookingId,
         payload: {
@@ -237,8 +308,8 @@ export async function fulfillPaidCheckout(params: {
           agreementName: booking.agreementName,
           agreementAcceptedAt: booking.agreementAcceptedAt?.toISOString(),
         },
-      })
-    )
+      },
+    }, bookingId, edge)
   )
 
   // 3b) Marketing-tracker revenue merge (Phase 2). Attribute this paid booking
@@ -276,9 +347,12 @@ export async function fulfillPaidCheckout(params: {
   )
 
   // 4) Marketing automation enrollment (external tool — env-gated stub)
-  tasks.push(
-    enqueue('marketing:enroll', () =>
-      marketingQueue.add('booking-paid', {
+  fanout.push(
+    enqueueFanout('marketing:enroll', {
+      queue: edge.marketing,
+      name: 'booking-paid',
+      kind: 'marketing-enroll',
+      data: {
         type: 'enroll-customer',
         bookingId,
         payload: {
@@ -288,17 +362,20 @@ export async function fulfillPaidCheckout(params: {
           displayId: booking.displayId,
           requestedDate: booking.requestedDate?.toISOString(),
         },
-      })
-    )
+      },
+    }, bookingId, edge)
   )
 
   // 5) Create the Discord job-coordination card (worker dispatch view).
   //    The payload carries everything the MOVE DAY JOB card renders so the
   //    worker never needs raw DB access; price detail stays owner-side except
   //    the labor estimate + travel-fee status the crew is allowed to see.
-  tasks.push(
-    enqueue('discord:create-job-channels', () =>
-      discordQueue.add('create-job-channels', {
+  fanout.push(
+    enqueueFanout('discord:create-job-channels', {
+      queue: edge.discord,
+      name: 'create-job-channels',
+      kind: 'create-job-channels',
+      data: {
         type: 'create-job-channels',
         bookingId,
         payload: {
@@ -315,8 +392,8 @@ export async function fulfillPaidCheckout(params: {
           travelFeeDollars: booking.travelFee ? booking.travelFee / 100 : 0,
           manualReviewRequired: booking.manualReviewRequired,
         },
-      })
-    )
+      },
+    }, bookingId, edge)
   )
 
   // 6) Door-hanger discount approval card — REMOVED 2026-07-21 (owner
@@ -324,7 +401,7 @@ export async function fulfillPaidCheckout(params: {
   //    new approval card is ever created. Historical DiscountType enum values
   //    are retained in the schema so existing bookings still read correctly.
 
-  await Promise.all(tasks)
+  const [statuses] = await Promise.all([Promise.all(fanout), Promise.all(tasks)])
 
   // ── STOP RULE: the customer converted ───────────────────────────────────
   // Cancel every pending abandoned-recovery stage. This is an optimisation, not
@@ -335,6 +412,8 @@ export async function fulfillPaidCheckout(params: {
     log.warn({ err: err instanceof Error ? err.message : String(err) }, 'onBookingPaid cleanup failed (non-fatal)')
   )
 
-  log.info('Checkout fulfilled — booking → PENDING_APPROVAL, all jobs queued')
+  // "all jobs queued" is said ONLY when every queue add succeeded (2026-09-15).
+  const summary = fanoutSummary(statuses)
+  log[summary.level]({ jobs: summary.counts }, summary.message)
   return { processed: true, bookingId }
 }

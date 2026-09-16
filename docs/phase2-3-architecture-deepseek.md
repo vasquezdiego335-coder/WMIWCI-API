@@ -1,5 +1,12 @@
 # Moving Company Software Design Document — Phase 2 & 3
 
+> ## ⚠️ HISTORICAL (pre-2026-09-15)
+> A design document, not a description of the running system. Its `smsQueue`,
+> `sms.worker.ts`, `TWILIO_*` variables, `*.sms` message copy, Vercel hosting and
+> Upstash Redis are all gone: **SMS was removed on 2026-09-15** and both services
+> run on Railway. Current topology: **[`DEPLOY.md`](../DEPLOY.md)**; current code
+> map: **[`ARCHITECTURE.md`](../ARCHITECTURE.md)**.
+
 ## 1. Executive Summary & Corrected Follow-Up Timeline
 
 **Core Problem:** The owner wants to ask for referrals immediately after a $49 hold is authorized, before the move happens. This is TCPA-risky and poor customer experience — the customer hasn't experienced service yet.

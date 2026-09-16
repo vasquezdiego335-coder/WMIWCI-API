@@ -11,6 +11,7 @@ import {
 } from '../email-monitoring'
 import { emailRequired } from '../env'
 import { AMBIGUOUS_WINDOW_DAYS } from '../email-audience'
+import { CRON_SCHEDULES, createCronReconciler, legacyRepeatKey } from '../cron-schedules'
 
 // ════════════════════════════════════════════════════════════════════════
 //  PRODUCTION HARDENING (owner spec 2026-07-26, audit items E-01…E-09)
@@ -55,16 +56,25 @@ test('E-01 the env gate is in the entrypoint PRODUCTION runs, not only the dev o
   const entry = pkg.scripts['host:start'] as string
   assert.match(entry, /worker-host\.ts/, 'host:start must point at worker-host.ts (update this test if it moves)')
 
-  const host = code(src('src/worker-host.ts'))
-  assert.match(host, /checkEnv\(\)/, 'the production entrypoint must validate the environment')
-  assert.match(host, /state\.envMissing = env\.missingRequired/, 'and record what is missing for /health')
-  // Workers must NOT start on a bad environment.
-  const gateAt = host.indexOf('const env = checkEnv()')
-  const firstWorker = host.indexOf('startEmailWorker()')
-  assert.ok(gateAt > 0 && gateAt < firstWorker, 'validation must run BEFORE any worker starts')
-  assert.match(host, /if \(!env\.ok\)[\s\S]{0,600}return/, 'a bad environment must return before starting workers')
-  // /health must reflect it, since this entrypoint deliberately does not crash.
-  assert.match(host, /state\.envMissing\.length === 0/, '/health must report degraded while vars are missing')
+  // 2026-09-15: worker-host.ts is a thin entry that starts src/worker-runtime/host.ts;
+  // the gate lives there. The entry must actually reach it.
+  const entry2 = code(src('src/worker-host.ts'))
+  assert.match(entry2, /import \{ startWorkerHost \} from '\.\/worker-runtime\/host'/, 'the production entrypoint must use the host')
+  assert.match(entry2, /startWorkerHost\(\)/, 'and start it')
+  const host = code(src('src/worker-runtime/host.ts'))
+  assert.match(host, /const env = checkEnv\(\)/, 'the production host must validate the environment')
+  assert.match(host, /validateConfig: validateWorkerConfig/, 'with the real validator by default')
+  assert.match(host, /state\.envMissing = config\.missing/, 'and record what is missing for /readyz')
+  // Workers must NOT start on a bad environment: validation precedes module loading,
+  // and module loading is where every worker (and startEmailWorker) comes from.
+  const gateAt = host.indexOf('const config = d.validateConfig()')
+  const loadAt = host.indexOf('mods = await d.loadModules()')
+  const startAt = host.indexOf('starter.start()')
+  assert.ok(gateAt > 0 && gateAt < loadAt && loadAt < startAt, 'validation must run BEFORE any worker module loads or starts')
+  assert.match(host, /if \(!config\.ok\) \{[\s\S]{0,1200}return\r?\n/, 'a bad environment must return before starting workers')
+  assert.match(code(src('src/worker-runtime/load-modules.ts')), /start: emailWorker\.startEmailWorker/, 'the email worker is started only through the loaded modules')
+  // /readyz must reflect it (the behaviour is pinned in worker-startup.test.ts).
+  assert.match(host, /envMissing: state\.envMissing/, '/readyz must report degraded while vars are missing')
 })
 
 test('E-01 the email vars that fail SILENTLY are required when email is on', () => {
@@ -92,8 +102,23 @@ test('E-02 retryPendingSideEffects is registered as a cron, not just exported', 
   const worker = code(src('src/workers/scheduled.worker.ts'))
   assert.match(worker, /import \{ retryPendingSideEffects \}/, 'must import the sweep')
   assert.match(worker, /await retryPendingSideEffects\(/, 'must CALL it in a job handler')
-  assert.match(worker, /pattern: '\*\/15 \* \* \* \*' \}, jobId: 'cron:email-side-effect-sweep'/, 'must be registered in the shared 15-minute recovery window')
+  assert.deepEqual(
+    CRON_SCHEDULES.find((s) => s.name === 'email-side-effect-sweep'),
+    { name: 'email-side-effect-sweep', pattern: '*/15 * * * *', tz: undefined, jobId: 'cron:email-side-effect-sweep' },
+    'must be registered in the shared 15-minute recovery window',
+  )
+  assertCronRegistryIsWhatTheWorkerRegisters()
 })
+
+/** The registry is only meaningful if the scheduled worker hands it to the reconciler. */
+function assertCronRegistryIsWhatTheWorkerRegisters(): void {
+  const worker = code(src('src/workers/scheduled.worker.ts'))
+  assert.match(worker, /import \{ CRON_SCHEDULES, createCronReconciler/, 'the worker must import the registry and reconciler')
+  assert.match(worker, /createCronReconciler\(\{[\s\S]{0,400}queue: scheduledQueue,[\s\S]{0,400}schedules: CRON_SCHEDULES,/, 'the reconciler must register CRON_SCHEDULES on the scheduled queue')
+  assert.match(worker, /^\s*registerCronJobs\(\)/m, 'startScheduledWorker must start registration')
+  const recon = code(lib('cron-schedules.ts'))
+  assert.match(recon, /opts\.queue\.add\(s\.name, \{ type: s\.name \}, \{ repeat, jobId: s\.jobId \}\)/, 'registration uses the legacy repeat API with the registry jobId')
+}
 
 test('E-02 a dead-lettered suppression raises a CRITICAL alert naming the risk', () => {
   const worker = src('src/workers/scheduled.worker.ts')
@@ -107,7 +132,7 @@ test('E-02 a dead-lettered suppression raises a CRITICAL alert naming the risk',
 test('NEON-COST production host does not start the legacy interval poller', () => {
   // PREVENTS: an UPDATE...RETURNING transaction every three seconds with no
   // mail to send, which keeps Neon's compute active around the clock.
-  const host = code(src('src/worker-host.ts'))
+  const host = code(src('src/worker-host.ts')) + code(src('src/worker-runtime/host.ts')) + code(src('src/worker-runtime/load-modules.ts'))
   assert.doesNotMatch(host, /startOutboxWorker/, 'production must be event-driven, not interval-polled')
   assert.match(host, /state\.outbox = process\.env\.OUTBOX_ENABLED === 'true'/)
 })
@@ -126,7 +151,11 @@ test('NEON-COST immediate and recovery outbox jobs use the same bounded drain', 
   const worker = code(src('src/workers/scheduled.worker.ts'))
   assert.match(worker, /case 'outbox-email-drain':\s*case 'outbox-email-recovery':/)
   assert.match(worker, /await drainOutbox\(\)/)
-  assert.match(worker, /jobId: 'cron:outbox-email-recovery'/)
+  assert.deepEqual(
+    CRON_SCHEDULES.find((s) => s.name === 'outbox-email-recovery'),
+    { name: 'outbox-email-recovery', pattern: '*/15 * * * *', tz: undefined, jobId: 'cron:outbox-email-recovery' },
+  )
+  assertCronRegistryIsWhatTheWorkerRegisters()
 
   const processor = code(src('src/outbox/workers/emailWorker.ts'))
   assert.match(processor, /export async function drainOutbox/)
@@ -134,7 +163,6 @@ test('NEON-COST immediate and recovery outbox jobs use the same bounded drain', 
 })
 
 test('NEON-COST recurring database maintenance shares one 15-minute wake window', () => {
-  const worker = code(src('src/workers/scheduled.worker.ts'))
   const aligned = [
     'campaign-sweep',
     'lead-notification-sweep',
@@ -145,26 +173,55 @@ test('NEON-COST recurring database maintenance shares one 15-minute wake window'
     'email-agent-cycle',
   ]
   for (const name of aligned) {
-    assert.ok(
-      worker.includes(`{ repeat: { pattern: '*/15 * * * *' }, jobId: 'cron:${name}' }`),
-      `${name} must run in the shared quarter-hour window`,
+    assert.deepEqual(
+      CRON_SCHEDULES.find((s) => s.name === name),
+      { name, pattern: '*/15 * * * *', tz: undefined, jobId: `cron:${name}` },
+      `${name} must run in the shared quarter-hour window (UTC, no tz)`,
     )
   }
+  const texts = [code(src('src/workers/scheduled.worker.ts')), code(lib('cron-schedules.ts'))]
   for (const oldPattern of ['*/2 * * * *', '*/5 * * * *', '*/10 * * * *', '5-59/10 * * * *']) {
-    assert.ok(!worker.includes(`pattern: '${oldPattern}'`), `stale frequent pattern must be absent: ${oldPattern}`)
+    assert.ok(!CRON_SCHEDULES.some((s) => s.pattern === oldPattern), `stale frequent pattern must be absent: ${oldPattern}`)
+    for (const t of texts) assert.ok(!t.includes(`'${oldPattern}'`), `stale frequent pattern must be absent from source: ${oldPattern}`)
   }
-  assert.ok(
-    worker.includes("{ repeat: { pattern: '0 * * * *' }, jobId: 'cron:lifecycle-repair' }"),
+  assert.deepEqual(
+    CRON_SCHEDULES.find((s) => s.name === 'lifecycle-repair'),
+    { name: 'lifecycle-repair', pattern: '0 * * * *', tz: undefined, jobId: 'cron:lifecycle-repair' },
     'the hourly repair must align with a quarter-hour wake',
   )
+  assertCronRegistryIsWhatTheWorkerRegisters()
 })
 
-test('NEON-COST deployment prunes old BullMQ repeatables instead of leaving both schedules live', () => {
-  const worker = code(src('src/workers/scheduled.worker.ts'))
-  assert.match(worker, /const desiredPatterns = new Map<string, string>/)
-  assert.match(worker, /const desired = desiredPatterns\.get\(r\.name\)/)
-  assert.match(worker, /r\.pattern !== desired/)
-  assert.match(worker, /removeRepeatableByKey\(r\.key\)/)
+test('NEON-COST deployment prunes old BullMQ repeatables instead of leaving both schedules live', async () => {
+  // Behavioural since 2026-09-15 (the prune moved into the reconciler): a managed
+  // name left on an old frequent pattern is removed by key, and the desired
+  // schedule is present exactly once. Full matrix: cron-reconciler.test.ts.
+  const live = new Map<string, { key: string; name: string; pattern: string; tz: string | null }>()
+  const staleKey = legacyRepeatKey({ name: 'campaign-sweep', pattern: '*/5 * * * *', tz: undefined, jobId: 'cron:campaign-sweep' })
+  live.set(staleKey, { key: staleKey, name: 'campaign-sweep', pattern: '*/5 * * * *', tz: null })
+  const removed: string[] = []
+  const reconciler = createCronReconciler({
+    redisOk: async () => true,
+    sleep: async () => undefined,
+    queue: {
+      add: async (name, _data, opts) => {
+        const key = legacyRepeatKey({ name: name as never, pattern: opts.repeat.pattern, tz: opts.repeat.tz, jobId: opts.jobId })
+        live.set(key, { key, name, pattern: opts.repeat.pattern, tz: opts.repeat.tz ?? null })
+      },
+      getRepeatableJobs: async () => [...live.values()],
+      removeRepeatableByKey: async (key) => {
+        removed.push(key)
+        return live.delete(key)
+      },
+    },
+  })
+  const status = await reconciler.reconcileOnce()
+  assert.deepEqual(removed, [staleKey], 'the stale pattern must be removed by its key')
+  assert.equal(status.ok, true)
+  assert.equal([...live.values()].filter((r) => r.name === 'campaign-sweep').length, 1)
+  assert.equal(live.size, CRON_SCHEDULES.length)
+  assert.match(code(lib('cron-schedules.ts')), /removeRepeatableByKey\(stale\.key\)/)
+  assertCronRegistryIsWhatTheWorkerRegisters()
 })
 
 // ── E-03: cross-run duplicate protection ────────────────────────────────
@@ -333,7 +390,11 @@ test('E-04 the health endpoint reuses the SAME checks the cron alerts on', async
 
 test('E-04 the monitoring cron is registered', () => {
   const worker = code(src('src/workers/scheduled.worker.ts'))
-  assert.match(worker, /jobId: 'cron:email-monitoring'/)
+  assert.deepEqual(
+    CRON_SCHEDULES.find((s) => s.name === 'email-monitoring'),
+    { name: 'email-monitoring', pattern: '*/15 * * * *', tz: undefined, jobId: 'cron:email-monitoring' },
+  )
+  assertCronRegistryIsWhatTheWorkerRegisters()
   assert.match(worker, /runEmailMonitoring\(\)/)
 })
 

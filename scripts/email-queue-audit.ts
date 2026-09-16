@@ -31,7 +31,7 @@
 // ════════════════════════════════════════════════════════════════════════
 import 'dotenv/config'
 import { Queue } from 'bullmq'
-import { bullConnection } from '../src/lib/redis'
+import { getLazyBullConnection } from '../src/lib/redis'
 import { prisma } from '../src/lib/db'
 import { classifyTemplate } from '../src/lib/email-guard'
 import { quoteFollowupBlockReason, leadNurtureBlockReason, LEAD_NURTURE_STAGES } from '../src/lib/journeys'
@@ -121,7 +121,7 @@ async function judgeBooking(bookingId: string, template: string): Promise<{ verd
 }
 
 async function auditQueue(name: 'scheduled' | 'email'): Promise<void> {
-  const q = new Queue(name, { connection: bullConnection })
+  const q = new Queue(name, { connection: getLazyBullConnection() })
   try {
     // Every state a job can be sitting in and still fire later. ACTIVE is
     // deliberately excluded: a job mid-execution cannot be removed safely, and

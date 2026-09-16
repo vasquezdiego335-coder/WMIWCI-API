@@ -17,6 +17,20 @@ import {
   campaignRunEventId,
   editedAfterApproval,
   promotionsEnabled,
+  RUN_STATES,
+  UNFINISHED_RUN_STATES,
+  RUN_SLOT_INDEX,
+  RECIPIENT_TERMINAL_STATES,
+  RECIPIENT_RETRYABLE_STATES,
+  CAMPAIGN_TRANSIENT_MAX_ATTEMPTS,
+  isRunSlotConflict,
+  isTransientTxError,
+  isTransientReadFailure,
+  planRecipientRetry,
+  recipientClaimWhere,
+  recipientSettlementWhere,
+  runSlotLockKey,
+  transientRetryDelayMs,
   type RunState,
 } from '../email-campaign-run'
 
@@ -169,4 +183,130 @@ test('promotional dispatch is DISABLED unless the switch is exactly "true"', () 
     if (prev === undefined) delete process.env.EMAIL_PROMOTIONS_ENABLED
     else process.env.EMAIL_PROMOTIONS_ENABLED = prev
   }
+})
+
+// ── One unfinished run per campaign (2026-09-15) ────────────────────────
+
+test('UNFINISHED_RUN_STATES is exactly every non-terminal run state', () => {
+  const expected = RUN_STATES.filter((s) => !RUN_TERMINAL_STATES.has(s)).slice().sort()
+  assert.deepEqual(UNFINISHED_RUN_STATES.slice().sort(), expected)
+  assert.deepEqual(UNFINISHED_RUN_STATES.slice().sort(), ['CANCELLING', 'PAUSED', 'PREPARING', 'QUEUED', 'SENDING'])
+  assert.equal(RUN_STATES.length, 9)
+})
+
+test('isRunSlotConflict recognises the index violation and nothing else', () => {
+  const yes: unknown[] = [
+    { code: 'P2002' },
+    { code: 'P2002', meta: { target: RUN_SLOT_INDEX } },
+    { code: 'P2002', meta: { target: ['campaign_id'] } },
+    { code: 'P2010', message: `Raw query failed. Code: 23505. duplicate key value violates unique constraint "${RUN_SLOT_INDEX}"` },
+  ]
+  for (const e of yes) assert.equal(isRunSlotConflict(e), true, JSON.stringify(e))
+  const no: unknown[] = [
+    { code: 'P2002', meta: { target: ['run_id', 'email'] } },
+    { code: 'P2002', meta: { target: 'email_campaign_recipients_run_id_email_key' } },
+    { code: 'P2025' },
+    { code: 'P2010', message: '23505 on some_other_index' },
+    new Error('boom'),
+    null,
+    undefined,
+  ]
+  for (const e of no) assert.equal(isRunSlotConflict(e), false, String(e && JSON.stringify(e)))
+})
+
+test('isTransientTxError is the busy-database family only', () => {
+  for (const code of ['P2024', 'P2028', 'P2034']) assert.equal(isTransientTxError({ code }), true, code)
+  for (const e of [{ code: 'P2002' }, { code: 'P2025' }, new Error('P2024'), null]) assert.equal(isTransientTxError(e), false)
+})
+
+test('recipient claim and settlement predicates carry the attempt token', () => {
+  assert.deepEqual(recipientClaimWhere('r', 'PENDING', 3), { id: 'r', status: 'PENDING', attempts: 3 })
+  assert.deepEqual(recipientClaimWhere('r', 'DEFERRED', 0), { id: 'r', status: 'DEFERRED', attempts: 0 })
+  assert.deepEqual(recipientSettlementWhere('r', 4), { id: 'r', status: 'SENDING', attempts: 4 })
+})
+
+test('runSlotLockKey is namespaced and deterministic', () => {
+  assert.equal(runSlotLockKey('c1'), runSlotLockKey('c1'))
+  assert.notEqual(runSlotLockKey('c1'), runSlotLockKey('c2'))
+  assert.match(runSlotLockKey('c1'), /^email_campaign_run:c1$/)
+})
+
+// ── Transient read failures are retried, never suppressed (2026-09-15) ──
+
+test('suppression_read_failed maps to DEFERRED, never SUPPRESSED', () => {
+  const out = recipientStateForOutcome({ sent: false, reason: 'suppression_read_failed', outcomeClass: 'retryable' })
+  assert.deepEqual(out, { status: 'DEFERRED', reason: 'suppression_read_failed' })
+  assert.notEqual(out.status, 'SUPPRESSED')
+  assert.equal(RECIPIENT_TERMINAL_STATES.has(out.status), false)
+})
+
+test('every *_read_failed, claim_lookup_failed and context_error: is DEFERRED', () => {
+  for (const reason of ['state_read_failed', 'eligibility_read_failed', 'consent_read_failed', 'claim_lookup_failed', 'context_error:connection reset']) {
+    assert.equal(recipientStateForOutcome({ sent: false, reason }).status, 'DEFERRED', reason)
+  }
+})
+
+test('hard suppressions stay terminal SUPPRESSED; unsubscribe stays UNSUBSCRIBED', () => {
+  for (const reason of ['hard_bounce', 'spam_complaint', 'admin_block', 'invalid_address', 'provider_rejected']) {
+    assert.equal(recipientStateForOutcome({ sent: false, reason, outcomeClass: 'terminal' }).status, 'SUPPRESSED', reason)
+  }
+  assert.equal(recipientStateForOutcome({ sent: false, reason: 'unsubscribed' }).status, 'UNSUBSCRIBED')
+  assert.equal(RECIPIENT_RETRYABLE_STATES.has('SUPPRESSED'), false)
+  assert.equal(RECIPIENT_TERMINAL_STATES.has('SUPPRESSED'), true)
+})
+
+test('isTransientReadFailure: reads only, never a verdict', () => {
+  for (const r of ['suppression_read_failed', 'state_read_failed', 'claim_lookup_failed', 'context_error:connection']) assert.equal(isTransientReadFailure(r), true, r)
+  for (const r of ['hard_bounce', 'quiet_hours', 'no_marketing_consent', 'validation: x', 'context_missing:reviewUrl', 'context_ineligible:x', '', null, undefined]) {
+    assert.equal(isTransientReadFailure(r), false, String(r))
+  }
+})
+
+test('transientRetryDelayMs is exponential and capped', () => {
+  const m = 60_000
+  assert.deepEqual([1, 2, 3, 4, 5, 6, 7, 8].map((n) => transientRetryDelayMs(n)), [5 * m, 10 * m, 20 * m, 40 * m, 80 * m, 120 * m, 120 * m, 120 * m])
+  assert.equal(transientRetryDelayMs(0), 5 * m)
+})
+
+test('planRecipientRetry: transient backoff grows per failure', () => {
+  const now = 1_700_000_000_000
+  const out = { sent: false, reason: 'suppression_read_failed' }
+  const p0 = planRecipientRetry(out, 'DEFERRED', 0, now, 6)
+  assert.equal(p0.action, 'transient')
+  if (p0.action === 'transient') {
+    assert.equal(p0.at.getTime(), now + 5 * 60_000)
+    assert.equal(p0.transientAttempts, 1)
+  }
+  const p3 = planRecipientRetry(out, 'DEFERRED', 3, now, 6)
+  assert.equal(p3.action === 'transient' && p3.at.getTime(), now + 40 * 60_000)
+})
+
+test('planRecipientRetry: exhaustion is FAILED (re-openable), never SUPPRESSED', () => {
+  const p = planRecipientRetry({ sent: false, reason: 'suppression_read_failed' }, 'DEFERRED', 5, Date.now(), 6)
+  assert.equal(p.action, 'exhausted')
+  if (p.action === 'exhausted') {
+    assert.equal(p.status, 'FAILED')
+    assert.equal(p.reason, 'suppression_read_failed:retries_exhausted')
+    assert.equal(p.transientAttempts, 6)
+  }
+  assert.ok(RECIPIENT_RETRYABLE_STATES.has('FAILED'), 'an operator can re-open an exhausted recipient')
+  assert.ok(CAMPAIGN_TRANSIENT_MAX_ATTEMPTS >= 2, 'the budget must allow at least one retry')
+})
+
+test('planRecipientRetry: a policy deferral wins and does NOT reset the transient budget', () => {
+  const retryAt = new Date(Date.now() + 3_600_000)
+  const p = planRecipientRetry({ sent: false, reason: 'quiet_hours', retryAt }, 'DEFERRED', 4, Date.now(), 6)
+  assert.deepEqual(p, { action: 'policy', at: retryAt, transientAttempts: 4 })
+})
+
+test('planRecipientRetry: sent and terminal outcomes never retry and reset the budget', () => {
+  assert.deepEqual(planRecipientRetry({ sent: true }, 'SENT', 3), { action: 'none', transientAttempts: 0 })
+  assert.deepEqual(planRecipientRetry({ sent: false, reason: 'hard_bounce' }, 'SUPPRESSED', 3), { action: 'none', transientAttempts: 0 })
+  // An undated DEFERRED of another kind keeps the existing behaviour and its counter.
+  assert.deepEqual(planRecipientRetry({ sent: false, reason: 'no_marketing_consent' }, 'DEFERRED', 2), { action: 'none', transientAttempts: 2 })
+})
+
+test('a transient-DEFERRED recipient blocks settlement; exhaustion settles COMPLETED_WITH_ERRORS', () => {
+  assert.equal(runIsSettled({ SENT: 3, DEFERRED: 1 }), false)
+  assert.equal(settledRunState({ SENT: 3, FAILED: 1 }, false), 'COMPLETED_WITH_ERRORS')
 })
