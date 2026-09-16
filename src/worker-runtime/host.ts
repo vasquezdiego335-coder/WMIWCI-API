@@ -424,7 +424,7 @@ export function startWorkerHost(overrides: Partial<WorkerHostDeps> = {}): Worker
         w.on('error', (err) => {
           const message = errMessage(err)
           a.lastError = message
-          const decision = errorLog(`${a.name} ${message}`)
+          const decision = errorLog(`${a.name} | ${message}`)
           if (decision.log) {
             logger.error({ event: 'worker.error', queue: a.name, err: message, suppressedSinceLastLog: decision.suppressed }, `queue worker "${a.name}" error`)
           }
