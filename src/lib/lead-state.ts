@@ -79,6 +79,14 @@ export type FormContract = {
   selfReportedSourceStep?: string
   /** The step id on which the marketing checkbox appears. */
   marketingConsentStep?: string
+  /**
+   * Does it show the email-marketing NOTICE (email consent release 2026-09-16)?
+   * A notice is not a checkbox: submitting after seeing it may lead to
+   * promotional email, and the form's opt-out box is the customer's choice.
+   */
+  presentsMarketingNotice?: boolean
+  /** The step id on which the notice appears. */
+  marketingNoticeStep?: string
 }
 
 /**
@@ -92,21 +100,30 @@ export type FormContract = {
 const BOOKING_FORM_STEPS = ['cardsvc', 'card1', 'card2', 'card3', 'card4', 'card5'] as const
 
 export const FORM_CONTRACTS: Record<string, FormContract> = {
-  //  #emailOptIn lives on card1 (Contact); #foundUs lives on card4
+  //  EMAIL CONSENT RELEASE 2026-09-16: the booking form, the quick quote and the
+  //  contact form replaced the opt-in checkbox with the email NOTICE (plus an
+  //  unticked opt-out box). They still ADDRESS marketing email on the page, so
+  //  presentsMarketingConsent stays true — which keeps every row captured in
+  //  the checkbox era reading exactly as before — and presentsMarketingNotice
+  //  records the current form. Both are pinned against the real markup by
+  //  lead-consent-site-contract.test.ts. The marketing record for a notice-era
+  //  submission is email_consent_events, not these columns.
+  //  #emailNoticeBlock lives on card1 (Contact); #foundUs lives on card4
   //  (Addresses & Access) — four steps later, which is precisely why a
   //  contact-step capture must not be able to answer for it.
   BOOKING_FORM: {
     presentsMarketingConsent: true,
+    presentsMarketingNotice: true,
     presentsSelfReportedSource: true,
     steps: BOOKING_FORM_STEPS,
-    marketingConsentStep: 'card1',
+    marketingNoticeStep: 'card1',
     selfReportedSourceStep: 'card4',
   },
-  //  The quick quote asks for consent and never asks how they heard.
-  QUICK_QUOTE_FORM: { presentsMarketingConsent: true, presentsSelfReportedSource: false },
+  //  The quick quote shows the notice and never asks how they heard.
+  QUICK_QUOTE_FORM: { presentsMarketingConsent: true, presentsMarketingNotice: true, presentsSelfReportedSource: false },
   HOMEPAGE_ESTIMATE: { presentsMarketingConsent: true, presentsSelfReportedSource: false },
   SERVICES_PAGE: { presentsMarketingConsent: true, presentsSelfReportedSource: false },
-  CONTACT_FORM: { presentsMarketingConsent: true, presentsSelfReportedSource: false },
+  CONTACT_FORM: { presentsMarketingConsent: true, presentsMarketingNotice: true, presentsSelfReportedSource: false },
   MOVING_CHECKLIST: { presentsMarketingConsent: true, presentsSelfReportedSource: false },
 }
 

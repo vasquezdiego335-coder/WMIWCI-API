@@ -238,10 +238,11 @@ test("follow-up ledger claim writes smsStatus 'not_applicable'", () => {
 
 // ── 6. campaign lead recheck ────────────────────────────────────────────
 
-test('campaign recheck passes the template to leadEligibility and refuses a subjectless recipient', () => {
+test('campaign recheck passes the template AND the campaign context, and refuses a subjectless recipient', () => {
   const s = src('src/lib/email-campaign-dispatch.ts')
-  assert.ok(s.includes('leadEligibility(recipient.leadId, template)'))
-  const i = s.indexOf('leadEligibility(recipient.leadId, template)')
+  assert.ok(s.includes("leadEligibility(recipient.leadId, template, { context: 'campaign' })"))
+  assert.ok(s.includes("bookingEligibility(template, recipient.bookingId, { context: 'campaign', sequenceKind: null })"))
+  const i = s.indexOf("leadEligibility(recipient.leadId, template, { context: 'campaign' })")
   assert.match(s.slice(i, i + 300), /return 'no_recheck_subject'/)
 })
 

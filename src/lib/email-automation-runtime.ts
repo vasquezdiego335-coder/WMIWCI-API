@@ -31,7 +31,12 @@
 import { prisma } from './db'
 import { queueLogger } from './logger'
 import { scheduledQueue } from './queues'
-import { guardedSend } from './email-guard'
+import { guardedSend, sendTimeEligibilityDeps } from './email-guard'
+import {
+  promotionalEligibility,
+  type EligibilityDecision,
+  type EligibilityRequest,
+} from './consent/marketing-eligibility'
 import { renderTemplate } from './email-render'
 import { templateByKey } from './email-registry'
 import { normalizeEmail } from './email-tokens'
@@ -118,6 +123,14 @@ export type LiveSubjectState = {
   //  types, so the lead side gains the same send-time guarantee its enrolment
   //  gate already gave it.
   marketing?: { consent: boolean | null; optOut: boolean } | null
+  // ── THE SHARED PER-PERSON GATE (DESIGN-v2 §5, 2026-09-16) ─────────────
+  //  promotionalEligibility() in context 'automation': express consent only
+  //  (never a notice), plus every per-person prohibition the columns above
+  //  cannot see — an unsubscribe or opt-out on record, a decline on another
+  //  row, a test or staff identity. loadLiveState ALWAYS loads it, for every
+  //  subject shape, which closes the old gap where a subject with neither a
+  //  booking nor a lead left `marketing` undefined and the consent rule silent.
+  eligibility?: EligibilityDecision | null
 }
 
 /**
@@ -144,6 +157,13 @@ export function evaluateStopRules(def: AutomationDefinition, state: LiveSubjectS
     if (!hasPromotionalConsent({ emailMarketingConsent: state.marketing.consent })) {
       return { stop: true, reason: 'no_marketing_consent' }
     }
+  }
+
+  //  The shared gate, also not switchable. A READ FAILURE is not a stop: the
+  //  runtime retries the stage (executeAutomationStage), because "could not
+  //  check" is a fact about the database, not about the person.
+  if (state.eligibility && !state.eligibility.eligible && state.eligibility.reason !== 'eligibility_read_failed') {
+    return { stop: true, reason: state.eligibility.reason }
   }
 
   const lead = state.lead
@@ -180,7 +200,41 @@ export function evaluateStopRules(def: AutomationDefinition, state: LiveSubjectS
 
 // ── Loading live state ──────────────────────────────────────────────────
 
-async function loadLiveState(enrollment: { bookingId: string | null; leadId: string | null; email: string }): Promise<LiveSubjectState> {
+/**
+ * The shared decision for an automation subject: context 'automation' (express
+ * only), subject = the most specific row the enrollment names. Never throws —
+ * a read error is 'eligibility_read_failed'.
+ */
+export function automationEligibilityRequest(subject: {
+  bookingId?: string | null
+  leadId?: string | null
+  customerId?: string | null
+}): Omit<EligibilityRequest, 'email'> {
+  const target: NonNullable<EligibilityRequest['subject']> = subject.bookingId
+    ? { type: 'booking', id: subject.bookingId }
+    : subject.leadId
+    ? { type: 'lead', id: subject.leadId }
+    : subject.customerId
+    ? { type: 'customer', id: subject.customerId }
+    : { type: 'none' }
+  return { context: 'automation', subject: target }
+}
+
+export function automationEligibility(subject: {
+  email: string
+  bookingId?: string | null
+  leadId?: string | null
+  customerId?: string | null
+}): Promise<EligibilityDecision> {
+  return promotionalEligibility({ ...automationEligibilityRequest(subject), email: subject.email }, sendTimeEligibilityDeps())
+}
+
+async function loadLiveState(enrollment: {
+  bookingId: string | null
+  leadId: string | null
+  customerId?: string | null
+  email: string
+}): Promise<LiveSubjectState> {
   const state: LiveSubjectState = {}
   if (enrollment.bookingId) {
     const b = await prisma.booking.findUnique({
@@ -242,6 +296,7 @@ async function loadLiveState(enrollment: { bookingId: string | null; leadId: str
     select: { reason: true },
   })
   state.suppressed = suppression ? { reason: suppression.reason as string } : null
+  state.eligibility = await automationEligibility(enrollment)
   return state
 }
 
@@ -380,6 +435,13 @@ export async function fireBookingTrigger(trigger: TriggerKey, bookingId: string)
       log.info({ trigger, bookingId, reason: 'no_consent' }, 'booking trigger skipped — not promotable')
       return 0
     }
+    // The shared per-person gate (DESIGN-v2 §5): automations are express only,
+    // and an unsubscribe, opt-out, decline or test identity on record refuses.
+    const decision = await automationEligibility({ email: booking.customer.email, bookingId: booking.id })
+    if (!decision.eligible) {
+      log.info({ trigger, bookingId, reason: decision.reason }, 'booking trigger skipped — not eligible')
+      return 0
+    }
 
     return fireAutomationTrigger(trigger, {
       email: booking.customer.email,
@@ -415,7 +477,7 @@ export async function fireBookingTrigger(trigger: TriggerKey, bookingId: string)
 
 export type LeadTriggerResult =
   | { status: 'enrolled'; count: number }
-  | { status: 'skipped'; reason: 'lead_not_found' | 'no_email' | 'no_consent' | 'suppressed' }
+  | { status: 'skipped'; reason: 'lead_not_found' | 'no_email' | 'no_consent' | 'suppressed' | 'ineligible' }
   | { status: 'unavailable'; reason: string }
 
 /**
@@ -485,6 +547,17 @@ export async function fireLeadTrigger(
       if (!verdict.allow) {
         log.info({ trigger, leadId, reason: verdict.reason }, 'lead trigger skipped — not promotable')
         return { status: 'skipped', reason: verdict.reason }
+      }
+      // The shared per-person gate (DESIGN-v2 §5): express only for
+      // automations; a read failure is reported, never enrolled.
+      const decision = await automationEligibility({ email: lead.email, leadId: lead.id })
+      if (!decision.eligible) {
+        if (decision.reason === 'eligibility_read_failed') {
+          log.warn({ event: 'LEAD_TRIGGER_ELIGIBILITY_READ_FAILED', trigger, leadId }, 'lead trigger not enrolled — eligibility unreadable')
+          return { status: 'unavailable', reason: 'eligibility_read_failed' }
+        }
+        log.info({ trigger, leadId, reason: decision.reason }, 'lead trigger skipped — not eligible')
+        return { status: 'skipped', reason: 'ineligible' }
       }
     }
 
@@ -756,6 +829,11 @@ export async function executeAutomationStage(enrollmentId: string, stageIndex: n
     return 'skipped' // the enrollment moved on concurrently
   }
 
+  // The shared gate could not be READ: retry this stage, never spend it.
+  if (liveState.eligibility && !liveState.eligibility.eligible && liveState.eligibility.reason === 'eligibility_read_failed') {
+    return deferTransient('eligibility_read_failed')
+  }
+
   // ── Automation-level cap ──────────────────────────────────────────────
   const cap = definition.caps.perRecipientPerMonth
   if (cap > 0) {
@@ -817,6 +895,10 @@ export async function executeAutomationStage(enrollmentId: string, stageIndex: n
     bookingId: enrollment.bookingId ?? undefined,
     leadId: enrollment.leadId ?? undefined,
     payload,
+    // The guard's promotional permission, for THIS subject in the
+    // 'automation' context (express only) — including a customer-only subject
+    // the guard could not name from bookingId/leadId alone.
+    eligibilityRequest: automationEligibilityRequest(enrollment),
     // The guard's own live reload — re-run the stop rules once more inside
     // the claim window.
     recheck: async () => {
@@ -849,7 +931,14 @@ export async function executeAutomationStage(enrollmentId: string, stageIndex: n
   if (isTransientReadFailure(outcome.reason)) return deferTransient(outcome.reason)
 
   // Terminal refusals that end the whole enrollment.
-  if (['unsubscribed', 'hard_bounce', 'spam_complaint', 'admin_block', 'invalid_email', 'invalid_address', 'provider_rejected'].includes(outcome.reason)) {
+  // The shared gate's prohibitions (DESIGN-v2 §5) end it too: a later stage
+  // would only be refused again for the same person.
+  if (
+    [
+      'unsubscribed', 'hard_bounce', 'spam_complaint', 'admin_block', 'invalid_email', 'invalid_address', 'provider_rejected',
+      'suppressed', 'opted_out', 'declined', 'test_identity', 'no_marketing_basis',
+    ].includes(outcome.reason)
+  ) {
     await prisma.emailAutomationEnrollment.update({
       where: { id: enrollmentId },
       data: { status: 'STOPPED', stopReason: outcome.reason, ...stamp },
@@ -907,6 +996,31 @@ export async function stopEnrollmentsFor(
 
 /** How far in advance move_date_approaching fires (documented, fixed). */
 export const MOVE_DATE_LEAD_MS = 7 * DAY
+
+/**
+ * Enroll one sweep subject through the gate its subject type uses at the event
+ * sites: a booking through fireBookingTrigger, a lead through fireLeadTrigger,
+ * and anything else only when the shared decision (express only) permits it.
+ * Never throws.
+ */
+async function fireGatedSweepSubject(trigger: TriggerKey, subject: AutomationSubject): Promise<number> {
+  try {
+    if (subject.bookingId) return await fireBookingTrigger(trigger, subject.bookingId)
+    if (subject.leadId) {
+      const r = await fireLeadTrigger(trigger, subject.leadId, { snapshot: subject.snapshot })
+      return r.status === 'enrolled' ? r.count : 0
+    }
+    const decision = await automationEligibility(subject)
+    if (!decision.eligible) {
+      log.info({ trigger, reason: decision.reason }, 'sweep subject skipped — not eligible')
+      return 0
+    }
+    return await fireAutomationTrigger(trigger, subject)
+  } catch (err) {
+    log.warn({ err: String(err), trigger }, 'gated sweep enrollment failed (non-fatal)')
+    return 0
+  }
+}
 
 /**
  * Re-enqueue due stages whose queue job was lost (restart recovery), and
@@ -1002,8 +1116,12 @@ export async function sweepAutomationEnrollments(): Promise<{ requeued: number; 
         continue // event-driven triggers enroll at their call sites
       }
 
+      // THE SAME ENROLLMENT GATE AS THE EVENT SITES (DESIGN-v2 §5, 2026-09-16).
+      // This loop used to call fireAutomationTrigger directly, skipping the
+      // consent check fireBookingTrigger and fireLeadTrigger make — a sweep
+      // could enrol people the event path would have refused.
       for (const subject of subjects) {
-        enrolled += await fireAutomationTrigger(trigger, subject)
+        enrolled += await fireGatedSweepSubject(trigger, subject)
       }
     } catch (err) {
       log.warn({ err: String(err), automationId: a.id, trigger }, 'time-based trigger sweep failed (non-fatal)')

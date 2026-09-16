@@ -5,22 +5,36 @@ import { emailQueue, discordQueue, scheduledQueue } from '../lib/queues'
 import { queueLogger } from '../lib/logger'
 import { deleteFiles } from '../lib/cloudinary'
 import { runFollowup, type FollowupType } from '../lib/followups'
-import { leadNurtureBlockReason, quoteFollowupBlockReason } from '../lib/journeys'
+import {
+  applyConfirmationGate,
+  defaultStageDeps,
+  journeyQueueEdge,
+  leadNurtureBlockReason,
+  greetingName,
+  promotionsEnabled,
+  quoteFollowupBlockReason,
+  stageLocaleFromBasis,
+} from '../lib/journeys'
+import { enqueueStatusOf } from '../lib/lifecycle-enqueue'
+import { promotionalEligibility } from '../lib/consent/marketing-eligibility'
+import { activeEnrollment } from '../lib/consent/sequence-enrollment'
 import { isSafeUrl } from '../emails/validation'
 import { etDayRange, moveDateInRange, effectiveMoveDate } from '../lib/scheduling'
-import { bookingMarketingBlockReason } from '../lib/email-eligibility'
-import { hasEverBooked, markStaleLeadsAbandoned, purgeAbandonedLeads } from '../lib/leads'
+import { bookingMarketingBlockReason, supersededByLaterBooking } from '../lib/email-eligibility'
+import { sendTimeEligibilityDeps } from '../lib/email-guard'
+import { hasBookingOnRecord, markStaleLeadsAbandoned, purgeAbandonedLeads } from '../lib/leads'
 import { processCampaignBatch, processRecipientRetry, sweepCampaignRuns } from '../lib/email-campaign-dispatch'
 import { retryPendingSideEffects } from '../lib/email-events'
 import { runEmailMonitoring } from '../lib/email-monitoring'
 import { executeAutomationStage, sweepAutomationEnrollments } from '../lib/email-automation-runtime'
 import { customerBalance, JOB_MONEY_PAYMENT_SELECT } from '../lib/job-money'
-import type { ScheduledJobData } from '../lib/queues'
+import type { EmailJobData, ScheduledJobData } from '../lib/queues'
 import { jobReminderEventKey } from '../lib/email-event-keys'
 import { queueSafeJobId } from '../lib/email-deferral'
 import { CRON_SCHEDULES, createCronReconciler, type CronReconciler, type CronStatus } from '../lib/cron-schedules'
 import { pingAppRedis, sanitizeRedisError } from '../lib/redis-health'
 import { createErrorLogLimiter } from '../lib/worker-health'
+import { postOpsAlert } from '../lib/ops-alert'
 
 type DigestBooking = {
   displayId: string
@@ -55,7 +69,8 @@ function formatDigestJobs(bookings: DigestBooking[]) {
     }))
 }
 
-async function processScheduledJob(job: Job<ScheduledJobData>): Promise<void> {
+/** Exported for the end-to-end suites, which drive real queued jobs through it. */
+export async function processScheduledJob(job: Job<ScheduledJobData>): Promise<void> {
   const { type, bookingId, payload } = job.data
   const log = queueLogger.child({ jobId: job.id, type })
 
@@ -71,6 +86,12 @@ async function processScheduledJob(job: Job<ScheduledJobData>): Promise<void> {
     case 'abandoned-checkout-recovery-3': {
       if (!bookingId) break
       const stage = type === 'abandoned-checkout-recovery' ? 1 : type === 'abandoned-checkout-recovery-2' ? 2 : 3
+      // PROMOTIONAL KILL SWITCH (2026-09-16): a queued stage dies with the
+      // switch, not only the scheduling of new ones.
+      if (!promotionsEnabled()) {
+        log.info({ bookingId, stage }, 'EMAIL_PROMOTIONS_ENABLED is off — skipping recovery stage')
+        break
+      }
       const booking = await prisma.booking.findUnique({
         where: { id: bookingId },
         include: { customer: true },
@@ -81,6 +102,12 @@ async function processScheduledJob(job: Job<ScheduledJobData>): Promise<void> {
         break
       }
       if (booking.isInternalTest) break
+      //  The customer re-did the form and a LATER booking was paid or moved on:
+      //  this one's recovery is over.
+      if (await supersededByLaterBooking(prisma as never, bookingId)) {
+        log.info({ bookingId, stage }, 'A later booking by the same customer went ahead — skipping recovery stage')
+        break
+      }
 
       // Never chase a date that has already gone by.
       const target = effectiveMoveDate(booking)
@@ -182,14 +209,75 @@ async function processScheduledJob(job: Job<ScheduledJobData>): Promise<void> {
           // explicit opt-in. A select that omits this would not compile —
           // which is the point of LeadState requiring it.
           emailMarketingConsent: true,
+          basisEventId: true,
         },
       })
-      const block = quoteFollowupBlockReason(lead)
+      // KILL SWITCH + THE SHARED GATE (2026-09-16): the per-person
+      // prohibitions and this lead's own stored basis, not the column alone.
+      // A read failure is thrown so BullMQ retries the stage.
+      const decision = lead?.email
+        ? await promotionalEligibility(
+            { context: 'scenario_flow', email: lead.email, subject: { type: 'lead', id: leadId, sequenceKind: 'quote_followup' } },
+            sendTimeEligibilityDeps()
+          )
+        : undefined
+      if (decision && !decision.eligible && decision.reason === 'eligibility_read_failed') {
+        throw new Error('quote follow-up: eligibility could not be read — retrying the stage')
+      }
+      const block = !promotionsEnabled() ? 'promotions_disabled' : quoteFollowupBlockReason(lead, new Date(), decision)
       if (block) {
         log.info({ leadId, type, reason: block }, 'quote follow-up skipped')
         break
       }
+      //  A sequence running on a NOTICE exists only through its enrollment:
+      //  stopped (opt-out, booking, gate stop) or owned by another lead → no
+      //  email job at all (the email worker would refuse it anyway).
+      if (decision?.eligible && decision.basis === 'notice') {
+        const own = await activeEnrollment(lead!.email as string, 'quote_followup')
+        if (!own || own.subjectType !== 'lead' || own.subjectId !== leadId) {
+          log.info({ leadId, type, reason: own ? 'already_enrolled' : 'enrollment_not_active' }, 'quote follow-up skipped')
+          break
+        }
+      }
+      // A quote-page NOTICE lead waits for its delivered confirmation first.
+      const gate = await applyConfirmationGate(
+        {
+          kind: 'quote_followup',
+          decision: decision ?? null,
+          enrollment: decision?.eligible && decision.basis === 'notice' ? await activeEnrollment(lead!.email as string, 'quote_followup') : null,
+          stageType: type,
+          leadId,
+          jobData: job.data as unknown as Record<string, unknown>,
+        },
+        defaultStageDeps()
+      )
+      if (gate?.action === 'defer') {
+        const status = enqueueStatusOf(await journeyQueueEdge().enqueue(type, gate.data, gate.fireAt, gate.jobId))
+        log.info({ leadId, type, fireAt: gate.fireAt.toISOString(), status }, 'quote follow-up waiting for the quote confirmation to be delivered')
+        break
+      }
+      if (gate?.action === 'stop') {
+        log.info({ leadId, type, reason: gate.reason }, 'quote follow-up stopped')
+        //  48 hours without a delivered event for the customer's own quote
+        //  reply usually means the delivery webhook is not reaching the API — at
+        //  this volume nothing else would show it. Tell a person, once per stop.
+        if (gate.reason === 'quote_confirmation_not_delivered') {
+          void postOpsAlert('Quote follow-up stopped: no delivery confirmation after 48 hours', [
+            { message: `Lead ${leadId}: the quote reply has no delivered event, so its quote follow-ups were stopped.`, action: 'Check the Resend webhook (endpoint, signing secret, API logs for /api/email/webhook).' },
+          ]).catch(() => undefined)
+        }
+        break
+      }
       const stage = type === 'quote-followup-1' ? 1 : type === 'quote-followup-2' ? 2 : 3
+      //  The submission's language, from the notice this stage runs under. A
+      //  failed read is not a reason to skip a stage: it falls back to English.
+      const basisLocale =
+        decision?.eligible && decision.basis === 'notice' && decision.basisEventId
+          ? await prisma.emailConsentEvent
+              .findUnique({ where: { id: decision.basisEventId }, select: { locale: true } })
+              .then((e) => e?.locale ?? null)
+              .catch(() => null)
+          : null
       await emailQueue.add(type, {
         template: type,
         to: lead!.email as string,
@@ -201,11 +289,11 @@ async function processScheduledJob(job: Job<ScheduledJobData>): Promise<void> {
         // produced a second logical send of the same stage.
         businessEventKey: `lead:${leadId}:${type}`,
         payload: {
-          customerName: lead!.name,
+          customerName: greetingName(lead!.name),
           jobType: lead!.jobType ?? undefined,
           moveDate: lead!.moveDate?.toISOString(),
           bookingUrl: `${(process.env.MARKETING_SITE_URL || 'https://www.moveitclearit.com').replace(/\/+$/, '')}/booking-form.html?utm_source=email&utm_medium=lifecycle&utm_campaign=quote-followup&utm_content=stage-${stage}`,
-          locale: 'en',
+          locale: stageLocaleFromBasis(basisLocale),
           journey: 'quote',
           stage,
         },
@@ -243,13 +331,42 @@ async function processScheduledJob(job: Job<ScheduledJobData>): Promise<void> {
       })
       // BOOKING history, not lead status — a returning customer must never be
       // walked through the first-time sequence.
-      const previousCustomer = lead ? await hasEverBooked(lead.email) : false
-      const block = leadNurtureBlockReason(lead ? { ...lead, previousCustomer } : null)
+      const previousCustomer = lead ? await hasBookingOnRecord(lead.email) : false
+      // KILL SWITCH + THE SHARED GATE (2026-09-16): the per-person prohibitions
+      // and this lead's own basis — an express opt-in, or the form notice its
+      // submission recorded (lead_nurture is on every surface). The email
+      // worker asks again, with the enrollment check, right before sending.
+      const decision = lead?.email
+        ? await promotionalEligibility({ context: 'scenario_flow', email: lead.email, subject: { type: 'lead', id: leadId, sequenceKind: 'lead_nurture' } }, sendTimeEligibilityDeps())
+        : undefined
+      if (decision && !decision.eligible && decision.reason === 'eligibility_read_failed') {
+        throw new Error('lead nurture: eligibility could not be read — retrying the stage')
+      }
+      const block = !promotionsEnabled()
+        ? 'promotions_disabled'
+        : leadNurtureBlockReason(lead ? { ...lead, previousCustomer } : null, new Date(), decision)
       if (block) {
         log.info({ leadId, type, reason: block }, 'lead nurture skipped')
         break
       }
+      //  A nurture running on a NOTICE exists only through its enrollment.
+      if (decision?.eligible && decision.basis === 'notice') {
+        const own = await activeEnrollment(lead!.email as string, 'lead_nurture')
+        if (!own || own.subjectType !== 'lead' || own.subjectId !== leadId) {
+          log.info({ leadId, type, reason: own ? 'already_enrolled' : 'enrollment_not_active' }, 'lead nurture skipped')
+          break
+        }
+      }
       const stage = type === 'lead-nurture-1' ? 1 : type === 'lead-nurture-2' ? 2 : 3
+      //  The submission's language, from the notice this stage runs under. A
+      //  failed read is not a reason to skip a stage: it falls back to English.
+      const nurtureBasisLocale =
+        decision?.eligible && decision.basis === 'notice' && decision.basisEventId
+          ? await prisma.emailConsentEvent
+              .findUnique({ where: { id: decision.basisEventId }, select: { locale: true } })
+              .then((e) => e?.locale ?? null)
+              .catch(() => null)
+          : null
       await emailQueue.add(type, {
         template: type,
         to: lead!.email as string,
@@ -258,12 +375,12 @@ async function processScheduledJob(job: Job<ScheduledJobData>): Promise<void> {
         // so guardedSend dedupes rather than minting a second logical send.
         businessEventKey: `lead:${leadId}:${type}`,
         payload: {
-          customerName: lead!.name,
+          customerName: greetingName(lead!.name),
           // The quick quote is where a real number actually comes from, so that
           // is where the one CTA goes — never the booking form, which would ask
           // someone with no price to start a checkout.
           quoteUrl: `${(process.env.MARKETING_SITE_URL || 'https://www.moveitclearit.com').replace(/\/+$/, '')}/quote.html?utm_source=email&utm_medium=lifecycle&utm_campaign=lead-nurture&utm_content=stage-${stage}`,
-          locale: 'en',
+          locale: stageLocaleFromBasis(nurtureBasisLocale),
           journey: 'lead-nurture',
           stage,
         },

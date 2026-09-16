@@ -9,7 +9,15 @@ import { PRICE_BOOK_VERSION } from '@/lib/pricing-config'
 import { pendingSnapshot } from '@/lib/quote-snapshot'
 import { isValidMoveDate, parseMoveDate } from '@/lib/quote-date'
 import { composeAccessDetails } from '@/lib/quote-access-details'
-import { CONSENT_VERSION, normaliseConsentSource } from '@/lib/consent'
+import { CONSENT_VERSION, normaliseConsentSource, routeConsentSource } from '@/lib/consent'
+import {
+  applyCaptureBasis,
+  captureClient,
+  describeCaptureBasis,
+  legacyConsentGivenOptOut,
+  startCaptureScenario,
+  CAPTURE_CONTRACT_FIELDS,
+} from '@/lib/capture-basis'
 import type { QuoteLeadCaptureResponse } from '@/lib/quote-capture'
 
 // ════════════════════════════════════════════════════════════════════════
@@ -233,6 +241,12 @@ const QuoteLeadSchema = z.object({
    * leave alone next time. It must PARSE, then be silently discarded.
    */
   company: z.string().trim().max(200).optional(),
+
+  // ── THE NOTICE CONTRACT (email consent release 2026-09-16, DESIGN-v2 §4) ──
+  //  `marketingNotice` counts only on the "See my estimate" submit (trigger
+  //  'submit'), for the quote notice, in the page's `locale`. Lenient: a
+  //  malformed value is dropped, never a 422.
+  ...CAPTURE_CONTRACT_FIELDS,
 })
 
 
@@ -505,16 +519,19 @@ async function handle(req: NextRequest): Promise<NextResponse> {
       // passed alongside them — so a resend months later is still labelled
       // correctly, and admin can filter on it without parsing prose.
       formStep: inPerson ? 'quote_in_person' : d.formStep || 'quote',
-      marketingConsent: d.marketingConsent,
+      // An old-page opt-in keeps today's meaning — unless the same payload
+      // ticked "don't email me", which wins.
+      marketingConsent: legacyConsentGivenOptOut(d.marketingConsent, d),
       marketingConsentPrompted: d.marketingConsentPresented,
       // CONSENT EVIDENCE — source, version and timestamp travel together or the
-      // record proves nothing (see lib/consent.ts). Normalised HERE against the
-      // controlled vocabulary so an unrecognised value falls back to THIS
-      // surface rather than to the partial-capture default of BOOKING_FORM,
-      // which would file a quick-quote opt-in under the wrong form. The version
-      // defaults to the disclosure currently shipped, so a cached page that
-      // predates the field still records what it showed.
-      consentSource: normaliseConsentSource(d.consentSource) ?? 'QUICK_QUOTE_FORM',
+      // record proves nothing (see lib/consent.ts). DERIVED FROM THE ROUTE
+      // (2026-09-16): this endpoint IS the quick quote, so it records
+      // QUICK_QUOTE_FORM whatever the body claims — the claim is only logged
+      // below. Before, a body could file a quick-quote opt-in under any surface,
+      // including ADMIN_MANUAL. The version defaults to the disclosure currently
+      // shipped, so a cached page that predates the field still records what it
+      // showed.
+      consentSource: routeConsentSource('QUICK_QUOTE_FORM', normaliseConsentSource(d.consentSource)),
       consentVersion: d.consentVersion || CONSENT_VERSION,
       contactPreference: d.contactPreference,
       bestTimeToCall: d.bestTimeToCall,
@@ -604,9 +621,42 @@ async function handle(req: NextRequest): Promise<NextResponse> {
     )
   }
 
+  // ── MARKETING BASIS (email consent release 2026-09-16) ─────────────────
+  //  AFTER the lead is saved, BEFORE the side effects below: the lifecycle
+  //  sequence they start reads the lead's stored basis. A REAL server quote is
+  //  the quote follow-up (Sequence A, its existing quote-followup templates).
+  //  Anything else — an in-person visit, a hand-planned move — enters the
+  //  general lead nurture (Sequence B). Old pages carry no notice and get
+  //  today's behaviour exactly. Never throws, never changes the response, and
+  //  never touches the confirmation email.
+  const realQuote = !inPerson && priced.ok && typeof serverCents === 'number' && serverCents > 0
+  const basis = await applyCaptureBasis({
+    surface: 'quote',
+    //  A priced quote → the quote follow-up; no price (hand-planned move,
+    //  in-person estimate) → the general lead nurture. Both are existing
+    //  sequences; the confirmation email is queued first either way.
+    scenario: realQuote ? 'quote_followup' : 'lead_nurture',
+    email: d.email,
+    leadId: result.lead.id,
+    contract: d,
+    acceptTrigger: 'submit',
+    locale: d.locale,
+    honeypot: d.company,
+    region: { phone: d.phone, postalCodes: [d.pickupZip, d.destinationZip] },
+    client: captureClient(req),
+    submissionKey: d.bookingSessionId,
+  })
+  const claimedSource = normaliseConsentSource(d.consentSource)
+
   // Side effects. Awaited so a serverless invocation cannot freeze before they
   // run; neither throws, and neither can change `captured`.
   const outcome = await quoteCaptureRouteDeps().onCaptured(result.lead.id, { locale: d.locale })
+
+  //  The sequence the submission named (Sequence A on a real quote, the lead
+  //  nurture otherwise) — after the confirmation email was queued above, never
+  //  before it.
+  //  Idempotent with the lifecycle sequence onCaptured already asked for.
+  const scenario = await startCaptureScenario(basis, { surface: 'quote', email: d.email, leadId: result.lead.id })
 
   apiLogger.info(
     {
@@ -622,6 +672,11 @@ async function handle(req: NextRequest): Promise<NextResponse> {
       // number was produced, 'nurture' for an in-person / manual-review job.
       // Log only — never returned to the browser.
       sequence: outcome.sequence ?? 'none',
+      // The marketing basis and the scenario it started. Log only.
+      basis: describeCaptureBasis(basis),
+      scenarioScheduled: scenario ? scenario.scheduled : undefined,
+      // The surface the BROWSER claimed, when it disagrees with the route's.
+      claimedConsentSource: claimedSource && claimedSource !== 'QUICK_QUOTE_FORM' ? claimedSource : undefined,
       packageKey: priced.ok ? priced.packageKey : null,
     },
     'quote lead captured'

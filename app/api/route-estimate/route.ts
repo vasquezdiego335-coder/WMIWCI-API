@@ -59,7 +59,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   const cors = corsHeaders(req.headers.get('origin'))
 
   // Routing calls cost money per request, so this is rate-limited like booking.
-  const rl = await rateLimit(LIMITS.booking, [clientIp(req)])
+  const rl = await rateLimit(LIMITS.routeEstimate, [clientIp(req)])
   if (!rl.ok) {
     const res = tooManyRequests(rl)
     for (const [k, v] of Object.entries(cors)) res.headers.set(k, v)

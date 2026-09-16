@@ -1,6 +1,14 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { z } from 'zod'
-import { normaliseConsentSource } from '@/lib/consent'
+import { normaliseConsentSource, routeConsentSource, PUBLIC_CONSENT_SOURCES } from '@/lib/consent'
+import {
+  applyCaptureBasis,
+  captureClient,
+  describeCaptureBasis,
+  legacyConsentGivenOptOut,
+  startCaptureScenario,
+  CAPTURE_CONTRACT_FIELDS,
+} from '@/lib/capture-basis'
 import { apiLogger } from '@/lib/logger'
 import { rateLimit, tooManyRequests, LIMITS, clientIp } from '@/lib/rate-limit'
 import { quoteCaptureRouteDeps } from '@/lib/quote-capture-deps'
@@ -211,7 +219,19 @@ const PartialSchema = z.object({
   //  can own the decision. The bound matters: this field is never stored or
   //  echoed, and an unbounded string is free memory for anyone who asks.
   company: z.string().max(200).optional(),
+  // ── THE NOTICE CONTRACT (email consent release 2026-09-16, DESIGN-v2 §4) ──
+  //  `marketingNotice` counts ONLY on the Step-1 Continue click (trigger
+  //  'continue') with `emailUserTyped: true`, and only on /api/leads/partial
+  //  itself. `locale` is the page's language, used to match the notice copy
+  //  the visitor was shown; it is not stored on the lead.
+  locale: str(8),
+  ...CAPTURE_CONTRACT_FIELDS,
 })
+
+/** The ONE path whose Step-1 Continue may record a booking-form notice. The
+ *  /api/leads alias shares this handler but serves other surfaces, so a notice
+ *  arriving there is ignored (an opt-out is still honoured). */
+const BOOKING_FORM_PATH = '/api/leads/partial'
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
   const res = await handle(req)
@@ -242,6 +262,12 @@ async function handle(req: NextRequest): Promise<NextResponse> {
   }
 
   const d = parsed.data
+  const contract = {
+    marketingNotice: d.marketingNotice,
+    emailMarketingOptOut: d.emailMarketingOptOut,
+    emailUserTyped: d.emailUserTyped,
+    turnstileToken: d.turnstileToken,
+  }
 
   // ── Honeypot tripped → generic success, nothing persisted ───────────────
   //  A bot that can tell rejection from acceptance tunes around the trap, so
@@ -315,12 +341,17 @@ async function handle(req: NextRequest): Promise<NextResponse> {
       phone: d.phone,
       bookingSessionId: d.bookingSessionId,
       formStep: d.formStep,
-      marketingConsent: d.marketingConsent,
+      // An old-page opt-in is kept exactly as today — unless the same payload
+      // ticked "don't email me", which wins.
+      marketingConsent: legacyConsentGivenOptOut(d.marketingConsent, contract),
       marketingConsentPrompted: d.marketingConsentPresented,
       foundUsPrompted: d.foundUsPresented,
-      // The capture surface, from the request. Falls back to BOOKING_FORM
-      // because that is the only caller that historically omitted it.
-      consentSource: normaliseConsentSource(d.consentSource) ?? 'BOOKING_FORM',
+      // The capture surface. Falls back to BOOKING_FORM because that is the
+      // only caller that historically omitted it. The shared handler serves
+      // several PUBLIC surfaces, so a public claim is honoured — but a staff
+      // or import source (ADMIN_MANUAL, IMPORTED, EXISTING_CUSTOMER_OPT_IN) is
+      // never accepted from a browser.
+      consentSource: routeConsentSource('BOOKING_FORM', normaliseConsentSource(d.consentSource), PUBLIC_CONSENT_SOURCES),
       consentVersion: d.consentVersion,
       source: d.source,
       foundUs: d.foundUs,
@@ -391,6 +422,36 @@ async function handle(req: NextRequest): Promise<NextResponse> {
     )
   }
 
+  // ── MARKETING BASIS (email consent release 2026-09-16) ─────────────────
+  //  AFTER the lead is saved and BEFORE any sequence is asked for, so the
+  //  lead's stored basis is what every journey reads. Old pages send neither
+  //  a notice nor the opt-out box and get `none` with no database call.
+  //  Never throws and never changes the response: the visitor's page is the
+  //  same whether a basis was granted, withheld or refused.
+  const onBookingForm = new URL(req.url).pathname.replace(/\/+$/, '') === BOOKING_FORM_PATH
+  const basis = result
+    ? await applyCaptureBasis({
+        surface: 'booking',
+        //  The Continue click on the contact step is the submission: it starts
+        //  the general lead nurture. Autosaves, beacons, drafts and prefill
+        //  never carry a notice (site + acceptTrigger + emailUserTyped).
+        scenario: 'lead_nurture',
+        email: d.email,
+        leadId: result.lead.id,
+        contract: onBookingForm ? contract : { emailMarketingOptOut: contract.emailMarketingOptOut },
+        acceptTrigger: 'continue',
+        requireEmailUserTyped: true,
+        locale: d.locale,
+        honeypot: d.company,
+        region: { phone: d.phone, postalCodes: [d.pickupZip, d.destinationZip] },
+        client: captureClient(req),
+        submissionKey: d.bookingSessionId,
+      })
+    : null
+  if (basis && basis.status !== 'none') {
+    apiLogger.info({ basis: describeCaptureBasis(basis) }, 'POST /api/leads/partial — marketing basis')
+  }
+
   // ── SEQUENCE B ENROLMENT ────────────────────────────────────────────────
   // Fired only when this submission could plausibly change the answer, because
   // the booking form calls this route from FIVE triggers (debounce, blur, nav,
@@ -404,12 +465,30 @@ async function handle(req: NextRequest): Promise<NextResponse> {
   //
   // Fire-and-forget: a Redis outage must never turn a silent, best-effort
   // capture into a visible failure. onLeadCaptured owns every refusal.
-  if (result && (result.isNew || d.marketingConsent === true)) {
+  //
+  // NEW booking-form pages (they report emailUserTyped on every ping) start
+  // nothing from a background ping — typing pause, blur, toggle or beacon —
+  // not even for someone who opted in to offers elsewhere: only the Step-1
+  // Continue click, the one moment the page may also record its notice (the
+  // privacy policy says exactly this). Old pages keep today's triggers.
+  const newContractPage = typeof contract.emailUserTyped === 'boolean'
+  const nurtureMoment = newContractPage
+    ? onBookingForm && contract.marketingNotice?.trigger === 'continue'
+    : result?.isNew === true || d.marketingConsent === true
+  if (result && nurtureMoment) {
     void import('@/lib/journeys')
       .then((m) => m.onLeadCaptured(result.lead.id))
       .catch((err) =>
         apiLogger.warn({ err: String(err).slice(0, 200) }, 'lead nurture trigger failed (non-fatal)')
       )
+  }
+
+  // ── THE BOOKING-FORM SCENARIO (Continue click with a granted notice) ────
+  //  The Continue click's own sequence: the general lead nurture on its notice
+  //  (onLeadCaptured above only ever acts on an express opt-in). Awaited so a
+  //  serverless invocation cannot freeze first; it never throws.
+  if (result && basis) {
+    await startCaptureScenario(basis, { surface: 'booking', email: d.email, leadId: result.lead.id })
   }
 
   // ── SERVER-DERIVED PRICING INFORMATION CARRIES ITS VERSION ─────────────

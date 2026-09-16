@@ -49,6 +49,9 @@ export const CONSENT_SOURCES = [
   'MOVING_CHECKLIST',
   'CONTACT_FORM',
   'SERVICES_PAGE',
+  /** The marketing tracker's landing form (go.moveitclearit.com/quote), forwarded
+   *  server-to-server to /api/notify/lead. It used to be filed as CONTACT_FORM. */
+  'TRACKER_LANDING',
   'EXISTING_CUSTOMER_OPT_IN',
   'ADMIN_MANUAL',
   'IMPORTED',
@@ -58,6 +61,37 @@ export type ConsentSource = (typeof CONSENT_SOURCES)[number]
 
 export const isConsentSource = (v: unknown): v is ConsentSource =>
   typeof v === 'string' && (CONSENT_SOURCES as readonly string[]).includes(v)
+
+/**
+ * Sources only a STAFF or IMPORT path may write (email consent release
+ * 2026-09-16). A public capture route must never accept one from a request
+ * body: anybody with curl could otherwise file a form submission as "the owner
+ * added this opt-in by hand", which is the strongest-looking provenance there is.
+ */
+export const NON_PUBLIC_CONSENT_SOURCES: readonly ConsentSource[] = ['EXISTING_CUSTOMER_OPT_IN', 'ADMIN_MANUAL', 'IMPORTED']
+
+/** Every capture surface a public form can honestly be. */
+export const PUBLIC_CONSENT_SOURCES: readonly ConsentSource[] = CONSENT_SOURCES.filter(
+  (s) => !NON_PUBLIC_CONSENT_SOURCES.includes(s),
+)
+
+/**
+ * The consent source a PUBLIC route records — DERIVED FROM THE ROUTE.
+ *
+ * The browser's claim is only a hint. It is honoured when it names another
+ * public surface this route legitimately serves (`accepts` — e.g. the shared
+ * /api/leads handler serves the homepage estimate and the moving checklist);
+ * otherwise the route's own surface is recorded and the claim is metadata the
+ * caller may log. A staff/import source is refused whatever `accepts` says.
+ */
+export function routeConsentSource(
+  routeSource: ConsentSource,
+  claimed?: ConsentSource | null,
+  accepts: readonly ConsentSource[] = [],
+): ConsentSource {
+  if (!claimed || NON_PUBLIC_CONSENT_SOURCES.includes(claimed)) return routeSource
+  return accepts.includes(claimed) ? claimed : routeSource
+}
 
 /**
  * Legacy source strings, mapped forward.

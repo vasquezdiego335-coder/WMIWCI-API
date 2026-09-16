@@ -30,11 +30,17 @@ import { render } from '@react-email/render'
 import { prisma } from './db'
 import { scheduledQueue } from './queues'
 import { queueLogger } from './logger'
-import { guardedSend, type SendOutcome } from './email-guard'
+import { guardedSend, sendTimeEligibilityDeps, type SendOutcome } from './email-guard'
 import { isSafeUrl } from '../emails/validation'
 import { unsubscribeUrl } from './email-tokens'
 import { checkReferralEligibility } from './referral-eligibility'
-import { bookingEligibility, bookingMarketingBlockReason, promotionalConsentBlockReason } from './email-eligibility'
+import {
+  bookingEligibility,
+  bookingMarketingBlockReason,
+  combinePromotional,
+  promotionalConsentBlockReason,
+} from './email-eligibility'
+import { promotionalEligibility } from './consent/marketing-eligibility'
 import { buildMarketingContext, applyMarketingContext } from './marketing-context'
 import { normalizeLocale, BIZ_NAME, BIZ_PHONE, type Locale } from './i18n'
 import ReviewRequestEmail from '../emails/review-request'
@@ -211,7 +217,10 @@ export function defaultFollowupScheduleDeps(): FollowupScheduleDeps {
         .updateMany({ where: { id: bookingId, completedAt: null }, data: { completedAt: new Date() } })
         .catch((err) => log.warn({ err: String(err), bookingId }, 'stamp completedAt failed (non-fatal)'))
     },
-    marketingBlock: bookingMarketingBlockReason,
+    // Post-move context (DESIGN-v2 §5): express consent, or an existing
+    // business relationship only while EMAIL_EBR_BASIS_ENABLED === 'true'.
+    // Never a notice.
+    marketingBlock: (bookingId) => bookingMarketingBlockReason(bookingId, { context: 'post_move' }),
     edge: {},
   }
 }
@@ -448,7 +457,10 @@ async function sendEmail(opts: {
     payload: opts.payload,
     // LIVE booking reload immediately before the claim — the same canonical
     // predicate the queue worker and the outbox use.
-    recheck: () => bookingEligibility(opts.template, opts.bookingId),
+    recheck: () => bookingEligibility(opts.template, opts.bookingId, { context: 'post_move' }),
+    // The shared per-person gate in the guard, in the post-move context:
+    // express consent (or EBR behind its flag), never a notice.
+    eligibilityRequest: { context: 'post_move', subject: { type: 'booking', id: opts.bookingId } },
     template: opts.template,
     emailClass: 'promotional',
     journey: 'post-job',
@@ -607,7 +619,7 @@ export async function runFollowup(bookingId: string, type: FollowupType): Promis
   // The rule itself is not restated: promotionalConsentBlockReason is the same
   // predicate bookingEligibility applies at send time, and the ledger records
   // WHICH reason so the owner can tell "they said no" from "we never asked".
-  const consentBlock = promotionalConsentBlockReason({
+  const legacyConsentBlock = promotionalConsentBlockReason({
     status: booking.status,
     isInternalTest: booking.isInternalTest,
     depositPaid: booking.depositPaid,
@@ -618,6 +630,22 @@ export async function runFollowup(bookingId: string, type: FollowupType): Promis
     customerMarketingConsent: customer.emailMarketingConsent,
     customerMarketingOptOut: customer.marketingOptOut,
   })
+  // ── THE PERSON, NOT THE ROW (DESIGN-v2 §5, 2026-09-16) ──────────────────
+  // The shared gate adds what one customer row cannot see: every suppression,
+  // an unsubscribe or opt-out on record, a decline on another row, a test or
+  // staff identity. Context 'post_move' permits express consent, or an EBR
+  // basis only while EMAIL_EBR_BASIS_ENABLED === 'true' — never a notice. It
+  // fails closed on a read error.
+  const decision = await promotionalEligibility(
+    { context: 'post_move', email: customer.email, subject: { type: 'booking', id: bookingId } },
+    sendTimeEligibilityDeps()
+  )
+  const consentBlock = combinePromotional(legacyConsentBlock, decision)
+  if (consentBlock === 'eligibility_read_failed') {
+    // Not a fact about the customer: throw so the queue retries, rather than
+    // recording a permanent skip for a transient read error.
+    throw new Error(`follow-up ${type} for ${bookingId}: eligibility read failed — retrying`)
+  }
   if (consentBlock) return recordSkip(bookingId, type, consentBlock)
 
   // Quiet hours — defer into the allowed window rather than sending now.

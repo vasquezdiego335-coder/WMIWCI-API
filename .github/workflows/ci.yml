@@ -194,7 +194,39 @@ jobs:
           bash scripts/bootstrap-fresh-database.sh
           npx prisma migrate status
 
+      # ── PRODUCTION-LIKE REHEARSAL OF THE CONSENT MIGRATION (2026-09-16) ──
+      #  The step above EXECUTES 20260916120000_email_consent_enrollment, but on
+      #  an EMPTY database. Production runs it on one that already holds leads,
+      #  bookings and sends, records ~70 migrations (four of them from another
+      #  branch) and is reached by a role that is not a superuser. An empty
+      #  database cannot show that existing rows are untouched or that nothing
+      #  is backfilled.
+      #
+      #  scripts/rehearse-consent-migration.sh builds a SECOND throwaway database,
+      #  ci_prodlike, on this job's postgres service: the bootstrap run from a
+      #  copy of prisma/ WITHOUT the new migration (the pre-release schema), plus
+      #  what production has and the baseline lacks: the email CHECK constraints,
+      #  pgcrypto, and the objects and _prisma_migrations rows of the four
+      #  migrations applied from another branch. It seeds @example.com rows,
+      #  runs the real `npx prisma migrate deploy` as a non-superuser owner
+      #  role, and fails the job unless: the new tables,
+      #  columns, indexes, trigger and CHECK exist; every seeded row count and
+      #  checksum is unchanged; the four new columns are NULL on every existing
+      #  row; the trigger refuses UPDATE and DELETE; a second deploy is a no-op;
+      #  email-schema-preflight.ts reports no drift; and `migrate status` is
+      #  clean. It prints how long the migration took and a PASS/FAIL summary.
+      #
+      #  It refuses any non-local or production-looking host, touches only
+      #  ci_prodlike and its role, and drops both after a pass. The test database
+      #  built above is not modified.
+      - name: Production-like migration rehearsal (pre-release schema + seeded rows → migrate deploy)
+        timeout-minutes: 15
+        run: bash scripts/rehearse-consent-migration.sh
+
       - name: Test suite (server-side; cross-repo tests run in pricing-parity)
+        # Runs even when the migration rehearsal above failed: a rehearsal
+        # failure must never HIDE the test results (the job is red either way).
+        if: ${{ !cancelled() }}
         run: npm test
 
       - name: Production build
@@ -253,6 +285,28 @@ jobs:
     name: cross-repository pricing parity
     runs-on: ubuntu-latest
     timeout-minutes: 20
+
+    # ── A DISPOSABLE DATABASE HERE TOO (2026-09-16) ─────────────────────────
+    #  true-e2e-browser-to-postgres.test.ts drives the real booking form into
+    #  the real route and a REAL PostgreSQL. The workflow-level DATABASE_URL
+    #  points at 127.0.0.1, but only the verify job had a service there, so
+    #  those two tests failed on every run ("Can't reach database server") and
+    #  this job has been red for a reason that had nothing to do with parity.
+    #  The same throwaway postgres:16 as verify, built the same way.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: ci
+          POSTGRES_PASSWORD: ci
+          POSTGRES_DB: ci
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U ci -d ci"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+
+    env:
+      SHADOW_DATABASE_URL: postgresql://ci:ci@127.0.0.1:5432/ci_shadow
 
     steps:
       - name: Check out WMIWCI-API
@@ -401,6 +455,13 @@ jobs:
       - name: Prisma generate
         working-directory: api
         run: npx prisma generate
+
+      - name: Build the disposable test database from source control
+        working-directory: api
+        run: |
+          set -euo pipefail
+          psql "postgresql://ci:ci@127.0.0.1:5432/ci" -c 'CREATE DATABASE ci_shadow'
+          bash scripts/bootstrap-fresh-database.sh
 
       # THE GATE. WMIWCI_SITE_DIR is absolute and points at the checkout above;
       # the tests THROW if it is set and wrong, so this cannot pass by skipping.

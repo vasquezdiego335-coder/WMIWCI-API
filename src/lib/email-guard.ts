@@ -15,6 +15,7 @@
 //      1. recipient format
 //      2. suppression (fails CLOSED)                      → src/lib/email-suppression
 //      3. LIVE STATE RELOAD via the caller's `recheck()`   → stale queue jobs die here
+//     3b. PROMOTIONAL PERMISSION — an eligible basis      → src/lib/consent/marketing-eligibility
 //      4. frequency caps + quiet hours (PROMOTIONAL only)
 //      5. payload validation (required fields, safe URLs)  → src/emails/validation
 //      6. CLAIM OR RESUME — an EmailSend row is written BEFORE the provider
@@ -44,6 +45,16 @@ import { normalizeEmail, unsubscribeUrl } from './email-tokens'
 import { isSuppressed, type EmailClass } from './email-suppression'
 import { assertEmailPayload, EmailValidationError } from '../emails/validation'
 import { buildMarketingContext } from './marketing-context'
+import {
+  INELIGIBLE_REASONS,
+  promotionalEligibility,
+  type EligibilityContext,
+  type EligibilityDecision,
+  type EligibilityDeps,
+  type EligibilityRequest,
+} from './consent/marketing-eligibility'
+import { testIdentityReason } from './consent/test-identity'
+import type { SequenceKind } from './consent/notice-registry'
 
 const log = queueLogger.child({ mod: 'email-guard' })
 
@@ -378,6 +389,11 @@ const DEFERRAL_REASONS: ReadonlySet<string> = new Set([
   'email_sending_disabled',
 ])
 
+/** promotionalEligibility refusals (the read failure excepted). */
+const PROMOTIONAL_TERMINAL_REASONS: ReadonlySet<string> = new Set([
+  ...INELIGIBLE_REASONS.filter((r) => r !== 'eligibility_read_failed'),
+])
+
 export type BlockClass = 'terminal' | 'retryable' | 'deferred'
 
 /**
@@ -392,12 +408,18 @@ export function classifyBlock(reason: string): BlockClass {
   // Booking/lead state that genuinely cannot come back is terminal.
   if (/^status_not_allowed:/.test(reason)) return 'terminal'
   if (/^booking_not_completed:|^booking_advanced:|^lead_converted$|^lead_lost$/.test(reason)) return 'terminal'
-  if (reason === 'move_date_passed' || reason === 'deposit_already_paid') return 'terminal'
+  if (reason === 'move_date_passed' || reason === 'deposit_already_paid' || reason === 'booking_superseded') return 'terminal'
   // CONSENT (owner spec 2026-08-06). An explicit withdrawal is final; never
   // having been asked is not — a later opt-in must be able to rescue the send,
   // so it stays resumable rather than closing the key forever.
   if (reason === 'marketing_opted_out') return 'terminal'
   if (reason === 'no_marketing_consent') return 'retryable'
+  // PROMOTIONAL ELIGIBILITY (DESIGN-v2 §5, 2026-09-16). Every refusal of the
+  // shared gate is TERMINAL except a read failure: a later notice or opt-in is
+  // a NEW submission with its own sends, and it must never resume an old key
+  // (no backfill). 'eligibility_read_failed' stays retryable via the
+  // _read_failed rule below.
+  if (PROMOTIONAL_TERMINAL_REASONS.has(reason)) return 'terminal'
   // A canary exclusion is a property of TODAY'S ROLLOUT, not of this person.
   // Retryable so widening the allowlist can still let the send through.
   if (reason === 'not_in_rollout_allowlist') return 'retryable'
@@ -474,6 +496,153 @@ export type GuardedSendInput = {
   recheck?: () => Promise<string | null>
   /** Set false to skip the unsubscribe header (transactional). Default: by class. */
   includeUnsubscribeHeader?: boolean
+  // ── PROMOTIONAL PERMISSION (email consent release 2026-09-16) ───────────
+  /**
+   * The caller's promotionalEligibility() decision, made immediately before
+   * this call. A PROMOTIONAL send without one is re-derived by the guard (see
+   * `eligibilityRequest`), so omitting it never skips the check. An ineligible
+   * decision refuses the send. An `internal_rehearsal` permission is honoured
+   * only together with `isTest: true`.
+   */
+  eligibility?: PromotionalPermission
+  /**
+   * How to re-derive the decision when `eligibility` is absent: the context
+   * and the subject. The recipient is always `to`. When this is absent too the
+   * guard derives a conservative request from `journey`, `bookingId` and
+   * `leadId` (see derivedEligibilityRequest) — never looser than the caller's
+   * own recheck, because both must pass.
+   */
+  eligibilityRequest?: Omit<EligibilityRequest, 'email'>
+  /**
+   * Recorded on EmailSend.marketingBasis / basisEventId. For a promotional
+   * send the ELIGIBILITY DECISION's basis always wins over these; they exist
+   * for transactional senders that want to say so explicitly.
+   */
+  marketingBasis?: 'express' | 'notice' | 'ebr' | 'transactional'
+  basisEventId?: string | null
+}
+
+/** An admin rehearsal to an internal address: permitted, but no marketing basis. */
+export type InternalRehearsalPermission = { eligible: true; basis: 'internal_rehearsal'; basisEventId: null }
+
+export type PromotionalPermission = EligibilityDecision | InternalRehearsalPermission
+
+// ════════════════════════════════════════════════════════════════════════
+//  PROMOTIONAL SENDS REQUIRE AN ELIGIBLE BASIS (DESIGN-v2 §5, §7)
+//  ---------------------------------------------------------------------
+//  guardedSend never used to check consent — it trusted each caller's
+//  `recheck`, and a path with no recheck (a job with neither booking nor lead,
+//  the admin test override) checked nothing. Now every PROMOTIONAL send needs
+//  a promotionalEligibility() decision: the caller's, or the guard's own.
+//
+//  The guard's own request is deliberately conservative. It uses the scenario
+//  context only where the journey names exactly one scenario sequence, and
+//  'automation' (express only) for anything it does not recognise, so a notice
+//  basis can only ever be used by a path that asks for it.
+//
+//  AND, NOT OR. The decision is checked AFTER the caller's recheck, and both
+//  must pass: the guard can only add refusals, never lift one — and the
+//  caller's existing reasons (e.g. the retryable 'no_marketing_consent') keep
+//  the ledger classification they have today.
+//
+//  CANARY REHEARSAL. The rollout allowlist exists so the owner can run a
+//  promotional journey on the team's own addresses first, and those are test
+//  identities (a prohibition). An address listed EXACTLY in
+//  EMAIL_PROMOTIONAL_ALLOWLIST (not by @domain) is therefore exempt from the
+//  test-identity prohibition at SEND time only. Every other prohibition and the
+//  basis requirement still apply, and grant/enrollment safeguards never see
+//  this exemption.
+// ════════════════════════════════════════════════════════════════════════
+
+/** Scenario journeys whose sequence kind is unambiguous from the journey label alone. */
+const SCENARIO_JOURNEY_KINDS: Readonly<Record<string, SequenceKind>> = {
+  abandoned: 'abandoned_checkout',
+  quote: 'quote_followup',
+  'lead-nurture': 'lead_nurture',
+}
+
+/** The request the guard derives when the caller supplied neither a decision nor a request. */
+export function derivedEligibilityRequest(input: Pick<GuardedSendInput, 'journey' | 'bookingId' | 'leadId' | 'eligibilityRequest'>): Omit<EligibilityRequest, 'email'> {
+  if (input.eligibilityRequest) return input.eligibilityRequest
+  const journey = input.journey ?? ''
+  const subject: NonNullable<EligibilityRequest['subject']> = input.bookingId
+    ? { type: 'booking', id: input.bookingId }
+    : input.leadId
+    ? { type: 'lead', id: input.leadId }
+    : { type: 'none' }
+  let context: EligibilityContext = 'automation'
+  if (journey === 'campaign') context = 'campaign'
+  else if (journey === 'post-job') context = 'post_move'
+  else if (SCENARIO_JOURNEY_KINDS[journey] && subject.type !== 'none') {
+    context = 'scenario_flow'
+    subject.sequenceKind = SCENARIO_JOURNEY_KINDS[journey]
+  }
+  return { context, subject }
+}
+
+/** Exact addresses (not @domain entries) in the rollout allowlist: the canary rehearsal set. */
+export function canaryRehearsalAddresses(): Set<string> {
+  return new Set((rolloutAllowlist() ?? []).filter((e) => !e.startsWith('@')))
+}
+
+/**
+ * Eligibility deps for a SEND-TIME (or legacy journey scheduling) check, with
+ * the canary rehearsal exemption described above: an address listed exactly in
+ * EMAIL_PROMOTIONAL_ALLOWLIST is not refused as a test identity. Never used by
+ * grant or enrollment safeguards.
+ */
+export function sendTimeEligibilityDeps(deps: EligibilityDeps = {}): EligibilityDeps {
+  if (deps.testIdentity) return deps
+  const exempt = canaryRehearsalAddresses()
+  if (exempt.size === 0) return deps
+  const db = deps.db
+  const loadStaffEmails = db
+    ? async () => {
+        const [users, invitations] = await Promise.all([
+          db.user.findMany({ select: { email: true } }),
+          db.crewInvitation.findMany({ select: { email: true } }),
+        ])
+        return { staff: users.map((u) => u.email), invitations: invitations.map((i) => i.email) }
+      }
+    : undefined
+  return {
+    ...deps,
+    testIdentity: async (e: string) =>
+      exempt.has(normalizeEmail(e)) ? null : testIdentityReason(e, { env: deps.env, loadStaffEmails }),
+  }
+}
+
+/**
+ * The permission this promotional send runs under. Never throws: the loader
+ * fails closed ('eligibility_read_failed', retryable).
+ */
+export async function promotionalPermission(
+  email: string,
+  input: Pick<GuardedSendInput, 'eligibility' | 'eligibilityRequest' | 'isTest' | 'journey' | 'bookingId' | 'leadId'>,
+  deps: EligibilityDeps = {}
+): Promise<PromotionalPermission> {
+  if (input.eligibility) {
+    if (input.eligibility.eligible && input.eligibility.basis === 'internal_rehearsal' && input.isTest !== true) {
+      return { eligible: false, reason: 'no_marketing_basis', terminal: true, detail: 'rehearsal_without_test_flag' }
+    }
+    return input.eligibility
+  }
+  return promotionalEligibility({ ...derivedEligibilityRequest(input), email }, sendTimeEligibilityDeps(deps))
+}
+
+/** The ledger columns for a permission. */
+function basisColumns(
+  emailClass: EmailClass,
+  input: Pick<GuardedSendInput, 'marketingBasis' | 'basisEventId'>,
+  permission: PromotionalPermission | null
+): { marketingBasis: string | null; basisEventId: string | null } {
+  if (permission && permission.eligible) {
+    return permission.basis === 'internal_rehearsal'
+      ? { marketingBasis: null, basisEventId: null }
+      : { marketingBasis: permission.basis, basisEventId: permission.basisEventId ?? null }
+  }
+  if (emailClass === 'transactional') return { marketingBasis: 'transactional', basisEventId: input.basisEventId ?? null }
+  return { marketingBasis: input.marketingBasis ?? null, basisEventId: input.basisEventId ?? null }
 }
 
 /**
@@ -505,12 +674,16 @@ function noteBlockRecordFailure(reason: string, err: unknown, stage: string): vo
   )
 }
 
+type LedgerBasis = { marketingBasis: string | null; basisEventId: string | null }
+const NO_BASIS: LedgerBasis = { marketingBasis: null, basisEventId: null }
+
 async function recordBlock(
   key: string,
   input: GuardedSendInput,
   emailClass: EmailClass,
   reason: string,
-  retryAt?: Date
+  retryAt?: Date,
+  ledger: LedgerBasis = NO_BASIS
 ): Promise<{ id?: string; blockClass: BlockClass; recorded: boolean }> {
   const blockClass = classifyBlock(reason)
   const status = statusForBlock(blockClass)
@@ -533,6 +706,8 @@ async function recordBlock(
         campaignId: input.campaignId ?? null,
         isTest: input.isTest ?? false,
         journeyConfigVersion: input.journeyConfigVersion ?? null,
+        marketingBasis: ledger.marketingBasis,
+        basisEventId: ledger.basisEventId,
         status,
         outcomeClass: blockClass,
         blockedReason: reason.slice(0, 500),
@@ -590,7 +765,8 @@ type ClaimResult =
 async function claimOrResumeSend(
   key: string,
   input: GuardedSendInput,
-  emailClass: EmailClass
+  emailClass: EmailClass,
+  ledger: LedgerBasis = NO_BASIS
 ): Promise<ClaimResult> {
   const email = normalizeEmail(input.to)
   const now = new Date()
@@ -609,6 +785,10 @@ async function claimOrResumeSend(
         campaignId: input.campaignId ?? null,
         isTest: input.isTest ?? false,
         journeyConfigVersion: input.journeyConfigVersion ?? null,
+        // The basis the send is being made under, written AT CLAIM TIME so an
+        // audit never has to re-derive it from columns that changed since.
+        marketingBasis: ledger.marketingBasis,
+        basisEventId: ledger.basisEventId,
         status: 'sending',
         outcomeClass: null,
         attempts: 1,
@@ -714,6 +894,9 @@ async function claimOrResumeSend(
       blockedReason: null,
       outcomeClass: null,
       nextAttemptAt: null,
+      // A resumed attempt records the basis it is sent under NOW.
+      marketingBasis: ledger.marketingBasis,
+      basisEventId: ledger.basisEventId,
     },
   })
   if (count === 0) return { ok: false, reason: 'in_flight', id: existing.id }
@@ -738,8 +921,12 @@ export async function guardedSend(input: GuardedSendInput): Promise<SendOutcome>
   })
   const l = log.child({ template: input.template, journey: input.journey, emailClass })
 
+  // The basis recorded on the ledger row. Promotional sends learn theirs at
+  // step 3b; a refusal before then records none.
+  let ledger: LedgerBasis = basisColumns(emailClass, input, null)
+
   const refuse = async (reason: string, retryAt?: Date): Promise<SendOutcome> => {
-    const { id, blockClass, recorded } = await recordBlock(key, input, emailClass, reason, retryAt)
+    const { id, blockClass, recorded } = await recordBlock(key, input, emailClass, reason, retryAt, ledger)
     return {
       sent: false,
       reason,
@@ -788,6 +975,20 @@ export async function guardedSend(input: GuardedSendInput): Promise<SendOutcome>
       l.info({ reason: abort }, 'blocked: state recheck refused the send')
       return refuse(abort)
     }
+  }
+
+  // ── 3b. PROMOTIONAL PERMISSION (DESIGN-v2 §5, §7) ─────────────────────
+  // Every promotional send needs an eligible basis: the caller's decision, or
+  // one derived here. After the recheck, so it can only ADD refusals. Written
+  // as `!== 'transactional'` so the one `=== 'promotional'` block below stays
+  // the caps/quiet-hours block the conformance tests locate.
+  if (emailClass !== 'transactional') {
+    const permission = await promotionalPermission(email, input)
+    if (!permission.eligible) {
+      l.info({ reason: permission.reason, detail: permission.detail }, 'blocked: no eligible promotional basis')
+      return refuse(permission.reason)
+    }
+    ledger = basisColumns(emailClass, input, permission)
   }
 
   // ── 4. quiet hours + frequency caps (PROMOTIONAL only) ────────────────
@@ -879,7 +1080,7 @@ export async function guardedSend(input: GuardedSendInput): Promise<SendOutcome>
   }
 
   // ── 6. CLAIM OR RESUME ────────────────────────────────────────────────
-  const claim = await claimOrResumeSend(key, input, emailClass)
+  const claim = await claimOrResumeSend(key, input, emailClass, ledger)
   if (!claim.ok) {
     l.info({ key, reason: claim.reason, notDueUntil: claim.notDueUntil }, 'not claiming')
     return {
@@ -893,11 +1094,18 @@ export async function guardedSend(input: GuardedSendInput): Promise<SendOutcome>
   const emailSendId = claim.id
 
   // ── 7. provider send ──────────────────────────────────────────────────
+  // RFC 8058 one-click (List-Unsubscribe + List-Unsubscribe-Post) on every
+  // promotional message.
   const wantsUnsubHeader = input.includeUnsubscribeHeader ?? emailClass === 'promotional'
   const unsub = wantsUnsubHeader ? unsubscribeUrl(email) : null
   const headers = unsub
     ? { 'List-Unsubscribe': `<${unsub}>`, 'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click' }
     : undefined
+
+  // The template's own html/text, exactly as rendered (owner direction
+  // 2026-09-16: existing email copy is not rewritten).
+  const html = input.html
+  const text = input.text
 
   let data: { id?: string } | null = null
   let providerError: unknown = null
@@ -907,8 +1115,8 @@ export async function guardedSend(input: GuardedSendInput): Promise<SendOutcome>
       to: email,
       reply_to: EMAIL_REPLY_TO,
       subject: input.subject,
-      html: input.html,
-      ...(input.text ? { text: input.text } : {}),
+      html,
+      ...(text ? { text } : {}),
       ...(headers ? { headers } : {}),
     })
     data = res.data

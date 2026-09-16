@@ -26,10 +26,35 @@ import { LeadStatus } from '@prisma/client'
 import { prisma } from './db'
 import { scheduledQueue } from './queues'
 import { queueLogger } from './logger'
-import { inRolloutAllowlist, nextAllowedTime, rolloutAllowlist } from './email-guard'
+import { inRolloutAllowlist, nextAllowedTime, rolloutAllowlist, sendTimeEligibilityDeps } from './email-guard'
 import { bookingMarketingBlockReason, effectiveMoveDate } from './email-eligibility'
 import { fireBookingTrigger, fireLeadTrigger, stopEnrollmentsFor } from './email-automation-runtime'
-import { hasEverBooked, hasPromotionalConsent, markLeadConverted } from './leads'
+import { hasBookingOnRecord, hasPromotionalConsent, markLeadConverted } from './leads'
+import { normalizeEmail } from './email-tokens'
+import {
+  promotionalEligibility,
+  type EligibilityContext,
+  type EligibilityDecision,
+  type EligibilityRequest,
+} from './consent/marketing-eligibility'
+import {
+  activeEnrollment,
+  enrollSequence,
+  personBookedSince,
+  type EnrollSequenceInput,
+  type EnrollSequenceResult,
+  type EnrollmentRecord,
+  type EnrollmentRef,
+  type EnrollmentSubjectType,
+} from './consent/sequence-enrollment'
+import {
+  SEQUENCE_KINDS,
+  SURFACE_SEQUENCE_KINDS,
+  isNoticeSurface,
+  isSequenceKind,
+  type NoticeSurface,
+  type SequenceKind,
+} from './consent/notice-registry'
 import {
   CANCELLED_REASON,
   defaultRetryStore,
@@ -58,7 +83,81 @@ export const JOURNEYS_ENABLED = process.env.EMAIL_JOURNEYS_ENABLED === 'true'
 /** Individual journeys can be disabled without turning everything off. */
 const enabled = (name: string): boolean => {
   if (!JOURNEYS_ENABLED) return false
+  // THE PROMOTIONAL KILL SWITCH (email consent release 2026-09-16). Campaigns
+  // and owner automations already refused to send without
+  // EMAIL_PROMOTIONS_ENABLED; the lifecycle journeys that send marketing email
+  // did not, so "turn promotions off" left three sequences running. The
+  // transactional journeys (reminders, balance) are deliberately untouched.
+  if (PROMOTIONAL_JOURNEYS.has(name) && !promotionsEnabled()) return false
   return process.env[`EMAIL_JOURNEY_${name.toUpperCase().replace(/-/g, '_')}_DISABLED`] !== 'true'
+}
+
+/** The journeys whose emails are promotional (email-guard classifyTemplate). */
+const PROMOTIONAL_JOURNEYS: ReadonlySet<string> = new Set(['abandoned', 'quote', 'lead-nurture'])
+
+/**
+ * The language a lead-scoped stage (quote follow-up, lead nurture) is rendered
+ * in. The EXISTING templates already have Spanish versions (i18n subjects); the
+ * stages used to hard-code English. A lead running on a form notice carries the
+ * language of that submission on its consent event; anything else keeps
+ * today's English.
+ */
+export function stageLocaleFromBasis(basisLocale: string | null | undefined): 'en' | 'es' {
+  return typeof basisLocale === 'string' && basisLocale.toLowerCase().startsWith('es') ? 'es' : 'en'
+}
+
+/**
+ * The name a stage greets the person by, or undefined for the template's own
+ * default ("there"). A lead captured without a name carries a placeholder
+ * ("Website lead", "Booking lead") that must never reach a greeting — the
+ * popup and the tracker landing page do not ask for a name.
+ */
+export function greetingName(name: string | null | undefined): string | undefined {
+  const t = typeof name === 'string' ? name.trim() : ''
+  if (!t || /^(website|booking) lead$/i.test(t)) return undefined
+  return t
+}
+
+/** EMAIL_PROMOTIONS_ENABLED, read at CALL time so a flip needs no restart. */
+export function promotionsEnabled(env: Record<string, string | undefined> = process.env): boolean {
+  return env.EMAIL_PROMOTIONS_ENABLED === 'true'
+}
+
+// ════════════════════════════════════════════════════════════════════════
+//  SCENARIO SEQUENCES (email consent release 2026-09-16, DESIGN-v2 §1 and §7)
+//  ---------------------------------------------------------------------
+//  Every genuine form submission with an email enters the most relevant
+//  EXISTING sequence, with its existing templates and cadence (owner direction
+//  2026-09-16; the one copy change is the corrected lead-nurture footer):
+//    quote.html, real server quote        → quote_followup (Sequence A)
+//    quote.html, no price                 → lead_nurture (Sequence B)
+//    booking form, contact step Continue  → lead_nurture
+//    booking submitted, not paid          → abandoned_checkout
+//    contact form (every topic), popup,
+//    tracker landing                      → lead_nurture
+//  The routes decide which one; SURFACE_SEQUENCE_KINDS bounds it.
+//
+//  Every kind keeps its EXISTING flag (EMAIL_JOURNEY_<X>_DISABLED) plus the
+//  master switch, EMAIL_PROMOTIONS_ENABLED and, for a notice,
+//  EMAIL_NOTICE_BASIS_ENABLED.
+// ════════════════════════════════════════════════════════════════════════
+
+/**
+ * May a sequence of this kind be scheduled or sent right now? Read at call
+ * time: the existing flags plus the promotions switch.
+ */
+export function sequenceKindEnabled(kind: SequenceKind, env: Record<string, string | undefined> = process.env): boolean {
+  if (!JOURNEYS_ENABLED || !promotionsEnabled(env)) return false
+  switch (kind) {
+    case 'quote_followup':
+      return env.EMAIL_JOURNEY_QUOTE_DISABLED !== 'true'
+    case 'abandoned_checkout':
+      return env.EMAIL_JOURNEY_ABANDONED_DISABLED !== 'true'
+    case 'lead_nurture':
+      return env.EMAIL_JOURNEY_LEAD_NURTURE_DISABLED !== 'true'
+    default:
+      return false
+  }
 }
 
 export type JourneyStage = {
@@ -131,6 +230,48 @@ export const LEAD_NURTURE_STAGES: JourneyStage[] = [
 /** Stable job id — the anti-duplication guarantee at the queue level. */
 export function jobIdFor(journey: string, stage: string, subjectId: string): string {
   return `journey__${journey}__${stage}__${subjectId}`
+}
+
+/**
+ * The job-id journey segment for a sequence kind. The existing kinds keep
+ * their existing segments, so a cancel built from an enrollment row finds the
+ * jobs the existing schedulers created. Hyphens only: no ':' ever reaches a
+ * BullMQ custom id (queue-jobid-safety.test.ts).
+ */
+export function journeyKeyFor(kind: SequenceKind): string {
+  switch (kind) {
+    case 'quote_followup':
+      return 'quote'
+    case 'abandoned_checkout':
+      return 'abandoned'
+    case 'lead_nurture':
+      return 'lead-nurture'
+    default:
+      return 'unknown'
+  }
+}
+
+/** The stage list a sequence kind schedules. */
+export function stagesForKind(kind: SequenceKind): JourneyStage[] {
+  if (kind === 'quote_followup') return QUOTE_STAGES
+  if (kind === 'lead_nurture') return LEAD_NURTURE_STAGES
+  return ABANDONED_STAGES
+}
+
+/** Every queue job id a sequence of this kind can own for one subject. */
+export function stageJobIdsForKind(kind: SequenceKind, subjectId: string): string[] {
+  return stagesForKind(kind).map((s) => jobIdFor(journeyKeyFor(kind), s.type, subjectId))
+}
+
+/**
+ * The sequence kind a lead-scoped template belongs to when the job carries
+ * none (jobs queued before this release, campaign rechecks).
+ */
+export function sequenceKindForTemplate(template: string | undefined): SequenceKind | null {
+  if (!template) return null
+  if (/^quote-followup-(?:\d+|final)$/.test(template)) return 'quote_followup'
+  if (/^lead-nurture-(?:\d+|final)$/.test(template)) return 'lead_nurture'
+  return null
 }
 
 // ════════════════════════════════════════════════════════════════════════
@@ -395,7 +536,7 @@ export interface JourneyDeps {
   enqueue(stage: string, data: Record<string, unknown>, fireAt: Date, jobId: string): Promise<EnqueueResult | boolean | void>
   cancel(jobId: string): Promise<void>
   loadLead(leadId: string): Promise<JourneyLead | null>
-  /** Booking HISTORY, not lead status — see leads.hasEverBooked. */
+  /** Booking HISTORY, not lead status — leads.hasBookingOnRecord in production. */
   hasEverBooked(email: string | null): Promise<boolean>
   /** email-eligibility.bookingMarketingBlockReason. */
   bookingMarketingBlock(bookingId: string): Promise<string | null>
@@ -424,6 +565,26 @@ export interface JourneyDeps {
   fireLeadTrigger(trigger: LeadTrigger, leadId: string): void
   fireBookingTrigger(trigger: BookingTrigger, bookingId: string): void
   stopEnrollments(scope: StopScope, reason: string, opts?: StopOpts): void
+
+  // ── CONSENT + PERSON-LEVEL ENROLLMENT (email consent release 2026-09-16) ──
+  //  OPTIONAL ONLY so the older injected test worlds keep compiling, exactly
+  //  like the boolean `enqueue` result above. A world without them gets the
+  //  legacy column rule and per-lead scheduling, unchanged. The production
+  //  deps provide every one, and the NEW sequences refuse to run without them.
+  /** consent/marketing-eligibility.promotionalEligibility. Never throws. */
+  eligibility?(req: EligibilityRequest): Promise<EligibilityDecision>
+  /** consent/sequence-enrollment.enrollSequence (default client). Never throws. */
+  enrollSequence?(input: EnrollSequenceInput): Promise<EnrollSequenceResult>
+  /** Stop the person's ACTIVE enrollments of these kinds. THROWS on a DB error. */
+  stopPersonEnrollments?(email: string, reason: string, kinds: readonly SequenceKind[]): Promise<EnrollmentRef[]>
+  /** Open (not booked, not lost) lead ids for an address. THROWS on a DB error. */
+  openLeadIdsForEmail?(email: string): Promise<string[]>
+  /** The booking's recipient address and its STORED basis event. */
+  loadBookingBasis?(bookingId: string): Promise<{ email: string | null; basisEventId: string | null } | null>
+  /** Stop the ACTIVE enrollments whose subject is this lead or booking. Never throws. */
+  stopSubjectEnrollments?(subjectType: EnrollmentSubjectType, subjectId: string, reason: string): Promise<void>
+  /** Has this lead already been SENT the first email of this sequence? THROWS on a DB error. */
+  sequenceAlreadySent?(leadId: string, kind: SequenceKind): Promise<boolean>
 }
 
 let _deps: JourneyDeps | undefined
@@ -438,7 +599,7 @@ export function defaultJourneyDeps(): JourneyDeps {
           where: { id: leadId },
           select: {
             id: true, email: true, status: true, quotedAt: true, bookedAt: true, lostAt: true,
-            moveDate: true, convertedBookingId: true, emailMarketingConsent: true,
+            moveDate: true, convertedBookingId: true, emailMarketingConsent: true, basisEventId: true,
           },
         })
         .catch((err) => {
@@ -446,7 +607,9 @@ export function defaultJourneyDeps(): JourneyDeps {
           return null
         })
     },
-    hasEverBooked,
+    //  The nurture's booking check (leads.hasBookingOnRecord): a move taken
+    //  before, or a booking still waiting for payment or approval.
+    hasEverBooked: hasBookingOnRecord,
     bookingMarketingBlock: bookingMarketingBlockReason,
     siblingUnpaidBooking,
     convertLead: markLeadConverted,
@@ -494,8 +657,184 @@ export function defaultJourneyDeps(): JourneyDeps {
     fireLeadTrigger: (trigger, leadId) => void fireLeadTrigger(trigger, leadId),
     fireBookingTrigger: (trigger, bookingId) => void fireBookingTrigger(trigger, bookingId),
     stopEnrollments: (scope, reason, opts) => void stopEnrollmentsFor(scope, reason, opts),
+    eligibility: (req) => promotionalEligibility(req, sendTimeEligibilityDeps()),
+    // The DEFAULT client, never a transaction client: a unique violation
+    // aborts a Postgres transaction (see sequence-enrollment.enrollSequence).
+    enrollSequence: (input) => enrollSequence(input),
+    async stopPersonEnrollments(email, reason, kinds) {
+      const normalized = normalizeEmail(email)
+      const active = await prisma.sequenceEnrollment.findMany({
+        where: { emailNormalized: normalized, status: 'active', sequenceKind: { in: [...kinds] } },
+        select: { id: true, sequenceKind: true, subjectType: true, subjectId: true },
+      })
+      if (active.length === 0) return []
+      // status: 'active' again in the WHERE, so a row a concurrent writer
+      // already stopped or completed keeps its own reason.
+      await prisma.sequenceEnrollment.updateMany({
+        where: { id: { in: active.map((a) => a.id) }, status: 'active' },
+        data: { status: 'stopped', stopReason: String(reason).slice(0, 80) },
+      })
+      return active
+    },
+    async stopSubjectEnrollments(subjectType, subjectId, reason) {
+      await prisma.sequenceEnrollment
+        .updateMany({
+          where: { subjectType, subjectId, status: 'active' },
+          data: { status: 'stopped', stopReason: String(reason).slice(0, 80) },
+        })
+        .catch((err) => {
+          log.warn({ subjectType, subjectId, err: err instanceof Error ? err.message : String(err) }, 'could not stop the subject enrollments (the send-time gate still refuses)')
+        })
+    },
+    async sequenceAlreadySent(leadId, kind) {
+      const first = stagesForKind(kind)[0]?.type
+      if (!first) return false
+      const row = await prisma.emailSend.findFirst({
+        where: { leadId, template: first, status: 'delivered' },
+        select: { id: true },
+      })
+      return Boolean(row)
+    },
+    async openLeadIdsForEmail(email) {
+      const rows = await prisma.lead.findMany({
+        where: {
+          email: { equals: normalizeEmail(email), mode: 'insensitive' },
+          bookedAt: null,
+          lostAt: null,
+          convertedBookingId: null,
+          status: { notIn: [LeadStatus.BOOKED, LeadStatus.LOST] },
+        },
+        select: { id: true },
+        take: 50,
+      })
+      return rows.map((r) => r.id)
+    },
+    async loadBookingBasis(bookingId) {
+      const row = await prisma.booking
+        .findUnique({ where: { id: bookingId }, select: { basisEventId: true, customer: { select: { email: true } } } })
+        .catch((err) => {
+          log.warn({ bookingId, err: err instanceof Error ? err.message : String(err) }, 'booking basis read failed (non-fatal)')
+          return null
+        })
+      return row ? { email: row.customer?.email ?? null, basisEventId: row.basisEventId ?? null } : null
+    },
   }
   return _deps
+}
+
+/**
+ * The permission half of a promotional gate, given the eligibility decision.
+ *
+ *   • no decision (an older injected world, or no address to ask about) —
+ *     the legacy rule: the lead's own explicit opt-in, nothing else;
+ *   • a decision — it is authoritative. It already contains the subject's own
+ *     consent column as express consent, every per-person prohibition
+ *     (suppression, opt-out, decline, test identity) and the notice rules.
+ *
+ * 'no_marketing_basis' is reported as the historical 'no_marketing_consent',
+ * which email-guard classifies retryable: a later opt-in can still rescue the
+ * send, exactly as before. Every other refusal keeps its own name.
+ */
+export function marketingConsentBlock(legacyConsent: boolean, decision?: EligibilityDecision | null): string | null {
+  if (decision === undefined || decision === null) return legacyConsent ? null : 'no_marketing_consent'
+  if (decision.eligible) return null
+  return decision.reason === 'no_marketing_basis' ? 'no_marketing_consent' : decision.reason
+}
+
+/** Ask the eligibility gate about a lead, when this world can. */
+async function leadDecision(
+  deps: JourneyDeps,
+  lead: JourneyLead,
+  sequenceKind: SequenceKind | null
+): Promise<EligibilityDecision | undefined> {
+  if (!deps.eligibility || !lead.email) return undefined
+  return deps.eligibility({
+    context: 'scenario_flow',
+    email: lead.email,
+    subject: { type: 'lead', id: lead.id, sequenceKind },
+    now: deps.now(),
+  })
+}
+
+type EnrollmentClaim = { ok: true; enrollment: EnrollmentRecord | null } | { ok: false; reason: string }
+
+/**
+ * PER-PERSON IDEMPOTENT ENROLLMENT, without losing retryable scheduling.
+ *
+ * `enrollSequence` answers 'already_enrolled' for ANY enrollment of the kind
+ * in the last 30 days. Two cases hide behind that answer:
+ *   • the SAME subject asking again (a form re-save, the repair sweep, an
+ *     enqueue that failed last time) — the sequence is ours; re-scheduling it
+ *     is harmless (stable job ids + the guard's idempotency key) and is what
+ *     keeps enrolment retryable;
+ *   • a DIFFERENT subject for the same person (a second lead, a double
+ *     submit) while that sequence is still ACTIVE, or a stopped sequence for
+ *     this subject — always refused: nobody gets two copies of one sequence.
+ *   • a different subject whose sequence already ENDED (stopped or completed)
+ *     inside the 30-day window — refused for a sequence running on a FORM
+ *     NOTICE (one per person per window). For an express / legacy opt-in
+ *     (`personLimit: false`) the existing per-flow behaviour is preserved
+ *     (owner direction 2026-09-16): a later quote or booking gets its sequence,
+ *     scheduled without a row of its own, exactly as before this release.
+ * A database error schedules nothing: a sequence without its row is a
+ * sequence no stop rule can find.
+ */
+async function claimEnrollment(
+  deps: JourneyDeps,
+  input: { email: string; kind: SequenceKind; subjectType: EnrollmentSubjectType; subjectId: string; basisEventId: string | null },
+  opts: { required: boolean; personLimit?: boolean }
+): Promise<EnrollmentClaim> {
+  if (!deps.enrollSequence) {
+    return opts.required ? { ok: false, reason: 'enrollment_unavailable' } : { ok: true, enrollment: null }
+  }
+  const r = await deps.enrollSequence({
+    email: input.email,
+    sequenceKind: input.kind,
+    subjectType: input.subjectType,
+    subjectId: input.subjectId,
+    basisEventId: input.basisEventId,
+    now: deps.now(),
+  })
+  if (r.outcome === 'created') return { ok: true, enrollment: r.enrollment }
+  if (r.outcome === 'already_enrolled') {
+    const e = r.enrollment
+    if (e && e.status === 'active' && e.subjectType === input.subjectType && e.subjectId === input.subjectId) {
+      return { ok: true, enrollment: e }
+    }
+    //  Only an ENDED sequence for a DIFFERENT subject is exempt, and only for an
+    //  express / legacy opt-in. An unknown row (null) is never exempt. A row
+    //  still marked active whose last stage is long past has ended too: nothing
+    //  marks a finished sequence completed, and its subject may have closed
+    //  before the stop hooks existed.
+    const sameSubject = !!e && e.subjectType === input.subjectType && e.subjectId === input.subjectId
+    const endedElsewhere = !!e && !sameSubject && (e.status !== 'active' || enrollmentOutlivedItsStages(e, deps.now()))
+    if (opts.personLimit === false && endedElsewhere) return { ok: true, enrollment: null }
+    return { ok: false, reason: 'already_enrolled' }
+  }
+  if (r.outcome === 'refused') return { ok: false, reason: `enrollment_refused:${r.reason}` }
+  return { ok: false, reason: 'enrollment_failed' }
+}
+
+/**
+ * A sequence's stages all fire within its last stage's delay (plus the quote
+ * confirmation wait and a day's slack for quiet hours and retries). An ACTIVE
+ * row older than that has, in practice, finished.
+ */
+export function enrollmentOutlivedItsStages(e: { sequenceKind: string; createdAt: Date }, now: Date): boolean {
+  if (!isSequenceKind(e.sequenceKind)) return false
+  const stages = stagesForKind(e.sequenceKind)
+  const last = stages.length ? Math.max(...stages.map((s) => s.delay)) : 0
+  return now.getTime() - e.createdAt.getTime() > last + CONFIRMATION_WAIT_MAX_MS + DAY
+}
+
+/** Shape a stage-scheduling summary into an enrolment outcome. */
+function outcomeFromSummary(summary: ScheduleSummary): EnrolmentOutcome {
+  const { scheduled: stages, recordedForRetry, lost } = summary
+  const failures = recordedForRetry + lost > 0 ? { recordedForRetry, lost } : {}
+  if (recordedForRetry + lost > 0 && stages === 0) {
+    return { scheduled: false, reason: lost > 0 ? 'enqueue_failed' : 'recorded_for_retry', ...failures }
+  }
+  return { scheduled: true, stages, ...failures }
 }
 
 // ════════════════════════════════════════════════════════════════════════
@@ -582,7 +921,15 @@ export async function onCheckoutStarted(
   // they carry their own ACTIVE + EMAIL_PROMOTIONS_ENABLED gates. Fire-and-
   // forget: a trigger failure must never break checkout.
   deps.fireBookingTrigger('booking_started', bookingId)
+  return scheduleAbandonedRecovery(bookingId, deps)
+}
 
+/**
+ * The abandoned-checkout SCHEDULING, without the automation trigger — so the
+ * notice path (onNoticeSubmission) can ask for the same sequence without
+ * announcing a second 'booking_started' event for one booking.
+ */
+async function scheduleAbandonedRecovery(bookingId: string, deps: JourneyDeps): Promise<ScheduleSummary | null> {
   if (!enabled('abandoned')) {
     log.info({ bookingId }, 'abandoned-recovery journey disabled — not scheduling')
     return null
@@ -593,7 +940,41 @@ export async function onCheckoutStarted(
   // guarantee; refusing here as well means three doomed jobs are never queued
   // and the reason is logged at checkout, not 72 hours later.
   const consentBlock = await deps.bookingMarketingBlock(bookingId)
-  if (consentBlock) {
+
+  // PER-PERSON PROHIBITIONS AND THE NOTICE BASIS (2026-09-16). When this world
+  // can ask the eligibility gate, it is asked for the booking's own address:
+  // an opt-out, decline, suppression or test identity refuses even where the
+  // Customer column says yes, and a booking whose STORED basis is a valid
+  // booking-surface notice may stand in for a missing consent column. Nothing
+  // else the legacy check refuses (the canary, a deleted or test booking, a
+  // customer opt-out) is ever overridden.
+  let basisEventId: string | null = null
+  let recipient: string | null = null
+  let noticeBasis = false
+  if (deps.eligibility && deps.loadBookingBasis) {
+    const booking = await deps.loadBookingBasis(bookingId)
+    recipient = booking?.email ?? null
+    if (!recipient) {
+      log.info({ bookingId, reason: consentBlock ?? 'no_email' }, 'no booking address — abandoned-recovery not scheduled')
+      return null
+    }
+    const decision = await deps.eligibility({
+      context: 'scenario_flow',
+      email: recipient,
+      subject: { type: 'booking', id: bookingId, sequenceKind: 'abandoned_checkout' },
+      now: deps.now(),
+    })
+    if (!decision.eligible) {
+      log.info({ bookingId, reason: decision.reason }, 'promotional eligibility refused — abandoned-recovery not scheduled')
+      return null
+    }
+    if (consentBlock && consentBlock !== 'no_marketing_consent') {
+      log.info({ bookingId, reason: consentBlock }, 'no promotional consent — abandoned-recovery not scheduled')
+      return null
+    }
+    basisEventId = decision.basisEventId
+    noticeBasis = decision.basis === 'notice'
+  } else if (consentBlock) {
     log.info({ bookingId, reason: consentBlock }, 'no promotional consent — abandoned-recovery not scheduled')
     return null
   }
@@ -602,6 +983,19 @@ export async function onCheckoutStarted(
   if (duplicateOf) {
     log.info({ bookingId, duplicateOf }, 'an earlier unpaid booking already owns a recovery sequence — not scheduling a second')
     return null
+  }
+
+  // ONE recovery sequence per PERSON per 30 days, as a database constraint.
+  if (recipient) {
+    const claim = await claimEnrollment(
+      deps,
+      { email: recipient, kind: 'abandoned_checkout', subjectType: 'booking', subjectId: bookingId, basisEventId },
+      { required: false, personLimit: noticeBasis }
+    )
+    if (!claim.ok) {
+      log.info({ bookingId, reason: claim.reason }, 'abandoned-recovery not scheduled (person-level enrollment)')
+      return null
+    }
   }
 
   // Parallel (each self-guarded), so a Redis stall bounds checkout to ~5s. The
@@ -675,6 +1069,21 @@ export async function onBookingCreated(input: {
     )
   }
 
+  // 2b. PERSON-LEVEL STOP (2026-09-16). The lead this booking converted is not
+  //     the only one: the same person may have another open lead with a
+  //     quote follow-up or nurture still running. Contained like step 1 — the send-time
+  //     person_booked_since gate is the real stop, this only tidies the queue.
+  if (input.email) {
+    try {
+      await onPersonBooked(input.email, deps)
+    } catch (err) {
+      log.warn(
+        { bookingId, err: err instanceof Error ? err.message : String(err) },
+        'person-level stop on booking failed (non-fatal) — the send-time gate still stops every sequence'
+      )
+    }
+  }
+
   // 3. Reads the consent written in step 1.
   try {
     abandoned = await onCheckoutStarted(bookingId, deps)
@@ -699,6 +1108,9 @@ export async function onBookingPaid(bookingId: string, deps: JourneyDeps = defau
   // the normal path; it must not end a move-date or post-move automation.
   deps.fireBookingTrigger('payment_captured', bookingId)
   deps.stopEnrollments({ bookingId }, 'deposit_paid', { triggers: ['booking_started', 'booking_abandoned'] })
+  //  The booking's own recovery enrollment ends here too, so it never counts
+  //  as a running sequence for the person's next booking.
+  await deps.stopSubjectEnrollments?.('booking', bookingId, 'deposit_paid')
   log.info({ bookingId }, 'abandoned-recovery cancelled (booking paid)')
 }
 
@@ -798,6 +1210,7 @@ export async function onBookingCancelled(
   // A cancelled booking has no truthful promotional automation left —
   // unconditional stop for every enrollment on it.
   deps.stopEnrollments({ bookingId }, 'booking_cancelled')
+  await deps.stopSubjectEnrollments?.('booking', bookingId, 'booking_cancelled')
   // The post-completion balance reminder dies with the booking too.
   await deps.cancel(jobIdFor('balance', 'balance-reminder-post', bookingId))
   log.info({ bookingId, cancelled: ids.length }, 'all journeys cancelled (booking cancelled)')
@@ -876,9 +1289,21 @@ export type EnrolmentOutcome =
  * gates below, because "a quote exists" is what makes B obsolete — whether A
  * may run is a separate question.
  */
+export type QuoteJourneyOptions = {
+  /**
+   * TRUE only on the customer's own submission path (onNoticeSubmission): the
+   * lead's stored notice basis may then permit the quote follow-up. Every other
+   * caller — the admin "mark quoted" route, the repair sweep, a repeat form
+   * save — is EXPRESS-ONLY: a staff action or a background job is not the
+   * submission the notice was shown for, and staff edits never enroll anyone.
+   */
+  allowNoticeBasis?: boolean
+}
+
 export async function ensureQuoteJourney(
   leadId: string,
-  deps: JourneyDeps = defaultJourneyDeps()
+  deps: JourneyDeps = defaultJourneyDeps(),
+  opts: QuoteJourneyOptions = {}
 ): Promise<EnrolmentOutcome> {
   if (!JOURNEYS_ENABLED) return { scheduled: false, reason: 'journeys_disabled' }
 
@@ -892,13 +1317,19 @@ export async function ensureQuoteJourney(
   // Sequence A has taken over — drop Sequence B's obsolete jobs. See above.
   await cancelLeadNurture(leadId, deps)
 
+  if (!promotionsEnabled()) return { scheduled: false, reason: 'promotions_disabled' }
   if (!enabled('quote')) return { scheduled: false, reason: 'journey_disabled' }
 
   // THE SHARED STOP MATRIX, not a second hand-written one: converted, lost,
   // closed status, no email, no consent, move date passed. Re-running the same
   // predicate the worker runs at send time is what keeps a retryable enrolment
-  // from resurrecting a journey the customer has moved past.
-  const block = quoteFollowupBlockReason(lead, deps.now())
+  // from resurrecting a journey the customer has moved past. The eligibility
+  // decision (2026-09-16) adds the per-person prohibitions and — only on the
+  // submission path (opts.allowNoticeBasis) — the lead's own stored notice
+  // basis; see marketingConsentBlock. Without a sequence kind the decision
+  // can only be an express permission.
+  const decision = await leadDecision(deps, lead, opts.allowNoticeBasis === true ? 'quote_followup' : null)
+  const block = quoteFollowupBlockReason(lead, deps.now(), decision)
   if (block) {
     log.info({ leadId, reason: block }, 'quote follow-up not scheduled')
     return { scheduled: false, reason: block }
@@ -919,19 +1350,39 @@ export async function ensureQuoteJourney(
     return { scheduled: false, reason: 'not_in_rollout_allowlist' }
   }
 
+  // A lead that was already SENT its quote follow-up is not enrolled again
+  // (see ensureLeadNurture): the running or finished sequence keeps its jobs.
+  if (deps.sequenceAlreadySent && (await deps.sequenceAlreadySent(leadId, 'quote_followup'))) {
+    log.info({ leadId }, 'quote follow-up not re-enrolled — this lead already received it')
+    return { scheduled: false, reason: 'already_sent' }
+  }
+
+  // ONE quote sequence per PERSON (2026-09-16), claimed after every refusal
+  // above so a refused lead never occupies the person's slot.
+  const claim = await claimEnrollment(
+    deps,
+    {
+      email: lead.email as string,
+      kind: 'quote_followup',
+      subjectType: 'lead',
+      subjectId: leadId,
+      basisEventId: decision?.eligible ? decision.basisEventId : null,
+    },
+    { required: false, personLimit: !!decision && decision.eligible && decision.basis === 'notice' }
+  )
+  if (!claim.ok) {
+    log.info({ leadId, reason: claim.reason }, 'quote follow-up not scheduled (person-level enrollment)')
+    return { scheduled: false, reason: claim.reason }
+  }
+
   const summary = await scheduleStages(deps, 'quote', QUOTE_STAGES, leadId, { leadId }, lead.quotedAt.getTime(), {
     moveDate: lead.moveDate,
   })
   logScheduleSummary(log, { leadId }, 'quote follow-up', summary)
-  const { scheduled: stages, recordedForRetry, lost } = summary
-  const failures = recordedForRetry + lost > 0 ? { recordedForRetry, lost } : {}
-  if (recordedForRetry + lost > 0 && stages === 0) {
-    // Nothing was queued: report it, so the admin audit is truthful. A durable
-    // retry row re-adds the stages hourly; a LOST stage is re-attempted by the
-    // stranded-journey repair (no ledger row exists for it).
-    return { scheduled: false, reason: lost > 0 ? 'enqueue_failed' : 'recorded_for_retry', ...failures }
-  }
-  return { scheduled: true, stages, ...failures }
+  // Nothing queued is reported as such, so the admin audit is truthful. A
+  // durable retry row re-adds the stages hourly; a LOST stage is re-attempted
+  // by the stranded-journey repair (no ledger row exists for it).
+  return outcomeFromSummary(summary)
 }
 
 /** Drop every pending Sequence-B stage for a lead. Best-effort, like `cancel`. */
@@ -1063,27 +1514,78 @@ export async function repairStrandedQuoteJourneys(
  * Idempotent: stable job ids mean a lead captured five times (the quick-quote
  * page fires on every meaningful edit) still has exactly three pending jobs.
  */
+export type LeadNurtureOptions = {
+  /**
+   * TRUE only on the customer's own submission path (onNoticeSubmission): the
+   * lead's stored form notice may then permit the nurture. Every other caller —
+   * the legacy capture hooks, a staff edit, a repair job — is EXPRESS-ONLY.
+   */
+  allowNoticeBasis?: boolean
+}
+
 export async function onLeadCaptured(
   leadId: string,
-  deps: JourneyDeps = defaultJourneyDeps()
+  deps: JourneyDeps = defaultJourneyDeps(),
+  opts: LeadNurtureOptions = {}
 ): Promise<ScheduleSummary | null> {
-  if (!enabled('lead-nurture')) return null
+  return (await ensureLeadNurture(leadId, deps, opts)).summary
+}
+
+/** onLeadCaptured, with the refusal reason for the submission path. */
+async function ensureLeadNurture(
+  leadId: string,
+  deps: JourneyDeps,
+  opts: LeadNurtureOptions
+): Promise<{ summary: ScheduleSummary | null; reason: string | null }> {
+  const refuse = (reason: string) => ({ summary: null, reason })
+  if (!enabled('lead-nurture')) return refuse('journey_disabled')
 
   const lead = await deps.loadLead(leadId)
-  if (!lead) return null
+  if (!lead) return refuse('lead_deleted')
 
   // Booking HISTORY, not lead status — see leads.hasEverBooked.
   const previousCustomer = await deps.hasEverBooked(lead.email)
-  const block = leadNurtureBlockReason({ ...lead, previousCustomer }, deps.now())
+  // Without a sequence kind the decision can only be an express permission (or
+  // a per-person prohibition). The submission path names the kind, so the
+  // lead's own stored notice may permit it.
+  const decision = await leadDecision(deps, lead, opts.allowNoticeBasis === true ? 'lead_nurture' : null)
+  const block = leadNurtureBlockReason({ ...lead, previousCustomer }, deps.now(), decision)
   if (block) {
     log.info({ leadId, reason: block }, 'lead nurture not scheduled')
-    return null
+    return refuse(block)
   }
 
   // CONTROLLED ROLLOUT. Unset allowlist ⇒ no restriction; see email-guard.
   if (!inRolloutAllowlist(lead.email ?? '', rolloutAllowlist())) {
     log.info({ leadId }, 'outside the rollout allowlist — lead nurture not scheduled')
-    return null
+    return refuse('not_in_rollout_allowlist')
+  }
+
+  // A lead that was already SENT this nurture (a returning person whose new
+  // form merged into their old open lead) is not enrolled again: the stable
+  // job ids and send keys would deliver nothing, and the empty row would block
+  // the person's other leads for 30 days.
+  if (deps.sequenceAlreadySent && (await deps.sequenceAlreadySent(leadId, 'lead_nurture'))) {
+    log.info({ leadId }, 'lead nurture not scheduled — this lead already received it')
+    return refuse('already_sent')
+  }
+
+  // ONE nurture per PERSON at a time; one per 30 days on a form notice.
+  // Claimed after every refusal above so a refused lead never takes the slot.
+  const claim = await claimEnrollment(
+    deps,
+    {
+      email: lead.email as string,
+      kind: 'lead_nurture',
+      subjectType: 'lead',
+      subjectId: leadId,
+      basisEventId: decision?.eligible ? decision.basisEventId : null,
+    },
+    { required: false, personLimit: !!decision && decision.eligible && decision.basis === 'notice' }
+  )
+  if (!claim.ok) {
+    log.info({ leadId, reason: claim.reason }, 'lead nurture not scheduled (person-level enrollment)')
+    return refuse(claim.reason)
   }
 
   // Anchored on NOW, so no stage is ever overdue and the recovery stagger in
@@ -1100,7 +1602,7 @@ export async function onLeadCaptured(
   )
   // "scheduled" only when every stage was; see lifecycle-enqueue.logScheduleSummary.
   logScheduleSummary(log, { leadId }, 'lead nurture', summary)
-  return summary
+  return { summary, reason: null }
 }
 
 /**
@@ -1119,7 +1621,176 @@ export async function onLeadClosed(
   // Converted or lost — the booking journey owns them now. Unconditional,
   // mirroring quoteFollowupBlockReason's own unconditional 'lead_converted'.
   deps.stopEnrollments({ leadId }, 'lead_closed')
+  await deps.stopSubjectEnrollments?.('lead', leadId, 'lead_closed')
   log.info({ leadId }, 'quote follow-up cancelled (lead closed)')
+}
+
+// ════════════════════════════════════════════════════════════════════════
+//  SCENARIO ENTRY POINTS (email consent release 2026-09-16)
+//  ---------------------------------------------------------------------
+//  What the capture routes call. Every one of them:
+//    • is a no-op unless its sequence's flags are on (sequenceKindEnabled);
+//    • asks promotionalEligibility, with the subject's STORED basisEventId —
+//      the route stores the notice event on the Lead/Booking first;
+//    • enrolls through the person-level unique row, and schedules ONLY on a
+//      new enrollment (or its own subject re-asking; see claimEnrollment);
+//    • never throws for a business reason and never breaks the request.
+//  Stopping is PERSON-level (onPersonBooked, onPersonOptedOut). Cancelling
+//  queue jobs is the optimisation; the send-time gate (scenarioSendDecision)
+//  is the enforcement.
+// ════════════════════════════════════════════════════════════════════════
+
+export type NoticeSubmissionInput = {
+  /** DERIVED BY THE ROUTE, never read from the request body. */
+  surface: NoticeSurface
+  /** The scenario the route decided on (quote_followup, abandoned_checkout). */
+  scenario: SequenceKind
+  leadId?: string | null
+  bookingId?: string | null
+  /** The notice_accepted event the route recorded and STORED on the subject. */
+  basisEventId: string | null
+  /** The address the submission recorded the notice for. */
+  email: string
+}
+
+const refused = (reason: string): EnrolmentOutcome => ({ scheduled: false, reason })
+
+/**
+ * A capture route recorded a submission → start its scenario sequence.
+ *
+ * Refuses (never throws) when the scenario does not belong to the surface, when
+ * the address or basis does not match the stored subject, and for every reason
+ * the sequence's own scheduler refuses.
+ */
+export async function onNoticeSubmission(
+  input: NoticeSubmissionInput,
+  deps: JourneyDeps = defaultJourneyDeps()
+): Promise<EnrolmentOutcome> {
+  try {
+    if (!isNoticeSurface(input.surface)) return refused('unknown_surface')
+    if (!isSequenceKind(input.scenario) || !SURFACE_SEQUENCE_KINDS[input.surface].includes(input.scenario)) {
+      return refused('scenario_not_on_surface')
+    }
+    const email = normalizeEmail(input.email)
+    if (!email) return refused('no_email')
+
+    if (input.scenario === 'abandoned_checkout') {
+      const bookingId = String(input.bookingId ?? '').trim()
+      if (!bookingId) return refused('no_booking')
+      if (deps.loadBookingBasis) {
+        const booking = await deps.loadBookingBasis(bookingId)
+        if (!booking) return refused('booking_deleted')
+        if (normalizeEmail(booking.email ?? '') !== email) return refused('basis_email_mismatch')
+        if (input.basisEventId && booking.basisEventId !== input.basisEventId) return refused('basis_not_stored')
+      }
+      const summary = await scheduleAbandonedRecovery(bookingId, deps)
+      if (!summary) return refused('not_scheduled')
+      logScheduleSummary(log, { bookingId, scenario: input.scenario }, 'abandoned-recovery (notice submission)', summary)
+      return outcomeFromSummary(summary)
+    }
+
+    const leadId = String(input.leadId ?? '').trim()
+    if (!leadId) return refused('no_lead')
+    const lead = await deps.loadLead(leadId)
+    if (!lead) return refused('lead_deleted')
+    if (!lead.email || normalizeEmail(lead.email) !== email) return refused('basis_email_mismatch')
+    if (input.basisEventId && (lead.basisEventId ?? null) !== input.basisEventId) return refused('basis_not_stored')
+
+    if (input.scenario === 'quote_followup') return await ensureQuoteJourney(leadId, deps, { allowNoticeBasis: true })
+    if (input.scenario === 'lead_nurture') {
+      const r = await ensureLeadNurture(leadId, deps, { allowNoticeBasis: true })
+      if (!r.summary) return refused(r.reason ?? 'not_scheduled')
+      return outcomeFromSummary(r.summary)
+    }
+    return refused('scenario_not_supported')
+  } catch (err) {
+    log.error(
+      { scenario: input.scenario, leadId: input.leadId, bookingId: input.bookingId, err: err instanceof Error ? err.message : String(err) },
+      'notice submission scheduling failed (non-fatal)'
+    )
+    return refused('scheduling_failed')
+  }
+}
+
+/** Kinds a new booking ends. Abandoned checkout is the booking's OWN sequence. */
+export const BOOKING_STOPS_KINDS: readonly SequenceKind[] = SEQUENCE_KINDS.filter((k) => k !== 'abandoned_checkout')
+
+export type PersonStopReport = { stopped: number; cancelledJobs: number; errors: number }
+
+/**
+ * Stop a person's sequences and remove their queued jobs, best effort.
+ *   1. the enrollment rows of `kinds` (plus any refs the caller already stopped
+ *      in its own transaction, e.g. recordConsentEvent's stoppedEnrollments);
+ *   2. the lead-scoped jobs of EVERY open lead for the address — a sequence
+ *      scheduled before enrollment rows existed has no row to find it by.
+ */
+async function stopPerson(
+  email: string,
+  reason: string,
+  kinds: readonly SequenceKind[],
+  deps: JourneyDeps,
+  alreadyStopped: readonly EnrollmentRef[] = []
+): Promise<PersonStopReport> {
+  const report: PersonStopReport = { stopped: 0, cancelledJobs: 0, errors: 0 }
+  if (!normalizeEmail(email)) return report
+  const refs: EnrollmentRef[] = [...alreadyStopped]
+  if (deps.stopPersonEnrollments) {
+    try {
+      refs.push(...(await deps.stopPersonEnrollments(email, reason, kinds)))
+    } catch (err) {
+      report.errors++
+      log.warn({ reason, err: err instanceof Error ? err.message : String(err) }, 'could not stop enrollments (the send-time gate still refuses)')
+    }
+  }
+  report.stopped = refs.length
+
+  const ids = new Set<string>()
+  for (const ref of refs) {
+    if (!isSequenceKind(ref.sequenceKind) || !kinds.includes(ref.sequenceKind)) continue
+    for (const id of stageJobIdsForKind(ref.sequenceKind, ref.subjectId)) ids.add(id)
+  }
+  if (deps.openLeadIdsForEmail) {
+    try {
+      for (const leadId of await deps.openLeadIdsForEmail(email)) {
+        for (const kind of kinds) {
+          if (kind === 'abandoned_checkout') continue
+          for (const id of stageJobIdsForKind(kind, leadId)) ids.add(id)
+        }
+        for (const s of LEAD_NURTURE_STAGES) ids.add(jobIdFor('lead-nurture', s.type, leadId))
+      }
+    } catch (err) {
+      report.errors++
+      log.warn({ reason, err: err instanceof Error ? err.message : String(err) }, 'could not list open leads to cancel (the send-time gate still refuses)')
+    }
+  }
+  await Promise.all(Array.from(ids).map((id) => deps.cancel(id)))
+  report.cancelledJobs = ids.size
+  log.info({ reason, ...report }, 'person-level sequences stopped')
+  return report
+}
+
+/**
+ * The person created a booking → end every lead-scoped sequence for the
+ * ADDRESS, not only the converted lead's: another open lead's quote
+ * follow-up or nurture. Their own abandoned-checkout sequence is not
+ * touched. Enforced again at send time by person_booked_since.
+ */
+export async function onPersonBooked(email: string, deps: JourneyDeps = defaultJourneyDeps()): Promise<PersonStopReport> {
+  return stopPerson(email, 'person_booked', BOOKING_STOPS_KINDS, deps)
+}
+
+/**
+ * The person opted out (capture box, decline, unsubscribe) → end EVERY
+ * sequence, abandoned checkout included. Pass the refs recordConsentEvent
+ * already stopped in its transaction so their jobs are cancelled too.
+ * Enforced again at send time by the eligibility gate.
+ */
+export async function onPersonOptedOut(
+  email: string,
+  opts: { stopped?: readonly EnrollmentRef[]; reason?: string } = {},
+  deps: JourneyDeps = defaultJourneyDeps()
+): Promise<PersonStopReport> {
+  return stopPerson(email, opts.reason ?? 'opted_out', SEQUENCE_KINDS, deps, opts.stopped ?? [])
 }
 
 // ════════════════════════════════════════════════════════════════════════
@@ -1137,14 +1808,27 @@ export type LeadState = {
   convertedBookingId: string | null
   /** TRI-STATE. Required here: quote follow-ups are PROMOTIONAL (see below). */
   emailMarketingConsent: boolean | null
+  /**
+   * The notice/express event this lead's submission recorded (2026-09-16).
+   * Informational here — the eligibility loader reads the STORED value itself.
+   */
+  basisEventId?: string | null
 }
 
 /**
  * May this lead still receive a quote follow-up? Returns a reason to ABORT,
  * or null to proceed. Mirrors the transition matrix in
  * docs/email-marketing/triggers-and-stop-rules.md.
+ *
+ * `decision` (2026-09-16): the promotionalEligibility answer for this lead and
+ * sequence. Omitted, the legacy column rule applies unchanged; supplied, it is
+ * the consent answer (see marketingConsentBlock).
  */
-export function quoteFollowupBlockReason(lead: LeadState | null, now: Date = new Date()): string | null {
+export function quoteFollowupBlockReason(
+  lead: LeadState | null,
+  now: Date = new Date(),
+  decision?: EligibilityDecision | null
+): string | null {
   if (!lead) return 'lead_deleted'
   if (!lead.email) return 'no_email'
   // ── PROMOTIONAL CONSENT ────────────────────────────────────────────────
@@ -1164,9 +1848,8 @@ export function quoteFollowupBlockReason(lead: LeadState | null, now: Date = new
   //
   //  TRI-STATE, and both false and null refuse: absence of a decision is not
   //  permission. The rule is hasPromotionalConsent(), the tested definition.
-  if (!hasPromotionalConsent({ emailMarketingConsent: lead.emailMarketingConsent })) {
-    return 'no_marketing_consent'
-  }
+  const consentBlock = marketingConsentBlock(hasPromotionalConsent({ emailMarketingConsent: lead.emailMarketingConsent }), decision)
+  if (consentBlock) return consentBlock
   if (!lead.quotedAt) return 'no_quote'
   // ── REPEAT CUSTOMERS ARE DELIBERATELY NOT BLOCKED HERE (owner rule
   //    2026-08-07). `leadNurtureBlockReason` refuses a `previousCustomer`,
@@ -1223,7 +1906,9 @@ export function transactionalLeadBlockReason(lead: LeadState | null): string | n
 }
 
 /** Lead-scoped templates that are an immediate REPLY, not a journey stage. */
-const TRANSACTIONAL_LEAD_TEMPLATES: ReadonlySet<string> = new Set(['quote-request-received'])
+const TRANSACTIONAL_LEAD_TEMPLATES: ReadonlySet<string> = new Set([
+  'quote-request-received',
+])
 
 /** Stages of the non-quote nurture. They use their OWN matrix, not the quote one. */
 const NURTURE_TEMPLATES: ReadonlySet<string> = new Set(LEAD_NURTURE_STAGES.map((s) => s.type))
@@ -1242,13 +1927,16 @@ export type NurtureLeadState = LeadState & {
  * null. The mirror image of quoteFollowupBlockReason: same stop rules, plus
  * "they now have a real quote" and "they have booked with us before".
  */
-export function leadNurtureBlockReason(lead: NurtureLeadState | null, now: Date = new Date()): string | null {
+export function leadNurtureBlockReason(
+  lead: NurtureLeadState | null,
+  now: Date = new Date(),
+  decision?: EligibilityDecision | null
+): string | null {
   if (!lead) return 'lead_deleted'
   if (!lead.email) return 'no_email'
   // PROMOTIONAL. Same rule, same tested predicate, same tri-state refusal.
-  if (!hasPromotionalConsent({ emailMarketingConsent: lead.emailMarketingConsent })) {
-    return 'no_marketing_consent'
-  }
+  const consentBlock = marketingConsentBlock(hasPromotionalConsent({ emailMarketingConsent: lead.emailMarketingConsent }), decision)
+  if (consentBlock) return consentBlock
   // A REAL quote exists → the quote journey owns this person. Checked before
   // conversion so the reason names the more useful fact: the two sequences
   // are mutually exclusive by construction, not by scheduling luck.
@@ -1264,43 +1952,344 @@ export function leadNurtureBlockReason(lead: NurtureLeadState | null, now: Date 
   return null
 }
 
-export async function leadEligibility(leadId: string, template?: string): Promise<string | null> {
+// ════════════════════════════════════════════════════════════════════════
+//  SEND-TIME ENFORCEMENT (email consent release 2026-09-16, DESIGN-v2 §7)
+//  ---------------------------------------------------------------------
+//  Everything that stops a promotional lead email is checked HERE, at the
+//  moment it would go out — the stage handler asks, and the email worker asks
+//  again immediately before the provider call:
+//    • the promotions kill switch;
+//    • the per-person prohibitions and the lead's own basis
+//      (promotionalEligibility: suppression, opt-out, decline, test identity,
+//      notice window, basis email match);
+//    • the journey's state matrix (converted, lost, quote, move date …);
+//    • in a scenario flow: the enrollment is still active and belongs to THIS
+//      lead, and the person has not booked since it started
+//      (person_booked_since, any non-test booking).
+//  Job cancellation is only ever an optimisation on top of this.
+// ════════════════════════════════════════════════════════════════════════
+
+/** The lead columns every send-time decision reads. */
+export type StageLead = LeadState & {
+  id: string
+  name: string
+  jobType: string | null
+  createdAt: Date
+  basisEventId: string | null
+}
+
+/** What the provider has told us about the quick-quote confirmation. */
+export type ConfirmationState = 'delivered' | 'pending' | 'failed'
+
+/** The injectable edge of every send-time decision. */
+export interface StageDeps {
+  now(): Date
+  env: Record<string, string | undefined>
+  /** THROWS on a database error: the caller fails closed. */
+  loadStageLead(leadId: string): Promise<StageLead | null>
+  /** promotionalEligibility. Never throws. */
+  eligibility(req: EligibilityRequest): Promise<EligibilityDecision>
+  /** leads.hasBookingOnRecord — true on a read error. */
+  hasEverBooked(email: string | null): Promise<boolean>
+  /** The newest ACTIVE enrollment of this kind. THROWS on a database error. */
+  activeEnrollment(email: string, kind: SequenceKind): Promise<EnrollmentRecord | null>
+  /** Any real booking created after `since`. True on a read error. */
+  personBookedSince(email: string, since: Date): Promise<boolean>
+  /** THROWS on a database error. */
+  quoteConfirmationState(leadId: string): Promise<ConfirmationState>
+  /** Mark one enrollment stopped. Never throws. */
+  stopEnrollment(enrollmentId: string, reason: string): Promise<void>
+}
+
+export type SendDecision = {
+  reason: string | null
+  decision: EligibilityDecision | null
+  enrollment: EnrollmentRecord | null
+}
+
+/**
+ * THE promotional lead gate. Reason to refuse, or null to send.
+ * `recipient` is the address the job would actually send to.
+ */
+export async function scenarioSendDecision(
+  input: {
+    leadId: string
+    lead: StageLead | null
+    template?: string
+    kind: SequenceKind | null
+    context: EligibilityContext
+    recipient?: string | null
+  },
+  deps: StageDeps
+): Promise<SendDecision> {
+  const { lead, leadId, kind, context } = input
+  const out = (reason: string | null, decision: EligibilityDecision | null = null, enrollment: EnrollmentRecord | null = null): SendDecision => ({
+    reason,
+    decision,
+    enrollment,
+  })
+  if (!lead) return out('lead_deleted')
+  if (!lead.email) return out('no_email')
+  // A job carries the address it was scheduled for. If the lead's address has
+  // changed since (an in-session correction), the basis was never given for
+  // the address the job would reach.
+  if (input.recipient && normalizeEmail(input.recipient) !== normalizeEmail(lead.email)) return out('basis_email_mismatch')
+  if (!promotionsEnabled(deps.env)) return out('promotions_disabled')
+
+  const decision = await deps.eligibility({
+    context,
+    email: lead.email,
+    subject: { type: 'lead', id: leadId, sequenceKind: kind },
+    now: deps.now(),
+  })
+
+  let block: string | null
+  if (input.template !== undefined && NURTURE_TEMPLATES.has(input.template)) {
+    // The booking-history question is asked HERE, at send time, because it
+    // can become true between scheduling and sending — someone who booked
+    // yesterday must not get tomorrow's "still need an estimate?".
+    const previousCustomer = await deps.hasEverBooked(lead.email)
+    block = leadNurtureBlockReason({ ...lead, previousCustomer }, deps.now(), decision)
+  } else {
+    block = quoteFollowupBlockReason(lead, deps.now(), decision)
+  }
+  if (block) return out(block, decision)
+
+  if (context !== 'scenario_flow' || !kind) return out(null, decision)
+
+  //  ENROLLMENT + person_booked_since. A sequence running on a notice exists
+  //  only through its enrollment row. A legacy quote sequence queued before
+  //  enrollment rows existed has none, and keeps running on its own lead's
+  //  timeline.
+  const enrollment = await deps.activeEnrollment(lead.email, kind)
+  const requireEnrollment = decision.eligible && decision.basis === 'notice'
+  //  Another subject's row blocks only while it could still be sending — the
+  //  same "outlived its stages" rule the enrollment claim uses, so an express
+  //  person the claim let through is not refused here.
+  //  Only THIS lead's row counts as its enrollment: another lead's (even an
+  //  outlived one) never stands in for it, never anchors person_booked_since
+  //  and is never returned for the confirmation gate to stop.
+  const own = enrollment && enrollment.subjectType === 'lead' && enrollment.subjectId === leadId ? enrollment : null
+  if (enrollment && !own && !enrollmentOutlivedItsStages(enrollment, deps.now())) {
+    return out('already_enrolled', decision)
+  }
+  if (requireEnrollment && !own) return out('enrollment_not_active', decision)
+  const since = own ? own.createdAt : lead.createdAt
+  if (await deps.personBookedSince(lead.email, since)) return out('person_booked_since', decision, own)
+  return out(null, decision, own)
+}
+
+export type LeadEligibilityOptions = {
+  /**
+   * The eligibility context. Defaults to 'automation' — express consent on the
+   * lead's OWN row only, never a notice — which is exactly today's rule for a
+   * caller that does not say (campaign dispatch). The email worker passes
+   * 'scenario_flow' for the journey stages it sends.
+   */
+  context?: EligibilityContext
+  /** The job's sequence kind, when it carries one. */
+  sequenceKind?: string | null
+  /** The address the job would send to. */
+  recipient?: string | null
+}
+
+/** The gate's answer plus the basis to record on the EmailSend row. */
+export type LeadSendEligibility = {
+  reason: string | null
+  marketingBasis: 'express' | 'notice' | 'ebr' | 'transactional' | null
+  basisEventId: string | null
+}
+
+/**
+ * LIVE lead eligibility — the send-time twin of `bookingEligibility`.
+ * FAILS CLOSED: a read error blocks the send.
+ */
+export async function leadEligibility(leadId: string, template?: string, opts: LeadEligibilityOptions = {}): Promise<string | null> {
+  return (await leadSendEligibility(leadId, template, opts)).reason
+}
+
+/** leadEligibility, with the basis the send would go out under. */
+export async function leadSendEligibility(
+  leadId: string,
+  template?: string,
+  opts: LeadEligibilityOptions = {},
+  deps: StageDeps = defaultStageDeps()
+): Promise<LeadSendEligibility> {
   try {
-    const lead = await prisma.lead.findUnique({
-      where: { id: leadId },
-      select: {
-        email: true,
-        status: true,
-        quotedAt: true,
-        bookedAt: true,
-        lostAt: true,
-        moveDate: true,
-        convertedBookingId: true,
-        emailMarketingConsent: true,
-      },
-    })
+    const lead = await deps.loadStageLead(leadId)
     // Journey stages keep the full matrix; an immediate transactional reply
     // gets only the rules true of every lead. `template` is optional so every
     // existing caller keeps today's behaviour.
-    let reason: string | null
     if (template && TRANSACTIONAL_LEAD_TEMPLATES.has(template)) {
-      reason = transactionalLeadBlockReason(lead)
-    } else if (template && NURTURE_TEMPLATES.has(template)) {
-      // The booking-history question is asked HERE, at send time, because it
-      // can become true between scheduling and sending — someone who booked
-      // yesterday must not get tomorrow's "still need an estimate?".
-      const previousCustomer = lead ? await hasEverBooked(lead.email) : false
-      reason = leadNurtureBlockReason(lead ? { ...lead, previousCustomer } : null)
-    } else {
-      reason = quoteFollowupBlockReason(lead)
+      const reason = transactionalLeadBlockReason(lead)
+      if (reason) log.info({ leadId, template, reason }, 'lead eligibility BLOCKED the send')
+      return { reason, marketingBasis: reason ? null : 'transactional', basisEventId: null }
     }
-    if (reason) log.info({ leadId, template, reason }, 'lead eligibility BLOCKED the send')
-    return reason
+    const kind = isSequenceKind(opts.sequenceKind) ? opts.sequenceKind : sequenceKindForTemplate(template)
+    const r = await scenarioSendDecision(
+      { leadId, lead, template, kind, context: opts.context ?? 'automation', recipient: opts.recipient ?? null },
+      deps
+    )
+    if (r.reason) log.info({ leadId, template, reason: r.reason }, 'lead eligibility BLOCKED the send')
+    const granted = !r.reason && r.decision && r.decision.eligible ? r.decision : null
+    return {
+      reason: r.reason,
+      marketingBasis: granted ? granted.basis : null,
+      basisEventId: granted ? granted.basisEventId : null,
+    }
   } catch (err) {
     log.error(
       { err: err instanceof Error ? err.message : String(err), leadId },
       'lead eligibility read failed — failing closed'
     )
-    return 'eligibility_read_failed'
+    return { reason: 'eligibility_read_failed', marketingBasis: null, basisEventId: null }
   }
+}
+
+// ════════════════════════════════════════════════════════════════════════
+//  THE QUICK-QUOTE DELIVERY GATE (DESIGN-v2 §7)
+//  ---------------------------------------------------------------------
+//  A quote-page submission is anonymous. Before any promotional stage goes to
+//  that address, the address has to have ACCEPTED the transactional reply the
+//  person asked for: quote-request-received with a delivered webhook and no
+//  bounce or complaint. Until then the stage waits in bounded steps; a bounce,
+//  a complaint, a terminal refusal or a wait past the bound stops the sequence.
+//  Applies to Sequence A running on a notice.
+// ════════════════════════════════════════════════════════════════════════
+
+export const CONFIRMATION_WAIT_STEP_MS = 2 * HOUR
+export const CONFIRMATION_WAIT_MAX_MS = 48 * HOUR
+
+export type ConfirmationGate =
+  | { action: 'proceed' }
+  | { action: 'defer'; fireAt: Date; jobId: string; data: Record<string, unknown> }
+  | { action: 'stop'; reason: string }
+
+/** Does this sequence wait for a delivered quick-quote confirmation? */
+export function needsConfirmationGate(kind: SequenceKind | null, decision: EligibilityDecision | null): boolean {
+  return kind === 'quote_followup' && !!decision && decision.eligible && decision.basis === 'notice'
+}
+
+/**
+ * PURE. Proceed, wait another step, or stop. The re-queued job keeps the
+ * stage's data plus the wait's start and attempt, and gets a DETERMINISTIC,
+ * colon-free id per attempt, so a stalled re-run of the same hop adds nothing.
+ */
+export function confirmationGateDecision(input: {
+  state: ConfirmationState
+  now: Date
+  stageType: string
+  journeyKey: string
+  leadId: string
+  jobData: Record<string, unknown>
+}): ConfirmationGate {
+  if (input.state === 'delivered') return { action: 'proceed' }
+  if (input.state === 'failed') return { action: 'stop', reason: 'quote_confirmation_failed' }
+  const now = input.now.getTime()
+  const startedRaw = input.jobData.confirmationWaitStartedAt
+  const parsed = typeof startedRaw === 'string' ? Date.parse(startedRaw) : NaN
+  const started = Number.isFinite(parsed) ? Math.min(parsed, now) : now
+  const attemptRaw = input.jobData.confirmationWaitAttempt
+  const attempt = typeof attemptRaw === 'number' && Number.isInteger(attemptRaw) && attemptRaw >= 0 ? attemptRaw : 0
+  if (now - started >= CONFIRMATION_WAIT_MAX_MS) return { action: 'stop', reason: 'quote_confirmation_not_delivered' }
+  const next = attempt + 1
+  const data: Record<string, unknown> = { ...input.jobData, confirmationWaitStartedAt: new Date(started).toISOString(), confirmationWaitAttempt: next }
+  delete data.type
+  return {
+    action: 'defer',
+    fireAt: new Date(Math.min(now + CONFIRMATION_WAIT_STEP_MS, started + CONFIRMATION_WAIT_MAX_MS)),
+    jobId: `${jobIdFor(input.journeyKey, input.stageType, input.leadId)}__wait${next}`,
+    data,
+  }
+}
+
+/**
+ * The gate as the stage handlers use it: null to proceed, or what to do.
+ * A stop also ends the enrollment, so the later stages refuse at send time.
+ */
+export async function applyConfirmationGate(
+  input: { kind: SequenceKind | null; decision: EligibilityDecision | null; enrollment: EnrollmentRecord | null; stageType: string; leadId: string; jobData: Record<string, unknown> },
+  deps: Pick<StageDeps, 'now' | 'quoteConfirmationState' | 'stopEnrollment'>
+): Promise<Exclude<ConfirmationGate, { action: 'proceed' }> | null> {
+  if (!input.kind || !needsConfirmationGate(input.kind, input.decision)) return null
+  const gate = confirmationGateDecision({
+    state: await deps.quoteConfirmationState(input.leadId),
+    now: deps.now(),
+    stageType: input.stageType,
+    journeyKey: journeyKeyFor(input.kind),
+    leadId: input.leadId,
+    jobData: input.jobData,
+  })
+  if (gate.action === 'proceed') return null
+  if (gate.action === 'stop' && input.enrollment) await deps.stopEnrollment(input.enrollment.id, gate.reason)
+  return gate
+}
+
+// ── The production StageDeps ───────────────────────────────────────────
+
+const STAGE_LEAD_SELECT = {
+  id: true,
+  name: true,
+  email: true,
+  status: true,
+  quotedAt: true,
+  bookedAt: true,
+  lostAt: true,
+  moveDate: true,
+  convertedBookingId: true,
+  jobType: true,
+  createdAt: true,
+  basisEventId: true,
+  // PROMOTIONAL — a gate that cannot see the consent column cannot enforce it.
+  emailMarketingConsent: true,
+} as const
+
+let _stageDeps: StageDeps | undefined
+export function defaultStageDeps(): StageDeps {
+  if (_stageDeps) return _stageDeps
+  _stageDeps = {
+    now: () => new Date(),
+    env: process.env,
+    loadStageLead: (leadId) => prisma.lead.findUnique({ where: { id: leadId }, select: STAGE_LEAD_SELECT }),
+    eligibility: (req) => promotionalEligibility(req, sendTimeEligibilityDeps()),
+    //  The nurture's booking check (leads.hasBookingOnRecord): a move taken
+    //  before, or a booking still waiting for payment or approval.
+    hasEverBooked: hasBookingOnRecord,
+    activeEnrollment: (email, kind) => activeEnrollment(email, kind),
+    personBookedSince: (email, since) => personBookedSince(email, since),
+    async quoteConfirmationState(leadId) {
+      //  Only a confirmation sent to the lead's CURRENT address counts: a partial
+      //  lead's address can be corrected, and a delivery to the old one says
+      //  nothing about the new one.
+      const lead = await prisma.lead.findUnique({ where: { id: leadId }, select: { email: true } })
+      const email = lead?.email ? normalizeEmail(lead.email) : ''
+      if (!email) return 'pending'
+      const rows = await prisma.emailSend.findMany({
+        where: { leadId, template: 'quote-request-received', email },
+        select: { id: true, status: true, deliveredAt: true, bouncedAt: true, complainedAt: true },
+        orderBy: { createdAt: 'desc' },
+        take: 10,
+      })
+      if (rows.some((r) => r.bouncedAt || r.complainedAt)) return 'failed'
+      if (rows.some((r) => r.deliveredAt)) return 'delivered'
+      //  The webhook stores the delivered EVENT before it sets delivered_at, and a
+      //  failed column write is logged, not retried (email-events.applyDeliveryState).
+      //  A linked delivered event is the same proof. Nothing else is: no event,
+      //  no delivery.
+      if (rows.length > 0) {
+        const delivered = await prisma.emailEvent.count({ where: { emailSendId: { in: rows.map((r) => r.id) }, type: 'delivered' } })
+        if (delivered > 0) return 'delivered'
+      }
+      if (rows.length > 0 && rows.every((r) => r.status === 'blocked_terminal' || r.status === 'failed_terminal')) return 'failed'
+      return 'pending'
+    },
+    async stopEnrollment(enrollmentId, reason) {
+      await prisma.sequenceEnrollment
+        .updateMany({ where: { id: enrollmentId, status: 'active' }, data: { status: 'stopped', stopReason: reason.slice(0, 80) } })
+        .catch((err) => {
+          log.warn({ enrollmentId, err: err instanceof Error ? err.message : String(err) }, 'could not stop the enrollment (later stages still refuse at send time)')
+        })
+    },
+  }
+  return _stageDeps
 }

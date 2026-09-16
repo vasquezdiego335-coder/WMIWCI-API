@@ -352,30 +352,27 @@ test('the success overlay is unreachable from a failed submit', skipSite, () => 
 })
 
 // ═══════════════════════════════════════════════════════════════════════
-//  11. EMAIL MARKETING — MUST BE UNTOUCHED
+//  11. EMAIL MARKETING — the notice replaced the checkbox (2026-09-16)
 // ═══════════════════════════════════════════════════════════════════════
 
-test('the marketing-consent checkbox is unchanged', skipSite, () => {
+test('the booking form shows the email notice and an unticked opt-out box, not an opt-in checkbox', skipSite, () => {
   const src = site('booking-form.html')
-
-  // Same element, same id, same form field name.
-  assert.ok(/id="emailOptIn"/.test(src), 'the consent checkbox id must remain emailOptIn')
-
-  // Still a checkbox, still UNCHECKED by default — a pre-checked consent box is
-  // not consent, and flipping the default would silently opt in every customer.
-  const el = src.match(/<input[^>]*id="emailOptIn"[^>]*>/)
-  assert.ok(el, 'the consent input must still exist')
-  assert.ok(/type="checkbox"/.test(el![0]), 'must remain a checkbox')
-  assert.ok(!/\bchecked\b/.test(el![0]), 'must remain UNCHECKED by default')
+  assert.ok(!/id="emailOptIn"/.test(src), 'the opt-in checkbox is gone')
+  assert.ok(/id="emailNoticeBlock"[^>]*data-notice-version="booking-2026-09-16-r2"/.test(src), 'the notice block carries its registered version')
+  // The opt-out box is UNCHECKED by default — a pre-ticked opt-out would
+  // silently drop every customer from the follow-ups they may expect.
+  const el = src.match(/<input[^>]*id="emailOptOut"[^>]*>/)
+  assert.ok(el, 'the opt-out input must exist')
+  assert.ok(/type="checkbox"/.test(el![0]), 'must be a checkbox')
+  assert.ok(!/\bchecked\b/.test(el![0]), 'must be UNCHECKED by default')
 })
 
-test('the tri-state consent payload contract is unchanged', skipSite, () => {
+test('the booking payload carries the notice contract, never a consent claim', skipSite, () => {
   const src = site('booking-form.html')
-  // true = ticked, false = ticked then unticked, ABSENT = never interacted.
-  // Collapsing absent to false would turn "not asked" into "declined".
-  assert.ok(/marketingConsent:/.test(src), 'marketingConsent must still be sent')
-  assert.ok(/dataset\.touched/.test(src),
-    'the touched-flag that distinguishes "declined" from "never asked" must remain')
+  assert.ok(/marketingNotice:/.test(src), 'the submit carries the notice it showed')
+  assert.ok(/emailMarketingOptOut:/.test(src), 'and the opt-out box state')
+  assert.ok(/emailUserTyped:/.test(src), 'and whether the address was typed on this page load')
+  assert.ok(!/marketingConsent:/.test(src), 'a notice is not an opt-in: no marketingConsent is sent')
 })
 
 test('the server still accepts marketingConsent on the booking payload', () => {

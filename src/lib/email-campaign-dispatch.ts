@@ -762,13 +762,21 @@ export async function sendToRecipient(
     recheck: async () => {
       const current = await prisma.emailCampaignRun.findUnique({ where: { id: run.id }, select: { status: true } })
       if (!current || !RUN_SENDABLE_STATES.has(current.status as RunState)) return 'run_not_sendable'
-      if (recipient.bookingId) return bookingEligibility(template, recipient.bookingId)
+      //  A campaign is a campaign whatever its template: the booking matrix would
+      //  otherwise judge an abandoned-checkout template as the running SEQUENCE
+      //  (an enrollment it does not have). Context 'campaign', no sequence kind.
+      if (recipient.bookingId) return bookingEligibility(template, recipient.bookingId, { context: 'campaign', sequenceKind: null })
       // The TEMPLATE selects the eligibility matrix (2026-09-15). Without it every
       // lead recipient was judged by the quote-follow-up matrix, so a
       // contact-lead reactivation campaign (lead-nurture-final, audience
       // quotedAt: null by definition) refused 100% of recipients as `no_quote`.
       // Consent is still enforced by whichever matrix applies.
-      if (recipient.leadId) return leadEligibility(recipient.leadId, template)
+      //  CONTEXT 'campaign' (2026-09-16): the re-check asks the SAME question
+      //  the audience and the guard ask. Without it the lead matrix defaulted
+      //  to the express-only automation context, so a quick-quote lead whose
+      //  basis is its form notice was refused at the last step of every
+      //  "relevant offer" campaign. Prohibitions and the template rule still apply.
+      if (recipient.leadId) return leadEligibility(recipient.leadId, template, { context: 'campaign' })
       // No subject to re-check means no live consent check: refuse, never pass.
       return 'no_recheck_subject'
     },

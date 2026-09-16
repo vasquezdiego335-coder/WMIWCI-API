@@ -56,7 +56,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     return NextResponse.redirect(fallbackUrl(), { status: 302 })
   }
 
-  const rl = await rateLimit(LIMITS.booking, [clientIp(req)])
+  const rl = await rateLimit(LIMITS.checkoutResume, [clientIp(req)])
   if (!rl.ok) return tooManyRequests(rl)
 
   try {

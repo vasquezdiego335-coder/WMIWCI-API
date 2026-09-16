@@ -9,6 +9,10 @@
 // bounce means the mailbox does not exist, so the fix is correcting the address
 // on the customer record — not removing the block. Both refusals are enforced
 // server-side, not by hiding a button.
+//
+// NOR AN UNSUBSCRIBE (DESIGN-v2 §8, 2026-09-16). Only the person can undo their
+// own unsubscribe, through the short-lived resubscribe token on their
+// confirmation page. email-suppression.adminLiftRefusal is checked first.
 
 import { NextRequest, NextResponse } from 'next/server'
 import { getSession } from '@/lib/auth'
@@ -16,6 +20,7 @@ import { prisma } from '@/lib/db'
 import { apiLogger } from '@/lib/logger'
 import { denyReason, type Role } from '@/lib/permissions'
 import { listSuppressions, canRestoreSuppression, maskEmail } from '@/lib/email-admin'
+import { adminLiftRefusal } from '@/lib/email-suppression'
 import { normalizeEmail } from '@/lib/email-tokens'
 import { z } from 'zod'
 
@@ -61,6 +66,12 @@ export async function DELETE(req: NextRequest): Promise<NextResponse> {
   const email = normalizeEmail(parsed.data.email)
   const existing = await prisma.emailSuppression.findUnique({ where: { email }, select: { reason: true, scope: true } })
   if (!existing) return NextResponse.json({ error: 'That address is not suppressed.' }, { status: 404 })
+
+  // An unsubscribe belongs to the person (DESIGN-v2 §8): refused here whatever
+  // the restorable list says, and also when the row was relabelled by an older
+  // escalation but an unsubscribe is on record for the address.
+  const lift = await adminLiftRefusal(email, existing.reason)
+  if (!lift.allow) return NextResponse.json({ error: lift.why }, { status: lift.code === 'check_failed' ? 503 : 409 })
 
   const verdict = canRestoreSuppression(existing.reason)
   if (!verdict.allow) return NextResponse.json({ error: verdict.why }, { status: 409 })

@@ -322,7 +322,11 @@ export async function fulfillPaidCheckout(params: {
   //     to its source / found-us in the scans→leads→jobs funnel. Idempotent on
   //     external_ref and self-guarded (5s timeout) — a tracker outage is a no-op.
   //     Revenue recorded is the move ESTIMATE (expected job value), not the $49.
-  tasks.push(
+  //
+  //     INTERNAL TEST BOOKINGS NEVER LEAVE THIS SYSTEM (2026-09-16). An owner
+  //     rehearsal is not revenue, and the tracker copy is an email store the
+  //     API's suppression and test-identity rules do not reach.
+  if (!booking.isInternalTest) tasks.push(
     ingestBookingToTracker({
       bookingId,
       source: booking.source,
@@ -352,8 +356,12 @@ export async function fulfillPaidCheckout(params: {
     })
   )
 
-  // 4) Marketing automation enrollment (external tool — env-gated stub)
-  fanout.push(
+  // 4) Marketing automation enrollment (external tool — env-gated stub).
+  //    Never for an internal test booking (2026-09-16): a rehearsal must not
+  //    put the owner's address on an external marketing list. The consent,
+  //    suppression and test-identity gate itself runs in enrollCustomer, at
+  //    job time, because consent can change between payment and the job.
+  if (!booking.isInternalTest) fanout.push(
     enqueueFanout('marketing:enroll', {
       queue: edge.marketing,
       queueName: 'marketing',

@@ -240,8 +240,8 @@ export default function LeadNurtureEmail({
       <MarketingFooter
         disclaimer={
           es
-            ? 'Te escribimos porque nos contactaste sobre una mudanza y aceptaste recibir correos nuestros.'
-            : "You're receiving this because you contacted us about a move and opted in to hear from us."
+            ? 'Te escribimos porque nos diste tu correo sobre una mudanza en moveitclearit.com. Para dejar de recibir estos correos, usa el enlace «Cancelar suscripción» de abajo.'
+            : "You're receiving this because you gave us your email about a move on moveitclearit.com. To stop these emails, use the Unsubscribe link below."
         }
         unsubscribeUrl={unsubscribeUrl}
         postalAddress={postalAddress}

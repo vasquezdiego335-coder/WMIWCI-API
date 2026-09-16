@@ -1218,6 +1218,16 @@ model Booking {
   /// did not come from a scan simply has none.
   attributionId       String?   @map("attribution_id")
 
+  // ── MARKETING BASIS OF THIS SUBMISSION (email consent release 2026-09-16) ──
+  //  The email_consent_events row (kind notice_accepted) recorded by the booking
+  //  submit that created THIS booking. A permission belongs to the submission,
+  //  never to the person: only this booking's scenario sequence may use it, and
+  //  only while the basis email still equals the booking's customer email.
+  //  Plain value, no FK (the event table is append-only). Null = no basis,
+  //  which is every booking created before the release. Never backfilled.
+  //  See src/lib/consent/marketing-eligibility.ts.
+  basisEventId        String?   @map("basis_event_id")
+
   // ── Job completion (Phase 3) — set when the booking transitions to COMPLETED;
   //    the anchor time for the post-move follow-up sequence. ──
   completedAt DateTime? @map("completed_at")
@@ -2278,6 +2288,17 @@ model Lead {
   alertStatus      String?   @map("alert_status")
   alertDeliveredAt DateTime? @map("alert_delivered_at")
 
+  // ── MARKETING BASIS OF THIS SUBMISSION (email consent release 2026-09-16) ──
+  //  The email_consent_events row (kind notice_accepted) recorded by the
+  //  submission that created or refreshed THIS lead: the quick quote "See my
+  //  estimate", the booking form's Step-1 Continue click, a contact message
+  //  about a quote, or a tracker landing form. Only this lead's scenario
+  //  sequence may use it, and only while the event's email still equals
+  //  lead.email (an in-session address change voids it: basis_email_mismatch).
+  //  Plain value, no FK. Null = no notice basis — every lead captured before the
+  //  release. NEVER backfilled. See src/lib/consent/marketing-eligibility.ts.
+  basisEventId String? @map("basis_event_id")
+
   contactedAt DateTime? @map("contacted_at")
   quotedAt    DateTime? @map("quoted_at")
   bookedAt    DateTime? @map("booked_at")
@@ -2998,6 +3019,17 @@ model EmailSend {
   /// An owner editing a delay must not retroactively rewrite the decisions
   /// already made for sends in flight.
   journeyConfigVersion Int? @map("journey_config_version")
+
+  /// ── THE BASIS THIS SEND WAS MADE UNDER (email consent release 2026-09-16) ──
+  /// 'express' | 'notice' | 'ebr' | 'transactional'. Null = a send claimed
+  /// before the release, or by a path that does not record it yet. Written at
+  /// claim time so an audit, or the email agent's consent check, judges the send
+  /// by the basis that was actually used rather than re-deriving it later from
+  /// columns that may have changed since.
+  marketingBasis String? @map("marketing_basis")
+  /// The email_consent_events row behind `marketingBasis` (the notice or express
+  /// event), when there is one. Legacy checkbox consent has no event: null.
+  basisEventId   String? @map("basis_event_id")
 
   events      EmailEvent[]
   campaignRef MarketingCampaign? @relation(fields: [campaignId], references: [id], onDelete: SetNull)
@@ -4226,4 +4258,130 @@ model LifecycleEnqueueRetry {
   @@index([status, nextAttemptAt])
   @@index([subjectType, subjectId])
   @@map("lifecycle_enqueue_retries")
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  EMAIL CONSENT EVIDENCE + SCENARIO ENROLLMENT (email consent release 2026-09-16)
+//  ---------------------------------------------------------------------------
+//  Three tables, one direction each:
+//    email_consent_events    — WHAT HAPPENED. Append-only source of truth.
+//    email_marketing_status  — the per-PERSON summary of it (prohibitions and
+//                              express), written in the same transaction.
+//    sequence_enrollments    — which scenario sequence a person is in, unique
+//                              per (email, kind, 30-day window).
+//  Migration: prisma/migrations/20260916120000_email_consent_enrollment.
+//  Code: src/lib/consent/*.
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// One consent-relevant fact about a normalized address, recorded as it
+/// happened and NEVER edited. An UPDATE or DELETE is refused by a database
+/// trigger; the only exception is the SQL function redact_email_consent(email),
+/// which replaces personal data with a hash for an erasure request.
+///
+/// lead_id / customer_id / booking_id are PLAIN values with no foreign key on
+/// purpose: an FK with ON DELETE SET NULL would be an UPDATE the trigger
+/// refuses (breaking lead deletion), and CASCADE would delete the evidence.
+///
+/// `kind` is TEXT with a CHECK constraint rather than a Prisma enum, so adding
+/// a kind is a one-line migration instead of a type rewrite.
+/// Retention: kept at least 3 years after the last send made under the basis.
+/// Never included in any purge.
+model EmailConsentEvent {
+  id               String   @id @default(cuid())
+  /// normalizeEmail(): trimmed + lowercased. The person key.
+  emailNormalized  String   @map("email_normalized")
+  leadId           String?  @map("lead_id")
+  customerId       String?  @map("customer_id")
+  bookingId        String?  @map("booking_id")
+  /// notice_accepted | express_opt_in |
+  /// opted_out_at_capture | declined_at_capture | unsubscribed | resubscribed |
+  /// basis_withheld
+  kind             String
+  /// DERIVED FROM THE ROUTE, never from the request body:
+  /// quote | booking | contact | tracker | popup | unsubscribe | resubscribe | …
+  surface          String
+  /// A key of NOTICE_VERSIONS (src/lib/consent/notice-registry.ts), or null.
+  noticeVersion    String?  @map("notice_version")
+  /// SHA-256 of the exact registered copy for noticeVersion + locale.
+  noticeCopySha256 String?  @map("notice_copy_sha256")
+  /// 'en' | 'es'
+  locale           String?
+  /// 'nanp' | 'non_nanp' | 'unknown' — stored on the event, never overwritten.
+  regionSignal     String?  @map("region_signal")
+  /// 'submit' | 'continue' | … — which user action produced it.
+  trigger          String?
+  /// The address came from a trusted user input event on this page load.
+  emailUserTyped   Boolean? @map("email_user_typed")
+  /// State of the "Don't send me follow-up or marketing emails" box.
+  optOutBox        Boolean? @map("opt_out_box")
+  /// Cloudflare Turnstile verdict; null = not required / not checked.
+  turnstileOk      Boolean? @map("turnstile_ok")
+  /// For kind basis_withheld: why no basis was granted.
+  withheldReason   String?  @map("withheld_reason")
+  /// Origin + path only. A query string can carry personal data and is dropped.
+  pageUrl          String?  @map("page_url")
+  /// HMAC of the client IP (CONSENT_IP_HMAC_SECRET). Never the raw IP.
+  ipHmac           String?  @map("ip_hmac")
+  uaHash           String?  @map("ua_hash")
+  /// Per request. UNIQUE with kind: a retried or double-fired request records once.
+  requestId        String   @map("request_id")
+  occurredAt       DateTime @default(now()) @map("occurred_at") @db.Timestamptz(3)
+
+  @@unique([requestId, kind])
+  @@index([emailNormalized, occurredAt(sort: Desc)])
+  /// Per-IP grant throttle.
+  @@index([ipHmac, occurredAt])
+  /// Global grant breaker.
+  @@index([kind, occurredAt])
+  @@map("email_consent_events")
+}
+
+/// The per-person summary derived from email_consent_events. Upserted in the
+/// SAME transaction as each event, and every timestamp only ever moves
+/// FORWARD, so a late or replayed event cannot move a withdrawal backwards.
+/// Prohibitions (opted out, declined) are read from here; permissions that
+/// belong to a submission (a notice) are read from Lead/Booking.basisEventId.
+model EmailMarketingStatus {
+  emailNormalized   String    @id @map("email_normalized")
+  /// Latest confirmed express opt-in (confirmed popup, resubscribe, legacy checkbox).
+  expressOptInAt    DateTime? @map("express_opt_in_at") @db.Timestamptz(3)
+  expressEventId    String?   @map("express_event_id")
+  /// Latest withdrawal: the capture opt-out box or an unsubscribe.
+  optedOutAt        DateTime? @map("opted_out_at") @db.Timestamptz(3)
+  /// Latest old-page decline (the retired checkbox left unticked).
+  declinedAt        DateTime? @map("declined_at") @db.Timestamptz(3)
+  lastNoticeAt      DateTime? @map("last_notice_at") @db.Timestamptz(3)
+  lastNoticeEventId String?   @map("last_notice_event_id")
+  updatedAt         DateTime  @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  @@map("email_marketing_status")
+}
+
+/// One scenario sequence for one person. UNIQUE (email, kind, window_start):
+/// two concurrent submissions for the same address cannot both start the same
+/// sequence — the second insert fails and reports already_enrolled.
+/// window_start is the first day of a fixed 30-day bucket (see
+/// src/lib/consent/sequence-enrollment.ts). No foreign keys.
+model SequenceEnrollment {
+  id              String   @id @default(cuid())
+  emailNormalized String   @map("email_normalized")
+  /// quote_followup | lead_nurture_quote_request | lead_nurture_booking_form |
+  /// lead_nurture_contact | abandoned_checkout | offer
+  sequenceKind    String   @map("sequence_kind")
+  /// 'lead' | 'booking' | 'customer' | 'email'
+  subjectType     String   @map("subject_type")
+  subjectId       String   @map("subject_id")
+  /// The event the sequence runs under; null for legacy express consent.
+  basisEventId    String?  @map("basis_event_id")
+  windowStart     DateTime @map("window_start") @db.Date
+  /// active | stopped | completed
+  status          String   @default("active")
+  stopReason      String?  @map("stop_reason")
+  createdAt       DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt       DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  @@unique([emailNormalized, sequenceKind, windowStart])
+  @@index([emailNormalized, status])
+  @@index([subjectType, subjectId])
+  @@map("sequence_enrollments")
 }

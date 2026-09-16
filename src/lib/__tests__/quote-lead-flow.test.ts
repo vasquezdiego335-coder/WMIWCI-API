@@ -591,7 +591,12 @@ test('13c. the route hands the owner-notification to quote-capture (no double pi
   assert.match(s, /onCaptured\(result\.lead\.id/, 'the rich card comes from the side-effect module')
   const deps = readFileSync(resolve(__dirname, '../quote-capture-deps.ts'), 'utf8')
   assert.match(deps, /onCaptured:\s*onQuoteRequestCaptured/, 'and production resolves it to the real one')
-  assert.match(s, /normaliseConsentSource\(d\.consentSource\) \?\? 'QUICK_QUOTE_FORM'/)
+  // DERIVED FROM THE ROUTE (2026-09-16): the quick-quote endpoint records
+  // QUICK_QUOTE_FORM whatever the body claims. The old pin accepted any body
+  // source with a fallback; this one requires the route-derived helper AND
+  // forbids the claim-first fallback coming back.
+  assert.match(s, /consentSource: routeConsentSource\('QUICK_QUOTE_FORM', normaliseConsentSource\(d\.consentSource\)\)/)
+  assert.ok(!/normaliseConsentSource\(d\.consentSource\) \?\?/.test(s), 'a body-supplied source must not win over the route')
   assert.match(s, /consentVersion: d\.consentVersion \|\| CONSENT_VERSION/)
   // The marketing outcome is logged, never returned.
   assert.match(s, /automationStatus:/)

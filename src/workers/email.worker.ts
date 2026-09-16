@@ -10,7 +10,7 @@ import { validateEmailJobData } from '../lib/email-job-validation'
 import { buildMarketingContext, applyMarketingContext } from '../lib/marketing-context'
 import { emailQueue } from '../lib/queues'
 import { bookingEligibility } from '../lib/email-eligibility'
-import { leadEligibility } from '../lib/journeys'
+import { leadEligibility, sequenceKindForTemplate } from '../lib/journeys'
 import { recordQuoteConfirmationOutcome } from '../lib/quote-capture'
 import type { EmailJobData } from '../lib/queues'
 
@@ -36,6 +36,10 @@ import QuoteFollowupEmail from '../emails/quote-followup'
 import QuoteRequestReceivedEmail from '../emails/quote-request-received'
 import LeadNurtureEmail from '../emails/lead-nurture'
 import { localizedSubject } from '../lib/i18n'
+import { isSequenceKind } from '../lib/consent/notice-registry'
+
+/** The templates this worker can dispatch: the queue's own list. */
+type WorkerTemplate = EmailJobData['template']
 
 // ════════════════════════════════════════════════════════════════════════
 //  MESSAGING POLICY — the 11 React (_ui-kit) customer emails. Each is tied to a
@@ -56,7 +60,7 @@ import { localizedSubject } from '../lib/i18n'
 //  unintended email. Add a template here only when its design + trigger are
 //  intentionally part of the customer journey.
 // ════════════════════════════════════════════════════════════════════════
-const ALLOWED_TEMPLATES = new Set<EmailJobData['template']>([
+const ALLOWED_TEMPLATES = new Set<WorkerTemplate>([
   'pre-approval',
   'final-confirmation',
   'booking-declined',
@@ -88,7 +92,7 @@ const ALLOWED_TEMPLATES = new Set<EmailJobData['template']>([
 ])
 
 const TEMPLATES: Record<
-  EmailJobData['template'],
+  WorkerTemplate,
   (payload: Record<string, unknown>) => React.ReactElement
 > = {
   'pre-approval': (p) => PreApprovalEmail(p as any),
@@ -124,7 +128,7 @@ const TEMPLATES: Record<
 
 // English fallbacks. Bilingual subjects come from emailSubject(template, locale)
 // when the job payload carries a `locale`.
-export const SUBJECTS: Record<EmailJobData['template'], string> = {
+export const SUBJECTS: Record<WorkerTemplate, string> = {
   'pre-approval': "We've received your booking request",
   'final-confirmation': 'Your booking is approved',
   'booking-declined': 'About your booking request',
@@ -264,6 +268,14 @@ export async function processEmailJob(job: Job<EmailJobData>): Promise<void> {
   // exactly-once PER BOOKING; without a bookingId we fall back to the queue job
   // id, which still stops a BullMQ retry from double-sending.
   log.info({ subject }, '📤 Handing to the send guard…')
+  // SCENARIO SEQUENCES (2026-09-16). A lead-scoped journey stage is sent in
+  // the 'scenario_flow' context, for the sequence kind the stage planner put
+  // on the job (or the one its template belongs to). The same request goes to
+  // the guard's own eligibility step, so the guard never falls back to a
+  // narrower journey-label guess that would refuse a valid notice basis — and
+  // never to a wider one either: this is the exact question the recheck asks.
+  const jobKind = typeof payload.sequenceKind === 'string' && isSequenceKind(payload.sequenceKind) ? payload.sequenceKind : null
+  const leadScoped = !bookingId && !!leadId
   const outcome = await guardedSend({
     to,
     subject,
@@ -284,8 +296,22 @@ export async function processEmailJob(job: Job<EmailJobData>): Promise<void> {
     recheck: bookingId
       ? () => bookingEligibility(template, bookingId)
       : leadId
-      ? () => leadEligibility(leadId, template)
+      ? () =>
+          leadEligibility(leadId, template, {
+            context: 'scenario_flow',
+            sequenceKind: jobKind,
+            // The address this job would reach must still be the lead's own.
+            recipient: to,
+          })
       : undefined,
+    ...(leadScoped && emailClass === 'promotional'
+      ? {
+          eligibilityRequest: {
+            context: 'scenario_flow' as const,
+            subject: { type: 'lead' as const, id: leadId as string, sequenceKind: jobKind ?? sequenceKindForTemplate(template) },
+          },
+        }
+      : {}),
   }).catch(async (err: unknown) => {
     // A DEFINITIVE provider rejection normally rides BullMQ's retry into the
     // guard's not_due re-queue below. On the job's LAST attempt there is no

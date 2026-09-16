@@ -24,12 +24,14 @@
 //     module reads templates and calls the guard. It writes nothing else.
 // ════════════════════════════════════════════════════════════════════════
 
-import { guardedSend, type SendOutcome } from './email-guard'
+import { classifyTemplate, guardedSend, type PromotionalPermission, type SendOutcome } from './email-guard'
 import { referralRedeemUrl } from './referral-code'
 import { templateByKey } from './email-registry'
 import { REQUIRED_FIELDS } from '../emails/validation'
 import { buildMarketingContext, applyMarketingContext } from './marketing-context'
 import { normalizeEmail } from './email-tokens'
+import { promotionalEligibility, type EligibilityDeps } from './consent/marketing-eligibility'
+import { testIdentityReason, type TestIdentityReason } from './consent/test-identity'
 
 export const TEST_SUBJECT_PREFIX = '[TEST]'
 
@@ -70,6 +72,46 @@ export function checkTestRecipient(requested: string | null | undefined, allowOv
     }
   }
   return { ok: true, email: wanted, isOverride: true }
+}
+
+// ════════════════════════════════════════════════════════════════════════
+//  A PROMOTIONAL TEST TO A REAL PERSON NEEDS A REAL BASIS (DESIGN-v2, 2026-09-16)
+//  ---------------------------------------------------------------------
+//  The owner override lets a test go to ANY address, and a test runs with no
+//  recheck — so a promotional template could be "tested" on a customer who
+//  never agreed to marketing. The override stays, for its real purpose
+//  (previewing on the owner's or a colleague's own inbox), but a promotional
+//  template now needs one of:
+//    • the configured EMAIL_TEST_RECIPIENT;
+//    • an INTERNAL identity: the owner, a staff user, a crew invitation, a
+//      business-domain or reserved-domain address, a known test address;
+//    • or, for anyone else, the same promotionalEligibility() a campaign uses
+//      (context 'campaign', express only). Otherwise the guard refuses it.
+//  A role mailbox (info@…) is NOT internal — it is usually somebody else's
+//  shared inbox — and a failed staff lookup is not proof of anything.
+// ════════════════════════════════════════════════════════════════════════
+
+/** Test-identity reasons that mean "one of us", so a rehearsal may go there. */
+const INTERNAL_REHEARSAL_REASONS: ReadonlySet<TestIdentityReason> = new Set<TestIdentityReason>([
+  'reserved_domain',
+  'business_domain',
+  'owner',
+  'test_recipient',
+  'known_test',
+  'staff',
+  'crew_invitation',
+])
+
+/** The permission a PROMOTIONAL test send to `to` runs under. Never throws. */
+export async function testSendPermission(to: string, deps: EligibilityDeps = {}): Promise<PromotionalPermission> {
+  const email = normalizeEmail(to)
+  const rehearsal: PromotionalPermission = { eligible: true, basis: 'internal_rehearsal', basisEventId: null }
+  if (configuredTestRecipient() && email === configuredTestRecipient()) return rehearsal
+  const identity = await (deps.testIdentity ?? ((e: string) => testIdentityReason(e, { env: deps.env })))(email).catch(
+    () => 'staff_lookup_failed' as const
+  )
+  if (identity && INTERNAL_REHEARSAL_REASONS.has(identity)) return rehearsal
+  return promotionalEligibility({ context: 'campaign', email }, deps)
 }
 
 // ── Synthetic variables ─────────────────────────────────────────────────
@@ -186,6 +228,11 @@ export async function sendTestEmail(input: TestSendInput): Promise<TestSendResul
 
   const minuteBucket = new Date().toISOString().slice(0, 16).replace(/[-:T]/g, '')
 
+  // A promotional rehearsal needs a permission like a real send (see
+  // testSendPermission). Transactional templates need none.
+  const emailClass = entry?.emailClass ?? classifyTemplate(input.template)
+  const eligibility = emailClass === 'promotional' ? await testSendPermission(input.to) : undefined
+
   const outcome = await guardedSend({
     to: input.to,
     subject,
@@ -201,7 +248,9 @@ export async function sendTestEmail(input: TestSendInput): Promise<TestSendResul
     payload: input.payload,
     isTest: true,
     // NO `recheck`: a test is not about a booking, so there is no live state to
-    // reload. Everything else in the guard still runs.
+    // reload. Everything else in the guard still runs — including the
+    // promotional permission, which this supplies explicitly.
+    ...(eligibility ? { eligibility } : {}),
   })
 
   return { outcome, subject, recipient: input.to, isOverride: input.isOverride }
