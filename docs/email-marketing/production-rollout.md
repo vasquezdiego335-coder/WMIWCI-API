@@ -15,10 +15,15 @@ _Last updated 2026-07-20._
    `/api/email/webhook` and `/api/email/suppression` exist, and the guard is
    active on all three send paths; **no new journey sends anything.**
    This is a safe, verifiable resting point.
-4. **Resend webhook** — register `{APP_URL}/api/email/webhook` for
-   `email.sent, delivered, delivery_delayed, bounced, complained, opened, clicked`.
-   Verify a test event lands in `EmailEvent`.
-5. **Workers** — redeploy so `scheduled.worker` and `email.worker` run the new code.
+4. **Resend webhook** — register `{APP_URL}/api/email/webhook` for **all nine**
+   handled events: `email.sent`, `email.delivered`, `email.delivery_delayed`,
+   `email.bounced`, `email.complained`, `email.opened`, `email.clicked`,
+   `email.failed`, `email.suppressed`. Omitting the last two means a
+   provider-side failure and a provider-side suppression are never delivered.
+   Handling per event: [`DEPLOY.md`](../../DEPLOY.md) §8. Verify a test event
+   lands in `EmailEvent`.
+5. **Worker host** — redeploy the `discord workers` service (`host:start`); all
+   five workers, including `scheduled` and `email`, run in that one process.
 6. **Soak (48 h)** — existing transactional mail only. Watch for: `EmailSend`
    rows appearing with `status='sent'`, zero unexpected `blocked` reasons, and
    no drop in delivery volume versus the previous week.

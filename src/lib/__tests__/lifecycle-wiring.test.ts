@@ -106,7 +106,10 @@ test('WORKER: the stranded-journey repair is dispatched AND scheduled', () => {
   const src = code('src/workers/scheduled.worker.ts')
   assert.match(src, /case 'lifecycle-repair'/, 'the worker handles the job')
   assert.match(src, /repairStrandedQuoteJourneys\(/)
-  assert.match(src, /jobId: 'cron:lifecycle-repair'/, 'and a cron actually fires it')
+  // The registry moved to src/lib/cron-schedules.ts (2026-09-15) and the worker
+  // registers it through the reconciler: pin both halves.
+  assert.match(code('src/lib/cron-schedules.ts'), /\{ name: 'lifecycle-repair', pattern: '0 \* \* \* \*', tz: undefined, jobId: 'cron:lifecycle-repair' \}/, 'and a cron actually fires it')
+  assert.match(src, /schedules: CRON_SCHEDULES/, 'the scheduled worker registers the registry')
   // The job type must exist in the queue contract or the payload is untyped.
   assert.match(code('src/lib/queues/index.ts'), /\| 'lifecycle-repair'/)
 })

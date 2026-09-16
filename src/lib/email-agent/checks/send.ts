@@ -21,6 +21,7 @@
 
 import { prisma } from '../../db'
 import { MAX_SEND_ATTEMPTS as GUARD_MAX_ATTEMPTS, classifyBlock } from '../../email-guard'
+import { lifecycleEnqueueCounters, prismaRetryStore } from '../../lifecycle-enqueue'
 import { maskEmail } from '../redact'
 import type { AgentFinding } from '../types'
 import {
@@ -628,8 +629,61 @@ const confirmationStalled: CheckDefinition = {
   },
 }
 
+// ── Lifecycle jobs whose enqueue failed and are not being recovered ─────
+//  lifecycle_enqueue_retries holds every lifecycle job (reminder, recovery,
+//  follow-up, payment fan-out) whose live queue.add failed. The hourly
+//  lifecycle-repair sweep re-adds them. A row still pending hours later means
+//  the sweep is not running or Redis is still refusing; a row abandoned as too
+//  late means a customer message was genuinely skipped. Cancellations close
+//  rows too and are NOT counted — they are the system working.
+//  Evidence carries counts only: the rows hold job data, never shown here.
+
+export const LIFECYCLE_RETRY_WARN_AGE_HOURS = 2
+export const LIFECYCLE_RETRY_CRITICAL_AGE_HOURS = 6
+
+const lifecycleEnqueueRetryBacklog: CheckDefinition = {
+  id: 'lifecycle.enqueue_retry_backlog',
+  category: 'send',
+  intent: 'Lifecycle emails whose queueing failed are not being re-queued, or were skipped as too late.',
+  run: async (ctx) => {
+    const s = await prismaRetryStore(prisma).summary(ctx.now)
+    countInspected(ctx, 'lifecycle_retries_pending', s.pending)
+    const critical = s.abandonedLast24h > 0 || s.pendingOlderThan6h > 0
+    const warning = s.pendingOlderThan2h > 0
+    if (!critical && !warning) return []
+    const lost = lifecycleEnqueueCounters().lost
+    return [
+      makeFinding(ctx, {
+        checkId: 'lifecycle.enqueue_retry_backlog',
+        severity: critical ? 'critical' : 'warning',
+        category: 'send',
+        fingerprintParts: ['enqueue_retry_backlog'],
+        title:
+          s.abandonedLast24h > 0
+            ? `${s.abandonedLast24h} lifecycle ${plural(s.abandonedLast24h, 'job was', 'jobs were')} skipped after failing to queue`
+            : `${s.pendingOlderThan2h} lifecycle ${plural(s.pendingOlderThan2h, 'job has', 'jobs have')} been waiting to be re-queued for over ${LIFECYCLE_RETRY_WARN_AGE_HOURS}h`,
+        description:
+          `Lifecycle jobs (reminders, checkout recovery, follow-ups, payment notifications) failed to reach the queue and were recorded for retry. ` +
+          `${s.pendingOlderThan2h} ${plural(s.pendingOlderThan2h, 'is', 'are')} still pending after ${LIFECYCLE_RETRY_WARN_AGE_HOURS}h ` +
+          `(${s.pendingOlderThan6h} after ${LIFECYCLE_RETRY_CRITICAL_AGE_HOURS}h), and ${s.abandonedLast24h} passed ${plural(s.abandonedLast24h, 'its', 'their')} lateness bound in the last 24h and will not be sent. ` +
+          `Check that the discord workers service is running the hourly lifecycle-repair job and that Redis is reachable.`,
+        evidence: {
+          pending: s.pending,
+          pendingOlderThan2h: s.pendingOlderThan2h,
+          pendingOlderThan6h: s.pendingOlderThan6h,
+          abandonedLast24h: s.abandonedLast24h,
+          enqueued: s.enqueued,
+          lostInThisProcess: lost,
+        },
+        suggestedActions: [],
+      }),
+    ]
+  },
+}
+
 export const sendChecks: CheckDefinition[] = [
   confirmationStalled,
+  lifecycleEnqueueRetryBacklog,
   inFlightStale,
   retryOverdue,
   missingProviderId,

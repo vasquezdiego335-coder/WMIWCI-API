@@ -1,7 +1,8 @@
 # Email System — Operations Runbook (Phases 12–14)
 
-Deploy, test, and monitor the transactional email system. Scope: the 16 React
-Email templates in `src/emails/`, the send worker `src/workers/email.worker.ts`,
+Deploy, test, and monitor the transactional email system. Scope: the React Email
+templates in `src/emails/` (19 templates behind 25 allowlisted template keys —
+some files serve a numbered sequence), the send worker `src/workers/email.worker.ts`,
 the validation gate `src/emails/validation.ts`, and the hosted assets on the
 site. Owner spec 2026‑07‑17. **This runbook is the plan — it does not deploy.**
 
@@ -32,16 +33,28 @@ sender (booking-approval.ts / fulfillment.ts / scheduled.worker.ts)
 
 ## 1 · Environment variables
 
+The complete, generated per-service list is
+[`../docs/env-ownership.json`](env-ownership.json); the deploy tables are in
+[`DEPLOY.md`](../DEPLOY.md) §3. The email-specific ones:
+
 | Var | Purpose | Notes |
 |---|---|---|
-| `RESEND_API_KEY` | Resend transport | Falls back to `re_placeholder` (no real sends) if unset. |
-| `EMAIL_FROM` | From header | Default `Move It Clear It <hello@moveitclearit.com>`. |
-| `EMAIL_REPLY_TO` | Reply-To | Default `hello@moveitclearit.com`. |
-| `APP_URL` | Portal + open-pixel base | Required for open tracking + portal links. |
+| `RESEND_API_KEY` | Resend transport | **Required on both services in production** — `checkEnv()` halts the worker without it. There is no `re_placeholder` fallback in production. |
+| `RESEND_WEBHOOK_SECRET` | Verifies the Svix signature on `/api/email/webhook` | `whsec_…`. Missing ⇒ the route returns 503 and processes nothing. Required on both services. |
+| `EMAIL_FROM` | From header | Default `Move It Clear It <hello@moveitclearit.com>`. `mustMatch`. |
+| `EMAIL_REPLY_TO` | Reply-To | Default `hello@moveitclearit.com`. `mustMatch`. |
+| `EMAIL_TOKEN_SECRET` | Signs unsubscribe / open tokens | The **worker signs**, the **API verifies** — if these differ, every unsubscribe link 400s. `mustMatch`. |
+| `BUSINESS_POSTAL_ADDRESS` | CAN-SPAM footer | Required whenever this deployment sends email. |
+| `MARKETING_SITE_URL` | Booking / redeem / referral links in emails | Required with email on; a stale value mails dead links. |
+| `APP_URL` | Portal + open-pixel base | Required. A placeholder value fails `/api/health` readiness. |
+| `EMAIL_SENDING_ENABLED` | Global kill switch | `'false'` holds everything. `mustMatch`. |
+| `EMAIL_CAP_PER_DAY/WEEK/MONTH`, `EMAIL_QUIET_START_HOUR`, `EMAIL_QUIET_END_HOUR`, `EMAIL_TRANSACTIONAL_GAP_MINUTES` | Send-guard policy | `guardedSend` runs on **both** services, so these must match or customers see inconsistent timing. |
 | `EMAIL_ASSET_BASE_URL` | Hosted PNG/GIF base | Default `https://moveitclearit.com/email`. |
 | `REFERRAL_SECRET` | Signs referral codes | Required only if `signReferralCode()` is used. |
 | `OUTBOX_ENABLED` | Route approval/confirmation via the outbox | When true, the legacy email is skipped; a post-commit queue nudge drains immediately and a 15-minute sweep recovers missed nudges. |
+| `OUTBOX_EMAIL_DRYRUN` | Worker-only | **Never `true` in production** — it HOLDS rows and is not a delivery test. |
 | `ALLOW_TEST_PAYMENTS` | Enables the $1 controlled test | **Temporary toggle — leave OFF in prod except during a supervised test.** |
+| `EMAIL_CAMPAIGN_TRANSIENT_MAX_ATTEMPTS`, `EMAIL_AUTOMATION_TRANSIENT_MAX_ATTEMPTS` | Transient-failure budget (default 6) | See §6h. |
 | `DATABASE_URL`, `JWT_SECRET` | App/DB | Needed by the build's page-data step. |
 
 Verify with `scripts/verify-email-assets.ts` (all hosted asset URLs return 200)
@@ -67,8 +80,11 @@ before relying on images.
    `scripts/gen-email-assets.ts`, deploy `WMIWCI-SITE/public/email/**`, then
    `scripts/verify-email-assets.ts` (expect 200s incl. the animated
    `truck-hero.gif`). Assets are versionless — deploy them **before** the worker.
-4. **Worker** (Railway): deploy `email.worker`. Confirm it connects to Redis and
-   logs `📧 Email job received` on the first job.
+4. **Worker host** (Railway project `patient-communication`, service
+   `discord workers`, start command `npm run host:start`). There is no separate
+   `email.worker` deployment — all five workers run in that one process. Confirm
+   `GET /readyz` returns 200 with `problems []`, five attached `workers[]` and
+   `schedules.missing []`, then `📧 Email job received` on the first job.
 5. **Promote** the verified preview to production.
 6. **Rollback**: revert to the previous deploy; templates are stateless, so a
    rollback is safe and instant. In-flight jobs already validated will still
@@ -131,11 +147,16 @@ the flag OFF.
 - Opens: the worker injects a 1×1 pixel (`/api/email/open?token=…`) and stamps
   `openToken`. Opens are best-effort (image-blocking clients under-report).
 
-### 4b · Resend-side (deliverability)
-- Configure Resend webhooks → an ingest route for `email.delivered`,
-  `email.bounced`, `email.complained`. **Hard bounces + complaints must
-  suppress future sends** to that address (build a suppression check before
-  `resend.emails.send`). *(Route not built yet — see blockers.)*
+### 4b · Resend webhook (LIVE)
+- The ingest route exists: **`POST {APP_URL}/api/email/webhook`** on the API
+  service (`app/api/email/webhook/route.ts` → `src/lib/email-events.ts`), Svix
+  signature over the raw body, deduped by `svix-id`. Hard bounces, complaints
+  and provider suppressions create suppression entries and stop enrollments;
+  soft bounces deliberately do not.
+- **Subscribe to all nine handled events** — the exact event→action table, the
+  soft/hard rule and the 200/400/500/503 semantics are in
+  [`DEPLOY.md`](../DEPLOY.md) §8. An endpoint configured from an older runbook
+  is missing `email.failed` and `email.suppressed`.
 - Watch the Resend dashboard for bounce rate (>2% = investigate) and complaint
   rate (>0.1% = urgent; risks domain reputation).
 
@@ -147,8 +168,13 @@ the flag OFF.
 
 ### 4d · Alerts to set up
 - Notification `FAILED` rate over a rolling window.
-- Worker crash / Redis disconnect (no `📧` logs = queue stalled).
+- Worker crash / Redis disconnect (no `📧` logs = queue stalled). The direct
+  signal is the worker's `GET /readyz` (503 with `problems[]`) and the API's
+  `GET /api/health` (`emailDelivery.ready false`).
 - Resend bounce/complaint webhook thresholds.
+- `lifecycle_enqueue_retries` backlog — the email agent check
+  `lifecycle.enqueue_retry_backlog` warns at 2 h pending, critical at 6 h or on
+  any non-cancellation abandonment in 24 h (§6h).
 
 ---
 
@@ -156,14 +182,22 @@ the flag OFF.
 
 | Blocker | Unblocks |
 |---|---|
-| **Unsubscribe route** (signed, one-click) | promotional List-Unsubscribe header + footer link |
-| **Business postal address** | CAN-SPAM footer on promotional mail |
 | **Real Google review URL** | review-request CTA |
 | **Cancellation-policy URL** | cancellation/partial-refund reference link |
 | **Social profile URLs** | footer social chips |
-| **SPF / DKIM / DMARC + Resend webhook ingest** | deliverability + bounce/complaint suppression |
+| **SPF / DKIM / DMARC** on the sending domain | deliverability at volume (the webhook ingest itself is **built and live** — §4b) |
 | **Redemption route + DB field** | referral-code enforcement (signing helper already shipped) |
-| **Senders for the 4 new templates** | information-required / operational-alert / final-invoice / referral-reward are in the allowlist but nothing enqueues them yet |
+
+Closed since this table was written: the signed one-click **unsubscribe route**
+(`app/api/email/unsubscribe`), the **Resend webhook ingest**
+(`app/api/email/webhook`), and `BUSINESS_POSTAL_ADDRESS`, which is now a
+required variable whenever the deployment sends email.
+
+**Senders, corrected.** `final-invoice` is enqueued by the `balance-reminder-post`
+stage on the scheduled queue, and `operational-alert` by the outbox premium-email
+path (`src/outbox/services/premiumEmails.tsx`). `information-required` and
+`referral-reward` still render only through the admin / test-send paths — verify
+in the code before relying on either.
 
 ---
 
@@ -256,13 +290,51 @@ attempts; a row that does use all five ends `failed_terminal`.
 
 ### 6g · Post‑deploy verification (read‑only)
 1. Both Railway services report the same `commit` on their health endpoint.
-2. API `/api/health`: `status ok`, `redis.ok true`, `emailQueue.workersAttached ≥ 1`.
-3. Worker `/healthz`: `status ok`, every `workers[].running true`, `problems []`.
+2. API `/api/health`: `status ok`, `redis.ok true`, `emailDelivery.ready true`
+   (and `emailQueue.workersAttached ≥ 1`). `GET /api/health/live` is the pure
+   liveness probe and is always 200 while the process serves.
+3. Worker `/readyz` (= `/healthz`): `status ok`, `problems []`, all five
+   `workers[]` `running` + `attached`, `schedules.missing []`. `GET /livez` is
+   the pure liveness probe.
 4. No unexpected sends: Resend `GET /emails` newest item unchanged unless a real
    customer event happened; `email_jobs` has no `pending/processing` rows that
    are not explained; BullMQ `email` wait/failed = 0.
-5. Rollback: redeploy the previous commit on **both** services (they must stay
-   on the same commit). No migration is involved in this release.
+5. `select status, count(*) from lifecycle_enqueue_retries group by 1;` — a
+   healthy system keeps this table empty.
+6. Rollback: redeploy the previous commit on **both** services (they must stay
+   on the same commit). This release **does** carry three additive migrations —
+   see [`DEPLOY.md`](../DEPLOY.md) §10 for the order, the read-only preflight and
+   the rollback SQL. They are safe to leave applied under the rolled-back code.
+
+### 6h · Durability added in this release
+- **Lifecycle enqueues are durable.** A lifecycle scheduler whose `queue.add`
+  fails or times out records the exact job (queue, name, data, deterministic job
+  id, intended fire time, `not_after`) in `lifecycle_enqueue_retries`. The hourly
+  `lifecycle-repair` re‑adds the **same job id**; a row past its `not_after` is
+  **abandoned, not fired late** (`too_late: not re-enqueued (no historical
+  replay)`). Statuses: `pending` → `enqueued`, or `abandoned`. Cancelling a
+  journey closes matching rows first, so a sweep can never resurrect a cancelled
+  stage. Logging is truthful: "scheduled" is said only when every attempted
+  stage was actually scheduled.
+- **A campaign recipient is never SUPPRESSED by a database blip.** Transient
+  read failures (`suppression_read_failed`, any `*_read_failed`,
+  `claim_lookup_failed`, `context_error:`) become **`DEFERRED` with
+  `next_attempt_at`** and bounded backoff (5/10/20/40/80 min, cap 2 h), ending
+  `FAILED '<reason>:retries_exhausted'` at `EMAIL_CAMPAIGN_TRANSIENT_MAX_ATTEMPTS`
+  (default 6). `hard_bounce`, `spam_complaint`, `admin_block`, `invalid_address`
+  and `provider_rejected` stay terminal. A run with deferred recipients can stay
+  open ~2.6 h. **Existing** `SUPPRESSED / 'suppression_read_failed'` rows were
+  **not** rewritten — re‑opening any of them is a separate owner decision.
+- **One dispatch per campaign.** Run creation takes a per‑campaign
+  `pg_advisory_xact_lock` and is backed by a partial unique index. Things an
+  operator will notice: a cancel issued during `PREPARING` now really cancels;
+  `retryFailedRecipients` returns 409 while another run is unfinished; a
+  post‑queue failure no longer marks a live run FAILED (the sweep re‑drives its
+  batches).
+- **The schedules are verified, not assumed.** `/readyz` reports
+  `schedules.registered` / `.missing` read back from Redis, and a background
+  reconciler re‑registers a missing schedule within ten minutes — so a flushed
+  Redis heals without a redeploy.
 
 ---
 

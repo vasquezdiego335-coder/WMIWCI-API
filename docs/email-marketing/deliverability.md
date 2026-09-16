@@ -17,7 +17,7 @@ _Last updated 2026-07-20._
 | No secrets in source | ✅ all via env |
 | Reasonable HTML size | ✅ 14–37 KB per template (previews) |
 | Image host | hosted PNG/GIF at `EMAIL_ASSET_BASE_URL` |
-| Unsafe-URL rejection | ✅ `unsafeUrlReason` blocks `#`, empty, `javascript:`, localhost, `*.vercel/ngrok/railway.app`, non-https |
+| Unsafe-URL rejection | ✅ `unsafeUrlReason` blocks `#`, empty, `javascript:`, localhost, placeholders, non-https, and preview hosts `*.vercel/ngrok/railway.app` — **except `APP_URL`'s own host**, because production itself runs on `*.up.railway.app` and every self-referencing portal link would otherwise be refused (`isAppOwnHost`, `src/emails/validation.ts`) |
 
 ## NOT verified — treat as unknown
 

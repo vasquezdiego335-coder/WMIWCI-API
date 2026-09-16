@@ -107,11 +107,19 @@ test('fewer workers than expected → degraded', () => {
 })
 
 test('worker host: health PINGs Redis, reports attachment, and a config failure exits non-zero after a grace window', () => {
-  const src = readFileSync(resolve(__dirname, '../../worker-host.ts'), 'utf8')
-  assert.ok(src.includes('await pingAppRedis()'), '/health must PING Redis')
-  assert.ok(/w\.isRunning\(\)/.test(src) && /w\.isPaused\(\)/.test(src), '/health must ask each worker whether it is attached')
+  // 2026-09-15: worker-host.ts is a thin entry; the host lives in worker-runtime/.
+  // Behaviour (503 bodies, exit(1) after the grace window, no exit for cron or
+  // Redis problems) is pinned end-to-end in worker-startup.test.ts.
+  const entry = readFileSync(resolve(__dirname, '../../worker-host.ts'), 'utf8')
+  const host = readFileSync(resolve(__dirname, '../../worker-runtime/host.ts'), 'utf8')
+  const src = entry + host
+  assert.ok(host.includes('pingRedis: () => pingAppRedis()') && host.includes('await d.pingRedis()'), '/readyz must PING Redis')
+  assert.ok(/w\.isRunning\(\)/.test(src) && /w\.isPaused\(\)/.test(src), '/readyz must ask each worker whether it is running')
+  assert.ok(/w\.on\('ready'/.test(host) && /attached: a\.attachedAt !== null/.test(host), "/readyz must count a worker attached only after its 'ready' event")
   assert.ok(!/state\.redis = true/.test(src), 'redis health must never be set from REDIS_URL presence')
-  assert.ok(/STARTUP HALTED[\s\S]{0,1200}process\.exit\(1\)/.test(src), 'missing configuration must end in a non-zero exit')
+  assert.ok(/setPhase\('config_failed'\)\s*\r?\n\s*scheduleFatalExit\(/.test(host) && /STARTUP HALTED/.test(host), 'missing configuration must schedule the fatal exit and say so')
+  assert.ok(/function scheduleFatalExit[\s\S]{0,600}void shutdown\(reason, 1\)/.test(host), 'the fatal exit goes through graceful shutdown with code 1')
+  assert.ok(/d\.exit\(code\)/.test(host) && /exit: \(code\) => process\.exit\(code\)/.test(host), 'and shutdown really exits the process')
   assert.ok(!/startSmsWorker/.test(src), 'no SMS worker: Move It Clear It no longer sends SMS')
 })
 
@@ -127,6 +135,14 @@ test('API health: PINGs Redis and reports email-queue worker attachment and the 
   assert.ok(src.includes('getWorkersCount()'))
   assert.ok(src.includes('RAILWAY_GIT_COMMIT_SHA'))
   assert.ok(/const ok = db === 'connected' && redis\.ok/.test(src), 'Redis must be part of API readiness')
+  // 2026-09-15: a required queue with no consumer is not ready.
+  assert.ok(/const ok = [^\n]*&& emailDelivery\.ready/.test(src), 'email-delivery worker attachment must be part of API readiness')
+  assert.ok(/const counts = redis\.ok \? await queueWorkers\(\)/.test(src), 'worker counts are not asked while Redis is down')
+  assert.ok(/singleFlightCache\(loadQueueWorkers, WORKER_COUNT_TTL_MS/.test(src), 'worker counts are cached and single-flight')
+  // An UNKNOWN window is retried in a second: "unknown" still fails readiness,
+  // but a single slow CLIENT LIST must not hold 503 for the full interval.
+  assert.ok(/WORKER_COUNT_UNKNOWN_TTL_MS/.test(src) && /every\(\(c\) => c === null\)/.test(src), 'an unknown worker-count window gets a short retry TTL')
+  for (const q of ['emailQueue', 'scheduledQueue', 'webhookRetryQueue', 'discordQueue']) assert.ok(src.includes(`count(${q})`), `${q} must be counted`)
 })
 
 // ── The test-environment guard itself ───────────────────────────────────

@@ -132,9 +132,10 @@ must NOT invent a second permission system.**
 
 ### 1.8 Queues and notification infrastructure
 
-Lazy BullMQ getters for `email`, `sms`, `discord`, `webhookRetry`, `scheduled`,
-`marketing`. Workers live in `src/workers/` and run in a **separate Railway
-service** (`Procfile` → `npm run host:start`); the admin service must never
+Lazy BullMQ getters for `email`, `discord`, `webhookRetry`, `scheduled`,
+`marketing` (the `sms` queue was removed with SMS on 2026-09-15). Workers live in
+`src/workers/` and all five run in a **separate Railway service**, started by
+`npm run host:start` (`src/worker-host.ts`); the admin/API service must never
 start them. Importing `src/lib/queues` from a route is safe — that is the
 existing pattern and the file documents why.
 

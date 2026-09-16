@@ -124,8 +124,11 @@ const stuckRuns: CheckDefinition = {
       const counts = await recipientCounts(r.id)
       const openRows = (counts.PENDING ?? 0) + (counts.SENDING ?? 0) + (counts.DEFERRED ?? 0)
 
-      // DEFERRED-only is not stuck: quiet hours and frequency caps are the
-      // system deliberately waiting, and the sweep will pick them up.
+      // DEFERRED-only is not stuck HERE: quiet hours, frequency caps and the
+      // transient-read backoff are the system deliberately waiting. Whether the
+      // wait is actually ending is a different question, and this check cannot
+      // answer it from run timestamps — `run.deferred_overdue` below reads the
+      // recipients' own due times instead.
       if (openRows > 0 && (counts.PENDING ?? 0) === 0 && (counts.SENDING ?? 0) === 0) continue
 
       const critical = idle >= RUN_STUCK_CRITICAL_MS
@@ -536,8 +539,146 @@ const abnormalDuration: CheckDefinition = {
   },
 }
 
+// ── Deferred recipients nobody is re-driving (2026-09-15) ───────────────
+//
+// A DEFERRED recipient carries a durable `nextAttemptAt`: quiet hours, a
+// frequency cap, an in-flight collision, or the transient-read backoff that
+// replaced the old "a failed suppression READ means SUPPRESSED" mapping. The
+// delayed queue job is only the fast path — the campaign sweep re-drives rows
+// whose job was lost. A row still sitting well past its due time means neither
+// is running, and because DEFERRED blocks runIsSettled, the whole run stays
+// open forever while the campaign looks merely "in progress".
+
+/** How far past its due time a deferral must be before the re-drive is presumed broken. */
+const DEFERRED_OVERDUE_MS = 30 * 60_000
+
+const overdueDeferrals: CheckDefinition = {
+  id: 'run.deferred_overdue',
+  category: 'run',
+  intent: 'Deferred recipients whose retry time has passed with nothing re-driving them.',
+  run: async (ctx) => {
+    const rows = await prisma.emailCampaignRecipient.findMany({
+      where: {
+        status: 'DEFERRED',
+        // Legacy rows (written before the column existed) carry NULL and are
+        // deliberately outside both the sweep and this check.
+        nextAttemptAt: { not: null, lt: since(ctx, DEFERRED_OVERDUE_MS) },
+        run: { status: { in: ['QUEUED', 'SENDING'] } },
+      },
+      select: { id: true, runId: true, email: true, reason: true, nextAttemptAt: true, transientAttempts: true },
+      orderBy: { nextAttemptAt: 'asc' },
+      take: 200,
+    })
+    countInspected(ctx, 'deferred_recipients_overdue', rows.length)
+    if (rows.length === 0) return []
+
+    const byRun = new Map<string, typeof rows>()
+    for (const r of rows) byRun.set(r.runId, [...(byRun.get(r.runId) ?? []), r])
+
+    return Array.from(byRun.entries()).map(([runId, list]) => {
+      const oldest = list[0].nextAttemptAt as Date
+      const overdue = ageMs(ctx, oldest)
+      return makeFinding(ctx, {
+        checkId: 'run.deferred_overdue',
+        severity: 'warning',
+        category: 'run',
+        runRefId: runId,
+        title: `${list.length} deferred ${plural(list.length, 'recipient is', 'recipients are')} past their retry time`,
+        description:
+          `On run ${runId}, ${list.length} ${plural(list.length, 'recipient', 'recipients')} should have been retried by now — the oldest was due ${minutes(overdue)} minutes ago. ` +
+          `A deferral is re-driven by its own delayed job and, if that is lost, by the fifteen-minute campaign sweep. Neither has happened, so check that the worker host is running and that dispatch is not paused. ` +
+          `Nothing was sent to these people yet, and a deferred recipient keeps the run open, so the run cannot finish while this lasts.`,
+        evidence: {
+          overdueCount: list.length,
+          oldestNextAttemptAt: oldest.toISOString(),
+          oldestOverdueMinutes: minutes(overdue),
+          reasons: Array.from(new Set(list.map((l) => l.reason ?? 'unknown'))).slice(0, EVIDENCE_ROW_CAP),
+          examples: list
+            .slice(0, EVIDENCE_ROW_CAP)
+            .map((l) => ({ recipientId: l.id, email: maskEmail(l.email), reason: l.reason, transientAttempts: l.transientAttempts })),
+        },
+        suggestedActions: ['inspectCampaignRun'],
+      })
+    })
+  },
+}
+
+// ── A closed recipient whose ledger row is still retryable (2026-09-15) ──
+//
+// Recipient settlement is now compare-and-set on the claim token, so a stale
+// worker can no longer overwrite a newer attempt — which also means it can no
+// longer CORRECT a row. If the newer attempt closed the recipient (SKIPPED /
+// FAILED) while the EmailSend ledger still says the send is retryable, the
+// customer was never emailed and nothing will try again. The ledger is the
+// delivery truth, so this compares the two rather than trusting either.
+
+/** EmailSend statuses that mean "not delivered, and still legitimately retryable". */
+const RETRYABLE_SEND_STATUSES: string[] = ['provider_rejected', 'retry_pending', 'deferred', 'blocked_retryable']
+
+const terminalWithRetryableSend: CheckDefinition = {
+  id: 'run.recipient_terminal_with_retryable_send',
+  category: 'run',
+  intent: 'Recipients closed as skipped or failed while their send ledger row is still retryable.',
+  run: async (ctx) => {
+    const rows = await prisma.emailCampaignRecipient.findMany({
+      where: {
+        status: { in: ['SKIPPED', 'FAILED'] },
+        emailSendId: { not: null },
+        createdAt: { gte: structuralSince(ctx) },
+        // An exhausted transient budget is DELIBERATELY FAILED against a
+        // blocked_retryable row: it is already reported as
+        // COMPLETED_WITH_ERRORS and is re-openable. Flagging it here would
+        // make this check fire on the system working as designed.
+        NOT: { reason: { endsWith: ':retries_exhausted' } },
+      },
+      select: { id: true, runId: true, email: true, status: true, reason: true, emailSendId: true },
+      take: 200,
+    })
+    if (rows.length === 0) return []
+
+    const sends = await prisma.emailSend.findMany({
+      where: { id: { in: rows.map((r) => r.emailSendId as string) }, status: { in: RETRYABLE_SEND_STATUSES } },
+      select: { id: true, status: true, blockedReason: true },
+    })
+    if (sends.length === 0) return []
+    const byId = new Map(sends.map((s) => [s.id, s]))
+    const affected = rows.filter((r) => r.emailSendId && byId.has(r.emailSendId))
+    if (affected.length === 0) return []
+
+    const byRun = new Map<string, typeof affected>()
+    for (const a of affected) byRun.set(a.runId, [...(byRun.get(a.runId) ?? []), a])
+
+    return Array.from(byRun.entries()).map(([runId, list]) =>
+      makeFinding(ctx, {
+        checkId: 'run.recipient_terminal_with_retryable_send',
+        severity: 'warning',
+        category: 'run',
+        runRefId: runId,
+        title: 'Recipients were closed while their send was still retryable',
+        description:
+          `${list.length} ${plural(list.length, 'recipient on run', 'recipients on run')} ${runId} ${plural(list.length, 'is', 'are')} recorded as skipped or failed, but ${plural(list.length, 'its', 'their')} delivery row is still in a retryable state — so nothing was delivered and nothing will try again. ` +
+          `This is what a claim that was superseded mid-attempt looks like (one worker stalled, the sweep re-opened the row, and the two attempts disagreed). Re-opening these recipients is safe: a retryable ledger row has no accepted send behind it.`,
+        evidence: {
+          affected: list.length,
+          examples: list.slice(0, EVIDENCE_ROW_CAP).map((l) => ({
+            recipientId: l.id,
+            email: maskEmail(l.email),
+            recipientStatus: l.status,
+            recipientReason: l.reason,
+            sendStatus: byId.get(l.emailSendId as string)?.status ?? null,
+            sendBlockedReason: byId.get(l.emailSendId as string)?.blockedReason ?? null,
+          })),
+        },
+        suggestedActions: ['inspectCampaignRun', 'inspectEmailSend'],
+      })
+    )
+  },
+}
+
 export const runChecks: CheckDefinition[] = [
   stuckRuns,
+  overdueDeferrals,
+  terminalWithRetryableSend,
   terminalWithoutTimestamp,
   counterMismatch,
   duplicateActiveRun,

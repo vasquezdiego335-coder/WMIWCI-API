@@ -589,9 +589,12 @@ export function explainSend(
     deposit_already_paid: 'The deposit was paid, so the recovery sequence stopped.',
     no_quote: 'No real quote is recorded on the lead, so no quote sequence was sent.',
     no_email: 'The record has no email address.',
-    state_read_failed: 'The eligibility recheck could not read the record, so the send was refused (fails closed).',
-    suppression_read_failed: 'The suppression list could not be read, so the send was refused (fails closed).',
-    eligibility_read_failed: 'The eligibility check could not read the record, so the send was refused (fails closed).',
+    // A failed READ is an outage, not a verdict about the person: the send was
+    // held (fails closed) and the recipient is retried with backoff — it is not
+    // a suppression and nobody was removed from the campaign.
+    state_read_failed: 'The eligibility recheck could not read the record, so the send was held (fails closed) and will be retried automatically.',
+    suppression_read_failed: 'The suppression list could not be read, so the send was held (fails closed) and will be retried automatically.',
+    eligibility_read_failed: 'The eligibility check could not read the record, so the send was held (fails closed) and will be retried automatically.',
     attempts_exhausted: 'Every permitted attempt was used.',
     ambiguous: 'The provider outcome is unknown.',
   }

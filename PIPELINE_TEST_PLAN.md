@@ -1,6 +1,15 @@
 # Booking → Stripe → Discord → Notifications — End-to-End Test Plan
 
-> **Stack reality:** this backend is **Next.js 14 (TypeScript, App Router) + Prisma/Postgres + BullMQ/Redis + discord.js + Stripe + Resend + Twilio** — *not* FastAPI/SQLite. All routes live under `backend/app/api/**`. Workers (BullMQ) run as a separate persistent process (`src/workers/index.ts`), since Vercel functions are serverless.
+> ## ⚠️ HISTORICAL (pre-2026-09-15)
+> This plan describes a topology that no longer exists: **Vercel hosting, Twilio
+> and SMS, `TWILIO_ENABLED`, the `sms` queue, `dist/workers/index.js`, and
+> Next.js 14**. SMS was removed on 2026-09-15 and the app runs entirely on
+> Railway. Keep it for the test *scenarios*; take every hosting, worker and
+> messaging fact from **[`DEPLOY.md`](DEPLOY.md)** and
+> **[`ARCHITECTURE.md`](ARCHITECTURE.md)** instead. Every step below that expects
+> a text message is dead.
+
+> **Stack reality (as of this document's writing):** this backend is **Next.js (TypeScript, App Router) + Prisma/Postgres + BullMQ/Redis + discord.js + Stripe + Resend** — *not* FastAPI/SQLite. All routes live under `backend/app/api/**`. Workers (BullMQ) run as a separate persistent process, today the combined worker host `src/worker-host.ts`.
 
 ---
 

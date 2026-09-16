@@ -1,5 +1,5 @@
 import { Worker, Job } from 'bullmq'
-import { bullConnection } from '../lib/redis'
+import { getLazyBullConnection } from '../lib/redis'
 import { prisma } from '../lib/db'
 import { emailQueue, discordQueue, scheduledQueue } from '../lib/queues'
 import { queueLogger } from '../lib/logger'
@@ -18,6 +18,9 @@ import { customerBalance, JOB_MONEY_PAYMENT_SELECT } from '../lib/job-money'
 import type { ScheduledJobData } from '../lib/queues'
 import { jobReminderEventKey } from '../lib/email-event-keys'
 import { queueSafeJobId } from '../lib/email-deferral'
+import { CRON_SCHEDULES, createCronReconciler, type CronReconciler, type CronStatus } from '../lib/cron-schedules'
+import { pingAppRedis, sanitizeRedisError } from '../lib/redis-health'
+import { createErrorLogLimiter } from '../lib/worker-health'
 
 type DigestBooking = {
   displayId: string
@@ -366,10 +369,17 @@ async function processScheduledJob(job: Job<ScheduledJobData>): Promise<void> {
     // matrix. A no-op costs one indexed query.
     case 'lifecycle-repair': {
       const { repairStrandedQuoteJourneys } = await import('../lib/journeys')
-      const report = await repairStrandedQuoteJourneys()
-      if (report.scheduled > 0) {
+      // Isolated in BOTH directions (2026-09-15): a Postgres or Redis error in
+      // the quote repair must not skip the durable enqueue-retry sweep below,
+      // because an outage is exactly when that sweep has work to do. Each
+      // repair runs again next hour on its own.
+      const report = await repairStrandedQuoteJourneys().catch((err) => {
+        log.error({ err: err instanceof Error ? err.message : String(err) }, 'stranded quote journey repair FAILED to run')
+        return null
+      })
+      if (report && report.scheduled > 0) {
         log.warn(report, 'stranded quote journeys repaired — a temporary block had stopped them enrolling')
-      } else {
+      } else if (report) {
         log.info(report, 'lifecycle repair sweep complete (nothing stranded)')
       }
       // Post-job follow-ups left retryable (a temporary email failure) were
@@ -381,6 +391,22 @@ async function processScheduledJob(job: Job<ScheduledJobData>): Promise<void> {
         return 0
       })
       if (retried > 0) log.info({ retried }, 'retryable post-job follow-ups re-driven')
+      // DURABLE ENQUEUE RETRIES (2026-09-15): re-add, under the same job id,
+      // every lifecycle job whose live enqueue failed and was recorded — never
+      // past its row's lateness bound. Isolated so a database error here cannot
+      // cost the two repairs above.
+      const { runLifecycleRetrySweep } = await import('../lib/lifecycle-retry-sweep')
+      const sweep = await runLifecycleRetrySweep().catch((err) => {
+        log.error({ err: err instanceof Error ? err.message : String(err) }, 'lifecycle enqueue retry sweep FAILED to run')
+        return null
+      })
+      if (sweep && (sweep.failed > 0 || sweep.abandonedTooLate > 0 || sweep.abandonedUnroutable > 0)) {
+        log.error(sweep, 'lifecycle enqueue retry sweep complete — some jobs could not be re-enqueued')
+      } else if (sweep && sweep.enqueued > 0) {
+        log.warn(sweep, 'lifecycle enqueue retry sweep re-enqueued jobs whose live enqueue had failed')
+      } else if (sweep) {
+        log.info(sweep, 'lifecycle enqueue retry sweep complete (nothing due)')
+      }
       break
     }
 
@@ -726,188 +752,48 @@ async function processScheduledJob(job: Job<ScheduledJobData>): Promise<void> {
   }
 }
 
-// ── Register repeatable cron jobs (idempotent — safe to call on startup) ──
+// ── Recurring schedules (self-healing; see src/lib/cron-schedules.ts) ──
 //
-// Cron times use America/New_York timezone:
-//   7:00 AM ET → morning digest (today's jobs)
-//   7:00 PM ET → evening digest (tomorrow's jobs)
-//
-// BullMQ deduplicates by the job name + repeat key, so calling this on
-// every worker start won't create duplicate cron entries.
-async function registerCronJobs(): Promise<void> {
-  await scheduledQueue.add(
-    'daily-schedule-morning',
-    { type: 'daily-schedule-morning' },
-    {
-      repeat: {
-        pattern: '0 7 * * *',
-        tz: 'America/New_York',
-      },
-      jobId: 'cron:daily-schedule-morning', // stable ID prevents duplicates
-    }
-  )
+// The twelve schedules live in CRON_SCHEDULES (names, patterns, tz and jobIds
+// byte-identical to what production Redis holds). Registration used to be twelve
+// sequential awaits, fire-and-forget at startup: the first rejection skipped the
+// rest, an outage hung silently, and nothing ever retried. The reconciler now
+// registers each schedule in isolation, verifies presence from Redis, prunes
+// same-name entries whose pattern or tz changed (BullMQ keys a repeatable on
+// name + jobId + tz + pattern, so a changed pattern ADDS a schedule instead of
+// replacing it), and keeps re-verifying so a flushed Redis heals itself.
+// Its status is what the worker host's readiness reports.
+let cronReconciler: CronReconciler | null = null
+const scheduledErrorLog = createErrorLogLimiter()
 
-  await scheduledQueue.add(
-    'daily-schedule-evening',
-    { type: 'daily-schedule-evening' },
-    {
-      repeat: {
-        pattern: '0 19 * * *',
-        tz: 'America/New_York',
-      },
-      jobId: 'cron:daily-schedule-evening',
-    }
-  )
-
-  // ── Email dispatch runtime sweeps (owner spec 2026-07-22) ──
-  // Cost rule: recovery/monitoring work shares ONE quarter-hour wake window.
-  // Scattering two-, five- and ten-minute Postgres jobs across the hour kept
-  // Neon's compute permanently active. Real customer events still run
-  // immediately; only safety-net and batch maintenance work waits up to 15m.
-  //
-  // campaign-sweep: every 15 min — dispatches due SCHEDULED campaigns,
-  // re-opens stale recipient claims, re-enqueues lost batches, finalizes
-  // settled runs. automation-sweep: every 15 min — requeues due stages
-  // (restart / un-pause recovery) and evaluates the grounded time-based
-  // triggers. Both are cheap no-ops when there is nothing to do, and every
-  // action they take is individually idempotent, so the cadence is a
-  // freshness knob rather than a correctness one.
-  await scheduledQueue.add(
-    'campaign-sweep',
-    { type: 'campaign-sweep' },
-    { repeat: { pattern: '*/15 * * * *' }, jobId: 'cron:campaign-sweep' }
-  )
-  // Lead delivery itself is inline and immediate. This is only the durable
-  // recovery path for an interrupted request or Discord outage.
-  await scheduledQueue.add(
-    'lead-notification-sweep',
-    { type: 'lead-notification-sweep' },
-    { repeat: { pattern: '*/15 * * * *' }, jobId: 'cron:lead-notification-sweep' }
-  )
-  await scheduledQueue.add(
-    'automation-sweep',
-    { type: 'automation-sweep' },
-    { repeat: { pattern: '*/15 * * * *' }, jobId: 'cron:automation-sweep' }
-  )
-
-  // Transactional email is event-driven for normal delivery. This sweep is
-  // the durable fallback when the post-commit Redis nudge could not be queued.
-  await scheduledQueue.add(
-    'outbox-email-recovery',
-    { type: 'outbox-email-recovery' },
-    { repeat: { pattern: '*/15 * * * *' }, jobId: 'cron:outbox-email-recovery' }
-  )
-
-  // email-side-effect-sweep: every 15 min — re-drives suppressions that failed
-  // to write, aligned with the other recovery jobs (audit E-02).
-  await scheduledQueue.add(
-    'email-side-effect-sweep',
-    { type: 'email-side-effect-sweep' },
-    { repeat: { pattern: '*/15 * * * *' }, jobId: 'cron:email-side-effect-sweep' }
-  )
-
-  // email-monitoring is read-only; it repairs nothing, because a monitor that
-  // fixes things hides the problem it exists to reveal (audit E-04). Run it in
-  // the same quarter-hour window rather than waking Postgres separately.
-  await scheduledQueue.add(
-    'email-monitoring',
-    { type: 'email-monitoring' },
-    { repeat: { pattern: '*/15 * * * *' }, jobId: 'cron:email-monitoring' }
-  )
-
-  // ── Email operations agent (owner spec 2026-07-27) ──
-  // Every 15 minutes by default (EMAIL_AGENT_INTERVAL_MINUTES documents the
-  // intent; the cron pattern is the schedule BullMQ actually honours, and the
-  // agent's own `scheduler.agent_gap` check reports whenever the two disagree
-  // in practice). Registered unconditionally: the cycle reads its own settings
-  // and returns immediately when the mode is `off`, so enabling the agent never
-  // requires a worker restart, and disabling it never leaves a cron orphaned.
-  await scheduledQueue.add(
-    'email-agent-cycle',
-    { type: 'email-agent-cycle' },
-    // EVERY 15 MINUTES (owner spec 2026-07-28). The deterministic half costs
-    // nothing to run, but a 5-minute cadence produced 288 cycles a day and,
-    // before the deduplication layer existed, 288 model calls per open
-    // incident. 15 minutes is still four checks an hour on a system whose
-    // fastest meaningful failure — a missed schedule — has a 15-minute grace
-    // period anyway, so nothing is detected later than it was before.
-    { repeat: { pattern: '*/15 * * * *' }, jobId: 'cron:email-agent-cycle' }
-  )
-
-  // ── Daily lead hygiene (owner review 2026-07-24) ──
-  // 3:20 AM ET, off-peak: ages inactive partial captures to ABANDONED (the
-  // lifecycle nothing previously set) and applies the retention purge. Both
-  // steps are idempotent and skip anything quoted, converted, or carrying a
-  // consent decision, so re-running is always safe.
-  await scheduledQueue.add(
-    'lead-maintenance',
-    { type: 'lead-maintenance' },
-    { repeat: { pattern: '20 3 * * *', tz: 'America/New_York' }, jobId: 'cron:lead-maintenance' }
-  )
-
-  // ── Marketing discovery (owner spec 2026-08-07) ──
-  // Daily at 10:05 ET — late enough that overnight captures have settled,
-  // inside business hours so the owner sees the Discord ask when it can be
-  // acted on. Flag-gated inside the job; the cron itself is always registered
-  // so enabling the agent never needs a worker restart.
-  await scheduledQueue.add(
-    'marketing-discovery',
-    { type: 'marketing-discovery' },
-    { repeat: { pattern: '5 10 * * *', tz: 'America/New_York' }, jobId: 'cron:marketing-discovery' }
-  )
-
-  // ── Stranded lifecycle repair (owner spec 2026-08-07) ──
-  // Hourly at :35, off the other sweeps. Hourly rather than daily because the
-  // condition it repairs is TEMPORARY by definition: when the owner widens the
-  // rollout allowlist, the leads quoted during the canary should enter their
-  // sequence within the hour, not the next morning. Bounded batch, and a pass
-  // with nothing to do is one indexed query.
-  await scheduledQueue.add(
-    'lifecycle-repair',
-    { type: 'lifecycle-repair' },
-    { repeat: { pattern: '0 * * * *' }, jobId: 'cron:lifecycle-repair' }
-  )
-
-  // BullMQ keys a repeatable job on (name, pattern, jobId), so changing a
-  // pattern ADDS a schedule instead of replacing the old one. Prune every
-  // managed stale pattern or the old two-/five-/ten-minute jobs would survive
-  // deployment and silently erase the cost saving.
-  try {
-    const desiredPatterns = new Map<string, string>([
-      ['daily-schedule-morning', '0 7 * * *'],
-      ['daily-schedule-evening', '0 19 * * *'],
-      ['campaign-sweep', '*/15 * * * *'],
-      ['lead-notification-sweep', '*/15 * * * *'],
-      ['automation-sweep', '*/15 * * * *'],
-      ['outbox-email-recovery', '*/15 * * * *'],
-      ['email-side-effect-sweep', '*/15 * * * *'],
-      ['email-monitoring', '*/15 * * * *'],
-      ['email-agent-cycle', '*/15 * * * *'],
-      ['lead-maintenance', '20 3 * * *'],
-      ['marketing-discovery', '5 10 * * *'],
-      ['lifecycle-repair', '0 * * * *'],
-    ])
-    const repeatables = await scheduledQueue.getRepeatableJobs()
-    for (const r of repeatables) {
-      const desired = desiredPatterns.get(r.name)
-      if (desired && r.pattern !== desired) {
-        await scheduledQueue.removeRepeatableByKey(r.key)
-        queueLogger.warn(
-          { name: r.name, stalePattern: r.pattern, desiredPattern: desired },
-          'removed a stale recurring schedule',
-        )
-      }
-    }
-  } catch (err) {
-    queueLogger.warn({ err: err instanceof Error ? err.message : String(err) }, 'could not prune stale repeatable jobs')
+export function registerCronJobs(): CronReconciler {
+  if (!cronReconciler) {
+    cronReconciler = createCronReconciler({
+      queue: scheduledQueue,
+      // Fail-fast probe: during an outage no queue command is issued, so nothing
+      // piles up in the BullMQ connection's offline queue.
+      redisOk: async () => (await pingAppRedis()).ok,
+      schedules: CRON_SCHEDULES,
+      logger: queueLogger,
+    })
   }
+  cronReconciler.start()
+  return cronReconciler
+}
 
-  queueLogger.info('Cron jobs registered (daily digests + campaign/automation sweeps + agent cycle + lead maintenance)')
+/** Readiness snapshot; null until the scheduled worker has started. */
+export function getCronStatus(): CronStatus | null {
+  return cronReconciler ? cronReconciler.status() : null
+}
+
+/** Stop the background reconcile loop (graceful shutdown). */
+export function stopCronJobs(): void {
+  cronReconciler?.stop()
 }
 
 export function startScheduledWorker() {
   const worker = new Worker<ScheduledJobData>('scheduled', processScheduledJob, {
-    connection: bullConnection,
+    connection: getLazyBullConnection(),
     concurrency: 2,
   })
 
@@ -915,10 +801,25 @@ export function startScheduledWorker() {
     queueLogger.error({ jobId: job?.id, err: err.message }, 'Scheduled job failed')
   })
 
-  // Register recurring digests on startup (idempotent)
-  registerCronJobs().catch((err) =>
-    queueLogger.error({ err }, 'Failed to register cron jobs')
-  )
+  // BullMQ emits 'Failed to add repeatable job for next iteration' (and then
+  // schedules NO next run) when it cannot create a repeatable's next iteration.
+  // The repeat entry itself survives, so the schedule still LOOKS registered and
+  // a presence check would repair nothing: ask for a FORCED reconcile, which
+  // re-adds every schedule and so recreates the lost delayed job. The worker
+  // host attaches its own rate-limited error log; when this is the only listener
+  // (the dev entrypoint) log here, rate-limited, so errors are never swallowed.
+  worker.on('error', (err) => {
+    const message = err instanceof Error ? err.message : String(err)
+    if (/Failed to add repeatable job for next iteration/.test(message)) {
+      cronReconciler?.requestReconcile(5_000, { forceReadd: true })
+    }
+    if (worker.listenerCount('error') === 1 && scheduledErrorLog(message).log) {
+      queueLogger.error({ queue: 'scheduled', err: sanitizeRedisError(message) }, 'Scheduled worker error')
+    }
+  })
+
+  // Register + verify recurring schedules; retries in the background, never throws.
+  registerCronJobs()
 
   return worker
 }

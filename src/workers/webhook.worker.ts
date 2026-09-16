@@ -1,6 +1,6 @@
 import { Worker, Job } from 'bullmq'
 import type Stripe from 'stripe'
-import { bullConnection } from '../lib/redis'
+import { getLazyBullConnection } from '../lib/redis'
 import { queueLogger } from '../lib/logger'
 import { processStripeEventJob } from '../lib/stripe-events'
 
@@ -30,7 +30,7 @@ async function processWebhookJob(job: Job<WebhookJobData>): Promise<void> {
 
 export function startWebhookWorker() {
   const worker = new Worker<WebhookJobData>('webhook-retry', processWebhookJob, {
-    connection: bullConnection,
+    connection: getLazyBullConnection(),
     concurrency: 5,
   })
 

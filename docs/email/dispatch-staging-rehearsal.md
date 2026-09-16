@@ -122,14 +122,37 @@ quoted**. Expected:
 
 ## 9. Webhook → suppression → enrollment stop
 
+**The signature cannot be skipped.** `processEmailWebhook` fails closed: with no
+`RESEND_WEBHOOK_SECRET` it returns 503, and with a bad signature it returns 400.
+There is no staging bypass. Either fire a real bounce from Resend's test
+addresses (`bounced@resend.dev`, `complained@resend.dev` — the cleanest option),
+or sign the body yourself with the **staging** secret:
+
 ```bash
+BODY='{"type":"email.bounced","data":{"email_id":"<providerId from §6>","to":["staging+ok@example.com"],"bounce":{"type":"Permanent","subType":"General","message":"550 5.1.1 user unknown"}}}'
+read -r ID TS SIG <<<"$(node -e "
+const c=require('crypto');
+const id='msg_stg1', ts=Math.floor(Date.now()/1000), body=process.argv[1];
+const k=Buffer.from(process.env.RESEND_WEBHOOK_SECRET.replace(/^whsec_/,''),'base64');
+console.log(id, ts, 'v1,'+c.createHmac('sha256',k).update(id+'.'+ts+'.'+body).digest('base64'));
+" "$BODY")"
+
 curl -X POST "$APP_URL/api/email/webhook" -H 'Content-Type: application/json' \
-  -H "svix-id: msg_stg1" -H "svix-timestamp: $(date +%s)" -H "svix-signature: <sign or disable verification in staging>" \
-  -d '{"type":"email.bounced","data":{"email_id":"<providerId from §6>","to":["staging+ok@…"],"bounce":{"type":"hard"}}}'
+  -H "svix-id: $ID" -H "svix-timestamp: $TS" -H "svix-signature: $SIG" \
+  -d "$BODY"
 ```
 
+**The bounce shape matters.** `isHardBounce`
+(`src/lib/bounce-classification.ts`) treats a bounce as hard only when
+`type === 'Permanent'` (case-insensitive) and `subType` is not `MailboxFull` /
+`MessageTooLarge` / `ContentRejected` / `AttachmentRejected`. A payload saying
+`{"type":"hard"}` is classified **soft**: it records `soft_bounced`, suppresses
+nothing and stops no enrollment — the opposite of what this step is proving.
+Never use the production secret here.
+
 Expected: `email_events` row, suppression created, any ACTIVE enrollment for
-the address STOPPED `suppressed:hard_bounce`, deliverability page counts it.
+the address STOPPED `suppressed:hard_bounce`, deliverability page counts it,
+HTTP 200 (a 500 means the suppression did not settle and Resend must retry).
 
 ## 10. Restart + duplicate-send proof
 

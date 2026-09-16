@@ -109,7 +109,12 @@ test('one campaign per sweep, cooldown before threshold work, bounded by constru
 test('the cron is registered and the worker dispatches it', () => {
   const worker = readFileSync(resolve(__dirname, '../../workers/scheduled.worker.ts'), 'utf8')
   assert.match(worker, /case 'marketing-discovery'/)
-  assert.match(worker, /jobId: 'cron:marketing-discovery'/)
+  // Registry moved to src/lib/cron-schedules.ts (2026-09-15); the worker registers it.
+  assert.match(
+    readFileSync(resolve(__dirname, '../cron-schedules.ts'), 'utf8'),
+    /\{ name: 'marketing-discovery', pattern: '5 10 \* \* \*', tz: 'America\/New_York', jobId: 'cron:marketing-discovery' \}/,
+  )
+  assert.match(worker, /schedules: CRON_SCHEDULES/)
   assert.match(readFileSync(resolve(__dirname, '../queues/index.ts'), 'utf8'), /\| 'marketing-discovery'/)
 })
 

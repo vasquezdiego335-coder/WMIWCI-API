@@ -859,10 +859,11 @@ async function handleBooking(req: NextRequest): Promise<NextResponse> {
     }
   }
 
-  // MESSAGING POLICY: no email/SMS is sent at booking creation. The system sends
-  // exactly four customer messages downstream — FINAL CONFIRMATION (email + SMS)
-  // when payment completes (fulfillPaidCheckout), and PRE-APPROVAL (email + SMS)
-  // when an admin approves in Discord. The Stripe Checkout URL is returned in the
+  // MESSAGING POLICY: no customer message is sent at booking creation, and every
+  // customer message is EMAIL (SMS sending was removed 2026-09-15). Downstream:
+  // PRE-APPROVAL when payment completes (fulfillPaidCheckout) and FINAL
+  // CONFIRMATION when an admin approves in Discord (booking-approval.ts) — that
+  // order, not the reverse. The Stripe Checkout URL is returned in the
   // response below and the customer is redirected straight to it, so the old
   // pre-payment "booking-confirmation" email (and the abandoned-checkout recovery
   // email) were both removed.
@@ -929,8 +930,8 @@ async function handleBooking(req: NextRequest): Promise<NextResponse> {
 
   // ── Owner alert: a new booking was started (non-fatal; never blocks booking) ──
   // The customer is intentionally NOT messaged here — they receive the existing
-  // FINAL CONFIRMATION (email + SMS) when payment completes, so we don't text
-  // people who are still mid-checkout. notifyBookingCreated guards each send.
+  // PRE-APPROVAL email when payment completes, so we don't contact people who
+  // are still mid-checkout. notifyBookingCreated guards each send.
   try {
     await notifyBookingCreated({
       name: customer.name,

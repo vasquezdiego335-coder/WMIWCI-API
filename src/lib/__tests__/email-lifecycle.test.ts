@@ -803,10 +803,25 @@ test('rollout: the schedulers refuse too, so the queue stays honest', () => {
   // Two gates, same as every other rule here: the scheduler avoids filling the
   // queue with certain refusals, and the send gate is the guarantee.
   const j = src('lib/journeys.ts')
-  for (const fn of ['export async function onQuoteCreated', 'export async function onLeadCaptured']) {
-    const body = j.slice(j.indexOf(fn), j.indexOf('await enqueue(', j.indexOf(fn)))
-    assert.match(body, /inRolloutAllowlist\(/, `${fn} must apply the allowlist before enqueueing`)
+  // The allowlist check lives in ensureQuoteJourney (onQuoteCreated delegates
+  // to it). Each body is sliced to the NEXT export, and the check must precede
+  // the scheduling call — the old slice ended at 'await enqueue(', a string that
+  // no longer existed, so it silently scanned the rest of the file.
+  for (const fn of ['export async function ensureQuoteJourney', 'export async function onLeadCaptured']) {
+    const start = j.indexOf(fn)
+    assert.ok(start > -1, `${fn} exists`)
+    const end = j.indexOf('\nexport ', start + fn.length)
+    const body = j.slice(start, end > -1 ? end : undefined)
+    const gate = body.indexOf('inRolloutAllowlist(')
+    const schedule = body.indexOf('scheduleStages(')
+    assert.ok(gate > -1, `${fn} must apply the allowlist`)
+    assert.ok(schedule > gate, `${fn} must apply the allowlist BEFORE scheduling`)
   }
+  assert.match(
+    j.slice(j.indexOf('export async function onQuoteCreated'), j.indexOf('\nexport ', j.indexOf('export async function onQuoteCreated') + 10)),
+    /return ensureQuoteJourney\(leadId, deps\)/,
+    'onQuoteCreated reaches the allowlist through ensureQuoteJourney'
+  )
   const e = src('lib/email-eligibility.ts')
   const booking = e.slice(e.indexOf('export async function bookingMarketingBlockReason'))
   assert.match(booking, /inRolloutAllowlist\(/, 'booking-scoped sequences too')

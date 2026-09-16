@@ -2,7 +2,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
-import { RUN_SENDABLE_STATES, runIsSettled, settledRunState, type RunState } from '../email-campaign-run'
+import { RUN_SENDABLE_STATES, RUN_TERMINAL_STATES, UNFINISHED_RUN_STATES, runIsSettled, settledRunState, type RunState } from '../email-campaign-run'
 
 // ════════════════════════════════════════════════════════════════════════
 //  STUCK RUN STATES (audit pass A, 2026-07-27)
@@ -69,7 +69,13 @@ test('A-1 SENDING rows are NOT force-cancelled — an in-flight send is left alo
 
 test('A-5 PREPARING blocks new dispatch — so it MUST be recoverable', () => {
   const c = code(dispatch())
-  assert.match(c, /const UNFINISHED_RUN_STATES: RunState\[\] = \['PREPARING'/, 'PREPARING blocks re-dispatch')
+  // The list moved to email-campaign-run.ts (2026-09-15), where it is tied to
+  // the partial unique index. The dispatcher must USE that one list, never keep
+  // a private copy that could drift from the database predicate.
+  assert.ok(UNFINISHED_RUN_STATES.includes('PREPARING'), 'PREPARING blocks re-dispatch')
+  assert.ok(!/const UNFINISHED_RUN_STATES/.test(c), 'the dispatcher must not redefine the unfinished set')
+  assert.match(c, /import \{[^}]*\bUNFINISHED_RUN_STATES\b[^}]*\} from '\.\/email-campaign-run'/, 'it must import the shared list')
+  assert.match(c, /campaignId, status: \{ in: \[\.\.\.UNFINISHED_RUN_STATES\] \}/, 'and filter the existing-run lookup with it')
   // The premise: an interrupted process cannot run the catch that sets FAILED.
   assert.match(c, /status: 'PREPARING', startedAt: \{ lt: new Date\(Date\.now\(\) - RECIPIENT_STALE_MS\) \}/,
     'the sweep must reclaim PREPARING runs that outlived the stale window')
@@ -84,10 +90,11 @@ test('A-5 the recovery message tells the owner nothing was sent and what to do',
 })
 
 test('A-5 FAILED is not an unfinished state, so recovery genuinely unblocks dispatch', () => {
-  const c = code(dispatch())
-  const unfinished = /const UNFINISHED_RUN_STATES: RunState\[\] = \[([^\]]+)\]/.exec(c)?.[1] ?? ''
-  assert.ok(!unfinished.includes('FAILED'), 'failing the run must actually free the campaign')
-  assert.ok(unfinished.includes('PREPARING'), 'and PREPARING must still block while genuinely in progress')
+  assert.ok(!UNFINISHED_RUN_STATES.includes('FAILED'), 'failing the run must actually free the campaign')
+  assert.ok(UNFINISHED_RUN_STATES.includes('PREPARING'), 'and PREPARING must still block while genuinely in progress')
+  for (const s of Array.from(RUN_TERMINAL_STATES)) {
+    assert.ok(!UNFINISHED_RUN_STATES.includes(s), `terminal ${s} must never block a new dispatch`)
+  }
 })
 
 test('A-5 recovery only touches runs past the stale window, never a live preparation', () => {

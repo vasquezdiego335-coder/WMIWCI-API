@@ -19,12 +19,28 @@ const ROOT = resolve(__dirname, '../../..')
 
 const TEST_DIRS = ['src/lib/__tests__', 'src/emails/__tests__']
 
-function registeredFiles(): Set<string> {
-  const pkg = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8')) as {
-    scripts: { test: string }
-  }
-  return new Set(pkg.scripts.test.match(/\S+\.test\.ts/g) ?? [])
+type Pkg = { scripts: { test: string }; testFiles?: string[] }
+
+function pkgJson(): Pkg {
+  return JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8')) as Pkg
 }
+
+// The list moved out of the "test" script string into a "testFiles" array on
+// 2026-09-15: at 187 files the inline command passed the Windows 8191-character
+// limit and `npm test` could not start. scripts/run-tests.mjs runs exactly this
+// array, so it is still the one place a new suite must be registered.
+function registeredFiles(): Set<string> {
+  return new Set(pkgJson().testFiles ?? [])
+}
+
+test('the test script runs the registered list, so the gate cannot be bypassed', () => {
+  const pkg = pkgJson()
+  assert.ok(Array.isArray(pkg.testFiles) && pkg.testFiles.length > 0, 'package.json needs a non-empty "testFiles" array')
+  assert.match(pkg.scripts.test, /run-tests\.mjs/, 'the "test" script must run scripts/run-tests.mjs')
+  const runner = readFileSync(join(ROOT, 'scripts/run-tests.mjs'), 'utf8')
+  assert.match(runner, /pkg\.testFiles/, 'the runner must take its files from package.json "testFiles"')
+  assert.match(runner, /shell: false/, 'spawn without a shell: a long file list must not be re-parsed by cmd.exe')
+})
 
 function diskFiles(): string[] {
   return TEST_DIRS.flatMap((dir) =>

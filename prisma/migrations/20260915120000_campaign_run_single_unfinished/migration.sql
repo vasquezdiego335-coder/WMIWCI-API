@@ -1,0 +1,66 @@
+-- ═══════════════════════════════════════════════════════════════════════════
+--  ONE UNFINISHED RUN PER EMAIL CAMPAIGN
+--
+--  THE DEFECT
+--  ----------
+--  dispatchCampaign (src/lib/email-campaign-dispatch.ts) looked for an
+--  unfinished run, did unlocked preparation work, then created a new run. No
+--  lock, no transaction and no database invariant stood between the check and
+--  the create. Two real callers can race: an admin double-click (API service)
+--  and the 15-minute campaign sweep (worker host). Each would create a run, and
+--  because the send idempotency key is anchored on the RUN id
+--  (campaign-run:<runId>), every recipient could be emailed twice.
+--
+--  The application now serialises dispatch with a per-campaign
+--  pg_advisory_xact_lock (claimCampaignRunSlot). This index is the database
+--  invariant behind it, and the only guard that also holds across a
+--  mixed-version deploy or any writer that bypasses the lock.
+--
+--  WHY PARTIAL, AND WHY THESE STATUSES
+--  -----------------------------------
+--  A campaign legitimately has many FINISHED runs over its life (a failed
+--  preparation followed by a re-dispatch, a cancelled run). What must never
+--  happen is TWO UNFINISHED runs at once. The predicate is exactly
+--  UNFINISHED_RUN_STATES in src/lib/email-campaign-run.ts — every run state
+--  except the terminal CANCELLED, COMPLETED, COMPLETED_WITH_ERRORS and FAILED.
+--  "status" is TEXT, not an enum, so the literals are the whole contract;
+--  campaign-run-slot.test.ts fails if the two lists drift. Adding a run state
+--  later needs a NEW migration that drops and recreates this index — never an
+--  edit to this applied file (production records its checksum).
+--
+--  WHY NOT CONCURRENTLY
+--  --------------------
+--  A failed or interrupted CREATE INDEX CONCURRENTLY leaves an INVALID index
+--  under this name, and `IF NOT EXISTS` would then silently accept that
+--  non-enforcing index on a re-run. Migrations run through the pooled
+--  DATABASE_URL (the datasource has no directUrl), where a concurrent build's
+--  waits on other transactions are unreliable. email_campaign_runs is tiny, so a
+--  plain build holds its SHARE lock for milliseconds. Same choice as
+--  20260825150000_lead_session_unique.
+--
+--  THIS MIGRATION CAN FAIL, AND THAT IS CORRECT
+--  --------------------------------------------
+--  If production already holds two unfinished runs for one campaign, CREATE
+--  UNIQUE INDEX aborts. Deciding which run survives is a human decision (keep
+--  the run with recipients or sends; cancel the other through the admin, then
+--  reconcile) — never something a migration may guess. Nothing here writes a
+--  row. Run the read-only scripts/campaign-run-duplicate-preflight.sql first.
+--
+--  If it does fail, `prisma migrate deploy` records it as FAILED and blocks
+--  every later deploy until, after resolving the duplicates, someone runs:
+--      npx prisma migrate resolve --rolled-back 20260915120000_campaign_run_single_unfinished
+--  and then `npx prisma migrate deploy` again.
+--
+--  NOT EXPRESSIBLE IN THE PRISMA DATAMODEL. Prisma has no syntax for a partial
+--  unique index (a @@unique on campaignId would wrongly forbid a second
+--  FINISHED run), so this lives in SQL only and is deliberately absent from
+--  schema.prisma. Never run `prisma db push` or `migrate dev` against
+--  production — either would drop it.
+--
+--  Rollback: DROP INDEX IF EXISTS "email_campaign_runs_one_unfinished_per_campaign";
+--  Additive and non-destructive in both directions — no column, no row.
+-- ═══════════════════════════════════════════════════════════════════════════
+
+CREATE UNIQUE INDEX IF NOT EXISTS "email_campaign_runs_one_unfinished_per_campaign"
+    ON "email_campaign_runs" ("campaign_id")
+ WHERE "status" IN ('PREPARING', 'QUEUED', 'SENDING', 'PAUSED', 'CANCELLING');

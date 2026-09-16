@@ -1,0 +1,84 @@
+# Migrations REPRESENTED IN prisma/baseline/00_init.sql.
+#
+# The baseline was generated from the datamodel as it stood at commit b2c612e6
+# (2026-08-29). Every directory listed below existed then, so its effect is
+# already inside 00_init.sql and re-running its SQL would fail on a duplicate
+# column. scripts/bootstrap-fresh-database.sh records EXACTLY these names as
+# applied, and then runs a real `prisma migrate deploy`, which EXECUTES every
+# migration that is not on this list. That is what makes CI prove a new
+# migration actually works instead of merely marking it applied.
+#
+# RULES:
+#   • Never add a name here by hand. A name belongs here only if 00_init.sql
+#     was regenerated to include it — and regenerating the baseline means
+#     replacing this whole list with the migrations the new baseline covers.
+#   • Never remove a name: production has these recorded with their checksums.
+#   • A NEW migration directory must sort (LC_ALL=C) AFTER the last name here.
+#     .github/workflows/ci.yml enforces that; without it a rebased branch could
+#     add a migration that sorts earlier, and it would never be executed.
+# Blank lines and lines starting with # are ignored by every reader.
+
+20260525000000_deposit_paid_and_truck_addon
+20260531000000_booking_agreement
+20260607000000_add_customer_locale
+20260611000000_add_reschedule_fields
+20260619000000_manual_events
+20260619010000_owner_tasks
+20260629000000_phase2_phase3_attribution_followups
+20260710120000_email_open_tracking
+20260711130000_service_area
+20260712120000_structured_access_fields
+20260712130000_admin_operations
+20260712140000_audit_booking_details_updated
+20260712160000_verified_address_and_test_payments
+20260712170000_waiting_time_policy
+20260713000000_admin_os_audit_actions
+20260713000100_admin_operating_system
+20260713020000_action_center_audit_actions
+20260713020100_action_center_and_roadmap
+20260713040000_hardening_audit_actions
+20260713040100_hardening_scan_and_lifecycle
+20260713120000_booking_reference
+20260715000100_lead_ingestion_fields
+20260715000200_payment_refund_dispute
+20260720000100_email_lifecycle
+20260720000100_phase1_jobcrew_labor
+20260720000200_phase2_financial_closeout
+20260720000300_stage3_reporting_analytics
+20260720010000_email_event_side_effects
+20260720020000_email_send_attempts
+20260720030000_notification_deferred
+20260720040000_followup_ledger_channels
+20260721000100_protect_financial_history
+20260721000200_saved_view_audit_actions
+20260721180000_stage4_payment_method_and_retained_share
+20260721190000_stage4_labor_rate_configuration
+20260721190100_stage4_snapshot_allocation_provenance
+20260721220000_email_admin_audit_actions
+20260721230000_email_marketing_admin
+20260722000000_stage5_crew_scheduling
+20260722000100_email_dispatch_runtime
+20260724000000_partial_lead_capture
+20260724010000_lead_own_table_crm_leads
+20260726000000_approved_config_hash
+20260726120000_email_delivery_state
+20260727120000_email_ops_agent
+20260728120000_email_agent_hardening
+20260728150000_booking_access_review
+20260728180000_ops_alert_dedupe
+20260728190000_consent_evidence_and_sources
+20260728214500_lead_move_details
+20260731000000_two_service_types
+20260804120000_quote_request_capture
+20260814120000_labor_only_booking_shape
+20260814170000_labor_only_hourly_pricing
+20260815120000_deposit_links
+20260815120000_full_service_transportation
+20260820120000_deposit_move_time_and_notes
+20260822120000_quote_price_snapshot
+20260822130000_quote_review_and_mileage
+20260824120000_attribution_id
+20260825120000_lead_question_provenance
+20260825130000_lead_address_completeness
+20260825140000_lead_notification_outbox
+20260825150000_lead_session_unique

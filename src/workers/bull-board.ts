@@ -14,7 +14,7 @@ import { createBullBoard } from '@bull-board/api'
 import { BullMQAdapter } from '@bull-board/api/bullMQAdapter'
 import { ExpressAdapter } from '@bull-board/express'
 import { Queue } from 'bullmq'
-import { bullConnection } from '@/lib/redis'
+import { getLazyBullConnection } from '@/lib/redis'
 
 const QUEUE_NAMES = ['email', 'discord', 'webhook-retry', 'scheduled']
 const PORT = parseInt(process.env.BULL_BOARD_PORT ?? '3001', 10)
@@ -23,7 +23,7 @@ async function startBullBoard() {
   const serverAdapter = new ExpressAdapter()
   serverAdapter.setBasePath('/bull-board')
 
-  const queues = QUEUE_NAMES.map((name) => new Queue(name, { connection: bullConnection }))
+  const queues = QUEUE_NAMES.map((name) => new Queue(name, { connection: getLazyBullConnection() }))
 
   createBullBoard({
     // Cast bridges a cross-package type skew between @bull-board/api's

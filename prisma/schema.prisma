@@ -3323,8 +3323,21 @@ model EmailCampaignRecipient {
 
   /// Which bounded batch this recipient was queued in.
   batchIndex Int? @map("batch_index")
-  /// Orchestration attempts (batch passes that reached this row).
+  /// Orchestration attempts (batch passes that reached this row). Also the
+  /// CLAIM TOKEN: every move into SENDING increments it, and settlement is
+  /// compare-and-set on { status: SENDING, attempts } so a stale worker can
+  /// never overwrite a newer attempt (email-campaign-run.ts).
   attempts   Int  @default(0)
+
+  /// When a DEFERRED row is due (policy deferral, transient read failure,
+  /// in-flight collision, provider throw). The delayed queue job is the fast
+  /// path; the sweep re-drives overdue rows whose job was lost. NULL on legacy
+  /// rows, which the sweep deliberately ignores.
+  nextAttemptAt     DateTime? @map("next_attempt_at")
+  /// Consecutive transient read failures (suppression/context read errors).
+  /// Bounded backoff; at the cap the row is FAILED ':retries_exhausted', never
+  /// SUPPRESSED. Reset on SENT, a terminal state, or a manual retry.
+  transientAttempts Int       @default(0) @map("transient_attempts")
 
   /// The canonical delivery ledger row, once a send was attempted.
   /// Opens/clicks/bounces live THERE (EmailSend → EmailEvent), not here.
@@ -3342,6 +3355,7 @@ model EmailCampaignRecipient {
   @@unique([runId, email])
   @@index([runId, status])
   @@index([email])
+  @@index([status, nextAttemptAt])
   @@map("email_campaign_recipients")
 }
 
@@ -4177,4 +4191,39 @@ model DepositRequest {
   @@index([createdAt])
   @@index([discordStatus])
   @@map("deposit_requests")
+}
+
+/// DURABLE LIFECYCLE ENQUEUE RETRIES (production reliability release 2026-09-15).
+/// One row per deterministic BullMQ job id whose live `queue.add` did not
+/// succeed. The hourly lifecycle-repair sweep re-adds exactly that job under
+/// the same id, and never after `notAfter`. Rows are never deleted. No foreign
+/// keys on purpose: a subject may be deleted, and the stage handlers recheck
+/// at run time. See src/lib/lifecycle-enqueue.ts.
+model LifecycleEnqueueRetry {
+  id            String    @id @default(cuid())
+  queueName     String    @map("queue_name")
+  jobName       String    @map("job_name")
+  /// The deterministic BullMQ job id — the upsert key.
+  jobId         String    @unique @map("job_id")
+  data          Json
+  /// The intended run time, before any quiet-hours shift.
+  fireAt        DateTime  @map("fire_at")
+  /// Never re-enqueue after this instant (path-specific lateness bound).
+  notAfter      DateTime  @map("not_after")
+  path          String
+  subjectType   String    @map("subject_type")
+  subjectId     String    @map("subject_id")
+  /// pending | enqueued | abandoned
+  status        String    @default("pending")
+  attempts      Int       @default(0)
+  /// Never contains a recipient address.
+  lastError     String?   @map("last_error")
+  nextAttemptAt DateTime  @default(now()) @map("next_attempt_at")
+  createdAt     DateTime  @default(now()) @map("created_at")
+  updatedAt     DateTime  @updatedAt @map("updated_at")
+  resolvedAt    DateTime? @map("resolved_at")
+
+  @@index([status, nextAttemptAt])
+  @@index([subjectType, subjectId])
+  @@map("lifecycle_enqueue_retries")
 }

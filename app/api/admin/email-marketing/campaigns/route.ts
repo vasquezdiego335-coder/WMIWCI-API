@@ -215,7 +215,13 @@ export async function PATCH(req: NextRequest): Promise<NextResponse> {
       // An over-cap audience is refused with a flag the UI turns into an
       // explicit second confirmation, rather than a dead error (audit E-05).
       const needsTruncationAck = /larger than \d+ and would be silently cut off/.test(result.error)
-      return NextResponse.json({ error: result.error, ...(needsTruncationAck ? { needsTruncationAck: true } : {}) }, { status: 409 })
+      // `conflict` means another dispatch holds this campaign's run slot (or the
+      // database was momentarily busy) — not a refusal of the campaign itself,
+      // so the UI can invite a reload instead of showing a validation failure.
+      return NextResponse.json(
+        { error: result.error, ...(needsTruncationAck ? { needsTruncationAck: true } : {}), ...(result.conflict ? { conflict: true } : {}) },
+        { status: 409 }
+      )
     }
     return NextResponse.json({ ok: true, runId: result.runId, totalRecipients: result.totalRecipients, alreadyRunning: result.alreadyRunning })
   }

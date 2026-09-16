@@ -263,8 +263,14 @@ Resend → **Webhooks → Add endpoint**:
 URL     https://<staging-api-domain>/api/email/webhook
 Secret  → set RESEND_WEBHOOK_SECRET to the whsec_… value
 Events  email.sent, email.delivered, email.delivery_delayed,
-        email.bounced, email.complained, email.opened, email.clicked
+        email.bounced, email.complained, email.opened, email.clicked,
+        email.failed, email.suppressed
 ```
+
+All nine are handled. `email.failed` (accepted by Resend, then failed) and
+`email.suppressed` (Resend's own suppression list) were missing from earlier
+copies of this list, so an endpoint configured from them never receives either.
+Per-event handling: [`DEPLOY.md`](../../DEPLOY.md) §8.
 
 ### 4.3 Expected HTTP responses
 
@@ -317,7 +323,8 @@ English. Restore the key afterwards.
 ## 5. Redis verification
 
 Queue names (BullMQ, key prefix `bull:`):
-`email`, `sms`, `discord`, `webhook-retry`, `scheduled`, `marketing`.
+`email`, `discord`, `webhook-retry`, `scheduled`, `marketing`.
+(The `sms` queue was deleted with SMS on 2026-09-15.)
 
 Admin → **Queues** (`/admin/queues`) shows waiting / active / completed /
 failed / delayed per queue, and links to Bull Board.

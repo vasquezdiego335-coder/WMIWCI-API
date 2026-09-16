@@ -1,5 +1,5 @@
 import { Worker, Job } from 'bullmq'
-import { bullConnection } from '../lib/redis'
+import { getLazyBullConnection } from '../lib/redis'
 import { queueLogger } from '../lib/logger'
 import type { MarketingJobData } from '../lib/queues'
 import { enrollCustomer, type MarketingContact } from '../lib/marketing'
@@ -20,7 +20,7 @@ async function processMarketingJob(job: Job<MarketingJobData>): Promise<void> {
 
 export function startMarketingWorker() {
   const worker = new Worker<MarketingJobData>('marketing', processMarketingJob, {
-    connection: bullConnection,
+    connection: getLazyBullConnection(),
     concurrency: 2,
   })
 
