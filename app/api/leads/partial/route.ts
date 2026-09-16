@@ -5,6 +5,7 @@ import {
   applyCaptureBasis,
   captureClient,
   describeCaptureBasis,
+  legacyCheckboxPresented,
   legacyConsentGivenOptOut,
   startCaptureScenario,
   CAPTURE_CONTRACT_FIELDS,
@@ -344,7 +345,7 @@ async function handle(req: NextRequest): Promise<NextResponse> {
       // An old-page opt-in is kept exactly as today — unless the same payload
       // ticked "don't email me", which wins.
       marketingConsent: legacyConsentGivenOptOut(d.marketingConsent, contract),
-      marketingConsentPrompted: d.marketingConsentPresented,
+      marketingConsentPrompted: legacyCheckboxPresented(d.marketingConsentPresented, contract),
       foundUsPrompted: d.foundUsPresented,
       // The capture surface. Falls back to BOOKING_FORM because that is the
       // only caller that historically omitted it. The shared handler serves

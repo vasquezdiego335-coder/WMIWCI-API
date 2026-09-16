@@ -10,6 +10,7 @@ import {
   applyCaptureBasis,
   captureClient,
   describeCaptureBasis,
+  legacyCheckboxPresented,
   legacyConsentGivenOptOut,
   startCaptureScenario,
   CAPTURE_CONTRACT_FIELDS,
@@ -186,7 +187,7 @@ async function handleContact(req: NextRequest): Promise<NextResponse> {
       // An old-page opt-in keeps today's meaning — unless the same payload
       // ticked "don't email me", which wins.
       marketingConsent: legacyConsentGivenOptOut(data.marketingConsent, data),
-      marketingConsentPrompted: data.marketingConsentPresented,
+      marketingConsentPrompted: legacyCheckboxPresented(data.marketingConsentPresented, data),
       // DERIVED FROM THE ROUTE (2026-09-16): this endpoint is the contact form.
       // The body's claim is never recorded, so it cannot file a message as a
       // staff-entered opt-in.

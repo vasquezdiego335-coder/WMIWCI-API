@@ -105,6 +105,19 @@ export function legacyConsentGivenOptOut(marketingConsent: boolean | undefined, 
   return marketingConsent
 }
 
+/**
+ * Was the legacy opt-in CHECKBOX on the page? An old page says so itself
+ * (`marketingConsentPresented`). A notice-era page — it sends the notice or the
+ * opt-out box state — has no checkbox at all: false, so the owner's lead card
+ * reads "Not opted in" instead of "Unknown — captured before we recorded
+ * whether the box was shown". Nothing else reads this column.
+ */
+export function legacyCheckboxPresented(presented: boolean | undefined, contract: CaptureContract): boolean | undefined {
+  if (typeof presented === 'boolean') return presented
+  if (contract.marketingNotice || typeof contract.emailMarketingOptOut === 'boolean') return false
+  return undefined
+}
+
 // ── REQUEST CONTEXT ─────────────────────────────────────────────────────────
 
 export type CaptureClient = {

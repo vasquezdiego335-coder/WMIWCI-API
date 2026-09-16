@@ -14,6 +14,7 @@ import {
   applyCaptureBasis,
   captureClient,
   describeCaptureBasis,
+  legacyCheckboxPresented,
   legacyConsentGivenOptOut,
   startCaptureScenario,
   CAPTURE_CONTRACT_FIELDS,
@@ -522,7 +523,7 @@ async function handle(req: NextRequest): Promise<NextResponse> {
       // An old-page opt-in keeps today's meaning — unless the same payload
       // ticked "don't email me", which wins.
       marketingConsent: legacyConsentGivenOptOut(d.marketingConsent, d),
-      marketingConsentPrompted: d.marketingConsentPresented,
+      marketingConsentPrompted: legacyCheckboxPresented(d.marketingConsentPresented, d),
       // CONSENT EVIDENCE — source, version and timestamp travel together or the
       // record proves nothing (see lib/consent.ts). DERIVED FROM THE ROUTE
       // (2026-09-16): this endpoint IS the quick quote, so it records
