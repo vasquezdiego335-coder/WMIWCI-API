@@ -911,7 +911,9 @@ test('4b. a booking for an address with a running lead_nurture stops that nurtur
   const enrollments = await enrollmentsOf(email)
   const nurtureRow = enrollments.find((e) => e.sequenceKind === 'lead_nurture')
   assert.equal(nurtureRow?.status, 'stopped')
-  assert.equal(nurtureRow?.stopReason, 'person_booked')
+  //  Two stop hooks run on a booking: the converted lead closes (lead_closed)
+  //  and the person-level stop (person_booked). Whichever lands first names it.
+  assert.ok(['lead_closed', 'person_booked'].includes(String(nurtureRow?.stopReason)), String(nurtureRow?.stopReason))
   assert.equal(enrollments.find((e) => e.sequenceKind === 'abandoned_checkout')?.status, 'active', 'the booking’s own sequence is untouched')
   await expectNoStages('lead_nurture', lead.id, 'the booking cancelled the nurture stages')
 
@@ -1147,7 +1149,9 @@ test('9. unsubscribe: the real one-click route suppresses, records the withdrawa
   assert.ok((await eventsOf(email)).some((e) => e.kind === 'unsubscribed' && e.surface === 'unsubscribe_link'), 'the withdrawal is on record')
   const [enrollment] = await enrollmentsOf(email)
   assert.equal(enrollment.status, 'stopped')
-  assert.equal(enrollment.stopReason, 'unsubscribed')
+  //  The unsubscribe event stops it, and so does the suppression it writes
+  //  (email-suppression.suppress); whichever lands first names the reason.
+  assert.ok(['unsubscribed', 'suppressed:unsubscribed'].includes(String(enrollment.stopReason)), String(enrollment.stopReason))
 
   // Stage 2 fires anyway (the unsubscribe does not remove queued jobs): nothing goes out.
   assert.deepEqual(await runStage(jobs[1], (d) => d.leadId === lead.id && d.template === 'lead-nurture-2'), [])
