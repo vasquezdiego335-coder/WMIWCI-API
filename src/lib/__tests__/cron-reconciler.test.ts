@@ -565,7 +565,14 @@ test('REDIS-GATED: three startups leave exactly one repeatable per managed name,
 
     const pending = await delayedFor()
     assert.equal(pending.length, 1, 'the repeatable must have a delayed next iteration to lose')
-    await pending[0].remove()
+    // Deleted at the Redis level, not through job.remove(): BullMQ 5.77 refuses
+    // that for an iteration owned by a scheduler ("belongs to a job scheduler",
+    // error -8). Dropping the ZSET member and the job hash reproduces exactly
+    // what a failed next-iteration create leaves behind — the repeat entry
+    // intact, its delayed job gone.
+    const lostId = pending[0].id as string
+    await probe.zrem(`bull:${name}:delayed`, lostId)
+    await probe.del(`bull:${name}:${lostId}`)
     assert.equal((await delayedFor()).length, 0, 'the schedule is now dead but still present')
     assert.equal((await queue.getRepeatableJobs()).filter((j) => j.name === target.name).length, 1)
 
