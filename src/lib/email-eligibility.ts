@@ -31,8 +31,16 @@
 
 import { prisma } from './db'
 import { queueLogger } from './logger'
-import { classifyTemplate, inRolloutAllowlist, rolloutAllowlist } from './email-guard'
+import { classifyTemplate, inRolloutAllowlist, rolloutAllowlist, sendTimeEligibilityDeps } from './email-guard'
 import { TEMPLATE_ALLOWED_STATUSES, type BookingStatus } from '../emails/status'
+import {
+  promotionalEligibility,
+  type EligibilityContext,
+  type EligibilityDb,
+  type EligibilityDecision,
+  type EligibilityDeps,
+} from './consent/marketing-eligibility'
+import type { SequenceKind } from './consent/notice-registry'
 
 const log = queueLogger.child({ mod: 'email-eligibility' })
 
@@ -145,6 +153,63 @@ const MOVE_DATE_SENSITIVE = new Set([
 //  gate with it — there is no second list to drift.
 // ════════════════════════════════════════════════════════════════════════
 
+// ════════════════════════════════════════════════════════════════════════
+//  THE SHARED ELIGIBILITY GATE ON BOOKING-SCOPED MAIL (DESIGN-v2 §5, 2026-09-16)
+//  ---------------------------------------------------------------------
+//  promotionalConsentBlockReason reads ONE customer row. The live paths below
+//  now also ask src/lib/consent/marketing-eligibility for the PERSON: every
+//  suppression reason, an opt-out or unsubscribe on record, a decline on any
+//  row, a test/staff identity — and the basis the send may use in its context:
+//
+//    abandoned-checkout 1/2/3            → 'scenario_flow' (abandoned_checkout)
+//    review/referral/repeat follow-ups   → 'post_move'
+//    anything else promotional           → 'automation' (express only)
+//
+//  HOW THE TWO ANSWERS COMBINE, so nothing becomes looser than today:
+//    • the decision refuses                → refused. The legacy reason is
+//      reported when the legacy check refuses too (keeping today's ledger
+//      classification, e.g. a retryable 'no_marketing_consent'); otherwise the
+//      decision's own, terminal reason.
+//    • the decision permits                → the legacy consent column is not
+//      required. The decision already honours that same column for this
+//      customer, and it only permits otherwise on a CONFIRMED express opt-in
+//      (a token resubscribe), or on a notice/EBR basis
+//      that is off unless its flag is set.
+//  Status, workflow and move-date checks are unchanged and still apply.
+// ════════════════════════════════════════════════════════════════════════
+
+/** Templates of the booking-form scenario sequence (DESIGN-v2 §1, P3). */
+const ABANDONED_CHECKOUT_TEMPLATES = new Set(['abandoned-checkout', 'abandoned-checkout-2', 'abandoned-checkout-3'])
+/** Post-move follow-ups (followups.ts): context 'post_move', never a notice. */
+const POST_MOVE_TEMPLATES = new Set(['review-request', 'review-reminder', 'referral', 'referral-ask', 'referral-reward', 'repeat-reminder'])
+
+export type BookingEligibilityScope = { context: EligibilityContext; sequenceKind: SequenceKind | null }
+
+/** The eligibility context a booking-scoped promotional template is sent in. */
+export function bookingEligibilityScope(template: string): BookingEligibilityScope {
+  if (ABANDONED_CHECKOUT_TEMPLATES.has(template)) return { context: 'scenario_flow', sequenceKind: 'abandoned_checkout' }
+  if (POST_MOVE_TEMPLATES.has(template)) return { context: 'post_move', sequenceKind: null }
+  return { context: 'automation', sequenceKind: null }
+}
+
+export type BookingEligibilityOptions = {
+  /** Overrides the template's scope — e.g. a campaign recheck passes 'campaign'. */
+  context?: EligibilityContext
+  sequenceKind?: SequenceKind | null
+  /** Injected in tests. Defaults to the real Prisma client and process.env. */
+  deps?: EligibilityDeps
+}
+
+/** Decision reasons that are PROHIBITIONS on the person: they are reported over a legacy reason. */
+const PROHIBITION_REASONS = new Set(['suppressed', 'opted_out', 'declined', 'test_identity', 'invalid_email'])
+
+/** Combine the legacy per-row answer with the shared decision (see above). */
+export function combinePromotional(legacy: string | null, decision: EligibilityDecision): string | null {
+  if (decision.eligible) return null
+  if (PROHIBITION_REASONS.has(decision.reason)) return decision.reason
+  return legacy ?? decision.reason
+}
+
 /** Consent verdict for a promotional booking-scoped send. Null = proceed. */
 export function promotionalConsentBlockReason(booking: BookingSnapshot): string | null {
   // STOP beats consent: someone who texted STOP has withdrawn, whatever an
@@ -164,7 +229,8 @@ export function promotionalConsentBlockReason(booking: BookingSnapshot): string 
 export function bookingBlockReason(
   template: string,
   booking: BookingSnapshot | null,
-  now: Date = new Date()
+  now: Date = new Date(),
+  opts: { promotional?: EligibilityDecision } = {}
 ): string | null {
   if (!booking) return 'booking_deleted'
 
@@ -174,8 +240,11 @@ export function bookingBlockReason(
   // 0. MAY WE MARKET TO THIS PERSON AT ALL? Checked before the template's own
   //    conditions because it is the more fundamental fact: for a promotional
   //    template, no amount of correct booking state makes the send permitted.
+  //    With the shared decision supplied (the live paths), the two answers are
+  //    combined as described above; without it, the per-row rule alone.
   if (classifyTemplate(template) === 'promotional') {
-    const consent = promotionalConsentBlockReason(booking)
+    const legacy = promotionalConsentBlockReason(booking)
+    const consent = opts.promotional ? combinePromotional(legacy, opts.promotional) : legacy
     if (consent) return consent
   }
 
@@ -209,9 +278,14 @@ export function bookingBlockReason(
  * FAILS CLOSED: a read error blocks the send. A booking we cannot verify is a
  * booking we must not email about.
  */
-export async function bookingEligibility(template: string, bookingId: string): Promise<string | null> {
+export async function bookingEligibility(
+  template: string,
+  bookingId: string,
+  opts: BookingEligibilityOptions = {}
+): Promise<string | null> {
+  const db = (opts.deps?.db ?? prisma) as EligibilityDb
   try {
-    const row = await prisma.booking.findUnique({
+    const row = await db.booking.findUnique({
       where: { id: bookingId },
       select: {
         status: true,
@@ -224,7 +298,7 @@ export async function bookingEligibility(template: string, bookingId: string): P
         // The consent columns the promotional gate needs. Loaded on EVERY
         // recheck, not only for promotional templates: one query, and a
         // template that changes class later cannot find the field missing.
-        customer: { select: { emailMarketingConsent: true, marketingOptOut: true } },
+        customer: { select: { email: true, emailMarketingConsent: true, marketingOptOut: true } },
       },
     })
     const booking: BookingSnapshot | null = row
@@ -243,7 +317,29 @@ export async function bookingEligibility(template: string, bookingId: string): P
           customerMarketingOptOut: row.customer?.marketingOptOut ?? false,
         }
       : null
-    const reason = bookingBlockReason(template, booking)
+    // The shared per-person decision, for promotional templates only. A booking
+    // with no customer address has no person to decide for; the legacy rule
+    // (consent null → refuse) still blocks it.
+    let promotional: EligibilityDecision | undefined
+    if (row && !row.isInternalTest && row.customer?.email && classifyTemplate(template) === 'promotional') {
+      const scope = bookingEligibilityScope(template)
+      promotional = await promotionalEligibility(
+        {
+          context: opts.context ?? scope.context,
+          email: row.customer.email,
+          subject: { type: 'booking', id: bookingId, sequenceKind: opts.sequenceKind ?? scope.sequenceKind },
+        },
+        sendTimeEligibilityDeps(opts.deps)
+      )
+    }
+    let reason = bookingBlockReason(template, booking, new Date(), { promotional })
+    //  A LATER booking by the same customer that was paid or moved past checkout
+    //  supersedes this unpaid one: "finish your booking" must never reach
+    //  someone who re-did the form and paid. (The recovery sequence belongs to
+    //  the first booking, so the later one's payment cannot cancel it.)
+    if (!reason && row && ABANDONED_CHECKOUT_TEMPLATES.has(template) && (await supersededByLaterBooking(db, bookingId))) {
+      reason = 'booking_superseded'
+    }
     if (reason) log.info({ bookingId, template, reason }, 'booking eligibility BLOCKED the send')
     return reason
   } catch (err) {
@@ -253,6 +349,26 @@ export async function bookingEligibility(template: string, bookingId: string): P
     )
     return 'eligibility_read_failed'
   }
+}
+
+/**
+ * Has the same customer created a real booking AFTER this one that was paid or
+ * went past checkout? THROWS on a database error (the caller fails closed).
+ */
+export async function supersededByLaterBooking(db: EligibilityDb, bookingId: string): Promise<boolean> {
+  const self = await db.booking.findUnique({ where: { id: bookingId }, select: { customerId: true, createdAt: true } })
+  if (!self?.customerId || !self.createdAt) return false
+  const later = await db.booking.findMany({
+    where: {
+      customerId: self.customerId,
+      isInternalTest: false,
+      createdAt: { gt: self.createdAt },
+      OR: [{ depositPaid: true }, { status: { in: ['PENDING_APPROVAL', 'CONFIRMED', 'SCHEDULED', 'IN_PROGRESS', 'COMPLETED', 'ARCHIVED'] } }],
+    },
+    select: { id: true },
+    take: 1,
+  })
+  return later.length > 0
 }
 
 /** Convenience: bind a template + booking into a `recheck` callback. */
@@ -270,9 +386,13 @@ export const bookingRecheck = (template: string, bookingId: string) => () => boo
  * FAILS CLOSED: a read error reports a block, so an outage cannot enrol
  * somebody we could not verify.
  */
-export async function bookingMarketingBlockReason(bookingId: string): Promise<string | null> {
+export async function bookingMarketingBlockReason(
+  bookingId: string,
+  opts: BookingEligibilityOptions = {}
+): Promise<string | null> {
+  const db = (opts.deps?.db ?? prisma) as EligibilityDb
   try {
-    const row = await prisma.booking.findUnique({
+    const row = await db.booking.findUnique({
       where: { id: bookingId },
       select: {
         isInternalTest: true,
@@ -285,7 +405,7 @@ export async function bookingMarketingBlockReason(bookingId: string): Promise<st
     // somebody outside the allowlist — the send gate would refuse every stage
     // anyway, and a queue full of certain refusals hides the real ones.
     if (!inRolloutAllowlist(row.customer?.email ?? '', rolloutAllowlist())) return 'not_in_rollout_allowlist'
-    return promotionalConsentBlockReason({
+    const legacy = promotionalConsentBlockReason({
       // Only the consent fields are consulted; the rest are placeholders that
       // promotionalConsentBlockReason never reads.
       status: '',
@@ -298,6 +418,19 @@ export async function bookingMarketingBlockReason(bookingId: string): Promise<st
       customerMarketingConsent: row.customer?.emailMarketingConsent ?? null,
       customerMarketingOptOut: row.customer?.marketingOptOut ?? false,
     })
+    // No address → nobody to decide for; the legacy answer (a refusal) stands.
+    if (!row.customer?.email) return legacy
+    // The caller names the sequence it is scheduling. Without one this is
+    // 'automation' — express only — so a notice basis is never assumed.
+    const decision = await promotionalEligibility(
+      {
+        context: opts.context ?? 'automation',
+        email: row.customer.email,
+        subject: { type: 'booking', id: bookingId, sequenceKind: opts.sequenceKind ?? null },
+      },
+      sendTimeEligibilityDeps(opts.deps)
+    )
+    return combinePromotional(legacy, decision)
   } catch (err) {
     log.error(
       { err: err instanceof Error ? err.message : String(err), bookingId },

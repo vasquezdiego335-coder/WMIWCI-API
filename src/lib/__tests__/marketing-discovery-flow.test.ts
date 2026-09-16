@@ -30,7 +30,7 @@ const DAY = 24 * 60 * 60 * 1000
 function preview(eligible: number, over: Partial<AudiencePreview['excluded']> = {}): AudiencePreview {
   return {
     segment: 'quick_quote_reactivation',
-    segmentLabel: 'Quoted 14+ days ago, opted in, never booked',
+    segmentLabel: 'Quoted 14+ days ago, may receive offers, never booked',
     totalCandidates: eligible + 8,
     excluded: {
       invalidAddress: 0, unsubscribed: 2, hardBounce: 1, complaint: 0,

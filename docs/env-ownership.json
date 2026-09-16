@@ -99,6 +99,30 @@
       ],
       "secret": false
     },
+    "CONSENT_GLOBAL_GRANTS_24H": {
+      "readBy": [
+        "api"
+      ],
+      "secret": false
+    },
+    "CONSENT_IP_DISTINCT_EMAILS_24H": {
+      "readBy": [
+        "api"
+      ],
+      "secret": false
+    },
+    "CONSENT_IP_HMAC_SECRET": {
+      "readBy": [
+        "api"
+      ],
+      "secret": true
+    },
+    "CONSENT_POPUP_GRANTS_24H": {
+      "readBy": [
+        "api"
+      ],
+      "secret": false
+    },
     "COOKIE_DOMAIN": {
       "readBy": [
         "api"
@@ -686,6 +710,13 @@
       ],
       "secret": false
     },
+    "EMAIL_EBR_BASIS_ENABLED": {
+      "readBy": [
+        "api",
+        "worker"
+      ],
+      "secret": false
+    },
     "EMAIL_FROM": {
       "readBy": [
         "api",
@@ -780,6 +811,13 @@
       ],
       "secret": false
     },
+    "EMAIL_NOTICE_BASIS_ENABLED": {
+      "readBy": [
+        "api",
+        "worker"
+      ],
+      "secret": false
+    },
     "EMAIL_PROMOTIONAL_ALLOWLIST": {
       "readBy": [
         "api",
@@ -853,6 +891,12 @@
       ],
       "note": "SHARED. Falls back to EMAIL_FROM when unset — so an unset value on one service silently changes where replies go."
     },
+    "EMAIL_REQUIRE_TURNSTILE": {
+      "readBy": [
+        "api"
+      ],
+      "secret": false
+    },
     "EMAIL_SENDING_ENABLED": {
       "readBy": [
         "api",
@@ -878,7 +922,8 @@
     },
     "EMAIL_TEST_RECIPIENT": {
       "readBy": [
-        "api"
+        "api",
+        "worker"
       ],
       "secret": false
     },
@@ -1042,6 +1087,12 @@
       ],
       "secret": false
     },
+    "OFFER_SIGNUP_ENABLED": {
+      "readBy": [
+        "api"
+      ],
+      "secret": false
+    },
     "OPENAI_API_KEY": {
       "readBy": [
         "api",
@@ -1106,7 +1157,8 @@
     },
     "OWNER_EMAIL": {
       "readBy": [
-        "api"
+        "api",
+        "worker"
       ],
       "secret": false
     },
@@ -1388,6 +1440,18 @@
         "worker"
       ],
       "secret": false
+    },
+    "TURNSTILE_ENABLED": {
+      "readBy": [
+        "api"
+      ],
+      "secret": false
+    },
+    "TURNSTILE_SECRET_KEY": {
+      "readBy": [
+        "api"
+      ],
+      "secret": true
     },
     "UPSTASH_REDIS_REST_TOKEN": {
       "readBy": [

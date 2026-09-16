@@ -1,5 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import { checkBucket, rateLimit, LIMITS, type Bucket } from '../rate-limit'
 
 // ════════════════════════════════════════════════════════════════════════
@@ -70,4 +72,39 @@ test('rateLimit: different buckets (routes) are independent for the same IP', as
   const booking = await rateLimit({ ...LIMITS.booking, limit: 1 }, [ip])
   assert.equal(login.ok, true)
   assert.equal(booking.ok, true) // booking bucket independent of login bucket
+})
+
+// ── The booking form's own requests never share a bucket (2026-09-16) ──────────
+//  The live route estimate fires on every address-typing pause. It used to share
+//  the booking bucket, so a customer who paused five times while typing was
+//  refused when they submitted, for up to an hour.
+test('route estimates, booking submits and checkout-resume links use three separate buckets', async () => {
+  assert.notEqual(LIMITS.routeEstimate.name, LIMITS.booking.name)
+  assert.notEqual(LIMITS.checkoutResume.name, LIMITS.booking.name)
+  assert.notEqual(LIMITS.checkoutResume.name, LIMITS.routeEstimate.name)
+  const ip = 'ip-typing-customer'
+  for (let i = 0; i < LIMITS.booking.limit + 5; i++) {
+    assert.equal((await rateLimit(LIMITS.routeEstimate, [ip])).ok, true, `estimate ${i + 1}`)
+  }
+  assert.equal((await rateLimit(LIMITS.booking, [ip])).ok, true, 'the submit is still allowed after many estimates')
+  assert.equal((await rateLimit(LIMITS.checkoutResume, [ip])).ok, true)
+  // The ceilings a real customer never reaches, and the fail modes.
+  assert.ok(LIMITS.booking.limit >= 10 && LIMITS.booking.failMode === 'closed')
+  assert.ok(LIMITS.routeEstimate.limit >= 40 && LIMITS.routeEstimate.failMode === 'closed')
+  assert.ok(LIMITS.checkoutResume.limit >= 30 && LIMITS.checkoutResume.failMode === 'closed')
+})
+
+test('the three booking routes call their own bucket', () => {
+  const read = (p: string) => readFileSync(resolve(__dirname, '../../..', p), 'utf8')
+  assert.match(read('app/api/route-estimate/route.ts'), /rateLimit\(LIMITS\.routeEstimate,/)
+  assert.match(read('app/api/stripe/checkout/resume/route.ts'), /rateLimit\(LIMITS\.checkoutResume,/)
+  assert.match(read('app/api/bookings/route.ts'), /rateLimit\(LIMITS\.booking,/)
+})
+
+test('a fail-closed refusal reports the time actually left in the window', async () => {
+  const cfg = { ...LIMITS.booking, name: 'retry-after-probe', limit: 1, windowSec: 3600 }
+  assert.equal((await rateLimit(cfg, ['ip-retry'])).ok, true)
+  const refused = await rateLimit(cfg, ['ip-retry'])
+  assert.equal(refused.ok, false)
+  assert.ok(refused.retryAfterSec > 0 && refused.retryAfterSec <= 3600)
 })

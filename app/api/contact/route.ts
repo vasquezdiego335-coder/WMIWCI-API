@@ -5,7 +5,16 @@ import { apiLogger } from '@/lib/logger'
 import { contactRouteDeps, fireAndForget } from '@/lib/contact-route-deps'
 import { normalizeLocale } from '@/lib/i18n'
 import { rateLimit, tooManyRequests, LIMITS, clientIp } from '@/lib/rate-limit'
-import { CONSENT_VERSION, normaliseConsentSource } from '@/lib/consent'
+import { CONSENT_VERSION, normaliseConsentSource, routeConsentSource } from '@/lib/consent'
+import {
+  applyCaptureBasis,
+  captureClient,
+  describeCaptureBasis,
+  legacyCheckboxPresented,
+  legacyConsentGivenOptOut,
+  startCaptureScenario,
+  CAPTURE_CONTRACT_FIELDS,
+} from '@/lib/capture-basis'
 
 export const runtime = 'nodejs'
 
@@ -84,6 +93,15 @@ const ContactSchema = z.object({
      decision; it is never stored or echoed, and the bound matters because an
      unbounded string is free memory for anyone who asks. */
   company: z.string().max(200).optional(),
+  // ── WHAT THE MESSAGE IS ABOUT (email consent release 2026-09-16) ──────
+  //  'quote' — "Getting a quote or planning a move" — is a sales inquiry (surface
+  //  'contact'). 'booking' (an existing booking) and 'other' are support requests
+  //  (surface 'contact_support'): the team is alerted first. Every topic then
+  //  enters the general lead nurture. Absent or unrecognised = 'other'; a cached
+  //  page that predates the selector carries no notice and starts nothing new.
+  topic: z.enum(['quote', 'booking', 'other']).optional().catch(undefined),
+  // The notice contract (DESIGN-v2 §4): trigger 'submit', contact notice.
+  ...CAPTURE_CONTRACT_FIELDS,
 })
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
@@ -166,14 +184,53 @@ async function handleContact(req: NextRequest): Promise<NextResponse> {
       source: data.source ?? 'contact-form',
       landingPage: req.headers.get('referer') ?? undefined,
       referrer: req.headers.get('referer') ?? undefined,
-      marketingConsent: data.marketingConsent,
-      marketingConsentPrompted: data.marketingConsentPresented,
-      consentSource: normaliseConsentSource(data.consentSource) ?? 'CONTACT_FORM',
+      // An old-page opt-in keeps today's meaning — unless the same payload
+      // ticked "don't email me", which wins.
+      marketingConsent: legacyConsentGivenOptOut(data.marketingConsent, data),
+      marketingConsentPrompted: legacyCheckboxPresented(data.marketingConsentPresented, data),
+      // DERIVED FROM THE ROUTE (2026-09-16): this endpoint is the contact form.
+      // The body's claim is never recorded, so it cannot file a message as a
+      // staff-entered opt-in.
+      consentSource: routeConsentSource('CONTACT_FORM', normaliseConsentSource(data.consentSource)),
       consentVersion: data.consentVersion || CONSENT_VERSION,
     },
     'contact-form',
   )
   if (!lead) leadFailed = true
+
+  // ── MARKETING BASIS (email consent release 2026-09-16) ─────────────────
+  //  After the enquiry is stored, before any sequence is asked for. The TOPIC
+  //  decides the path (owner direction 2026-09-16):
+  //    • 'quote' (getting a quote or planning a move) → surface 'contact';
+  //    • 'booking' (an existing booking) or 'other' → surface
+  //      'contact_support', so the record shows it was a support request.
+  //  Either way the Discord team alert is queued first, then the person
+  //  enters the general lead nurture (its existing rules still refuse, e.g.
+  //  someone who has already booked).
+  //  Old pages carry no notice and get today's behaviour exactly. Never throws
+  //  and never changes the reply.
+  const topic = data.topic ?? 'other'
+  const supportRequest = topic !== 'quote'
+  const surface = supportRequest ? 'contact_support' : 'contact'
+  const basis = lead
+    ? await applyCaptureBasis({
+        surface,
+        //  Every topic enters the general lead nurture, AFTER the team alert
+        //  below is queued (the requested reply comes first).
+        scenario: 'lead_nurture',
+        email: data.email,
+        leadId: lead.lead.id,
+        contract: data,
+        acceptTrigger: 'submit',
+        locale: data.locale,
+        honeypot: data.company,
+        region: { phone: data.phone },
+        client: captureClient(req),
+      })
+    : null
+  if (basis && basis.status !== 'none') {
+    apiLogger.info({ topic, basis: describeCaptureBasis(basis) }, '/api/contact — marketing basis')
+  }
 
   // ── Non-quote nurture (Sequence B) ──────────────────────────────────
   //  A contact-form lead has an intent and an email and NO calculated quote,
@@ -182,7 +239,16 @@ async function handleContact(req: NextRequest): Promise<NextResponse> {
   //  has booked with us before — so this call is a no-op for most submissions,
   //  and that is the correct, expected outcome. Fire-and-forget: a Redis stall
   //  must never cost us the message.
-  if (lead) fireAndForget(deps.nurture(lead.lead.id), 'lead nurture trigger')
+  //
+  //  Every topic follows up (owner direction 2026-09-16), as the privacy page
+  //  now says: a message about an existing booking or anything else is answered
+  //  first, then may lead to the general follow-up. The sequence still refuses
+  //  anyone who has a booking on record, so a customer asking about their own
+  //  booking is not sent "to price your move".
+  //
+  //  ANSWER FIRST: the team alert below is queued BEFORE any promotional
+  //  sequence is asked for, so the customer's actual message is always the
+  //  first thing that happens.
 
   // ── 1) Alert the team in Discord (reliable, always attempted) ──
   try {
@@ -203,6 +269,13 @@ async function handleContact(req: NextRequest): Promise<NextResponse> {
   } catch (err) {
     apiLogger.error({ err }, '/api/contact — Discord queue failed (non-fatal)')
   }
+
+  // ── Promotional follow-up, only after the request is on its way to the team ──
+  if (lead) fireAndForget(deps.nurture(lead.lead.id), 'lead nurture trigger')
+  //  The submission's own sequence: every topic enters the general lead
+  //  nurture on its notice (the legacy call above only ever acts on an express
+  //  opt-in; stable job ids and the enrollment claim make the two idempotent).
+  if (lead && basis) await startCaptureScenario(basis, { surface, email: data.email, leadId: lead.lead.id })
 
   // ── 2) NO customer auto-reply ──
   // MESSAGING POLICY: the contact-form acknowledgement is not a customer email,

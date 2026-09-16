@@ -463,6 +463,75 @@ services then pick up the new code minutes later on merge.
    `npx prisma migrate resolve --rolled-back 20260915120000_campaign_run_single_unfinished`
    and deploy again.
 
+### The email consent release adds one additive migration (2026-09-16)
+
+| Migration | What it does | Rollback |
+|---|---|---|
+| `20260916120000_email_consent_enrollment` | new tables `email_consent_events` (append-only: a trigger refuses UPDATE/DELETE except `redact_email_consent(email)`), `email_marketing_status`, `sequence_enrollments`; nullable columns `crm_leads.basis_event_id`, `bookings.basis_event_id`, `email_sends.marketing_basis`, `email_sends.basis_event_id` | in the file's header — roll the code back FIRST, and export `email_consent_events` before dropping it (it is consent evidence) |
+
+It writes no row and backfills nothing: every existing lead and booking has no
+notice basis, so no historical contact can be enrolled by it.
+
+**Apply it BEFORE the merge — this one is not optional ordering.** The
+regenerated Prisma client selects the four new columns on every default read
+and write of `crm_leads`, `bookings` and `email_sends`. On an unmigrated
+database, booking creation, payment fulfilment and **every** email send —
+transactional included — fail with `P2022` the moment Railway deploys. Then run
+`npx tsx scripts/email-schema-preflight.ts`; it must report no drift (it checks
+the new tables, columns, the `(request_id, kind)` unique index, the kind CHECK
+and the append-only trigger).
+
+Every new flag defaults off (`EMAIL_NOTICE_BASIS_ENABLED`, `OFFER_SIGNUP_ENABLED`,
+`EMAIL_EBR_BASIS_ENABLED`, `EMAIL_REQUIRE_TURNSTILE`), so no form notice becomes a
+marketing basis and the popup route stays dark until an owner turns them on.
+
+**What the flags turn on.** Every genuine form submission with an email enters
+an EXISTING sequence with its existing templates and cadence: a priced quick
+quote → quote follow-up (after the quote reply is webhook-delivered, in the page
+language); a no-price quote, the booking form's Continue click, every contact
+topic (the team alert is queued first), the popup and the tracker → lead
+nurture; a submitted, unpaid booking → abandoned-checkout recovery. The one copy
+change is the lead-nurture footer, which no longer says "opted in". The full map
+is docs/email-marketing/form-marketing-paths.md.
+
+**Rules that apply at once, flags or not:** test/staff/role addresses are refused
+promotional mail even with consent; nobody gets two copies of one sequence
+running at once (a form-notice person: one of each kind per 30 days); the lead
+nurture refuses anyone with a booking on record — a move taken before, or a
+booking still waiting for payment or approval; recovery for an unpaid booking
+stops once a LATER booking by the same customer is paid or approved; a booking
+stops the person's lead sequences; a suppression (bounce, complaint, unsubscribe,
+admin block) stops every sequence row; the unsubscribe page never offers "keep me
+subscribed" to someone who had already opted out; journey scheduling needs
+`EMAIL_PROMOTIONS_ENABLED=true` (already true); an admin can no longer lift an
+unsubscribe; a later hard bounce or complaint relabels an admin block.
+
+**Abuse limits (API service, read per request, blank or invalid = default):**
+`CONSENT_IP_DISTINCT_EMAILS_24H` (5 distinct addresses granted per client
+connection per 24 h; IPv6 grouped by /64), `CONSENT_GLOBAL_GRANTS_24H` (100
+distinct addresses per 24 h; a breaker trip posts one ops alert),
+`CONSENT_POPUP_GRANTS_24H` (30 distinct popup addresses per 24 h). A withheld
+grant still saves the lead and sends the requested reply; it is recorded as a
+`basis_withheld` event with its reason. Route limits: booking submit 10/h
+(fail-closed, its own bucket), route estimate 40/10 min (fail-closed, its own
+bucket), checkout resume 30/h (fail-closed, its own bucket).
+
+**Apply the migration with a lock timeout.** On the Neon DIRECT host, append
+`options=-c lock_timeout=5s` to the URL for `migrate deploy`: the three ALTERs
+take brief exclusive locks, and production's `lock_timeout` is 0. A timeout rolls
+the whole file back cleanly; `migrate resolve --rolled-back
+20260916120000_email_consent_enrollment`, then deploy again at a quieter moment.
+
+**Rollout gates, in order:** migration + preflight → API and worker on the same
+commit → website → tracker (`INTERNAL_NOTIFY_TOKEN` on API and tracker,
+`WMIWCI_API_BASE_URL` on the tracker) → reconcile the Leadtracking/SendGrid
+suppressions (import UNSUBSCRIBED first, then bounces as HARD_BOUNCE, invalid as
+INVALID_ADDRESS, spam reports as SPAM_COMPLAINT; do not import SendGrid "blocks"
+in bulk) → `EMAIL_NOTICE_BASIS_ENABLED=true` on the worker, then the API →
+`OFFER_SIGNUP_ENABLED=true` → remove `SENDGRID_API_KEY` from the Lead-tracking
+service (keep the service up ≥30 days for its unsubscribe links). Keep
+`TURNSTILE_ENABLED=false` until a real secret and a page widget both exist.
+
 CI builds its throwaway database from `prisma/baseline/00_init.sql` plus the
 migrations listed in `prisma/baseline/REPRESENTED_MIGRATIONS.txt`, then runs a
 real `prisma migrate deploy` for everything else — so a new migration's SQL

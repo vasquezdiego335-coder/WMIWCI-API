@@ -15,6 +15,12 @@
 // ============================================================
 
 import { queueLogger } from './logger'
+import { prisma } from './db'
+import {
+  promotionalEligibility,
+  type EligibilityDb,
+  type EligibilityDeps,
+} from './consent/marketing-eligibility'
 
 export type MarketingContact = {
   email: string
@@ -28,17 +34,49 @@ export function isMarketingConfigured(): boolean {
   return Boolean(process.env.MARKETING_API_KEY && process.env.MARKETING_LIST_ID)
 }
 
+export type EnrollCustomerResult =
+  | { status: 'not_configured' }
+  | { status: 'refused'; reason: string }
+  | { status: 'enrolled' }
+
+// ════════════════════════════════════════════════════════════════════════
+//  WHO MAY BE ADDED TO AN EXTERNAL MARKETING LIST (DESIGN-v2 §5, 2026-09-16)
+//  ---------------------------------------------------------------------
+//  fulfillment.ts enqueues this for EVERY paid deposit, and the example below
+//  subscribes the address outright. Paying for a move is not consent to a
+//  marketing list, so before any provider call:
+//    • an internal test booking is refused (looked up by displayId);
+//    • promotionalEligibility() must permit it in the 'automation' context —
+//      EXPRESS consent only, never a notice or EBR basis — with the customer
+//      as the subject. That also refuses a suppressed, unsubscribed, opted-out
+//      or declined person and any test/staff/role identity.
+//  Every refusal FAILS CLOSED, including a read error: an address that could
+//  not be checked is not enrolled.
+// ════════════════════════════════════════════════════════════════════════
+
+type EnrollDb = EligibilityDb
+
 /**
  * Enroll a paying customer into the marketing automation / audience.
- * Safe to call always — it skips cleanly when not configured.
+ * Safe to call always — it skips cleanly when not configured, and refuses
+ * anybody the shared gate does not permit.
  */
-export async function enrollCustomer(contact: MarketingContact): Promise<void> {
+export async function enrollCustomer(
+  contact: MarketingContact,
+  deps: EligibilityDeps & { db?: EnrollDb } = {}
+): Promise<EnrollCustomerResult> {
   if (!isMarketingConfigured()) {
     queueLogger.info(
       { email: contact.email },
       'Marketing not configured — skipping (set MARKETING_API_KEY + MARKETING_LIST_ID to activate)'
     )
-    return
+    return { status: 'not_configured' }
+  }
+
+  const refusal = await enrollRefusal(contact, deps)
+  if (refusal) {
+    queueLogger.info({ displayId: contact.displayId, reason: refusal }, 'enrollCustomer(): refused by the marketing eligibility gate')
+    return { status: 'refused', reason: refusal }
   }
 
   // ────────────────────────────────────────────────────────────
@@ -69,4 +107,34 @@ export async function enrollCustomer(contact: MarketingContact): Promise<void> {
     { email: contact.email },
     'enrollCustomer(): configured but no provider call implemented yet — fill in the TODO in src/lib/marketing.ts'
   )
+  return { status: 'enrolled' }
+}
+
+/** Why this contact may not be enrolled, or null. Never throws; fails closed. */
+export async function enrollRefusal(contact: MarketingContact, deps: EligibilityDeps & { db?: EnrollDb } = {}): Promise<string | null> {
+  const db = (deps.db ?? prisma) as EnrollDb
+  if (!contact.email || !contact.email.trim()) return 'no_email'
+  try {
+    if (contact.displayId) {
+      const booking = await db.booking.findUnique({ where: { displayId: contact.displayId }, select: { isInternalTest: true } })
+      if (booking?.isInternalTest) return 'internal_test_booking'
+    }
+    const customer = await db.customer.findMany({
+      where: { email: { equals: contact.email.trim(), mode: 'insensitive' } },
+      select: { id: true },
+      take: 1,
+    })
+    const decision = await promotionalEligibility(
+      {
+        context: 'automation',
+        email: contact.email,
+        subject: customer[0] ? { type: 'customer', id: customer[0].id } : { type: 'none' },
+      },
+      deps
+    )
+    return decision.eligible ? null : decision.reason
+  } catch (err) {
+    queueLogger.error({ err: err instanceof Error ? err.message : String(err) }, 'enrollCustomer(): eligibility read failed — refusing')
+    return 'eligibility_read_failed'
+  }
 }

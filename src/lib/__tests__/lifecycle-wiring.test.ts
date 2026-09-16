@@ -61,7 +61,12 @@ test('BOOKING STEP 1: /api/leads/partial enrols a consented lead instead of doin
   assert.match(src, /onLeadCaptured\(/, 'the partial route reaches Sequence B')
   // It must be gated on something that can CHANGE the answer, not fired on
   // every autosave — the booking form calls this route from five triggers.
-  assert.match(src, /result\.isNew \|\| d\.marketingConsent === true/)
+  // Old pages: the first capture or the consent toggle. New pages (2026-09-16,
+  // they report emailUserTyped): ONLY the Step-1 Continue click, never a
+  // background ping — what the privacy policy promises.
+  assert.match(src, /result\?\.isNew === true \|\| d\.marketingConsent === true/)
+  assert.match(src, /newContractPage\s*\? onBookingForm && contract\.marketingNotice\?\.trigger === 'continue'/)
+  assert.match(src, /if \(result && nurtureMoment\) \{/)
 })
 
 test('CONTACT: /api/contact enrols through the same Sequence B entry point', () => {
@@ -71,7 +76,8 @@ test('CONTACT: /api/contact enrols through the same Sequence B entry point', () 
   //  pointing at `onLeadCaptured` would pass a route-only check forever.
   const route = code('app/api/contact/route.ts')
   assert.match(route, /deps\.nurture\(/, 'the route asks for enrolment')
-  assert.match(route, /if \(lead\) fireAndForget\(deps\.nurture/, 'and only for a lead that exists')
+  assert.match(route, /if \(lead\) fireAndForget\(deps\.nurture/,
+    'only for a lead that exists — every topic (owner direction 2026-09-16); the nurture refuses anyone with a booking on record')
 
   const seam = code('src/lib/contact-route-deps.ts')
   assert.match(seam, /nurture:\s*\(leadId: string\)/, 'the seam declares it')

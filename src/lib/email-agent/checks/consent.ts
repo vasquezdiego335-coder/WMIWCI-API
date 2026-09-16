@@ -216,11 +216,43 @@ const suppressionScopePolicy: CheckDefinition = {
 }
 
 // ── 4. Marketing that reached somebody with no recorded opt-in ──────────
+//
+//  JUDGED BY THE BASIS THE SEND WAS MADE UNDER (DESIGN-v2 §5, 2026-09-16).
+//  Since the consent release the guard writes EmailSend.marketingBasis and
+//  basisEventId at claim time. Re-deriving consent from TODAY's columns would
+//  flag every lawful notice-basis send as CRITICAL — and this finding suggests
+//  pauseMarketingDispatch, which the policy runs automatically — while a send
+//  whose recorded basis does not hold up would still be missed. So:
+//    • 'notice' / 'express' with an event id → that consent event must exist,
+//      be of the matching kind, and belong to the SAME address;
+//    • 'express' with no event id (a legacy checkbox) → a true consent column
+//      on a Customer or Lead row for the address, as before;
+//    • 'ebr' → accepted (it is only ever granted behind its flag);
+//    • no basis recorded (a send claimed before the release) → the legacy
+//      column check, exactly as before;
+//    • anything else ('transactional' on a promotional send) → offending.
+
+/** PURE: does a send's recorded basis hold up against the evidence loaded for it? */
+export function promotionalBasisHolds(
+  send: { email: string; marketingBasis: string | null; basisEventId: string | null },
+  evidence: { legacyConsenting: Set<string>; events: Map<string, { kind: string; emailNormalized: string }> }
+): boolean {
+  const email = send.email.trim().toLowerCase()
+  const basis = send.marketingBasis
+  if (basis === 'ebr') return true
+  if ((basis === 'notice' || basis === 'express') && send.basisEventId) {
+    const ev = evidence.events.get(send.basisEventId)
+    if (!ev || ev.emailNormalized !== email) return false
+    return basis === 'notice' ? ev.kind === 'notice_accepted' : ev.kind === 'express_opt_in'
+  }
+  if (basis === 'express' || basis === null) return evidence.legacyConsenting.has(email)
+  return false
+}
 
 const sentWithoutConsent: CheckDefinition = {
   id: 'consent.sent_without_consent',
   category: 'consent',
-  intent: 'A promotional email was accepted for somebody who has no explicit marketing opt-in on any record.',
+  intent: 'A promotional email was accepted without an eligible marketing basis for that address.',
   run: async (ctx) => {
     const sends = await prisma.emailSend.findMany({
       where: {
@@ -228,12 +260,18 @@ const sentWithoutConsent: CheckDefinition = {
         isTest: false,
         sentAt: { not: null, gte: structuralSince(ctx) },
       },
-      select: { id: true, email: true, template: true, sentAt: true, campaignId: true },
+      select: { id: true, email: true, template: true, sentAt: true, campaignId: true, marketingBasis: true, basisEventId: true },
       orderBy: { sentAt: 'desc' },
       take: 500,
     })
     countInspected(ctx, 'promotional_sends_consent_checked', sends.length)
     if (sends.length === 0) return []
+
+    const eventIds = Array.from(new Set(sends.map((s) => s.basisEventId).filter((id): id is string => !!id)))
+    const basisEvents = eventIds.length
+      ? await prisma.emailConsentEvent.findMany({ where: { id: { in: eventIds } }, select: { id: true, kind: true, emailNormalized: true } })
+      : []
+    const events = new Map(basisEvents.map((e) => [e.id, { kind: e.kind, emailNormalized: e.emailNormalized }]))
 
     const emails = Array.from(new Set(sends.map((s) => s.email.toLowerCase())))
     // Consent may live on EITHER record — a person can be a Lead, a Customer,
@@ -249,7 +287,7 @@ const sentWithoutConsent: CheckDefinition = {
         .map((c) => c.email.toLowerCase())
         .concat(leads.filter((l): l is { email: string } => !!l.email).map((l) => l.email.toLowerCase()))
     )
-    const offending = sends.filter((s) => !consenting.has(s.email.toLowerCase()))
+    const offending = sends.filter((s) => !promotionalBasisHolds(s, { legacyConsenting: consenting, events }))
     if (offending.length === 0) return []
 
     return [
@@ -261,8 +299,9 @@ const sentWithoutConsent: CheckDefinition = {
         fingerprintParts: ['sent_without_consent', ...offending.map((o) => o.id).sort().slice(0, 5)],
         title: `${offending.length} promotional ${plural(offending.length, 'email', 'emails')} went to somebody with no recorded consent`,
         description:
-          `${offending.length} promotional ${plural(offending.length, 'send', 'sends')} in the last ${STRUCTURAL_WINDOW_DAYS} days went to ${plural(offending.length, 'an address', 'addresses')} with no explicit email-marketing opt-in ` +
-          `on either the customer or the lead record. Consent may have been withdrawn after the send, which is not a fault — but if it was never there, this is a compliance breach and the audience definition that produced it will produce more.`,
+          `${offending.length} promotional ${plural(offending.length, 'send', 'sends')} in the last ${STRUCTURAL_WINDOW_DAYS} days went to ${plural(offending.length, 'an address', 'addresses')} without an eligible marketing basis: ` +
+          `the basis recorded on the send does not match a consent event for that address, or (for sends with no recorded basis or a legacy checkbox) there is no explicit email-marketing opt-in on either the customer or the lead record. ` +
+          `Consent may have been withdrawn after the send, which is not a fault — but if it was never there, this is a compliance breach and the path that produced it will produce more.`,
         evidence: {
           affected: offending.length,
           checkedSends: sends.length,
@@ -270,6 +309,7 @@ const sentWithoutConsent: CheckDefinition = {
           examples: offending.slice(0, EVIDENCE_ROW_CAP).map((s) => ({
             sendId: s.id, email: maskEmail(s.email), template: s.template,
             sentAt: s.sentAt?.toISOString() ?? null, campaignId: s.campaignId,
+            marketingBasis: s.marketingBasis, basisEventId: s.basisEventId,
           })),
         },
         suggestedActions: ['pauseMarketingDispatch', 'inspectEmailSend', 'createApprovalRequest'],

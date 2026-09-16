@@ -9,6 +9,8 @@
 //
 // Not a test file; never listed in `npm test`.
 process.env.EMAIL_JOURNEYS_ENABLED = 'true'
+// Promotional journeys also need the promotions kill switch (2026-09-16).
+process.env.EMAIL_PROMOTIONS_ENABLED = 'true'
 process.env.MARKETING_FOLLOWUPS_ENABLED = 'true'
 delete process.env.EMAIL_PROMOTIONAL_ALLOWLIST
 

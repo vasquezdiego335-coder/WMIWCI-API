@@ -436,9 +436,17 @@ export async function listSuppressions(opts: { reason?: string; email?: string; 
  * deliberate act that belongs at the provider, with a reason — not a button in
  * a list view.
  */
-export const RESTORABLE_REASONS = ['UNSUBSCRIBED', 'ADMIN_BLOCK', 'INVALID_ADDRESS'] as const
+// UNSUBSCRIBED is deliberately NOT restorable (2026-09-16): an unsubscribe is
+// the customer's own withdrawal, and only the customer can undo it, from the
+// resubscribe link on their unsubscribe confirmation page. The admin route
+// refuses it too (email-suppression adminLiftRefusal); this list keeps the
+// button from being offered at all.
+export const RESTORABLE_REASONS = ['ADMIN_BLOCK', 'INVALID_ADDRESS'] as const
 
 export function canRestoreSuppression(reason: string): { allow: boolean; why: string } {
+  if (reason === 'UNSUBSCRIBED') {
+    return { allow: false, why: 'This person unsubscribed. Only they can undo that, from the resubscribe link on their unsubscribe confirmation page.' }
+  }
   if (reason === 'SPAM_COMPLAINT') {
     return { allow: false, why: 'A spam complaint cannot be lifted here. Re-sending to a complainant damages the sending domain for every customer.' }
   }
@@ -595,6 +603,7 @@ export function explainSend(
     state_read_failed: 'The eligibility recheck could not read the record, so the send was held (fails closed) and will be retried automatically.',
     suppression_read_failed: 'The suppression list could not be read, so the send was held (fails closed) and will be retried automatically.',
     eligibility_read_failed: 'The eligibility check could not read the record, so the send was held (fails closed) and will be retried automatically.',
+    notice_expired: 'The form submission this email relied on is more than 6 months old, so no promotional email may be based on it any more.',
     attempts_exhausted: 'Every permitted attempt was used.',
     ambiguous: 'The provider outcome is unknown.',
   }

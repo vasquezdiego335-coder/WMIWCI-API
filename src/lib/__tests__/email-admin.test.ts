@@ -133,9 +133,11 @@ test('a hard bounce can never be lifted from the admin', () => {
   assert.match(v.why, /mailbox does not exist/i)
 })
 
-test('an unsubscribe and an admin block are restorable', () => {
-  assert.equal(canRestoreSuppression('UNSUBSCRIBED').allow, true)
+test('an admin block is restorable; an unsubscribe is NOT (only the customer can undo it)', () => {
   assert.equal(canRestoreSuppression('ADMIN_BLOCK').allow, true)
+  const unsub = canRestoreSuppression('UNSUBSCRIBED')
+  assert.equal(unsub.allow, false, 'an unsubscribe is the customer’s own withdrawal')
+  assert.match(unsub.why, /resubscribe link/, 'and the reason points the owner at the customer’s own path back')
 })
 
 test('an unknown suppression reason is refused, not allowed by default', () => {

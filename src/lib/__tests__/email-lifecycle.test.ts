@@ -514,10 +514,15 @@ test('24. every worker query loads the consent columns its gate needs', () => {
   assert.match(quoteCase, /emailMarketingConsent: true/)
   const nurtureCase = w.slice(w.indexOf("case 'lead-nurture-1':"), w.indexOf("case 'review-request-48h':"))
   assert.match(nurtureCase, /emailMarketingConsent: true/)
-  assert.match(nurtureCase, /hasEverBooked\(/, 'booking history is asked for, not assumed')
+  assert.match(nurtureCase, /hasBookingOnRecord\(/, 'booking history (and a booking still waiting for payment or approval) is asked for, not assumed')
 
   const e = src('lib/email-eligibility.ts')
-  assert.match(e, /customer: \{ select: \{ emailMarketingConsent: true, marketingOptOut: true \} \}/)
+  // Pinned on the LIVE send-time gate itself (not anywhere in the file). Since
+  // 2026-09-16 it also loads the customer's address, which the shared
+  // per-person eligibility decision is keyed on.
+  const liveGate = e.slice(e.indexOf('export async function bookingEligibility'), e.indexOf('export const bookingRecheck'))
+  assert.ok(liveGate.length > 0, 'bookingEligibility must be locatable')
+  assert.match(liveGate, /customer: \{ select: \{ email: true, emailMarketingConsent: true, marketingOptOut: true \} \}/)
 
   const j = src('lib/journeys.ts')
   assert.match(j, /export type LeadState = \{[\s\S]*?emailMarketingConsent: boolean \| null/)

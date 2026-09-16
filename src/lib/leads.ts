@@ -629,6 +629,73 @@ export async function markLeadQuoted(
 }
 
 /**
+ * PURE: what a booking conversion may carry from the matched lead
+ * (email consent release 2026-09-16).
+ *
+ * THE BUG THIS EXISTS TO STOP. The lead is matched by booking SESSION first, and
+ * a session's address is correctable — so the lead found can belong to a
+ * DIFFERENT address than the booking. Its consent used to be written onto the
+ * booking address's Customer anyway, stamped 'BOOKING_FORM', the current
+ * version and `now`: somebody else's opt-in, with invented provenance.
+ *
+ *   • The lead's own decision (and its notice basis) travels ONLY when the two
+ *     addresses are identical.
+ *   • An inherited decision keeps its ORIGINAL at, source and version — a
+ *     quick-quote opt-in from last week stays a quick-quote opt-in from last
+ *     week. Only this booking's own explicit checkbox is a booking-form decision
+ *     made now.
+ *   • The booking's explicit checkbox is written onto the lead only when the
+ *     lead is that address's.
+ *   • The basis is copied only into a booking that has none of its own; the
+ *     booking submit's own notice stands as its own event.
+ */
+export function conversionConsentPlan(input: {
+  bookingEmail: string | null
+  lead: {
+    email: string | null
+    emailMarketingConsent: boolean | null
+    marketingConsentAt?: Date | null
+    marketingConsentSource: string | null
+    marketingConsentVersion: string | null
+    basisEventId?: string | null
+  } | null
+  explicit: boolean | undefined
+  consentSource?: string | null
+  consentVersion?: string | null
+}): {
+  sameAddress: boolean
+  /** The consent claim to apply to the LEAD (undefined = leave it alone). */
+  leadConsent: boolean | undefined
+  /** The consent claim to apply to the CUSTOMER (undefined = leave it alone). */
+  customerConsent: boolean | undefined
+  /** Evidence for the customer write. `at` set = keep the original timestamp. */
+  provenance: { source: string | null | undefined; version: string; at: Date | null }
+  /** Lead basis to copy into the booking when the booking has none. */
+  copyBasisEventId: string | null
+} {
+  const booking = normalizeEmail(input.bookingEmail)
+  const lead = input.lead
+  const sameAddress = Boolean(lead && booking && normalizeEmail(lead.email) === booking)
+  const inherited =
+    input.explicit === undefined && lead && sameAddress ? (lead.emailMarketingConsent ?? undefined) : undefined
+  const provenance =
+    inherited !== undefined && lead
+      ? {
+          source: lead.marketingConsentSource ?? input.consentSource,
+          version: lead.marketingConsentVersion ?? input.consentVersion ?? CONSENT_VERSION,
+          at: lead.marketingConsentAt ?? null,
+        }
+      : { source: input.consentSource, version: input.consentVersion ?? CONSENT_VERSION, at: null }
+  return {
+    sameAddress,
+    leadConsent: sameAddress ? input.explicit : undefined,
+    customerConsent: input.explicit ?? inherited,
+    provenance,
+    copyBasisEventId: sameAddress && lead?.basisEventId ? lead.basisEventId : null,
+  }
+}
+
+/**
  * A booking was created → convert a matching OPEN lead so quote follow-ups stop,
  * and the conversion is visible to audiences and attribution (both already READ
  * convertedBookingId / bookedAt). Idempotent and best-effort: returns the
@@ -658,6 +725,10 @@ export async function markLeadConverted(
   const normalized = normalizeEmail(email)
   const sessionId = clean(opts.bookingSessionId)
   if (!normalized && !sessionId) return null
+  const LEAD_SELECT = {
+    id: true, email: true, emailMarketingConsent: true, marketingConsentAt: true,
+    marketingConsentSource: true, marketingConsentVersion: true, basisEventId: true,
+  } as const
   try {
     // Session first (a partial lead may not yet carry the final email), then email.
     let lead =
@@ -665,22 +736,30 @@ export async function markLeadConverted(
         ? await prisma.lead.findFirst({
             where: { bookingSessionId: sessionId, status: { in: OPEN_STATUSES } },
             orderBy: { createdAt: 'desc' },
-            select: { id: true, email: true, emailMarketingConsent: true, marketingConsentSource: true, marketingConsentVersion: true },
+            select: LEAD_SELECT,
           })
         : null
     if (!lead && normalized) {
       lead = await prisma.lead.findFirst({
         where: { email: normalized, status: { in: OPEN_STATUSES } },
         orderBy: { createdAt: 'desc' },
-        select: { id: true, email: true, emailMarketingConsent: true, marketingConsentSource: true, marketingConsentVersion: true },
+        select: LEAD_SELECT,
       })
     }
 
     // Effective consent to propagate: an explicit booking-payload value wins,
-    // otherwise whatever the partial lead already recorded. `undefined` ⇒ leave
-    // both records untouched (do not infer a decision — owner spec S2).
+    // otherwise whatever the partial lead already recorded — FOR THIS ADDRESS
+    // ONLY (see conversionConsentPlan). `undefined` ⇒ leave both records
+    // untouched (do not infer a decision — owner spec S2).
     const explicit = typeof opts.marketingConsent === 'boolean' ? opts.marketingConsent : undefined
-    const effectiveConsent = explicit ?? (lead ? lead.emailMarketingConsent ?? undefined : undefined)
+    const plan = conversionConsentPlan({
+      bookingEmail: normalized,
+      lead,
+      explicit,
+      consentSource: opts.consentSource,
+      consentVersion: opts.consentVersion,
+    })
+    const effectiveConsent = plan.customerConsent
 
     // A SUPPRESSED address is never marketable, whatever this form claims.
     // Checked here so neither the Lead nor the Customer write below can
@@ -705,7 +784,9 @@ export async function markLeadConverted(
       // Consent rules live in ONE place (src/lib/consent.ts) so this route and
       // the lead endpoint cannot drift. It decides whether anything changes at
       // all: silence changes nothing, an unchecked box never revokes an earlier
-      // opt-in, and suppression overrides everything.
+      // opt-in, and suppression overrides everything. A lead that belongs to a
+      // different address than the booking is converted but its consent is
+      // left alone — the booking's checkbox was not about that address.
       const decision = decideConsent(
         {
           consent: lead.emailMarketingConsent,
@@ -713,7 +794,7 @@ export async function markLeadConverted(
           consentVersion: lead.marketingConsentVersion,
         },
         {
-          consent: explicit,
+          consent: plan.leadConsent,
           source: opts.consentSource,
           version: opts.consentVersion ?? CONSENT_VERSION,
           isSuppressed: suppressed,
@@ -722,7 +803,17 @@ export async function markLeadConverted(
       )
       Object.assign(data, decision.changes)
       await prisma.lead.update({ where: { id: lead.id }, data })
-      apiLogger.info({ leadId: lead.id, bookingId }, 'lead converted (booking created)')
+      apiLogger.info({ leadId: lead.id, bookingId, sameAddress: plan.sameAddress }, 'lead converted (booking created)')
+    }
+
+    // ── THE LEAD'S NOTICE BASIS, same address only (2026-09-16) ────────────
+    //  Filled only into a booking with no basis of its own, so the booking
+    //  submit's own notice is never replaced. Best effort: the eligibility gate
+    //  re-checks the event's address and surface before it permits anything.
+    if (plan.copyBasisEventId) {
+      await prisma.booking
+        .updateMany({ where: { id: bookingId, basisEventId: null }, data: { basisEventId: plan.copyBasisEventId } })
+        .catch((err) => apiLogger.warn({ err: String(err).slice(0, 200), bookingId }, 'booking basis copy failed (non-fatal)'))
     }
 
     // Propagate positive/negative consent to the durable Customer record so
@@ -744,8 +835,8 @@ export async function markLeadConverted(
         },
         {
           consent: effectiveConsent,
-          source: opts.consentSource,
-          version: opts.consentVersion ?? CONSENT_VERSION,
+          source: plan.provenance.source,
+          version: plan.provenance.version,
           isSuppressed: suppressed,
         },
         now
@@ -754,10 +845,15 @@ export async function markLeadConverted(
       // The FULL evidence travels with the boolean. Source and version were
       // previously written only to the Lead, so a customer who consented with
       // no prior lead carried a bare `true` and nothing that could show where
-      // it came from or what wording they saw.
-      if (Object.keys(customerDecision.changes).length > 0) {
+      // it came from or what wording they saw. An INHERITED decision keeps the
+      // moment it was actually made, not the moment of this booking.
+      const changes =
+        customerDecision.changes.marketingConsentAt && plan.provenance.at
+          ? { ...customerDecision.changes, marketingConsentAt: plan.provenance.at }
+          : customerDecision.changes
+      if (Object.keys(changes).length > 0) {
         await prisma.customer
-          .updateMany({ where: { email: normalized }, data: customerDecision.changes })
+          .updateMany({ where: { email: normalized }, data: changes })
           .catch((err) =>
             apiLogger.warn({ err: String(err), bookingId }, 'customer consent propagation failed (non-fatal)')
           )
@@ -819,6 +915,13 @@ export type PartialLeadInput = {
   marketingConsentPrompted?: boolean
   consentSource?: string | null
   consentVersion?: string | null
+  /**
+   * Set by the capture after a suppression lookup (2026-09-16). This path used
+   * to skip the lookup that ingestLeadSafe makes, so an unsubscribed or
+   * complained address that ticked an old page's box was STORED as consenting.
+   * Suppression beats every consent claim a form can make.
+   */
+  isSuppressed?: boolean
   /** Free-form source string (utm_source or a client-derived channel). */
   source?: string | null
   /** The customer's own "How did you hear about us?" answer. NOT `source`:
@@ -1019,6 +1122,7 @@ function partialConsentPatch(
       consent: input.marketingConsent,
       source: input.consentSource ?? 'BOOKING_FORM',
       version: clean(input.consentVersion) ?? CONSENT_VERSION,
+      isSuppressed: input.isSuppressed === true,
     },
     now,
   )
@@ -1052,7 +1156,10 @@ function quoteSnapshotColumns(input: PartialLeadInput): Record<string, unknown> 
 }
 
 export function buildPartialLeadCreate(input: PartialLeadInput, now: Date) {
-  const consented = typeof input.marketingConsent === 'boolean'
+  //  A SUPPRESSED address's claim is not stored (the question still counts as
+  //  asked — see marketingConsentPrompted below).
+  const asked = typeof input.marketingConsent === 'boolean'
+  const consented = asked && input.isSuppressed !== true
   return {
     contactPreference: normalizeContactPreference(input.contactPreference),
     bestTimeToCall: clean(input.bestTimeToCall),
@@ -1098,7 +1205,7 @@ export function buildPartialLeadCreate(input: PartialLeadInput, now: Date) {
     //
     //  An explicit consent decision is itself proof the question was asked, so
     //  it implies TRUE without the client having to say so twice.
-    marketingConsentPrompted: consented ? true : (input.marketingConsentPrompted ?? null),
+    marketingConsentPrompted: asked ? true : (input.marketingConsentPrompted ?? null),
     // ── THE CUSTOMER'S OWN ANSWER, in its own column ─────────────────────
     //  It used to reach only composeNotes() -> free-text `notes` on the OTHER
     //  ingestion path, and nothing at all on this one, so a partial capture
@@ -1265,6 +1372,18 @@ export function buildPartialLeadUpdate(
   const correctable = <T>(cur: T | null, next: T | null | undefined): T | null =>
     matchedBy === 'session' && next != null ? next : fillIfBlank(cur, next)
 
+  // ── A CORRECTED ADDRESS IS A DIFFERENT PERSON'S INBOX (2026-09-16) ──────
+  //  In-session the latest email wins (see `correctable`). The consent and the
+  //  notice basis on this row were given FOR THE OLD ADDRESS, so they must not
+  //  follow the correction: an opt-in typed as a@… and retyped to b@… used to
+  //  keep `true` — and a's timestamp and source — for b. The row's decision is
+  //  cleared to "never asked" and any claim in THIS payload is judged afresh
+  //  for the new address. The old address's own consent events are untouched.
+  const nextEmail = normalizeEmail(input.email)
+  const emailChanged =
+    matchedBy === 'session' && nextEmail != null && existing.email != null && normalizeEmail(existing.email) !== nextEmail
+  const consentBase: ExistingPartialLead = emailChanged ? { ...existing, emailMarketingConsent: null } : existing
+
   // Lifecycle: never downgrade. CONVERTED/SUBMITTED are sticky terminal-ish.
   const candidate = lifecycleForStep(input.formStep)
   const curRank = existing.lifecycle ? LIFECYCLE_RANK[existing.lifecycle] ?? 0 : -1
@@ -1317,7 +1436,16 @@ export function buildPartialLeadUpdate(
     attributionId: fillIfBlank(existing.attributionId, cleanAttributionId(input.attributionId)),
     // Access details: FILL-BLANK-ONLY. See PartialLeadInput.accessDetails.
     notes: fillIfBlank(existing.notes, clean(input.accessDetails)),
-    ...partialConsentPatch(existing, input, now),
+    ...(emailChanged
+      ? {
+          emailMarketingConsent: null,
+          marketingConsentAt: null,
+          marketingConsentSource: null,
+          marketingConsentVersion: null,
+          basisEventId: null,
+        }
+      : {}),
+    ...partialConsentPatch(consentBase, input, now),
     ...questionProvenancePatch(existing, input),
     ...sourceUpgradePatch(existing, input),
     // ── THE MOVE'S TWO ENDS, ON THE UPDATE PATH TOO (fix 2026-08-25) ──────
@@ -1416,7 +1544,16 @@ export interface PartialLeadStore {
   update(id: string, data: ReturnType<typeof buildPartialLeadUpdate>): Promise<LeadRecord>
 }
 
-export type PartialLeadDeps = { store: PartialLeadStore; now: () => Date }
+export type PartialLeadDeps = {
+  store: PartialLeadStore
+  now: () => Date
+  /**
+   * Suppression lookup for a submission that carries a consent boolean. FAILS
+   * CLOSED (the default answers `true` on a read error). Optional so an
+   * injected test store keeps its exact behaviour; production always has it.
+   */
+  isSuppressed?: (email: string) => Promise<boolean>
+}
 
 /** THE partial-lead writer. Dedup priority: (1) bookingSessionId, (2) normalized
  *  email on an OPEN lead. Returns null when there is nothing to key on (no
@@ -1429,6 +1566,13 @@ export async function capturePartialLead(
   const sessionId = clean(input.bookingSessionId)
   const email = normalizeEmail(input.email)
   if (!sessionId && !email) return null
+
+  // SUPPRESSION FIRST, and only when this submission claims a consent decision
+  // — the same rule ingestLeadSafe applies. A form can never re-subscribe an
+  // address that unsubscribed, complained or hard-bounced.
+  if (typeof input.marketingConsent === 'boolean' && email && deps.isSuppressed) {
+    input = { ...input, isSuppressed: await deps.isSuppressed(email) }
+  }
 
   let existing: ExistingPartialLead | null = null
   let matchedBy: LeadMatchBasis = 'email'
@@ -1491,6 +1635,7 @@ export function defaultPartialLeadDeps(): PartialLeadDeps {
   } as const
   _partialDeps = {
     now: () => new Date(),
+    isSuppressed: (email) => isAddressSuppressed(email),
     store: {
       async findBySessionId(sessionId) {
         return prisma.lead.findFirst({
@@ -1775,10 +1920,61 @@ export async function hasEverBooked(email?: string | null): Promise<boolean> {
   }
 }
 
+/**
+ * Booking statuses that mean "this person is already in a booking" for the
+ * LEAD NURTURE (2026-09-16), on top of countsAsPriorBooking. Every form now
+ * enters the nurture, so a customer whose booking is waiting for payment or
+ * for the owner's approval — who writes in to ask about it, or opens the popup —
+ * must not be told "to price your move, we need a few things". Recent only: an
+ * abandoned checkout from last season is somebody starting over.
+ */
+export const NURTURE_BLOCKING_OPEN_STATUSES: readonly string[] = ['PENDING_PAYMENT', 'PENDING_APPROVAL']
+export const NURTURE_OPEN_BOOKING_DAYS = 90
+
+/** PURE: does this booking keep the person out of the lead nurture? */
+export function blocksLeadNurture(
+  b: { status: string; depositPaid: boolean; isInternalTest: boolean; createdAt: Date },
+  now: Date = new Date(),
+): boolean {
+  if (b.isInternalTest) return false
+  if (countsAsPriorBooking(b)) return true
+  return NURTURE_BLOCKING_OPEN_STATUSES.includes(b.status) && now.getTime() - b.createdAt.getTime() <= NURTURE_OPEN_BOOKING_DAYS * 24 * 60 * 60 * 1000
+}
+
+/**
+ * The lead nurture's booking check: a move taken with us before
+ * (hasEverBooked's rule) OR a booking still waiting for payment or approval.
+ * FAILS CLOSED like hasEverBooked: a read error answers true.
+ */
+export async function hasBookingOnRecord(email?: string | null): Promise<boolean> {
+  const normalized = normalizeEmail(email)
+  if (!normalized) return false
+  try {
+    const bookings = await prisma.booking.findMany({
+      where: { customer: { email: normalized } },
+      select: { status: true, depositPaid: true, isInternalTest: true, createdAt: true },
+      orderBy: { createdAt: 'desc' },
+      take: 25,
+    })
+    const now = new Date()
+    return bookings.some((b) => blocksLeadNurture(b, now))
+  } catch (err) {
+    apiLogger.warn({ err: String(err).slice(0, 200) }, 'booking lookup failed — treating the person as booked (no nurture)')
+    return true
+  }
+}
+
 /** PURE promotional-consent gate (owner spec 2026-07-24). A person is promotable
  *  ONLY with an explicit positive consent AND no active suppression. Used by the
  *  audience layer + unit tests. `emailMarketingConsent` is tri-state: null/false
- *  both fail. Suppression always wins. */
+ *  both fail. Suppression always wins.
+ *
+ *  EXPRESS ONLY, BY DEFINITION (2026-09-16). This reads the legacy checkbox
+ *  column, which only an explicit opt-in writes — a notice is never stored
+ *  there. It is a ROW-level legacy check, not the decision: every promotional
+ *  caller also asks consent/marketing-eligibility.promotionalEligibility, whose
+ *  per-person prohibitions (an unsubscribe or decline on any row, a test
+ *  identity) win over a `true` here. It must never be widened to a notice. */
 export function hasPromotionalConsent(subject: {
   emailMarketingConsent?: boolean | null
   suppressed?: boolean | { reason?: string } | null

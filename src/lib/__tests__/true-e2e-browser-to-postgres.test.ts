@@ -168,7 +168,7 @@ test('TRUE E2E: real page -> real API -> real PostgreSQL, contact step then card
   svc!.dispatchEvent(new b.win.Event('change', { bubbles: true }))
   for (let i = 0; i < 10; i++) await new Promise((r) => setTimeout(r, 5))
 
-  // ── 1. CONTACT STEP. Email entered, marketing box left visibly unchecked ──
+  // ── 1. CONTACT STEP. Email entered, the email notice shown, opt-out left unticked ──
   setField(b, 'email', EMAIL)
   ;(b.doc.getElementById('email') as HTMLInputElement).dispatchEvent(new b.win.Event('blur', { bubbles: true }))
   for (let i = 0; i < 30; i++) await new Promise((r) => setTimeout(r, 5))
@@ -178,8 +178,12 @@ test('TRUE E2E: real page -> real API -> real PostgreSQL, contact step then card
   console.log('\n[BROWSER BODY 1 — contact step]\n' + JSON.stringify(first, null, 2))
 
   //  Proof the evidence came from the PAGE, before the API ever sees it.
-  assert.equal(first.marketingConsent, false, 'a displayed, unchecked box is a decline')
-  assert.equal(first.marketingConsentPresented, true)
+  //  Email consent release 2026-09-16: the page shows a NOTICE, not a checkbox.
+  //  A background capture (blur) never carries the notice and never claims consent;
+  //  the unticked opt-out box is sent explicitly.
+  assert.equal('marketingConsent' in first, false, 'no checkbox, so no consent claim')
+  assert.equal(first.marketingNotice, undefined, 'only the Continue click carries the notice')
+  assert.equal(first.emailMarketingOptOut, false)
   assert.equal(first.attributionId, AID, 'the scan id rides the FIRST capture')
   assert.equal(first.foundUsPresented, false, 'the source question is not reached yet')
   assert.equal(first.pickupZip, undefined, 'and no address may be claimed yet')
@@ -193,8 +197,8 @@ test('TRUE E2E: real page -> real API -> real PostgreSQL, contact step then card
   const afterFirst = await prisma.lead.findFirst({ where: { email: EMAIL } })
   assert.ok(afterFirst, 'the row must exist in PostgreSQL')
   const leadId = afterFirst!.id
-  assert.equal(afterFirst!.emailMarketingConsent, false, 'stored as Not opted in')
-  assert.equal(afterFirst!.marketingConsentPrompted, true)
+  assert.equal(afterFirst!.emailMarketingConsent, null, 'a notice page never writes an opt-in column')
+  assert.equal(await prisma.emailConsentEvent.count({ where: { emailNormalized: EMAIL } }), 0, 'a blur records no notice and no consent event')
   assert.equal(afterFirst!.attributionId, AID, 'the individual scan is stored')
   assert.equal(afterFirst!.foundUsPrompted, false)
   assert.equal(afterFirst!.pickupAddressComplete, null, 'the address step was never reached')
@@ -204,7 +208,10 @@ test('TRUE E2E: real page -> real API -> real PostgreSQL, contact step then card
   const card1 = formatLeadAlert(toLeadAlertInput(afterFirst as never))
   const text1 = [card1.title, ...card1.lines.map((l) => l.message)].join('\n')
   console.log('\n[OWNER CARD 1]\n' + text1)
-  assert.match(text1, /Marketing email: Not opted in/)
+  //  The notice-era booking form has no opt-in checkbox, and the card says so
+  //  (never "Unknown — captured before we recorded whether the box was shown").
+  assert.match(text1, /Marketing email: (Not asked — this form has no marketing checkbox|Not opted in)/)
+  assert.doesNotMatch(text1, /Marketing email: Unknown/)
   assert.match(text1, /Customer-reported source: Not reached yet/)
   assert.match(text1, /awaiting pickup and destination addresses/i)
   assert.match(text1, /Door hanger/, 'the scan is attributed')
@@ -256,7 +263,7 @@ test('TRUE E2E: real page -> real API -> real PostgreSQL, contact step then card
   assert.ok(afterSecond.foundUs, 'the customer-reported source is stored')
   assert.equal(afterSecond.foundUsPrompted, true)
   assert.equal(afterSecond.attributionId, AID, 'first-touch attribution was not overwritten')
-  assert.equal(afterSecond.emailMarketingConsent, false, 'the decline still stands')
+  assert.equal(afterSecond.emailMarketingConsent, null, 'still no opt-in column written')
   assert.notEqual(afterSecond.lifecycle, null)
 
   //  Tracked acquisition and the customer's own answer stayed SEPARATE.

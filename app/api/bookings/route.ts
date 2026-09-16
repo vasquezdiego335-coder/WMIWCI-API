@@ -21,6 +21,14 @@ import { TRUCK_PICKUP_RETURN, DISCOUNT_POLICY } from '@/lib/pricing-config'
 // unit testable without importing a Next route.
 import { BookingSchema } from '@/lib/booking-schema'
 import { CONSENT_VERSION } from '@/lib/consent'
+import {
+  applyCaptureBasis,
+  captureClient,
+  describeCaptureBasis,
+  legacyConsentGivenOptOut,
+  parseCaptureContract,
+  startCaptureScenario,
+} from '@/lib/capture-basis'
 import { buildReviewReasons } from '@/lib/booking-review'
 import { resolveServiceShape } from '@/lib/service-shape'
 import { assessInventory, describeInventory, mergeInventory, parseInventoryText, toInventory } from '@/lib/inventory'
@@ -246,6 +254,12 @@ async function handleBooking(req: NextRequest): Promise<NextResponse> {
   }
 
   const data = parsed.data
+  // ── THE NOTICE CONTRACT (email consent release 2026-09-16, DESIGN-v2 §4) ──
+  //  BookingSchema strips keys it does not declare, so `marketingNotice`,
+  //  `emailMarketingOptOut`, `emailUserTyped` and `turnstileToken` are read
+  //  from the RAW body here — leniently: a malformed value is dropped, never a
+  //  422, and nothing is written for them until the booking exists.
+  const contract = parseCaptureContract(body)
 
   // ══════════════════════════════════════════════════════════════════════
   //  THE PRODUCT GATE — BEFORE ANY SIDE EFFECT WHATSOEVER
@@ -859,14 +873,49 @@ async function handleBooking(req: NextRequest): Promise<NextResponse> {
     }
   }
 
-  // MESSAGING POLICY: no customer message is sent at booking creation, and every
+  // MESSAGING POLICY: no customer message is sent at booking CREATION, and every
   // customer message is EMAIL (SMS sending was removed 2026-09-15). Downstream:
   // PRE-APPROVAL when payment completes (fulfillPaidCheckout) and FINAL
   // CONFIRMATION when an admin approves in Discord (booking-approval.ts) — that
   // order, not the reverse. The Stripe Checkout URL is returned in the
   // response below and the customer is redirected straight to it, so the old
-  // pre-payment "booking-confirmation" email (and the abandoned-checkout recovery
-  // email) were both removed.
+  // pre-payment "booking-confirmation" email was removed.
+  //
+  // THE ABANDONED-CHECKOUT RECOVERY SEQUENCE WAS NOT REMOVED. (This comment used
+  // to say it had been, while the hand-over below scheduled it.) onBookingCreated
+  // -> onCheckoutStarted queues the PROMOTIONAL recovery emails at +45m / +24h /
+  // +72h for a booking still unpaid, and onBookingPaid cancels them. They are
+  // gated by the journey flags, EMAIL_PROMOTIONS_ENABLED, the person-level
+  // eligibility decision (an express opt-in, or this booking's own stored
+  // notice) and the send-time guard — see journeys.ts.
+
+  // ── MARKETING BASIS (email consent release 2026-09-16) ─────────────────
+  //  Recorded once the booking EXISTS and its payment session was created (a
+  //  Stripe failure above deletes the booking and returns before this), and
+  //  BEFORE the hand-over below, so the recovery sequence reads this booking's
+  //  own stored notice. A ticked opt-out box is recorded instead and stops the
+  //  person's sequences. Old pages carry neither and get today's behaviour.
+  //  Never throws; the customer's checkout is unaffected either way.
+  const bookingBasis = await applyCaptureBasis({
+    surface: 'booking',
+    scenario: 'abandoned_checkout',
+    email: customer.email,
+    bookingId: booking.id,
+    customerId: customer.id,
+    contract,
+    acceptTrigger: 'submit',
+    locale: data.locale,
+    region: {
+      phone: data.phone,
+      postalCodes: [...(data.pickupAddresses ?? []).map((a) => a.zip), data.destinationAddress?.zip],
+      country: originV.country ?? destV.country ?? null,
+    },
+    client: captureClient(req),
+    submissionKey: data.bookingSessionId,
+  })
+  if (bookingBasis.status !== 'none') {
+    apiLogger.info({ bookingId: booking.id, basis: describeCaptureBasis(bookingBasis) }, 'booking marketing basis')
+  }
 
   apiLogger.info({ bookingId: booking.id, customerId: customer.id, serviceType: data.serviceType }, 'Booking created')
 
@@ -914,12 +963,19 @@ async function handleBooking(req: NextRequest): Promise<NextResponse> {
   // Sequencing that by hand in a 700-line route is what allowed it; the order
   // now lives in journeys.onBookingCreated, where it is tested. Never fatal —
   // the customer's checkout is already created and returned below.
+  //
+  // PERSON-LEVEL STOP (2026-09-16): the same composite also ends every
+  // lead-scoped sequence for this ADDRESS (journeys.onPersonBooked) — another
+  // open lead's quote follow-up or nurture — not only the converted
+  // lead's. It is not repeated here.
   const { convertedLeadId } = await onBookingCreated({
     bookingId: booking.id,
     email: customer.email,
     // Match the exact partial lead captured in Step 1 (session first, then email).
     bookingSessionId: data.bookingSessionId,
-    marketingConsent: data.marketingConsent,
+    // An old-page opt-in keeps today's meaning — unless the same payload ticked
+    // "don't email me", which wins.
+    marketingConsent: legacyConsentGivenOptOut(data.marketingConsent, contract),
     // Controlled vocabulary + the disclosure version the visitor actually saw.
     // `booking_step_1` was an ad-hoc string, and the version was never recorded
     // at all — so a consent record could not say WHAT was agreed to.
@@ -927,6 +983,10 @@ async function handleBooking(req: NextRequest): Promise<NextResponse> {
     consentVersion: CONSENT_VERSION,
   })
   if (convertedLeadId) apiLogger.info({ bookingId: booking.id, convertedLeadId }, 'lead converted (booking created)')
+
+  // The recovery sequence a granted booking notice permits (idempotent with
+  // the one onBookingCreated already asked for). Never throws.
+  await startCaptureScenario(bookingBasis, { surface: 'booking', email: customer.email, bookingId: booking.id })
 
   // ── Owner alert: a new booking was started (non-fatal; never blocks booking) ──
   // The customer is intentionally NOT messaged here — they receive the existing

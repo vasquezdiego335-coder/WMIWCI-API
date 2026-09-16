@@ -6,6 +6,10 @@
 // Import this FIRST in any test that exercises real scheduling. It is not a
 // test file and is never listed in `npm test`.
 process.env.EMAIL_JOURNEYS_ENABLED = 'true'
+// The promotional journeys (abandoned checkout, quote follow-up, lead nurture)
+// also require the promotions kill switch since 2026-09-16. It is read at CALL
+// time; tests that prove the switch stops them unset it themselves and restore it.
+process.env.EMAIL_PROMOTIONS_ENABLED = 'true'
 // A canary allowlist would block every scheduling assertion below. Tests that
 // care about the canary set it themselves and restore it.
 delete process.env.EMAIL_PROMOTIONAL_ALLOWLIST

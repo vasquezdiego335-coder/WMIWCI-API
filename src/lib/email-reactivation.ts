@@ -53,6 +53,8 @@ export const RECOVERY_WINDOW_DAYS = 4
 export type ReactivationLead = {
   email: string | null
   emailMarketingConsent: boolean | null
+  /** The lead's own form notice (2026-09-16), when its submission recorded one. */
+  basisEventId?: string | null
   quotedAt: Date | null
   bookedAt: Date | null
   convertedBookingId: string | null
@@ -113,9 +115,12 @@ export function activeRecoveryReason(booking: ReactivationBooking, now: Date): s
  */
 export function reactivationBlockReason(lead: ReactivationLead, now: Date): string | null {
   if (!lead.email) return 'no_email'
-  // ONLY an explicit opt-in qualifies. null and false both refuse — absence of
-  // a decision is not consent, and a campaign is the last place to forget it.
-  if (lead.emailMarketingConsent !== true) return 'no_marketing_consent'
+  // A MARKETING BASIS is required: an explicit opt-in, or the lead's own form
+  // notice (owner direction 2026-09-16). A null or false column with no notice
+  // refuses — absence of a basis is not permission, and a campaign is the last
+  // place to forget it. The shared per-person decision re-checks the notice
+  // (window, prohibitions) before anything is sent.
+  if (lead.emailMarketingConsent !== true && !lead.basisEventId) return 'no_marketing_consent'
   if (lead.bookedAt || lead.convertedBookingId) return 'lead_converted'
   if (lead.lostAt) return 'lead_lost'
   // The move already happened — "still planning your move?" would be false.

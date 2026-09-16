@@ -19,6 +19,7 @@ import type { CampaignStatus } from '@prisma/client'
 import { prisma } from '../../db'
 import { preflightCampaign } from '../../email-campaign-dispatch'
 import { needsReapproval } from '../../email-campaign-approval'
+import { campaignEligibilityDecisions } from '../../email-audience'
 import { maskEmail } from '../redact'
 import type { AgentFinding } from '../types'
 import {
@@ -493,23 +494,26 @@ const campaignComplianceRisk: CheckDefinition = {
       if (pending.length === 0) continue
       const emails = pending.map((p) => p.email)
 
-      const [suppressed, consenting, consentingLeads] = await Promise.all([
+      //  THE SHARED DECISION, not the consent columns (2026-09-16): since the
+      //  owner direction that every form submission may lead to offers, a
+      //  recipient may hold a lawful FORM NOTICE instead of an opt-in column.
+      //  Judging by the columns would raise a critical finding for every one of
+      //  them. campaignEligibilityDecisions is what the dispatch itself applies.
+      const [suppressed, decisions] = await Promise.all([
         prisma.emailSuppression.findMany({ where: { email: { in: emails } }, select: { email: true, reason: true, scope: true } }),
-        prisma.customer.findMany({ where: { email: { in: emails }, emailMarketingConsent: true }, select: { email: true } }),
-        prisma.lead.findMany({ where: { email: { in: emails }, emailMarketingConsent: true }, select: { email: true } }),
+        campaignEligibilityDecisions(emails.map((e) => e.toLowerCase())),
       ])
-
-      // Customer.email is required; Lead.email is optional. Normalised
-      // separately so a null lead address can never become an empty-string key.
-      const consentSet = new Set(
-        consenting
-          .map((c) => c.email.toLowerCase())
-          .concat(consentingLeads.filter((l): l is { email: string } => !!l.email).map((l) => l.email.toLowerCase()))
-      )
       const suppressedSet = new Map(suppressed.map((s) => [s.email.toLowerCase(), s]))
 
       const suppressedPending = pending.filter((p) => suppressedSet.has(p.email.toLowerCase()))
-      const unconsented = pending.filter((p) => !consentSet.has(p.email.toLowerCase()))
+      //  Suppressed recipients are reported above; anything else the decision
+      //  refuses (no opt-in and no valid notice, an opt-out, a decline, a test
+      //  identity, a support request) is a recipient this run should not hold.
+      const unconsented = pending.filter((p) => {
+        if (suppressedSet.has(p.email.toLowerCase())) return false
+        const d = decisions.get(p.email.toLowerCase())
+        return !d || !d.eligible
+      })
 
       if (suppressedPending.length > 0) {
         findings.push(
@@ -545,10 +549,10 @@ const campaignComplianceRisk: CheckDefinition = {
             category: 'consent',
             campaignId: run.campaignId,
             runRefId: run.id,
-            title: 'A live run still holds recipients with no recorded marketing consent',
+            title: 'A live run still holds recipients with no marketing basis',
             description:
-              `Run ${run.id} has ${unconsented.length} ${plural(unconsented.length, 'recipient', 'recipients')} waiting to send with no explicit email-marketing opt-in on either their customer or their lead record. ` +
-              `Consent is rechecked immediately before each send and they will be refused — but a live run carrying them means the audience definition is producing people who never opted in.`,
+              `Run ${run.id} has ${unconsented.length} ${plural(unconsented.length, 'recipient', 'recipients')} waiting to send who may not be sent offers today: no opt-in and no form notice still inside its window, or an opt-out, decline, test address or open support request on record. ` +
+              `The basis is rechecked immediately before each send and they will be refused — but a live run carrying them means the audience was built from state that no longer permits it.`,
             evidence: {
               runStatus: run.status,
               withoutConsent: unconsented.length,

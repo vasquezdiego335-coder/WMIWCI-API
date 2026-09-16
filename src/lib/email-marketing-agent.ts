@@ -102,7 +102,7 @@ export const PLAYBOOK: readonly PlaybookEntry[] = [
       subject: 'Do you still need moving help?',
       previewText: 'Get a real price in about a minute — no visit needed.',
       rationale:
-        'These people wrote to us, opted in, never got a quote, and have been quiet for 14+ days. The honest ask is the estimate itself, so the draft points at the quick-quote page rather than a discount.',
+        'These people wrote to us about a move, never got a quote, and have been quiet for 14+ days. The honest ask is the estimate itself, so the draft points at the quick-quote page rather than a discount.',
     },
   },
 ]

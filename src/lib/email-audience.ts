@@ -23,6 +23,17 @@
 import { prisma } from './db'
 import { normalizeEmail } from './email-tokens'
 import { activeLifecycleReason, activeRecoveryReason, reactivationCutoff } from './email-reactivation'
+import { canaryRehearsalAddresses } from './email-guard'
+import {
+  BASIS_EVENT_SELECT,
+  NOTICE_BASIS_DAYS,
+  decidePromotionalEligibility,
+  eligibilityFlags,
+  type BasisEventFact,
+  type EligibilityDecision,
+  type LegacyConsentFact,
+} from './consent/marketing-eligibility'
+import { classifyTestIdentity, type TestIdentityReason } from './consent/test-identity'
 
 /** Hard ceiling on any audience query. No segment may scan without a bound. */
 export const MAX_AUDIENCE = 5000
@@ -45,8 +56,9 @@ export const SEGMENTS = {
   //  campaign pool. They are DISTINCT audiences on purpose — "requested a
   //  quote and went quiet" and "wrote to us and went quiet" deserve different
   //  copy, and neither is "abandoned checkout", which requires a real booking.
-  quick_quote_reactivation: 'Quoted 14+ days ago, opted in, never booked',
-  contact_lead_reactivation: 'Contacted us 14+ days ago, opted in, never quoted or booked',
+  //  "May receive offers" (2026-09-16): an opt-in OR the lead's own form notice.
+  quick_quote_reactivation: 'Quoted 14+ days ago, may receive offers, never booked',
+  contact_lead_reactivation: 'Contacted us 14+ days ago, may receive offers, never quoted or booked',
 } as const
 
 export type SegmentKey = keyof typeof SEGMENTS
@@ -256,9 +268,12 @@ export async function resolveCandidates(def: AudienceDefinition): Promise<Candid
     }
 
     // ── Reactivation pool (owner spec 2026-08-07) ─────────────────────────
-    //  Consent is enforced IN THE SQL here, unlike the legacy segments —
-    //  these two exist only for people we may market to, so matching anyone
-    //  else is wasted work the shared consent gate would discard anyway.
+    //  A marketing basis is prefiltered IN THE SQL here, unlike the legacy
+    //  segments — these two exist only for people we may market to, so
+    //  matching anyone else is wasted work the shared gate would discard
+    //  anyway. A basis is an explicit opt-in column OR the lead's own form
+    //  notice (owner direction 2026-09-16: "quick quote → quote follow-up and
+    //  relevant offers"); the shared per-person decision re-checks either.
     //  The 14-day age + "not converted/lost" mirror
     //  email-reactivation.reactivationBlockReason; the active-lifecycle
     //  exclusion runs in resolveAudienceDetailed for every segment.
@@ -269,13 +284,15 @@ export async function resolveCandidates(def: AudienceDefinition): Promise<Candid
       const leads = await prisma.lead.findMany({
         where: {
           ...leadWhere(f),
-          emailMarketingConsent: true,
           convertedBookingId: null,
           bookedAt: null,
           lostAt: null,
           status: { notIn: ['BOOKED', 'LOST'] },
-          // "Still planning your move?" must not land after the move.
-          OR: [{ moveDate: null }, { moveDate: { gte: new Date() } }],
+          AND: [
+            { OR: [{ emailMarketingConsent: true }, { basisEventId: { not: null } }] },
+            // "Still planning your move?" must not land after the move.
+            { OR: [{ moveDate: null }, { moveDate: { gte: new Date() } }] },
+          ],
           ...(quoted
             ? { quotedAt: { not: null, lte: cutoff } }
             : { quotedAt: null, lastActivityAt: { lte: cutoff } }),
@@ -400,13 +417,19 @@ function dedupe(rows: BookingRow[], f: Record<string, unknown>): Candidate[] {
  * and `resolveAudienceDetailed` run — makes the rule true for EVERY segment at
  * once, present and future, rather than relying on each resolver to remember.
  *
- * Consent may live on either record (a person can be a Lead, a Customer, or
- * both), so an explicit `true` on EITHER grants it. Anything else — false, null,
- * or no record at all — is NOT consent. Entering an email is not opting in.
+ * A basis may live on either record (a person can be a Lead, a Customer, or
+ * both), so an explicit `true` on EITHER passes this prefilter. Since the
+ * owner direction of 2026-09-16 so does the consent record: an express opt-in
+ * (a resubscribe), or a form submission whose notice is still inside the
+ * notice window. Anything else — false, null, an expired notice, no record at
+ * all — does NOT pass. This is only the PREFILTER: the shared per-person
+ * decision (campaignEligibilityDecisions) then applies every prohibition and
+ * re-checks the notice itself.
  */
 async function consentingEmails(emails: string[]): Promise<Set<string>> {
   if (emails.length === 0) return new Set()
-  const [customers, leads] = await Promise.all([
+  const noticeCutoff = new Date(Date.now() - NOTICE_BASIS_DAYS * 24 * 60 * 60 * 1000)
+  const [customers, leads, statuses] = await Promise.all([
     prisma.customer.findMany({
       where: { email: { in: emails }, emailMarketingConsent: true },
       select: { email: true },
@@ -415,10 +438,18 @@ async function consentingEmails(emails: string[]): Promise<Set<string>> {
       where: { email: { in: emails }, emailMarketingConsent: true },
       select: { email: true },
     }),
+    prisma.emailMarketingStatus.findMany({
+      where: {
+        emailNormalized: { in: emails.map(normalizeEmail) },
+        OR: [{ expressOptInAt: { not: null } }, { lastNoticeAt: { gte: noticeCutoff } }],
+      },
+      select: { emailNormalized: true },
+    }),
   ])
   const set = new Set<string>()
   for (const r of customers) set.add(normalizeEmail(r.email))
   for (const r of leads) if (r.email) set.add(normalizeEmail(r.email))
+  for (const r of statuses) set.add(r.emailNormalized)
   return set
 }
 
@@ -436,6 +467,11 @@ export type AudiencePreview = {
     marketingOptOut: number
     /** No explicit promotional opt-in (fails closed — absence is not consent). */
     noConsent: number
+    /**
+     * Passed the opt-in prefilter but refused by the shared per-person gate:
+     * an opt-out or decline on record, or a test/staff identity (DESIGN-v2 §5).
+     */
+    ineligible?: number
     duplicate: number
     /** A lifecycle journey currently owns them — the campaign waits its turn. */
     activeLifecycle: number
@@ -460,7 +496,7 @@ export async function previewAudience(def: AudienceDefinition): Promise<Audience
     segment: def.segment,
     segmentLabel: SEGMENTS[def.segment],
     totalCandidates: 0,
-    excluded: { invalidAddress: 0, unsubscribed: 0, hardBounce: 0, complaint: 0, otherSuppression: 0, marketingOptOut: 0, noConsent: 0, duplicate: 0, activeLifecycle: 0 },
+    excluded: { invalidAddress: 0, unsubscribed: 0, hardBounce: 0, complaint: 0, otherSuppression: 0, marketingOptOut: 0, noConsent: 0, ineligible: 0, duplicate: 0, activeLifecycle: 0 },
     eligible: 0,
     truncated: false,
     sample: [],
@@ -489,11 +525,12 @@ export async function previewAudience(def: AudienceDefinition): Promise<Audience
     }
 
     const emails = unique.map((c) => c.email)
-    const [suppressions, optedOut, consenting, lifecycleOwned] = await Promise.all([
+    const [suppressions, optedOut, consenting, lifecycleOwned, decisions] = await Promise.all([
       prisma.emailSuppression.findMany({ where: { email: { in: emails } }, select: { email: true, reason: true } }),
       prisma.customer.findMany({ where: { email: { in: emails }, marketingOptOut: true }, select: { email: true } }),
       consentingEmails(emails),
       lifecycleOwnedEmails(emails),
+      campaignEligibilityDecisions(emails),
     ])
 
     const byEmail = new Map(suppressions.map((s) => [s.email, s.reason as string]))
@@ -530,6 +567,12 @@ export async function previewAudience(def: AudienceDefinition): Promise<Audience
         base.excluded.noConsent++
         continue
       }
+      // THE SHARED GATE, PER PERSON — the same decision the send gate makes.
+      const decision = decisions.get(c.email)
+      if (!decision || !decision.eligible) {
+        base.excluded.ineligible = (base.excluded.ineligible ?? 0) + 1
+        continue
+      }
       // LIFECYCLE BEATS CAMPAIGNS — the preview shows the same exclusion the
       // dispatch applies, so the owner's count is the count that sends.
       const owned = lifecycleOwned.get(c.email)
@@ -547,6 +590,111 @@ export async function previewAudience(def: AudienceDefinition): Promise<Audience
     base.error = err instanceof Error ? err.message : String(err)
     return base
   }
+}
+
+// ════════════════════════════════════════════════════════════════════════
+//  THE SHARED GATE, PER PERSON (DESIGN-v2 §5, 2026-09-16)
+//  ---------------------------------------------------------------------
+//  consentingEmails() above is a SQL PREFILTER: "a true on some row". On its
+//  own it took the LOOSER of Lead and Customer — a Customer who later declined
+//  stayed in every segment because an older Lead row still said true. Every
+//  candidate who passes it is now also run through the same pure decision the
+//  send gate uses (decidePromotionalEligibility, context 'campaign'):
+//    • an express opt-in, OR the person's LATEST form notice (≤ 183 days,
+//      not a support message, notice basis enabled) — never an EBR basis;
+//    • per-person prohibitions: an opt-out or unsubscribe on record, a decline
+//      on ANY row that is not followed by a later opt-in, a test/staff/role
+//      identity (a staff lookup failure refuses everyone).
+//  AND, not OR: the prefilter can only narrow what the decision permits, and
+//  the decision can only narrow what the prefilter found. Neither is ever
+//  looser than the send gate, which checks the same decision again per send.
+//
+//  Batched: one query per table for the whole audience, not one per person.
+//  A read error THROWS — the preview reports it, the dispatch refuses.
+// ════════════════════════════════════════════════════════════════════════
+
+export async function campaignEligibilityDecisions(emails: string[], now: Date = new Date()): Promise<Map<string, EligibilityDecision>> {
+  const out = new Map<string, EligibilityDecision>()
+  if (emails.length === 0) return out
+  const insensitiveIn = { in: emails, mode: 'insensitive' as const }
+  const [suppressions, customers, leads, statuses, staff] = await Promise.all([
+    prisma.emailSuppression.findMany({ where: { email: { in: emails } }, select: { email: true, reason: true, scope: true } }),
+    prisma.customer.findMany({
+      where: { email: insensitiveIn },
+      select: { id: true, email: true, emailMarketingConsent: true, marketingConsentAt: true, marketingOptOut: true },
+    }),
+    prisma.lead.findMany({
+      where: { email: insensitiveIn },
+      select: { id: true, email: true, emailMarketingConsent: true, marketingConsentAt: true },
+    }),
+    prisma.emailMarketingStatus.findMany({ where: { emailNormalized: { in: emails } } }),
+    //  The staff lookup THROWS like every other read here. Swallowing it used
+    //  to mark every non-static address a terminal "test identity", so a
+    //  campaign dispatched during a pool timeout SKIPPED its whole audience
+    //  and completed. A throw makes the dispatch refuse and try again.
+    Promise.all([
+      prisma.user.findMany({ select: { email: true } }),
+      prisma.crewInvitation.findMany({ select: { email: true } }),
+    ]).then(([users, invitations]) => ({ staff: users.map((u) => u.email), invitations: invitations.map((i) => i.email) })),
+  ])
+
+  const suppressionBy = new Map(suppressions.map((s) => [normalizeEmail(s.email), s]))
+  const statusBy = new Map(statuses.map((s) => [s.emailNormalized, s]))
+  //  Each person's LATEST form submission — the notice basis for offers
+  //  (marketing-eligibility rule 8). One query for the whole audience.
+  const noticeIds = statuses.map((s) => s.lastNoticeEventId).filter((id): id is string => typeof id === 'string' && id.length > 0)
+  const noticeEvents: BasisEventFact[] = noticeIds.length
+    ? await prisma.emailConsentEvent.findMany({ where: { id: { in: noticeIds } }, select: BASIS_EVENT_SELECT })
+    : []
+  const noticeBy = new Map(noticeEvents.map((e) => [e.id, e]))
+  const legacyBy = new Map<string, LegacyConsentFact[]>()
+  const optOutBy = new Set<string>()
+  const push = (email: string, fact: LegacyConsentFact) => {
+    const key = normalizeEmail(email)
+    legacyBy.set(key, [...(legacyBy.get(key) ?? []), fact])
+  }
+  for (const c of customers) {
+    if (c.marketingOptOut) optOutBy.add(normalizeEmail(c.email))
+    if (typeof c.emailMarketingConsent === 'boolean') {
+      push(c.email, { record: 'customer', id: c.id, value: c.emailMarketingConsent, at: c.marketingConsentAt ?? null, isSubject: false })
+    }
+  }
+  for (const l of leads) {
+    if (l.email && typeof l.emailMarketingConsent === 'boolean') {
+      push(l.email, { record: 'lead', id: l.id, value: l.emailMarketingConsent, at: l.marketingConsentAt ?? null, isSubject: false })
+    }
+  }
+
+  const exempt = canaryRehearsalAddresses()
+  const flags = eligibilityFlags()
+  for (const email of emails) {
+    const suppression = suppressionBy.get(email)
+    const status = statusBy.get(email)
+    const identity: TestIdentityReason | null = exempt.has(email)
+      ? null
+      : classifyTestIdentity(email, { staffEmails: staff.staff, invitationEmails: staff.invitations })
+    out.set(
+      email,
+      decidePromotionalEligibility({
+        context: 'campaign',
+        now,
+        emailNormalized: email,
+        suppression: suppression ? { reason: String(suppression.reason), scope: suppression.scope } : null,
+        customerMarketingOptOut: optOutBy.has(email),
+        status: status
+          ? { expressOptInAt: status.expressOptInAt, expressEventId: status.expressEventId, optedOutAt: status.optedOutAt, declinedAt: status.declinedAt }
+          : null,
+        legacyConsent: legacyBy.get(email) ?? [],
+        testIdentity: identity,
+        subject: { type: 'none', id: null, sequenceKind: null, basisEventId: null },
+        basisEvent: null,
+        latestNotice: status?.lastNoticeEventId ? noticeBy.get(status.lastNoticeEventId) ?? null : null,
+        ebrAt: null,
+        flags,
+      })
+    )
+  }
+  return out
 }
 
 /** One candidate excluded at dispatch, with the machine-readable why. */
@@ -632,12 +780,13 @@ export async function resolveAudienceDetailed(
   }
 
   const emails = unique.map((c) => c.email)
-  const [suppressions, optedOut, consenting, priorAmbiguous, lifecycleOwned] = await Promise.all([
+  const [suppressions, optedOut, consenting, priorAmbiguous, lifecycleOwned, decisions] = await Promise.all([
     prisma.emailSuppression.findMany({ where: { email: { in: emails } }, select: { email: true, reason: true } }),
     prisma.customer.findMany({ where: { email: { in: emails }, marketingOptOut: true }, select: { email: true } }),
     consentingEmails(emails),
     priorAmbiguousEmails(emails, opts.campaignId ?? null, opts.ambiguousWindowDays ?? AMBIGUOUS_WINDOW_DAYS),
     lifecycleOwnedEmails(emails),
+    campaignEligibilityDecisions(emails),
   ])
   const suppressionByEmail = new Map(suppressions.map((s) => [s.email, s.reason as string]))
   const optOut = new Set(optedOut.map((c) => normalizeEmail(c.email)))
@@ -660,6 +809,12 @@ export async function resolveAudienceDetailed(
     // PROMOTIONAL CONSENT — required for every segment; fails closed.
     if (!consenting.has(c.email)) {
       excluded.push({ candidate: c, reason: 'no_consent' })
+      continue
+    }
+    // THE SHARED GATE, PER PERSON (context 'campaign': express, or the latest form notice).
+    const decision = decisions.get(c.email)
+    if (!decision || !decision.eligible) {
+      excluded.push({ candidate: c, reason: `ineligible:${decision && !decision.eligible ? decision.reason : 'undecided'}` })
       continue
     }
     // ── LIFECYCLE BEATS CAMPAIGNS (owner spec 2026-08-07) ─────────────────

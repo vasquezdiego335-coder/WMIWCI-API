@@ -96,43 +96,44 @@ async function triggerBookingCapture(h: Harness): Promise<void> {
 //  BOOKING FORM — the surface that produced the incident
 // ══════════════════════════════════════════════════════════════════════
 
-test('booking form: the marketing checkbox IS on the contact step', { skip }, async () => {
-  //  This is the whole reason "not asked" was a lie. If this ever stops being
-  //  true, the FORM_CONTRACTS entry below is wrong and must change with it.
+test('booking form: the contact step shows the email NOTICE and an unticked opt-out box — no opt-in checkbox', { skip }, async () => {
+  //  EMAIL CONSENT RELEASE 2026-09-16: the opt-in checkbox is gone. If this
+  //  ever stops being true, the FORM_CONTRACTS entry below must change with it.
   const h = await load(FORM, /\/api\/leads\/partial/)
-  const box = h.doc.getElementById('emailOptIn')
-  assert.ok(box, 'the booking form must present a marketing checkbox')
-  const card = box!.closest('.card')
-  assert.equal(card?.id, 'card1', 'and it must be on the step that creates the lead')
-  assert.equal((box as HTMLInputElement).checked, false, 'it renders unchecked, so silence is a decline')
+  assert.equal(h.doc.getElementById('emailOptIn'), null, 'no opt-in checkbox remains')
+  const notice = h.doc.getElementById('emailNoticeBlock')
+  assert.ok(notice, 'the booking form must show the email notice')
+  assert.equal(notice!.closest('.card')?.id, 'card1', 'on the step that creates the lead')
+  assert.equal(notice!.getAttribute('data-notice-version'), 'booking-2026-09-16-r2')
+  const optOut = h.doc.getElementById('emailOptOut') as HTMLInputElement | null
+  assert.ok(optOut, 'the opt-out box is on the same step')
+  assert.equal(optOut!.checked, false, 'and it renders unticked')
 })
 
-test('THE FIX: a displayed, unchecked box sends FALSE — not nothing', { skip }, async () => {
+test('booking form: a background capture sends the opt-out state and typed flag — never a consent claim or a notice', { skip }, async () => {
   const h = await load(FORM, /\/api\/leads\/partial/)
   await triggerBookingCapture(h)
 
   assert.ok(h.posted.length > 0, 'entering an email must capture a partial lead')
   const body = lastPost(h)
-
-  //  THE REGRESSION THIS PINS. Before the fix this key was absent, the column
-  //  stayed null, and the owner card read "Marketing: not asked".
-  assert.equal(body.marketingConsent, false, 'an unchecked box that was SHOWN is a decline')
-  assert.equal(body.marketingConsentPresented, true, 'and the form says it asked')
-  assert.ok('marketingConsent' in body, 'the key must be present, not dropped by JSON.stringify')
+  //  A blur is not the Continue click: it may save the lead, but it can never
+  //  carry the notice (so it can never start marketing) and never claims consent.
+  assert.equal(body.marketingNotice, undefined, 'only the Continue click carries the notice')
+  assert.equal('marketingConsent' in body, false, 'no checkbox, so no consent claim')
+  assert.equal(body.emailMarketingOptOut, false, 'the unticked opt-out box is sent explicitly')
+  assert.equal(typeof body.emailUserTyped, 'boolean', 'and whether the address was typed on this page load')
 })
 
-test('booking form: ticking the box still sends true', { skip }, async () => {
+test('booking form: ticking the opt-out box is sent on the next capture', { skip }, async () => {
   const h = await load(FORM, /\/api\/leads\/partial/)
-  const box = h.doc.getElementById('emailOptIn') as HTMLInputElement
+  const box = h.doc.getElementById('emailOptOut') as HTMLInputElement
   box.checked = true
   box.dispatchEvent(new h.win.Event('change', { bubbles: true }))
   await triggerBookingCapture(h)
 
   const body = lastPost(h)
-  assert.equal(body.marketingConsent, true)
-  assert.equal(body.marketingConsentPresented, true)
-  //  The disclosure version travels with it, or the consent proves nothing later.
-  assert.ok(body.consentVersion, 'a consent record needs the wording that was shown')
+  assert.equal(body.emailMarketingOptOut, true, 'an opt-out is honoured on ANY capture, not only Continue')
+  assert.equal('marketingConsent' in body, false)
 })
 
 test('booking form: the source question is NOT claimed at the contact step', { skip }, async () => {
@@ -172,33 +173,30 @@ test('booking form: one lead per session — a re-trigger does not fork the lead
 //  THE OTHER SURFACES — same pathology, same fix
 // ══════════════════════════════════════════════════════════════════════
 
-test('quick quote: a displayed, unchecked box sends false', { skip }, async () => {
+test('quick quote: the email notice and an unticked opt-out box, no opt-in checkbox', { skip }, async () => {
   if (!existsSync(QUOTE)) return
   const h = await load(QUOTE, /\/api\/leads\/quote-capture/)
-  const box = h.doc.getElementById('qOptIn')
-  assert.ok(box, 'quote.html must present a marketing checkbox')
-
-  //  Read the rule off the page rather than driving its whole multi-step flow:
-  //  what matters is that the CLICK gate is gone.
+  assert.equal(h.doc.getElementById('qOptIn'), null, 'no opt-in checkbox remains')
+  const notice = h.doc.getElementById('qEmailNoticeBlock')
+  assert.ok(notice, 'quote.html must show the email notice')
+  assert.equal(notice!.getAttribute('data-notice-version'), 'quote-2026-09-16-r2')
+  const optOut = h.doc.getElementById('qEmailOptOut') as HTMLInputElement | null
+  assert.ok(optOut && optOut.checked === false, 'with an unticked opt-out box')
+  //  Read the payload rule off the page rather than driving its multi-step flow.
   const src = readFileSync(QUOTE, 'utf8')
-  assert.doesNotMatch(
-    src,
-    /qOptIn'\)[\s\S]{0,200}dataset\.touched/,
-    'the quick quote must not require a CLICK before it will record a decline',
-  )
-  assert.match(src, /marketingConsentPresented/, 'and it must report whether it asked')
+  assert.match(src, /marketingNotice/, 'the submit carries the notice it showed')
+  assert.match(src, /emailMarketingOptOut/, 'and the opt-out box state')
+  assert.doesNotMatch(src, /marketingConsent\s*:/, 'and never a consent claim')
 })
 
-test('contact form: a displayed, unchecked box sends false', { skip }, async () => {
+test('contact form: the email notice and an unticked opt-out box, no opt-in checkbox', { skip }, async () => {
   if (!existsSync(CONTACT)) return
   const src = readFileSync(CONTACT, 'utf8')
-  assert.match(src, /msg-optin/, 'contact.html presents a marketing checkbox')
-  assert.doesNotMatch(
-    src,
-    /msg-optin[\s\S]{0,300}dataset\.touched/,
-    'the contact form must not require a CLICK before it will record a decline',
-  )
-  assert.match(src, /marketingConsentPresented/, 'and it must report whether it asked')
+  assert.doesNotMatch(src, /id="msg-optin"/, 'no opt-in checkbox remains')
+  assert.match(src, /id="msg-notice-block"[^>]*data-notice-version="contact-2026-09-16-r2"/, 'contact.html shows the email notice')
+  assert.match(src, /<input type="checkbox" id="msg-optout"(?![^>]*\bchecked\b)[^>]*>/, 'with an unticked opt-out box')
+  assert.match(src, /marketingNotice/, 'the submit carries the notice it showed')
+  assert.match(src, /emailMarketingOptOut/, 'and the opt-out box state')
 })
 
 test('no lead-producing surface still gates a decline on a CLICK', { skip }, async () => {
@@ -223,11 +221,19 @@ test('FORM_CONTRACTS matches what booking-form.html actually asks', { skip }, as
   const contract = FORM_CONTRACTS.BOOKING_FORM
   assert.ok(contract, 'the booking form must have a registered contract')
 
+  //  presentsMarketingConsent = the page ADDRESSES marketing email (the old
+  //  checkbox, or the notice that replaced it) — see FORM_CONTRACTS.
   assert.equal(
     contract.presentsMarketingConsent,
-    !!h.doc.getElementById('emailOptIn'),
-    'the registry must agree with the markup about the marketing checkbox',
+    !!h.doc.getElementById('emailOptIn') || !!h.doc.getElementById('emailNoticeBlock'),
+    'the registry must agree with the markup about the marketing question',
   )
+  assert.equal(
+    contract.presentsMarketingNotice === true,
+    !!h.doc.getElementById('emailNoticeBlock'),
+    'the registry must agree with the markup about the email notice',
+  )
+  assert.equal(contract.marketingNoticeStep, h.doc.getElementById('emailNoticeBlock')?.closest('.card')?.id)
   assert.equal(
     contract.presentsSelfReportedSource,
     !!h.doc.getElementById('foundUs'),
@@ -241,6 +247,7 @@ test('FORM_CONTRACTS matches what booking-form.html actually asks', { skip }, as
   assert.equal(
     contract.marketingConsentStep,
     h.doc.getElementById('emailOptIn')?.closest('.card')?.id,
+    'no checkbox step is claimed now that the checkbox is gone',
   )
 
   //  The declared step order must be the real one. It is not positional

@@ -54,8 +54,21 @@ export const LIMITS = {
   // High-risk: keyed by IP only (no email-lockout DoS). 10 tries / 15 min.
   login: { name: 'login', limit: 10, windowSec: 15 * 60, failMode: 'closed' } as RateLimitConfig,
   // Booking creates a Stripe Checkout session — cap abuse but stay well above a
-  // real customer's 1–2 attempts. 5 / hour.
-  booking: { name: 'booking', limit: 5, windowSec: 60 * 60, failMode: 'closed' } as RateLimitConfig,
+  // real customer's attempts, including a correction and a network retry. Its
+  // OWN bucket (2026-09-16): the booking form's address estimates used to share
+  // it, so a customer who paused five times while typing an address was locked
+  // out of submitting for an hour. 10 / hour.
+  booking: { name: 'booking', limit: 10, windowSec: 60 * 60, failMode: 'closed' } as RateLimitConfig,
+  // The booking form's live route estimate: fires after a typing pause on each
+  // address edit, add-a-stop, service switch and draft restore. Each call is a
+  // paid routing lookup, so it fails closed, but with room for a real customer
+  // editing several addresses. 40 / 10 min.
+  routeEstimate: { name: 'route-estimate', limit: 40, windowSec: 10 * 60, failMode: 'closed' } as RateLimitConfig,
+  // The "finish your booking" link in an abandoned-checkout email. Its own
+  // bucket, so the customer's own address typing can never block their way back
+  // to pay. It can open a Stripe session, so it fails closed — at a ceiling no
+  // real customer reaches. 30 / hour.
+  checkoutResume: { name: 'checkout-resume', limit: 30, windowSec: 60 * 60, failMode: 'closed' } as RateLimitConfig,
   // Low-risk public inquiry forms — fail open so a limiter blip never eats a lead.
   contact: { name: 'contact', limit: 5, windowSec: 10 * 60, failMode: 'open' } as RateLimitConfig,
   lead: { name: 'lead', limit: 8, windowSec: 10 * 60, failMode: 'open' } as RateLimitConfig,
@@ -170,12 +183,14 @@ export async function rateLimit(cfg: RateLimitConfig, identifiers: Array<string 
     // only records; we still allow, but surface `degraded` so callers can log.
     return { ok: true, limit: cfg.limit, remaining: allowedLocal ? cfg.limit - 1 : 0, retryAfterSec: 0, degraded: true }
   }
-  // High-risk: honor the local per-instance decision.
+  // High-risk: honor the local per-instance decision. Retry-After is the time
+  // actually left in the window, not the whole window.
+  const resetAt = localStore.get(key)?.resetAt ?? Date.now() + cfg.windowSec * 1000
   return {
     ok: allowedLocal,
     limit: cfg.limit,
     remaining: allowedLocal ? cfg.limit - 1 : 0,
-    retryAfterSec: allowedLocal ? 0 : cfg.windowSec,
+    retryAfterSec: allowedLocal ? 0 : Math.max(1, Math.ceil((resetAt - Date.now()) / 1000)),
     degraded: true,
   }
 }

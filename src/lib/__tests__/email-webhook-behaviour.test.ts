@@ -123,6 +123,19 @@ const fakePrisma = {
       db.suppressions.push(row)
       return { ...row }
     },
+    //  suppress() relabels a weaker label to a stronger reason in its own
+    //  conditional statement (email-suppression.ts suppressionLabelAfter).
+    async updateMany({ where, data }: Row) {
+      await tick()
+      let count = 0
+      for (const s of db.suppressions) {
+        if (s.email !== where.email) continue
+        if (where.reason?.in && !where.reason.in.includes(s.reason)) continue
+        for (const [k, v] of Object.entries(data)) if (v !== undefined) s[k] = v
+        count++
+      }
+      return { count }
+    },
     async create({ data }: Row) {
       await tick()
       if (db.suppressions.some((s) => s.email === data.email)) {

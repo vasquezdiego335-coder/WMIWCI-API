@@ -42,6 +42,9 @@ const EXPECTED: Expectation[] = [
       'sent_at', 'created_at', 'updated_at',
       // Email marketing admin (2026-07-21).
       'campaign_id', 'is_test', 'journey_config_version',
+      // Email consent release (2026-09-16). The Prisma client selects these on
+      // EVERY email_sends read and write, so without them all mail stops (P2022).
+      'marketing_basis', 'basis_event_id',
     ],
     indexes: [
       'email_sends_idempotency_key_key',
@@ -124,6 +127,41 @@ const EXPECTED: Expectation[] = [
     // The unique pair IS the immutability guarantee for a versioned definition.
     indexes: ['email_automation_versions_automation_id_version_key'],
     constraints: ['email_automation_versions_automation_id_fkey', 'email_automation_versions_version_positive'],
+  },
+  // -- Email consent release (2026-09-16, migration 20260916120000) --
+  // The code of that release reads these on EVERY lead, booking and send: the
+  // migration must be applied BEFORE the merge (DEPLOY.md §10), or bookings and
+  // all email fail with P2022 the moment Railway deploys.
+  { table: 'crm_leads', columns: ['basis_event_id'] },
+  { table: 'bookings', columns: ['basis_event_id'] },
+  {
+    table: 'email_consent_events',
+    columns: [
+      'id', 'email_normalized', 'lead_id', 'customer_id', 'booking_id', 'kind', 'surface',
+      'notice_version', 'notice_copy_sha256', 'locale', 'region_signal', 'trigger',
+      'email_user_typed', 'opt_out_box', 'turnstile_ok', 'withheld_reason', 'page_url',
+      'ip_hmac', 'ua_hash', 'request_id', 'occurred_at',
+    ],
+    // UNIQUE (request_id, kind) is what makes a retried request, and a spent
+    // confirm/resubscribe token, record exactly once.
+    indexes: ['email_consent_events_request_id_kind_key'],
+    constraints: ['email_consent_events_kind_check'],
+  },
+  {
+    table: 'email_marketing_status',
+    columns: [
+      'email_normalized', 'express_opt_in_at', 'express_event_id', 'opted_out_at',
+      'declined_at', 'last_notice_at', 'last_notice_event_id', 'updated_at',
+    ],
+  },
+  {
+    table: 'sequence_enrollments',
+    columns: [
+      'id', 'email_normalized', 'sequence_kind', 'subject_type', 'subject_id', 'basis_event_id',
+      'window_start', 'status', 'stop_reason', 'created_at', 'updated_at',
+    ],
+    // One scenario sequence per person per window, even under concurrent submissions.
+    indexes: ['sequence_enrollments_email_normalized_sequence_kind_window__key'],
   },
 ]
 
@@ -232,6 +270,17 @@ async function main() {
   if (missingActions.length) {
     problems.push(`enum AuditAction is missing ${missingActions.join(', ')} - admin actions will throw when audited`)
   } else ok.push('AuditAction carries every email admin action')
+
+  // -- Consent evidence is append-only (2026-09-16) --
+  // Without the trigger an UPDATE or DELETE could quietly rewrite what a person
+  // was shown or when they withdrew.
+  const appendOnly = await prisma.$queryRawUnsafe<Array<{ tgname: string }>>(
+    `SELECT t.tgname FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid
+      WHERE c.relname = 'email_consent_events' AND t.tgname = 'email_consent_events_append_only' AND NOT t.tgisinternal`
+  )
+  if (appendOnly.length === 0) {
+    problems.push('email_consent_events has no append-only trigger - consent evidence could be edited or deleted')
+  } else ok.push('email_consent_events is append-only (trigger present)')
 
   // -- THE DELETE RULE THAT MATTERS --
   // email_sends.campaign_id must be ON DELETE SET NULL. If a migration were
