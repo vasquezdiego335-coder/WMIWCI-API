@@ -208,7 +208,10 @@ test('TRUE E2E: real page -> real API -> real PostgreSQL, contact step then card
   const card1 = formatLeadAlert(toLeadAlertInput(afterFirst as never))
   const text1 = [card1.title, ...card1.lines.map((l) => l.message)].join('\n')
   console.log('\n[OWNER CARD 1]\n' + text1)
-  assert.match(text1, /Marketing email: Not opted in/)
+  //  The notice-era booking form has no opt-in checkbox, and the card says so
+  //  (never "Unknown — captured before we recorded whether the box was shown").
+  assert.match(text1, /Marketing email: (Not asked — this form has no marketing checkbox|Not opted in)/)
+  assert.doesNotMatch(text1, /Marketing email: Unknown/)
   assert.match(text1, /Customer-reported source: Not reached yet/)
   assert.match(text1, /awaiting pickup and destination addresses/i)
   assert.match(text1, /Door hanger/, 'the scan is attributed')
