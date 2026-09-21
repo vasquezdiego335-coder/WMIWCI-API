@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { getSession } from '@/lib/auth'
 import { prisma } from '@/lib/db'
 import { apiLogger } from '@/lib/logger'
+import { queueBookingCardSync } from '@/lib/booking-cards-sync'
 import { type Role } from '@/lib/permissions'
 import { canChangeAssignmentStatus, canSaveAssignment } from '@/lib/scheduling-guards'
 import { previewAssignmentConflicts } from '@/lib/scheduling-service'
@@ -83,6 +84,7 @@ export async function POST(req: NextRequest, props: { params: Promise<{ id: stri
     })
     if (d.action === 'OFFER') await scheduleAssignmentNotification({ jobCrewId: params.id, type: 'OFFERED' }).catch(() => {})
     if (d.action === 'CANCEL') await scheduleAssignmentNotification({ jobCrewId: params.id, type: 'CANCELLED' }).catch(() => {})
+    void queueBookingCardSync(row.job.bookingId, 'crew-schedule')
     return NextResponse.json({ ok: true })
   }
 
@@ -120,5 +122,6 @@ export async function POST(req: NextRequest, props: { params: Promise<{ id: stri
   })
 
   if (material) await replaceAssignmentReminders({ jobCrewId: params.id, reportTime: nextReportTime }).catch((e) => apiLogger.error({ err: String(e) }, 'reminder replace failed'))
+  void queueBookingCardSync(row.job.bookingId, 'crew-schedule')
   return NextResponse.json({ ok: true, conflicts, materialChange: material })
 }

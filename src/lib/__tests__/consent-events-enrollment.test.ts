@@ -459,7 +459,7 @@ test('migration: additive, re-runnable, append-only trigger, redaction function,
   assert.match(sql(), /ROLLBACK/, 'rollback SQL is documented in the header')
 })
 
-test('migration: sorts after every other migration and is EXECUTED in CI (not represented by the baseline)', () => {
+test('migration: sorts after every migration that preceded it and is EXECUTED in CI (not represented by the baseline)', () => {
   assert.ok(existsSync(resolve(MIGRATIONS, NAME, 'migration.sql')))
   const dirs = readdirSync(MIGRATIONS, { withFileTypes: true })
     .filter((e) => e.isDirectory())
@@ -472,6 +472,12 @@ test('migration: sorts after every other migration and is EXECUTED in CI (not re
   assert.ok(!represented.includes(NAME), 'a represented migration is recorded as applied WITHOUT running')
   const lastRepresented = [...represented].sort().pop() as string
   assert.ok(NAME > lastRepresented, 'unlisted migrations must sort after the last represented one')
-  const earlier = dirs.filter((d) => d !== NAME)
-  assert.ok(earlier.every((d) => d < NAME), `must sort after ${earlier[earlier.length - 1]}`)
+  // This read "every OTHER migration must sort before this one", which was true
+  // the day it shipped and made it impossible to ever add another migration.
+  // Later releases append migrations that sort AFTER this one — that is the
+  // ordering rule working. What must hold is that nothing sharing its timestamp
+  // can reorder it; the general rule for new migrations is asserted once, for all
+  // of them, in migration-bootstrap.test.ts.
+  const sameStamp = dirs.filter((d) => d !== NAME && d.slice(0, 14) === NAME.slice(0, 14))
+  assert.deepEqual(sameStamp, [], 'no other migration may share this timestamp')
 })

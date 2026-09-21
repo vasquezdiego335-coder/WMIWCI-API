@@ -381,36 +381,14 @@ export async function fulfillPaidCheckout(params: {
     }, bookingId, edge)
   )
 
-  // 5) Create the Discord job-coordination card (worker dispatch view).
-  //    The payload carries everything the MOVE DAY JOB card renders so the
-  //    worker never needs raw DB access; price detail stays owner-side except
-  //    the labor estimate + travel-fee status the crew is allowed to see.
-  fanout.push(
-    enqueueFanout('discord:create-job-channels', {
-      queue: edge.discord,
-      queueName: 'discord',
-      name: 'create-job-channels',
-      kind: 'create-job-channels',
-      data: {
-        type: 'create-job-channels',
-        bookingId,
-        payload: {
-          bookingId,
-          displayId: booking.displayId,
-          customerName: booking.customer.name,
-          customerPhone: booking.customer.phone,
-          originAddress: booking.originAddress,
-          destAddress: booking.destAddress,
-          requestedDate: booking.requestedDate?.toISOString(),
-          items: booking.itemsDescription ?? undefined,
-          truckAddonDueOnMoveDay: booking.truckAddonDueOnMoveDay,
-          laborEstimate: booking.baseRate,
-          travelFeeDollars: booking.travelFee ? booking.travelFee / 100 : 0,
-          manualReviewRequired: booking.manualReviewRequired,
-        },
-      },
-    }, bookingId, edge)
-  )
+  // 5) NO JOB CARD HERE (Discord restructure 2026-09-20).
+  //    This step used to post a "Move Day Job" card to the crew channel the
+  //    moment the $49 was AUTHORIZED — labelled "Scheduled", carrying the full
+  //    name, phone, street addresses and the labor price — for a booking the
+  //    owner had not approved and the business had not been paid for. A
+  //    request is not a job. The crew card is now created by
+  //    booking-cards-sync, and only after approveBooking() has captured the
+  //    hold and committed the approval.
 
   // 6) Door-hanger discount approval card — REMOVED 2026-07-21 (owner
   //    decision). The campaign approved 30%, over the 10% public cap, so no

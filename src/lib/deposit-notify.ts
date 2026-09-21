@@ -31,6 +31,7 @@
 import { botLogger } from './logger'
 import { discordSafe } from './booking-display'
 import { formatCents, formatMoveWhenEn, formatPaymentTime, firstNameOf } from './deposit-links'
+import { TONE, brandFooter } from './discord-ui'
 
 const log = botLogger.child({ mod: 'deposit-notify' })
 
@@ -44,7 +45,9 @@ const log = botLogger.child({ mod: 'deposit-notify' })
  */
 export const DEFAULT_PAYMENTS_CHANNEL_ID = '1524853745064869990'
 
-/** Brand orange (#FF5A1F) — the embed accent. */
+/** Brand orange (#FF5A1F). Still the accent of the TEST card. The confirmed-
+ *  payment card itself is TONE.success: in the shared visual system (discord-ui)
+ *  orange means "pending", and money that has arrived is not pending. */
 export const EMBED_COLOR = 0xff5a1f
 export const WEBHOOK_USERNAME = 'Move It Clear It Payments'
 
@@ -172,10 +175,10 @@ export function buildDepositPaidEmbed(input: DepositPaidEmbedInput): EmbedJson {
 
   const embed: EmbedJson = {
     title: test ? '🧪 TEST — Deposit Paid' : '✅ Deposit Paid',
-    color: EMBED_COLOR,
+    color: TONE.success,
     fields,
     timestamp: (input.paidAt ?? new Date()).toISOString(),
-    footer: { text: 'Stripe-confirmed payment • Move It Clear It' },
+    footer: brandFooter('Stripe-confirmed payment'),
   }
   // The title links to the private admin page when there is one, so the card is
   // one tap from the booking on a phone.

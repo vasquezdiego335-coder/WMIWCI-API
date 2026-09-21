@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { getSession } from '@/lib/auth'
 import { prisma } from '@/lib/db'
 import { apiLogger } from '@/lib/logger'
+import { queueBookingCardSync } from '@/lib/booking-cards-sync'
 import { can, type Role } from '@/lib/permissions'
 import { validateTimeEntry, hasBlockingIssue, hasReviewIssue, hoursToMinutes } from '@/lib/labor-time'
 import { recalcAssignment, loadLaborPolicy, otherShiftsFor } from '@/lib/labor-service'
@@ -280,6 +281,10 @@ export async function PATCH(req: NextRequest, props: { params: Promise<{ id: str
   await recalcAssignment(updated.id)
   const fresh = await prisma.jobCrew.findUnique({ where: { id: updated.id }, include: { laborPayments: true } })
   apiLogger.info({ jobCrewId: updated.id, rateChanged, timeTouched }, 'Crew assignment updated')
+  // Who is on the job just changed: repaint the living Discord cards so
+  // #job-data and #today-jobs answer "who am I working with?" truthfully.
+  // Fire-and-forget — never throws, time-boxed, and never blocks this response.
+  if (existing.job?.bookingId) void queueBookingCardSync(existing.job.bookingId, 'crew-updated')
   return NextResponse.json({ assignment: fresh, warnings: issues.filter((i) => i.level === 'WARNING') })
 }
 
@@ -323,5 +328,6 @@ export async function DELETE(_req: NextRequest, props: { params: Promise<{ id: s
     })
   })
 
+  if (existing.job?.bookingId) void queueBookingCardSync(existing.job.bookingId, 'crew-removed')
   return NextResponse.json({ ok: true })
 }
