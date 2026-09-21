@@ -90,13 +90,26 @@ function booking(over: Partial<JobBookingInput> & Record<string, unknown> = {}):
   } as JobBookingInput
 }
 
-/** Every string anywhere in the payload, including button labels and URLs. */
+/**
+ * Every string a READER can see anywhere in the payload, including button
+ * labels and URLs.
+ *
+ * `timestamp` is skipped: Discord renders it as a relative time, never as text,
+ * and its value is the wall clock. Scanning it made the "no bare 49" check below
+ * fail whenever the test ran at second or minute :49 — observed in CI on
+ * 2026-09-21 at 11:13:49.996Z, on a card that contained no money at all.
+ */
 function everyString(value: unknown, out: string[] = []): string[] {
   if (typeof value === 'string') out.push(value)
   else if (Array.isArray(value)) for (const v of value) everyString(v, out)
-  else if (value && typeof value === 'object') for (const v of Object.values(value)) everyString(v, out)
+  else if (value && typeof value === 'object') {
+    for (const [k, v] of Object.entries(value)) if (k !== 'timestamp') everyString(v, out)
+  }
   return out
 }
+
+/** The exact instant the unscoped scan failed in CI — a timestamp full of "49". */
+const CLOCK_FULL_OF_49 = '2026-09-21T11:13:49.996Z'
 
 const field = (card: { embeds: Array<{ fields?: Array<{ name: string; value: string }> }> }, name: string): string | undefined =>
   card.embeds[0].fields?.find((f) => f.name === name)?.value
@@ -104,7 +117,11 @@ const field = (card: { embeds: Array<{ fields?: Array<{ name: string; value: str
 // ── CREW CARD: what it must never carry ─────────────────────────────────────
 
 test('the crew card contains NO money — no $ anywhere, no total, deposit, balance or fee', () => {
-  const text = everyString(buildCrewJobCard(booking({ waitingMinutes: 42 } as never), { waitingFeeLine: 'Waiting fee $25.00 (move day)' })).join('\n')
+  const card = buildCrewJobCard(booking({ waitingMinutes: 42 } as never), { waitingFeeLine: 'Waiting fee $25.00 (move day)' })
+  // Pin the clock to the value that made this test flaky, so the assertions
+  // below are deterministic and prove the SCAN — not the time of day — is right.
+  card.embeds[0].timestamp = CLOCK_FULL_OF_49
+  const text = everyString(card).join('\n')
   assert.doesNotMatch(text, /\$/, 'a dollar sign on the crew card is a leak')
   assert.doesNotMatch(text, /\b(total|deposit|balance|remaining|paid|captured|authorized|estimate|fee|refund|profit|margin)\b/i)
   assert.doesNotMatch(text, /1,?250|\b49\b/, 'the job total and the hold amount must not appear as bare numbers either')
