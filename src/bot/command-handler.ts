@@ -13,6 +13,7 @@ import path from 'path'
 import { ManualEventType } from '@prisma/client'
 
 import { botLogger } from '../lib/logger'
+import { authorizeOwnerAction } from '../lib/discord-auth'
 import { prisma } from '../lib/db'
 import { etDayRange, moveDateInRange, effectiveMoveDate } from '../lib/scheduling'
 import {
@@ -486,6 +487,28 @@ export async function handleSlashCommand(interaction: ChatInputCommandInteractio
   }
 
   botLogger.info(ctx, '▶ Slash command received')
+
+  // ── OWNER-ONLY, fail closed ─────────────────────────────────────────────
+  // /job prints a customer's details, /stats prints booking volume, /schedule
+  // prints names and addresses — and NONE of them checked who was asking. The
+  // buttons these commands surface were already owner-gated; the commands
+  // themselves were not. discord-auth reads the raw interaction shape, so the
+  // gateway object is mapped onto it rather than teaching the gate a second one.
+  const member = interaction.member as { roles?: unknown } | null
+  const roleIds = Array.isArray(member?.roles)
+    ? (member?.roles as unknown[]).map(String)
+    : Array.from(((member?.roles as { cache?: Map<string, unknown> } | undefined)?.cache ?? new Map()).keys())
+  const auth = authorizeOwnerAction(
+    {
+      guild_id: interaction.guildId ?? undefined,
+      member: { user: { id: interaction.user.id, username: interaction.user.username }, roles: roleIds },
+    },
+    `slash:${interaction.commandName}`,
+  )
+  if (!auth.ok) {
+    await respondSafely(interaction, '🔒 You do not have permission to use this command.')
+    return
+  }
 
   const command = commands.get(interaction.commandName)
 

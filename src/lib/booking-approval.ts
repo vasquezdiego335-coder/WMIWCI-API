@@ -44,6 +44,7 @@ import { outboxEnabled, emitApproved } from '../outbox/integration'
 import { can, type Role } from './permissions'
 import { apiLogger } from './logger'
 import { evaluateApproval, type ApprovalGuardInput } from './approval-guards'
+import { queueBookingCardSync } from './booking-cards-sync'
 
 // ── Public types ────────────────────────────────────────────────────────────
 
@@ -645,6 +646,15 @@ function prismaApprovalStore(): ApprovalStore {
 function queueApprovalNotifier(): ApprovalNotifier {
   return {
     async sendApproved(booking, capturedCents, approvedBy) {
+      // THE BOOKED MOMENT, told to Discord. This notifier runs only after
+      // stripe.capture() succeeded AND commitApproval() committed, so this is
+      // the one place "JOB CONFIRMED · $49 captured" can honestly originate —
+      // from BOTH approval surfaces (the Discord button and the admin portal).
+      // A failed capture returns before reaching here; checkout.session.completed
+      // never reaches here at all. Started first and awaited last so a slow
+      // email enqueue cannot starve it; it never throws and is time-boxed.
+      const cardSync = queueBookingCardSync(booking.id, 'approved')
+
       const locale = booking.customer.locale
       const when = booking.requestedDate
       const dateStr = when ? formatEastern(when) : 'your move date'
@@ -691,8 +701,12 @@ function queueApprovalNotifier(): ApprovalNotifier {
       }
 
       // No customer SMS: Move It Clear It no longer texts customers (owner, 2026-09-15).
+      await cardSync
     },
     async sendDeclined(booking) {
+      // Declined from the ADMIN portal used to leave the Discord request card
+      // showing live Approve / Deny buttons for a cancelled booking.
+      await queueBookingCardSync(booking.id, 'declined')
       if (!booking.customer.email) return
       const appBase = (process.env.APP_URL ?? 'https://moveitclearit.com').replace(/\/+$/, '')
       await emailQueue.add('booking-declined', {

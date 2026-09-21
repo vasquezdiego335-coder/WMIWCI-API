@@ -4,9 +4,7 @@ import { queueLogger } from '../lib/logger'
 import type { DiscordJobData } from '../lib/queues'
 import {
   postBookingApprovalCard,
-  postPaymentAlert,
   postFailureAlert,
-  createJobChannels,
   postDailySchedule,
   postContactMessage,
   postLeadCard,
@@ -18,6 +16,7 @@ import {
 //  with it. A module graph resolved at start-up cannot stall a job handler.
 import { processLeadNotification } from '../lib/lead-notification-processor'
 import { deliverLeadNotice } from '../lib/lead-notification-transport'
+import { syncBookingCards } from '../lib/booking-cards-sync'
 import { queueSafeJobId } from '../lib/email-deferral'
 import { discordQueue } from '../lib/queues'
 
@@ -32,7 +31,12 @@ async function processDiscordJob(job: Job<DiscordJobData>): Promise<void> {
       await postBookingApprovalCard(bookingId!, payload)
       break
     case 'payment-received':
-      await postPaymentAlert(bookingId!, payload)
+      // RETIRED 2026-09-20. Nothing has enqueued this since the approval card
+      // took over, and its copy ("Deposit Paid — deposit received") was FALSE
+      // for the flow it described: the website's $49 is an authorization
+      // (capture_method 'manual'), not money received. A stray job left in
+      // Redis is acknowledged and dropped rather than posting that claim.
+      log.warn('payment-received job ignored — retired; the $49 is an authorization, not a payment')
       break
     case 'discount-request':
       // Door-hanger campaign retired 2026-07-21. A job left in Redis from
@@ -41,8 +45,28 @@ async function processDiscordJob(job: Job<DiscordJobData>): Promise<void> {
       log.warn('discount-request job ignored — door-hanger campaign retired')
       break
     case 'create-job-channels':
-      await createJobChannels(bookingId!, payload)
+    // LEGACY NAME, NEW BEHAVIOUR. This used to post a "Move Day Job" card the
+    // moment the $49 was AUTHORIZED — labelled "Scheduled", carrying the full
+    // name, phone, street addresses and the labor price — for a booking nobody
+    // had approved. A job with that name can still arrive from Redis or from a
+    // lifecycle-repair retry row, so it is routed through the sync, which posts
+    // a crew card only for a CONFIRMED booking and only the crew-safe one.
+    // falls through
+    case 'booking-card-sync': {
+      if (!bookingId) {
+        log.error('booking card sync job without bookingId — dropping')
+        break
+      }
+      const result = await syncBookingCards(bookingId)
+      const failed = result.outcomes.filter((o) => o.result === 'failed')
+      // Throwing hands the retry to BullMQ (5 attempts, exponential backoff).
+      // Safe to repeat: creation is locked by UNIQUE (booking_id, audience) and
+      // everything after it is an edit.
+      if (failed.length) {
+        throw new Error(`booking card sync failed: ${failed.map((f) => `${f.audience}: ${'error' in f ? f.error : ''}`).join('; ')}`)
+      }
       break
+    }
     case 'failure-alert':
       await postFailureAlert(payload)
       break

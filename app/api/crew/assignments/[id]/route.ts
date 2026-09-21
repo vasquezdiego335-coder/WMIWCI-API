@@ -5,6 +5,7 @@ import { type Role } from '@/lib/permissions'
 import { canActOnOwnAssignment, isPortalEligible } from '@/lib/scheduling-guards'
 import { evaluateTransition, type AssignmentStatus } from '@/lib/assignment-lifecycle'
 import { scheduleAssignmentNotification } from '@/lib/crew-notifications'
+import { queueBookingCardSync } from '@/lib/booking-cards-sync'
 import { z } from 'zod'
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -79,5 +80,7 @@ export async function POST(req: NextRequest, props: { params: Promise<{ id: stri
 
   // Notify owners of a decline so they can re-staff.
   if (d.action === 'DECLINE') await scheduleAssignmentNotification({ jobCrewId: params.id, type: 'DECLINED' }).catch(() => {})
+  // A decline takes that person off the card; an acknowledgement keeps them on.
+  void queueBookingCardSync(row.job.bookingId, 'crew-response')
   return NextResponse.json({ ok: true })
 }

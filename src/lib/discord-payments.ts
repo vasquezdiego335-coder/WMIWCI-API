@@ -93,6 +93,13 @@ export async function deliverDepositNotification(depositRequestId: string): Prom
       quoteTotalCents: true,
       balanceBeforeCents: true,
       moveDate: true,
+      // The card has always been ABLE to show these three — buildDepositPaidEmbed
+      // accepts them — but this select never read them, so production never
+      // printed the move TIME, the service line or the crew note. P2022-safe: all
+      // three columns shipped with migration 20260820120000.
+      moveTimeMinutes: true,
+      serviceSummary: true,
+      internalNote: true,
       paidAt: true,
       livemode: true,
       discordStatus: true,
@@ -120,6 +127,10 @@ export async function deliverDepositNotification(depositRequestId: string): Prom
     quoteTotalCents: row.quoteTotalCents,
     remainingCents: remaining,
     moveDate: row.moveDate,
+    moveTimeMinutes: row.moveTimeMinutes,
+    serviceSummary: row.serviceSummary,
+    // PRIVATE crew note. Safe here and only here: #payments is Owner + Manager.
+    internalNote: row.internalNote,
     bookingReference: row.booking?.bookingReference ?? row.booking?.displayId ?? null,
     paidAt: row.paidAt,
     livemode: row.livemode,

@@ -14,6 +14,7 @@ import {
   EMBED_COLOR,
   WEBHOOK_USERNAME,
 } from '../deposit-notify'
+import { TONE } from '../discord-ui'
 
 // ════════════════════════════════════════════════════════════════════════════
 //  The confirmed-deposit Discord card: what it says, what it must never say,
@@ -105,9 +106,12 @@ const fieldValue = (embed: Record<string, unknown>, name: string): string | unde
 test('the card carries the owner-specified layout and the brand accent', () => {
   const e = fullEmbed()
   assert.equal(e.title, '✅ Deposit Paid')
-  assert.equal(e.color, EMBED_COLOR)
+  // Shared visual system (discord-ui, 2026-09-20): green means money ARRIVED.
+  // Brand orange now means "pending" everywhere, so a confirmed payment must
+  // not wear it. The brand constant itself is unchanged and still used for TEST.
+  assert.equal(e.color, TONE.success)
   assert.equal(EMBED_COLOR, 0xff5a1f, 'brand orange #FF5A1F')
-  assert.equal((e.footer as { text: string }).text, 'Stripe-confirmed payment • Move It Clear It')
+  assert.equal((e.footer as { text: string }).text, 'Move It Clear It • Stripe-confirmed payment', 'one footer format on every card')
   assert.equal(typeof e.timestamp, 'string')
   assert.equal(e.url, 'https://admin.example/admin/bookings')
 

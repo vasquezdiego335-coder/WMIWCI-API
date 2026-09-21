@@ -35,38 +35,51 @@ import { CRON_SCHEDULES, createCronReconciler, type CronReconciler, type CronSta
 import { pingAppRedis, sanitizeRedisError } from '../lib/redis-health'
 import { createErrorLogLimiter } from '../lib/worker-health'
 import { postOpsAlert } from '../lib/ops-alert'
+import { toCrewView, type CrewJobView, type JobBookingInput } from '../lib/job-cards'
 
-type DigestBooking = {
-  displayId: string
-  itemsDescription: string | null
-  originAddress: string
+type DigestBooking = JobBookingInput & {
   scheduledStart: Date | null
   confirmedDate: Date | null
   requestedDate: Date | null
-  customer: { name: string }
 }
 
-// Shape confirmed bookings into the daily-digest summaries, ordered by — and
-// timed off — their effective move date (scheduledStart ?? confirmedDate ??
-// requestedDate) so a booking is never dropped or mistimed because one date
-// field was blank. All times render in America/New_York.
-function formatDigestJobs(bookings: DigestBooking[]) {
+/** What a digest needs loaded: the customer's name (cut to a FIRST name by
+ *  toCrewView) and who is assigned — JobCrew is THE assignment record. */
+const DIGEST_INCLUDE = {
+  customer: { select: { name: true } },
+  job: {
+    select: {
+      crewNotes: true,
+      staffingReq: { select: { requiredWorkers: true } },
+      crew: { select: { assignmentStatus: true, role: true, crewLeader: true, isDriver: true, reportTime: true, user: { select: { name: true } } } },
+    },
+  },
+} as const
+
+// Shape confirmed bookings into the daily-digest summaries, ordered by their
+// effective move date (scheduledStart ?? confirmedDate ?? requestedDate) so a
+// booking is never dropped or mistimed because one date field was blank.
+//
+// THE DIGEST IS CREW-VISIBLE (#today-jobs / #upcoming-jobs). It used to carry
+// each customer's FULL NAME and STREET ADDRESS. It now carries CrewJobView — a
+// type with nowhere to put a surname, a street, a phone number or a price — so
+// what reaches the queue is already safe, whoever renders it.
+function formatDigestJobs(bookings: DigestBooking[]): CrewJobView[] {
   return bookings
     .map((b) => ({ b, when: effectiveMoveDate(b) }))
     .sort((a, z) => (a.when?.getTime() ?? 0) - (z.when?.getTime() ?? 0))
-    .map(({ b, when }) => ({
-      displayId: b.displayId,
-      customerName: b.customer.name,
-      serviceType: b.itemsDescription?.split('\n')[0]?.replace('Service: ', '') ?? 'Unknown',
-      scheduledTime: when
-        ? when.toLocaleTimeString('en-US', {
-            hour: 'numeric',
-            minute: '2-digit',
-            timeZone: 'America/New_York',
-          })
-        : 'TBD',
-      originAddress: b.originAddress,
-    }))
+    .map(({ b }) => toCrewView(b))
+}
+
+/** "Tuesday, September 22" on the Eastern calendar. */
+const etDayLabel = (at: Date): string =>
+  at.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', timeZone: 'America/New_York' })
+
+/** Every card in a digest is repainted when the digest goes out, so a sync that
+ *  was lost to a Redis stall heals within twelve hours at most. Never throws. */
+async function repaintCards(bookings: { id: string }[]): Promise<void> {
+  const { queueBookingCardSync } = await import('../lib/booking-cards-sync')
+  await Promise.all(bookings.map((b) => queueBookingCardSync(b.id, 'daily-digest')))
 }
 
 /** Exported for the end-to-end suites, which drive real queued jobs through it. */
@@ -559,17 +572,11 @@ export async function processScheduledJob(job: Job<ScheduledJobData>): Promise<v
           status: { in: ['CONFIRMED', 'SCHEDULED', 'IN_PROGRESS'] },
           ...moveDateInRange(todayStart, todayEnd),
         },
-        include: { customer: true },
+        include: DIGEST_INCLUDE,
       })
 
-      const formatted = formatDigestJobs(jobs)
-
-      const today = new Date().toLocaleDateString('en-US', {
-        weekday: 'long',
-        month: 'long',
-        day: 'numeric',
-        timeZone: 'America/New_York',
-      })
+      const formatted = formatDigestJobs(jobs as unknown as DigestBooking[])
+      const today = etDayLabel(new Date())
 
       // LAST ACTIVITY (incident 2026-09-14): lead, email and booking recency
       // side by side, so "emails stopped" and "customers stopped" never look
@@ -582,11 +589,16 @@ export async function processScheduledJob(job: Job<ScheduledJobData>): Promise<v
       await discordQueue.add('daily-schedule', {
         type: 'daily-schedule',
         payload: {
-          title: `☀️ Today's Jobs — ${today}`,
+          slot: 'today', // → #today-jobs (DISCORD_CHANNEL_TODAY_JOBS)
+          dayLabel: today,
+          title: `Today's Jobs — ${today}`,
           jobs: formatted,
+          // Owner telemetry. postDailySchedule sends it to the OWNER channel as
+          // its own message — it is not crew business.
           ...(activity ? { activity } : {}),
         },
       })
+      await repaintCards(jobs)
 
       // No day-of-move customer SMS: Move It Clear It no longer texts customers
       // (owner, 2026-09-15). The digest goes to the team on Discord only.
@@ -605,25 +617,22 @@ export async function processScheduledJob(job: Job<ScheduledJobData>): Promise<v
           status: { in: ['CONFIRMED', 'SCHEDULED'] },
           ...moveDateInRange(tomorrowStart, tomorrowEnd),
         },
-        include: { customer: true },
+        include: DIGEST_INCLUDE,
       })
 
-      const formatted = formatDigestJobs(jobs)
-
-      const tomorrowLabel = tomorrowStart.toLocaleDateString('en-US', {
-        weekday: 'long',
-        month: 'long',
-        day: 'numeric',
-        timeZone: 'America/New_York',
-      })
+      const formatted = formatDigestJobs(jobs as unknown as DigestBooking[])
+      const tomorrowLabel = etDayLabel(tomorrowStart)
 
       await discordQueue.add('daily-schedule', {
         type: 'daily-schedule',
         payload: {
-          title: `🌙 Tomorrow's Jobs — ${tomorrowLabel}`,
+          slot: 'tomorrow', // → #upcoming-jobs (DISCORD_CHANNEL_UPCOMING_JOBS)
+          dayLabel: tomorrowLabel,
+          title: `Tomorrow's Jobs — ${tomorrowLabel}`,
           jobs: formatted,
         },
       })
+      await repaintCards(jobs)
 
       log.info({ count: formatted.length }, 'Evening schedule digest queued')
       break

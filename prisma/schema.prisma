@@ -4225,6 +4225,47 @@ model DepositRequest {
   @@map("deposit_requests")
 }
 
+/// ONE LIVING DISCORD CARD PER (BOOKING, AUDIENCE)  (Discord restructure 2026-09-20).
+///
+/// A booking used to produce a NEW message for every event, in four channels,
+/// with nothing tying them together. Each audience now has exactly one message
+/// that is EDITED as the booking moves PENDING_APPROVAL -> CONFIRMED ->
+/// IN_PROGRESS -> COMPLETED. This row is where that message lives.
+///
+///   audience 'crew'   the crew-safe card in #job-data
+///   audience 'owner'  the owner card in #bookings, when the original approval
+///                     message (Booking.discordApprovalMessageId) cannot be
+///                     edited and a replacement had to be posted
+///
+/// WHY A TABLE AND NOT A COLUMN ON Booking. A new Booking column is selected
+/// by EVERY default Booking query the moment the Prisma client is regenerated,
+/// and this repo does not run migrations at build time. Code reaching
+/// production one step ahead of its migration would make every booking read
+/// fail with P2022 — checkout, approval and the admin all at once. A query
+/// against a missing TABLE fails only for the feature that owns it, and the
+/// card sync catches that and carries on. No relation is declared on Booking
+/// for the same reason: Booking's generated type does not change at all.
+///
+/// (booking_id, audience) is UNIQUE, and that constraint IS the exactly-once
+/// lock: the first INSERT wins the right to post, a concurrent or retried job
+/// gets P2002 and edits instead. message_id is NULL only while the winner is
+/// mid-post; claimed_at lets a crashed worker's claim be taken over.
+model BookingDiscordCard {
+  id         String    @id @default(cuid())
+  bookingId  String    @map("booking_id")
+  audience   String
+  channelId  String    @map("channel_id")
+  messageId  String?   @map("message_id")
+  claimedAt  DateTime? @map("claimed_at")
+  /// The BookingStatus last rendered. Diagnostic only - never read as state.
+  lastStatus String?   @map("last_status")
+  createdAt  DateTime  @default(now()) @map("created_at")
+  updatedAt  DateTime  @updatedAt @map("updated_at")
+
+  @@unique([bookingId, audience])
+  @@map("booking_discord_cards")
+}
+
 /// DURABLE LIFECYCLE ENQUEUE RETRIES (production reliability release 2026-09-15).
 /// One row per deterministic BullMQ job id whose live `queue.add` did not
 /// succeed. The hourly lifecycle-repair sweep re-adds exactly that job under

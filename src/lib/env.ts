@@ -49,6 +49,15 @@ const REQUIRED_DISCORD: EnvVar[] = [
     required: false,
     note: 'destination for confirmed deposit payments (defaults to 1524853745064869990). Used by the BOT transport; with a webhook the URL selects the channel.',
   },
+  // ── Server restructure 2026-09-20 ──
+  // DISCORD_CHANNEL_SCHEDULING is the OWNER channel (#bookings): request cards,
+  // owner job cards. DISCORD_CHANNEL_JOB_DATA is the CREW channel (#job-data) and
+  // receives ONLY the crew-safe card. (DISCORD_CHANNEL_JOBS is legacy: the retired
+  // job card read it, and it still points at the archived #🚚-jobs.) Both digests fall back to SCHEDULING, which
+  // is the safe direction: crew-safe content may reach owners, never the reverse.
+  { key: 'DISCORD_CHANNEL_JOB_DATA', required: false, note: 'CREW-VISIBLE #job-data. Receives only the crew-safe job card (no price, phone or street address). Unset = crew cards are skipped, never misplaced.' },
+  { key: 'DISCORD_CHANNEL_TODAY_JOBS', required: false, note: 'CREW-VISIBLE #today-jobs — the 7:00 AM ET digest. Falls back to DISCORD_CHANNEL_SCHEDULING.' },
+  { key: 'DISCORD_CHANNEL_UPCOMING_JOBS', required: false, note: 'CREW-VISIBLE #upcoming-jobs — the 7:00 PM ET digest. Falls back to DISCORD_CHANNEL_SCHEDULING.' },
 ]
 
 // ── EMAIL (audit E-01, 2026-07-26) ──────────────────────────────────────

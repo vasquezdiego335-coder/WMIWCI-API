@@ -243,6 +243,17 @@
       ],
       "secret": false
     },
+    "DISCORD_CHANNEL_JOB_DATA": {
+      "readBy": [
+        "api",
+        "worker"
+      ],
+      "secret": false,
+      "checkedBy": [
+        "api",
+        "worker"
+      ]
+    },
     "DISCORD_CHANNEL_LEADS": {
       "readBy": [
         "api",
@@ -297,6 +308,28 @@
       "secret": false
     },
     "DISCORD_CHANNEL_SCHEDULING": {
+      "readBy": [
+        "api",
+        "worker"
+      ],
+      "secret": false,
+      "checkedBy": [
+        "api",
+        "worker"
+      ]
+    },
+    "DISCORD_CHANNEL_TODAY_JOBS": {
+      "readBy": [
+        "api",
+        "worker"
+      ],
+      "secret": false,
+      "checkedBy": [
+        "api",
+        "worker"
+      ]
+    },
+    "DISCORD_CHANNEL_UPCOMING_JOBS": {
       "readBy": [
         "api",
         "worker"

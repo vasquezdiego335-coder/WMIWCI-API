@@ -9,17 +9,10 @@ import {
 } from 'discord.js'
 import { botLogger } from '../lib/logger'
 import { prisma } from '../lib/db'
-import {
-  buildJobCard,
-  buildBookingApprovalCard,
-  approvalCardDataFromBooking,
-  serviceLabelFromDescription,
-  truckLabelFromDescription,
-  TRUCK_OPTION_LABELS,
-  buildLeadCard,
-  type LeadCardData,
-} from '../lib/booking-display'
+import { approvalCardDataFromBooking, buildLeadCard, type LeadCardData } from '../lib/booking-display'
 import { completenessLines } from '../lib/booking-completeness'
+import { buildBookingRequestCard, buildDailyDigest, type CrewJobView, type DigestSlot } from '../lib/job-cards'
+import { TONE, brandFooter } from '../lib/discord-ui'
 
 // ════════════════════════════════════════════════════════════════════════
 //  Discord REST sender — for the WORKER process (and any non-gateway caller)
@@ -36,9 +29,13 @@ import { completenessLines } from '../lib/booking-completeness'
 //  The gateway Client stays ONLY in the bot process (src/bot/index.ts),
 //  which needs it to RECEIVE slash commands / interactions.
 //
-//  EXPORTS match discord-actions.ts so the worker just swaps the import path:
-//    postBookingApprovalCard, postDiscountApprovalCard, postPaymentAlert,
-//    postFailureAlert, createJobChannels, postDailySchedule, postContactMessage
+//  EXPORTS: postBookingApprovalCard, postFailureAlert, postDailySchedule,
+//    postContactMessage, postLeadCard.
+//
+//  The job card is NOT posted from here any more. It used to go out the moment
+//  a $49 hold was AUTHORIZED, labelled "Scheduled". It is now one living card
+//  per booking, created only once the booking is CONFIRMED and edited in place
+//  afterwards — see src/lib/booking-cards-sync.ts.
 // ════════════════════════════════════════════════════════════════════════
 
 const errMsg = (e: unknown): string => (e instanceof Error ? e.message : String(e))
@@ -174,9 +171,12 @@ export async function postBookingApprovalCard(
         adminUrl,
       }
 
-  const card = buildBookingApprovalCard(cardData)
+  // The REQUEST card: the approval body under the shared header, which says
+  // what is true at this moment — "$49 authorized · awaiting approval". The
+  // website checkout is capture_method 'manual'; nothing has been paid.
+  const card = buildBookingRequestCard(cardData)
 
-  const msg = await restSendToChannel('DISCORD_CHANNEL_SCHEDULING', card)
+  const msg = await restSendToChannel('DISCORD_CHANNEL_SCHEDULING', { ...card, allowed_mentions: { parse: [] } })
   if (!msg) return
 
   await prisma.booking
@@ -193,23 +193,11 @@ export async function postBookingApprovalCard(
 
 
 // ══════════════════════════════════════════════════════════════════════════
-//  3. Payment received alert (informational)
+//  3. "Payment received" alert — RETIRED 2026-09-20.
+//     It announced "Deposit Paid — deposit received" for the website's $49,
+//     which is an AUTHORIZATION (capture_method 'manual'). Nothing enqueued it;
+//     it is removed so the false claim cannot be wired back in by accident.
 // ══════════════════════════════════════════════════════════════════════════
-export async function postPaymentAlert(bookingId: string, payload: Record<string, unknown>): Promise<void> {
-  botLogger.info({ bookingId }, '▶ postPaymentAlert (REST)')
-  const embed = new EmbedBuilder()
-    .setTitle(`💳 Deposit Paid — ${payload.displayId}`)
-    .setColor(0x22c55e)
-    .setDescription('Deposit received. Booking is **PENDING_APPROVAL** — approve or deny using the original card above.')
-    .addFields(
-      { name: '👤 Customer', value: [`**${payload.customerName}**`, payload.customerEmail as string].filter(Boolean).join('\n') || '—', inline: true },
-      { name: '💵 Amount', value: `$${payload.amount ?? 49} deposit`, inline: true },
-      { name: '📦 Service', value: (payload.serviceType as string) || 'Unknown', inline: true }
-    )
-    .setFooter({ text: `Booking ID: ${bookingId}` })
-    .setTimestamp()
-  await restSendToChannel('DISCORD_CHANNEL_SCHEDULING', { embeds: [embed.toJSON()] })
-}
 
 // ══════════════════════════════════════════════════════════════════════════
 //  4. System failure / error alert
@@ -227,77 +215,57 @@ export async function postFailureAlert(payload: Record<string, unknown>): Promis
 }
 
 // ══════════════════════════════════════════════════════════════════════════
-//  5. Worker dispatch card — "MOVE DAY JOB" (Start / Complete, links)
-//     Built by the shared, tested builder in lib/booking-display.ts so the
-//     interactions endpoint re-renders the exact same card on button presses.
-//     Worker-facing: human statuses, short ref, no payment breakdown.
+//  5. Job card — MOVED to src/lib/booking-cards-sync.ts (one living card per
+//     booking, crew-safe, created only once the booking is CONFIRMED).
 // ══════════════════════════════════════════════════════════════════════════
-export async function createJobChannels(bookingId: string, payload: Record<string, unknown>): Promise<void> {
-  botLogger.info({ bookingId }, '▶ createJobChannels (REST)')
-
-  const items = payload.items ? String(payload.items) : null
-  const appUrl = process.env.APP_URL ?? 'https://wmiwci-api.vercel.app'
-
-  const photoCount = await prisma.file
-    .count({ where: { bookingId, type: 'PHOTO_BEFORE' } })
-    .catch(() => 0)
-
-  const card = buildJobCard({
-    bookingId,
-    displayId: payload.displayId as string | undefined,
-    status: 'CONFIRMED',
-    customerName: payload.customerName as string | undefined,
-    customerPhone: payload.customerPhone as string | undefined,
-    serviceType: serviceLabelFromDescription(items) ?? undefined,
-    moveDate: (payload.requestedDate as string | undefined) ?? (payload.confirmedDate as string | undefined),
-    originAddress: payload.originAddress as string | undefined,
-    destAddress: payload.destAddress as string | undefined,
-    truckOptionLabel:
-      payload.truckAddonDueOnMoveDay === true
-        ? TRUCK_OPTION_LABELS['truck-pickup-return']
-        : truckLabelFromDescription(items) ?? undefined,
-    rawDescription: items,
-    photoCount,
-    laborEstimate: typeof payload.laborEstimate === 'number' ? payload.laborEstimate : null,
-    travelFeeDollars: typeof payload.travelFeeDollars === 'number' ? payload.travelFeeDollars : null,
-    manualReviewRequired: payload.manualReviewRequired === true,
-    adminUrl: `${appUrl}/admin/bookings`,
-  })
-
-  // Button presses edit the clicked card in place (RES_UPDATE_MESSAGE) and the
-  // booking id rides in each button's custom_id, so no message id is persisted.
-  await restSendToChannel('DISCORD_CHANNEL_JOBS', card)
-}
 
 // ══════════════════════════════════════════════════════════════════════════
-//  6. Daily schedule digest
+//  6. Daily job digests
+//     7:00 AM → #today-jobs      (DISCORD_CHANNEL_TODAY_JOBS)
+//     7:00 PM → #upcoming-jobs   (DISCORD_CHANNEL_UPCOMING_JOBS)
+//     Both are CREW-VISIBLE, so the payload is a list of CrewJobView — a type
+//     with nowhere to put a price, a surname, a phone or a street address.
+//     The owner's "last activity" telemetry is NOT crew business and goes to the
+//     owner channel as its own message.
 // ══════════════════════════════════════════════════════════════════════════
 export async function postDailySchedule(payload: Record<string, unknown>): Promise<void> {
-  botLogger.info({ title: payload.title }, '▶ postDailySchedule (REST)')
-  type JobSummary = { displayId: string; customerName: string; serviceType: string; scheduledTime: string; originAddress: string }
-  const jobs = (payload.jobs as JobSummary[]) ?? []
-  const embed = new EmbedBuilder()
-    .setTitle((payload.title as string) || '📅 Daily Schedule')
-    .setColor(0x0a1628)
-    .setTimestamp()
-  if (jobs.length === 0) {
-    embed.setDescription('No jobs scheduled. 🏖️')
-  } else {
-    for (const job of jobs) {
+  botLogger.info({ slot: payload.slot, title: payload.title }, '▶ postDailySchedule (REST)')
+
+  const jobs = Array.isArray(payload.jobs) ? (payload.jobs as Array<Record<string, unknown>>) : []
+  // A job queued by the PREVIOUS release carries full names and street
+  // addresses. It may only ever reach the owner channel — never a crew one.
+  const legacy = typeof payload.slot !== 'string' || jobs.some((j) => 'customerName' in j || 'originAddress' in j)
+
+  if (legacy) {
+    const embed = new EmbedBuilder().setTitle((payload.title as string) || 'Daily Schedule').setColor(TONE.info).setTimestamp()
+    if (jobs.length === 0) embed.setDescription('No jobs scheduled.')
+    for (const job of jobs.slice(0, 20)) {
       embed.addFields({
-        name: `${job.displayId} — ${job.customerName}`,
-        value: [`📦 ${job.serviceType}`, `⏰ ${job.scheduledTime}`, `📍 ${job.originAddress || 'Address TBD'}`].join('\n'),
+        name: `${job.displayId ?? ''} — ${job.customerName ?? ''}`.slice(0, 256),
+        value: [job.serviceType, job.scheduledTime, job.originAddress || 'Address TBD'].filter(Boolean).join('\n').slice(0, 1024),
         inline: false,
       })
     }
-    embed.setFooter({ text: `${jobs.length} job${jobs.length === 1 ? '' : 's'} scheduled` })
+    await restSendToChannel('DISCORD_CHANNEL_SCHEDULING', { embeds: [embed.toJSON()], allowed_mentions: { parse: [] } })
+  } else {
+    const slot = payload.slot as DigestSlot
+    const digest = buildDailyDigest(slot, String(payload.dayLabel ?? ''), jobs as unknown as CrewJobView[])
+    // Falls back to the OWNER channel, which is always safe for crew-safe
+    // content; the reverse would not be.
+    await restSendFirst([slot === 'today' ? 'DISCORD_CHANNEL_TODAY_JOBS' : 'DISCORD_CHANNEL_UPCOMING_JOBS', 'DISCORD_CHANNEL_SCHEDULING'], {
+      ...digest,
+      allowed_mentions: { parse: [] },
+    })
   }
-  // Last-activity lines (src/lib/ops-activity.ts) — timestamps only, no PII.
+
+  // Last-activity lines (src/lib/ops-activity.ts) — owner telemetry, owner channel.
   const activity = Array.isArray(payload.activity) ? (payload.activity as unknown[]).map(String) : []
   if (activity.length > 0) {
-    embed.addFields({ name: '📈 Last activity', value: activity.join('\n').slice(0, 1024), inline: false })
+    await restSendToChannel('DISCORD_CHANNEL_SCHEDULING', {
+      embeds: [{ title: 'Last activity', color: TONE.neutral, description: activity.join('\n').slice(0, 2000), footer: brandFooter('Owner snapshot'), timestamp: new Date().toISOString() }],
+      allowed_mentions: { parse: [] },
+    })
   }
-  await restSendToChannel('DISCORD_CHANNEL_SCHEDULING', { embeds: [embed.toJSON()] })
 }
 
 // ══════════════════════════════════════════════════════════════════════════

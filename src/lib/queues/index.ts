@@ -200,6 +200,11 @@ export type DiscordJobData = {
     // A CONFIRMED deposit-link payment. Queued only by the Stripe webhook path,
     // only after Stripe reported the session paid. payload: { depositRequestId }
     | 'deposit-paid'
+    // Repaint a booking's living cards (owner card in #bookings, crew card in
+    // #job-data) from the booking AS IT IS NOW. Carries only bookingId — never a
+    // status or an amount — so a duplicate or late job can only repaint the
+    // truth. See src/lib/booking-cards-sync.ts.
+    | 'booking-card-sync'
   bookingId?: string
   payload: Record<string, unknown>
 }

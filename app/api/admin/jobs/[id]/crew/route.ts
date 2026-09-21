@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { getSession } from '@/lib/auth'
 import { prisma } from '@/lib/db'
 import { apiLogger } from '@/lib/logger'
+import { queueBookingCardSync } from '@/lib/booking-cards-sync'
 import { can, type Role } from '@/lib/permissions'
 import { buildRateSnapshot, type PayModel, type WorkerType } from '@/lib/labor-calc'
 import { ensureJobForBooking, recalcAssignment, loadLaborPolicy } from '@/lib/labor-service'
@@ -255,5 +256,9 @@ export async function POST(req: NextRequest, props: { params: Promise<{ id: stri
   // a revive of the same row reuses the same dedupe key and stays silent).
   await scheduleAssignmentNotification({ jobCrewId: created.id, type: 'ASSIGNED' }).catch(() => {})
   apiLogger.info({ jobCrewId: created.id, bookingId: booking.id, worker: worker.name }, 'Crew assigned')
+  // Who is on the job just changed: repaint the living Discord cards so
+  // #job-data and #today-jobs answer "who am I working with?" truthfully.
+  // Fire-and-forget — never throws, time-boxed, and never blocks this response.
+  void queueBookingCardSync(booking.id, 'crew-assigned')
   return NextResponse.json(created, { status: 201 })
 }

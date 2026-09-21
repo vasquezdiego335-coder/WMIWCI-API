@@ -18,14 +18,9 @@ import { offerRescheduleToCustomer } from "@/lib/reschedule";
 import { formatEastern } from "@/lib/scheduling";
 import { authorizeOwnerAction, type DiscordActor } from "@/lib/discord-auth";
 import { accessSections } from "@/lib/booking-access";
-import {
-  buildJobCard,
-  serviceLabelFromDescription,
-  truckLabelFromDescription,
-  timeOfDay,
-  TRUCK_OPTION_LABELS,
-} from "@/lib/booking-display";
-import { resolveWaiting, feeDollars, WAITING_GRACE_MINUTES } from "@/lib/waiting-time";
+import { resolveWaiting } from "@/lib/waiting-time";
+import { buildCrewJobCard, buildOwnerJobCard } from "@/lib/job-cards";
+import { defaultCardSyncDeps, loadJobCardExtras, queueBookingCardSync, type SyncBooking } from "@/lib/booking-cards-sync";
 import { apiLogger } from "@/lib/logger";
 import { outboxEnabled, emitRescheduleRequested } from "@/outbox/integration";
 
@@ -118,9 +113,9 @@ function confirmedCard(
   return {
     embeds: [
       {
-        title: `✅ Approved — ${booking.displayId}`,
+        title: "🚚 MOVE IT CLEAR IT",
         color: 0x22c55e,
-        description: "Deposit captured · booking **CONFIRMED**.",
+        description: `🟢 **JOB CONFIRMED**\n$${(cents / 100).toFixed(0)} captured · ${booking.displayId}`,
         fields: [
           { name: "👤 Customer", value: booking.customer?.name ?? "—", inline: true },
           { name: "📅 Move date", value: dateStr, inline: true },
@@ -236,10 +231,25 @@ async function handleApprove(
     );
   }
 
-  // Render the confirmed card from the (pre-claim) booking snapshot.
+  // THE CAPTURE SUCCEEDED AND THE APPROVAL COMMITTED — approveBooking() returns
+  // ok only after both. Repaint the clicked request card as the owner JOB card:
+  // "🟢 JOB CONFIRMED · $49 captured". A failed capture never reaches this line
+  // (it returned above with the claim rolled back), so this wording cannot
+  // appear for a booking that was not actually charged.
+  //
+  // Time-boxed: Discord allows 3s for the whole interaction and the capture has
+  // already spent most of it. If the fresh read is slow, fall back to the compact
+  // card; the queued booking-card-sync repaints the full one moments later.
+  const full = await Promise.race([
+    (async () => {
+      const fresh = await defaultCardSyncDeps().loadBooking(result.booking.id);
+      return fresh ? buildOwnerJobCard(fresh, await loadJobCardExtras(fresh)) : null;
+    })().catch(() => null),
+    new Promise<null>((resolve) => setTimeout(() => resolve(null), 700)),
+  ]);
   return NextResponse.json({
     type: RES_UPDATE_MESSAGE,
-    data: confirmedCard(result.booking, approverName, result.capturedCents ?? undefined, result.receiptUrl),
+    data: full ?? confirmedCard(result.booking, approverName, result.capturedCents ?? undefined, result.receiptUrl),
   });
 }
 
@@ -577,90 +587,26 @@ type JobBooking = NonNullable<Awaited<ReturnType<typeof loadJobBooking>>>;
 function loadJobBooking(bookingId: string) {
   return prisma.booking.findUnique({
     where: { id: bookingId },
-    include: { customer: true, job: true },
+    include: {
+      customer: true,
+      // Who is on the job — JobCrew is THE assignment record.
+      job: { include: { crew: { include: { user: { select: { name: true } } } }, staffingReq: true } },
+    },
   });
 }
 
-// Who pressed Start/Complete (for re-rendering after later presses).
-async function jobAuditTrail(bookingId: string): Promise<{
-  startedBy?: string;
-  startedAtLabel?: string;
-  completedBy?: string;
-  completedAtLabel?: string;
-}> {
-  const rows = await prisma.auditLog
-    .findMany({
-      where: { bookingId, action: { in: ["JOB_STARTED", "JOB_COMPLETED"] } },
-      orderBy: { createdAt: "asc" },
-    })
-    .catch(() => []);
-  const out: { startedBy?: string; startedAtLabel?: string; completedBy?: string; completedAtLabel?: string } = {};
-  for (const row of rows) {
-    const details = (row.details ?? {}) as Record<string, unknown>;
-    const by = typeof details.by === "string" ? details.by : undefined;
-    if (row.action === "JOB_STARTED" && !out.startedBy) {
-      out.startedBy = by ?? "crew";
-      out.startedAtLabel = timeOfDay(row.createdAt);
-    }
-    if (row.action === "JOB_COMPLETED") {
-      out.completedBy = by ?? "crew";
-      out.completedAtLabel = timeOfDay(row.createdAt);
-    }
-  }
-  return out;
-}
-
+// The card these buttons live on is the CREW card in #job-data — a channel every
+// 📦 Mover can read. It is therefore re-rendered with the crew-safe builder: no
+// price, no phone, no street address, no fee (see src/lib/job-cards.ts). The
+// old renderer printed the customer's full name, phone, both street addresses
+// and the labor estimate here.
+//
+// The OWNER card in #bookings is a different message; it follows via the queued
+// sync so both stay in step without this handler knowing where the other lives.
 async function renderJobCard(booking: JobBooking) {
-  const photoCount = await prisma.file
-    .count({ where: { bookingId: booking.id, type: "PHOTO_BEFORE" } })
-    .catch(() => 0);
-  const trail = await jobAuditTrail(booking.id);
-  const items = booking.itemsDescription;
-  const appUrl = process.env.APP_URL ?? "https://wmiwci-api.vercel.app";
-
-  // Waiting-time summary line (fee math from the single source of truth).
-  const w = resolveWaiting(booking);
-  let waitingSummary: string | null = null;
-  if (w.source !== "none") {
-    if (w.ongoing) {
-      waitingSummary =
-        w.billableMinutes > 0
-          ? `⏳ Waiting ${w.totalMinutes} min — billable, running fee ${feeDollars(w.feeCents)}`
-          : `⏳ Waiting ${w.totalMinutes} min — within the free ${WAITING_GRACE_MINUTES}-min grace`;
-    } else if (w.totalMinutes > 0) {
-      waitingSummary =
-        w.feeCents > 0
-          ? `Waited ${w.totalMinutes} min → ${w.billableMinutes} min billable · Waiting fee ${feeDollars(w.feeCents)} (move day)`
-          : `Waited ${w.totalMinutes} min — within the free ${WAITING_GRACE_MINUTES}-min grace · no fee`;
-    }
-  }
-
-  return buildJobCard({
-    bookingId: booking.id,
-    displayId: booking.displayId,
-    status: booking.status,
-    customerName: booking.customer?.name,
-    customerPhone: booking.customer?.phone,
-    serviceType: serviceLabelFromDescription(items) ?? undefined,
-    moveDate: booking.confirmedDate ?? booking.requestedDate,
-    originAddress: booking.originAddress,
-    destAddress: booking.destAddress,
-    truckOptionLabel: booking.truckAddonDueOnMoveDay
-      ? TRUCK_OPTION_LABELS["truck-pickup-return"]
-      : truckLabelFromDescription(items) ?? undefined,
-    rawDescription: items,
-    photoCount,
-    laborEstimate: booking.baseRate,
-    travelFeeDollars: booking.travelFee ? booking.travelFee / 100 : null,
-    manualReviewRequired: booking.manualReviewRequired,
-    adminUrl: `${appUrl}/admin/bookings`,
-    crewArrivedAt: booking.crewArrivedAt,
-    customerReadyAt: booking.customerReadyAt,
-    waitingStartedAt: booking.waitingStartedAt,
-    waitingEndedAt: booking.waitingEndedAt,
-    waitingSummary,
-    ...trail,
-  });
+  void queueBookingCardSync(booking.id, "move-day-button");
+  const extras = await loadJobCardExtras(booking as unknown as SyncBooking).catch(() => ({}));
+  return buildCrewJobCard(booking as unknown as SyncBooking, extras);
 }
 
 // ════════════════════════════════════════════════════════════════════════
@@ -1051,6 +997,14 @@ export async function POST(req: Request) {
   // and never time out; unknown commands fall through to the generic ack below.
   if (interaction.type === TYPE_APPLICATION_COMMAND) {
     const cmd: string = interaction?.data?.name ?? "";
+    // OWNER-ONLY, through the same fail-closed gate as the money buttons. These
+    // commands read and write business data (/recent, the field log, the owner
+    // task board) and had NO authorization at all: any member who could type a
+    // slash command could run them, and a channel restriction does not stop a
+    // command. Found 2026-09-20 while preparing the server for crew invites.
+    if (!authorizeOwnerAction(interaction, `slash:${cmd}`).ok) {
+      return ephemeral("🔒 You do not have permission to use this command.");
+    }
     if (FIELD_LOG[cmd] || cmd === "recent") {
       try {
         return cmd === "recent" ? await handleRecent(interaction) : await handleFieldLog(interaction, cmd);
