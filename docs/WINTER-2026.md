@@ -29,7 +29,7 @@ Code that supports it:
 | Vercel (www.moveitclearit.com) | Static website | **Not visible** (CLI not signed in). Hobby = $0 but non-commercial only; Pro = $20/seat | Deploy winter branch, then move to Cloudflare (free) | $0 | Redeploy normal branch (R7) |
 | Cloudflare | DNS, Registrar, Email Routing (hello@ inbox) | $0 (free features; dashboard not checked) | Keep; export DNS zone | $0 | — |
 | Domain moveitclearit.com | Cloudflare Registrar | Paid to **2027-05-23**; renews at cost | Keep auto-renew + a valid card | $0 during winter | — |
-| Stripe (acct_1TaOAg…, live) | Booking holds, deposits | $0 fixed fee; balance $0, no holds, disputes, links or subscriptions (verified) | Disable webhook endpoint after the API is off | $0 | Re-enable endpoint (R8) |
+| Stripe (live account) | Booking holds, deposits | $0 fixed fee; balance $0, no holds, disputes, links or subscriptions (verified) | Disable webhook endpoint after the API is off | $0 | Re-enable endpoint (R8) |
 | Resend (moveitclearit.com verified) | Sending email | **Plan not visible**. ~30 emails/month fits Free (3,000/month) | Keep domain; downgrade if on Pro; disable webhook | $0 on Free | Re-enable webhook |
 | Twilio (Trial account) | App SMS (already `TWILIO_ENABLED=false`) | $1.15/month number **…5371** paid from trial credit ($9.69 left). **Not the business number** | Leave. Twilio may reclaim an unused trial number after 90 days | $0 cash | Only if SMS is wanted again |
 | Business number (862) 640-0625 | Public phone / text | Not on Twilio. A Drive note says "my number is 862-640-0625": **appears to be the owner's own line**. No business-phone bill found | Keep. Set the seasonal voicemail (section 6) | Owner to confirm $0 | — |
