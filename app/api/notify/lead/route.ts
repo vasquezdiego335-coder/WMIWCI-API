@@ -6,6 +6,7 @@ import { apiLogger } from '@/lib/logger'
 import { rateLimit, tooManyRequests, LIMITS, clientIp } from '@/lib/rate-limit'
 import { ingestLeadSafe } from '@/lib/leads'
 import { CONSENT_VERSION, normaliseConsentSource, routeConsentSource } from '@/lib/consent'
+import { guardSeasonalClosure } from '@/lib/seasonal-closure'
 import {
   applyCaptureBasis,
   captureBasisDeps,
@@ -98,6 +99,9 @@ function tokenOk(req: NextRequest): boolean {
 }
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
+  // Winter mode: refuse before any database, Stripe or Google call.
+  const closed = guardSeasonalClosure()
+  if (closed) return closed
   if (!tokenOk(req)) {
     return NextResponse.json({ ok: false, error: 'unauthorized' }, { status: 401 })
   }

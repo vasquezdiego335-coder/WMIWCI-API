@@ -6,6 +6,7 @@ import { contactRouteDeps, fireAndForget } from '@/lib/contact-route-deps'
 import { normalizeLocale } from '@/lib/i18n'
 import { rateLimit, tooManyRequests, LIMITS, clientIp } from '@/lib/rate-limit'
 import { CONSENT_VERSION, normaliseConsentSource, routeConsentSource } from '@/lib/consent'
+import { guardSeasonalClosure } from '@/lib/seasonal-closure'
 import {
   applyCaptureBasis,
   captureClient,
@@ -105,6 +106,9 @@ const ContactSchema = z.object({
 })
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
+  // Winter mode: refuse before any database, Stripe or Google call.
+  const closed = guardSeasonalClosure()
+  if (closed) return closed
   const res = await handleContact(req)
   for (const [k, v] of Object.entries(corsHeaders(req.headers.get('origin')))) {
     res.headers.set(k, v)

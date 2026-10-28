@@ -26,12 +26,16 @@
 
 import { NextRequest, NextResponse } from 'next/server'
 import { POST as capturePartialLead, OPTIONS as partialOptions } from './partial/route'
+import { guardSeasonalClosure } from '@/lib/seasonal-closure'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
 
 /** Delegates to the hardened partial-lead handler. */
 export async function POST(req: NextRequest): Promise<NextResponse> {
+  // Winter mode: refuse before any database, Stripe or Google call.
+  const closed = guardSeasonalClosure()
+  if (closed) return closed
   return capturePartialLead(req)
 }
 

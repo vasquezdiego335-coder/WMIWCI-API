@@ -21,6 +21,7 @@ import { computeRouteDistance } from '@/lib/route-distance'
 import { mileageChargeForMiles, TRANSPORTATION_MILEAGE, COPY } from '@/lib/pricing-config'
 import { rateLimit, tooManyRequests, LIMITS, clientIp } from '@/lib/rate-limit'
 import { apiLogger } from '@/lib/logger'
+import { guardSeasonalClosure } from '@/lib/seasonal-closure'
 
 // Same cross-origin story as /api/bookings and /api/service-area/check: the
 // static marketing site calls this from the browser. One shared allowlist.
@@ -56,6 +57,9 @@ const RequestSchema = z.object({
 })
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
+  // Winter mode: refuse before any database, Stripe or Google call.
+  const closed = guardSeasonalClosure()
+  if (closed) return closed
   const cors = corsHeaders(req.headers.get('origin'))
 
   // Routing calls cost money per request, so this is rate-limited like booking.

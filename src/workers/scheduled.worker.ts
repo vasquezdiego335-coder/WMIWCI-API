@@ -1,4 +1,5 @@
 import { Worker, Job } from 'bullmq'
+import { seasonalClosureSkipsSchedule } from '../lib/seasonal-closure'
 import { getLazyBullConnection } from '../lib/redis'
 import { prisma } from '../lib/db'
 import { emailQueue, discordQueue, scheduledQueue } from '../lib/queues'
@@ -82,10 +83,21 @@ async function repaintCards(bookings: { id: string }[]): Promise<void> {
   await Promise.all(bookings.map((b) => queueBookingCardSync(b.id, 'daily-digest')))
 }
 
+const CRON_SCHEDULE_NAMES: ReadonlySet<string> = new Set(CRON_SCHEDULES.map((c) => c.name))
+
 /** Exported for the end-to-end suites, which drive real queued jobs through it. */
 export async function processScheduledJob(job: Job<ScheduledJobData>): Promise<void> {
   const { type, bookingId, payload } = job.data
   const log = queueLogger.child({ jobId: job.id, type })
+
+  // Seasonal closure: the recurring sweeps (digests, campaigns, automations,
+  // AI agent, lifecycle repair, lead maintenance) do nothing while closed, so
+  // they neither send nor keep Neon awake. One-off jobs still run and meet the
+  // email guard, which drops anything that is not a listed transactional reply.
+  if (CRON_SCHEDULE_NAMES.has(type) && seasonalClosureSkipsSchedule(type)) {
+    log.info('skipped: seasonal closure')
+    return
+  }
 
   switch (type) {
     // ── Abandoned checkout recovery — 3 stages, one template ──────

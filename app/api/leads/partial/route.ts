@@ -15,6 +15,7 @@ import { rateLimit, tooManyRequests, LIMITS, clientIp } from '@/lib/rate-limit'
 import { quoteCaptureRouteDeps } from '@/lib/quote-capture-deps'
 import { PRICE_BOOK_VERSION } from '@/lib/pricing-config'
 import { pricePartialLead } from '@/lib/partial-lead-pricing'
+import { guardSeasonalClosure } from '@/lib/seasonal-closure'
 
 // ════════════════════════════════════════════════════════════════════════
 //  POST /api/leads/partial — PUBLIC, cross-origin (called from the static
@@ -235,6 +236,9 @@ const PartialSchema = z.object({
 const BOOKING_FORM_PATH = '/api/leads/partial'
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
+  // Winter mode: refuse before any database, Stripe or Google call.
+  const closed = guardSeasonalClosure()
+  if (closed) return closed
   const res = await handle(req)
   for (const [k, v] of Object.entries(corsHeaders(req.headers.get('origin')))) res.headers.set(k, v)
   return res

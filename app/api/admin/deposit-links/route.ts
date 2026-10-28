@@ -20,6 +20,7 @@ import {
 import { parseCalendarDate, parseMoveTime } from '@/lib/move-date'
 import { createDepositRequest, isMissingColumnError } from '@/lib/deposit-service'
 import { depositNotifyConfig } from '@/lib/discord-payments'
+import { guardSeasonalClosure } from '@/lib/seasonal-closure'
 
 // ════════════════════════════════════════════════════════════════════════════
 //  GET  /api/admin/deposit-links   — searchable history
@@ -171,6 +172,9 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
 }
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
+  // Winter mode: refuse before any database, Stripe or Google call.
+  const closed = guardSeasonalClosure()
+  if (closed) return closed
   const session = await getSession()
   if (!session) return NextResponse.json({ error: 'Authentication required' }, { status: 401 })
   if (!can(session.role as Role, 'deposit.create')) return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
