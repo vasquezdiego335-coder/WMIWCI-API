@@ -22,7 +22,7 @@ import { NextResponse } from 'next/server'
 export const SEASONAL_CLOSURE_CODE = 'SEASONAL_CLOSURE'
 
 export const SEASONAL_CLOSURE_MESSAGE =
-  'Move It Clear It is closed for the winter season and is not accepting new bookings, quotes or payments right now. Thank you for your interest.'
+  'Move It Clear It is closed for the winter season. We’ll be back soon! We are not accepting new bookings, quotes or payments right now.'
 
 /** True when the switch is on. Read at call time so tests and restarts see the current value. */
 export function isSeasonalClosure(env: NodeJS.ProcessEnv = process.env): boolean {

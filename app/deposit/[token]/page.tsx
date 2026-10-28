@@ -42,7 +42,7 @@ function SeasonalClosureCard() {
   return (
     <main style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 16, fontFamily: 'system-ui, sans-serif', background: '#fff7f2' }}>
       <div style={{ maxWidth: 440, background: '#fff', borderRadius: 16, padding: 28, boxShadow: '0 4px 24px rgba(0,0,0,.08)', textAlign: 'center' }}>
-        <h1 style={{ fontSize: 22, margin: '0 0 12px' }}>Closed for the winter</h1>
+        <h1 style={{ fontSize: 22, margin: '0 0 12px' }}>Closed for the winter &mdash; we&rsquo;ll be back soon</h1>
         <p style={{ margin: '0 0 20px', lineHeight: 1.5, color: '#333' }}>{SEASONAL_CLOSURE_MESSAGE} No payment can be made from this link.</p>
         <a href={site} style={{ color: '#FF5A1F', fontWeight: 600 }}>Visit moveitclearit.com</a>
       </div>
