@@ -38,6 +38,7 @@
 //  dashboard, and can be re-driven deliberately with `reopenForRetry()`.
 // ════════════════════════════════════════════════════════════════════════
 
+import { seasonalClosureBlocksEmail, SEASONAL_CLOSURE_EMAIL_REASON } from './seasonal-closure'
 import { prisma } from './db'
 import { queueLogger } from './logger'
 import { resend, EMAIL_FROM, EMAIL_REPLY_TO } from './resend'
@@ -374,6 +375,9 @@ const TERMINAL_BLOCK_REASONS: ReadonlySet<string> = new Set([
   'internal_test_booking',
   'booking_deleted',
   'duplicate',
+  // Seasonal closure: dropped for good, so nothing queued over the winter is
+  // sent when the business reopens.
+  'seasonal_closure',
 ])
 
 /** Reasons that mean "not now" rather than "not ever". */
@@ -947,6 +951,15 @@ export async function guardedSend(input: GuardedSendInput): Promise<SendOutcome>
   if (process.env.EMAIL_SENDING_ENABLED === 'false') {
     l.warn('blocked: global kill switch (EMAIL_SENDING_ENABLED=false)')
     return refuse('email_sending_disabled', new Date(Date.now() + 15 * 60_000))
+  }
+
+  // ── 0b. SEASONAL CLOSURE (winter mode) ─────────────────────────────────
+  // Unlike the kill switch above this is TERMINAL: marketing, journeys and
+  // reminders created while closed must never go out in spring. Only the few
+  // transactional replies listed in seasonal-closure.ts still send.
+  if (seasonalClosureBlocksEmail({ emailClass, template: input.template })) {
+    l.info('blocked: seasonal closure')
+    return refuse(SEASONAL_CLOSURE_EMAIL_REASON)
   }
 
   // ── 1. recipient format ───────────────────────────────────────────────

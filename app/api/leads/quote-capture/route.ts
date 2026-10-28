@@ -20,6 +20,7 @@ import {
   CAPTURE_CONTRACT_FIELDS,
 } from '@/lib/capture-basis'
 import type { QuoteLeadCaptureResponse } from '@/lib/quote-capture'
+import { guardSeasonalClosure } from '@/lib/seasonal-closure'
 
 // ════════════════════════════════════════════════════════════════════════
 //  POST /api/leads — PUBLIC, cross-origin. THE quick-quote capture endpoint.
@@ -252,6 +253,9 @@ const QuoteLeadSchema = z.object({
 
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
+  // Winter mode: refuse before any database, Stripe or Google call.
+  const closed = guardSeasonalClosure()
+  if (closed) return closed
   const res = await handle(req)
   for (const [k, v] of Object.entries(corsHeaders(req.headers.get('origin')))) res.headers.set(k, v)
   return res

@@ -4,6 +4,7 @@ import { createBookingCheckout } from '@/lib/stripe'
 import { apiLogger } from '@/lib/logger'
 import { rateLimit, tooManyRequests, LIMITS, clientIp } from '@/lib/rate-limit'
 import { AGREEMENT_VERSION } from '@/lib/agreement'
+import { isSeasonalClosure } from '@/lib/seasonal-closure'
 
 // ════════════════════════════════════════════════════════════════════════
 //  GET /api/stripe/checkout/resume?booking=<id>
@@ -49,6 +50,13 @@ function fallbackUrl(token?: string | null): string {
 }
 
 export async function GET(req: NextRequest): Promise<NextResponse> {
+  // Winter mode: this GET is the target of a link in an old email, so send the
+  // person to the website (which says we are closed) instead of showing JSON.
+  // No database or Stripe call is made.
+  if (isSeasonalClosure()) {
+    const site = (process.env.MARKETING_SITE_URL?.trim() || 'https://www.moveitclearit.com').replace(/\/+$/, '')
+    return NextResponse.redirect(`${site}/`, 302)
+  }
   // Accept `booking` (canonical) and `resume` (what the shipped emails used, so
   // any already-queued recovery email still works once this deploys).
   const id = (req.nextUrl.searchParams.get('booking') ?? req.nextUrl.searchParams.get('resume') ?? '').trim()

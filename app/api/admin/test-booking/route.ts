@@ -7,6 +7,7 @@ import { apiLogger } from '@/lib/logger'
 import { can, type Role } from '@/lib/permissions'
 import { testPaymentsEnabled, resolveTestAmountCents } from '@/lib/test-payments'
 import { nextBookingReference } from '@/lib/booking-reference'
+import { guardSeasonalClosure } from '@/lib/seasonal-closure'
 
 export const runtime = 'nodejs'
 
@@ -35,6 +36,9 @@ const Body = z.object({
 })
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
+  // Winter mode: refuse before any database, Stripe or Google call.
+  const closed = guardSeasonalClosure()
+  if (closed) return closed
   // GATE 1 — env flag (off by default).
   if (!testPaymentsEnabled()) {
     return NextResponse.json({ error: 'Controlled test payments are disabled.' }, { status: 403 })

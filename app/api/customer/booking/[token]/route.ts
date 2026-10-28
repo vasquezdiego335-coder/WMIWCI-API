@@ -7,6 +7,7 @@ import { isDayAvailable, formatEastern, RESCHEDULE_MIN_NOTICE_HOURS } from '@/li
 import { BIZ_PHONE } from '@/lib/i18n'
 import { outboxEnabled, emitNewDatePicked } from '@/outbox/integration'
 import { customerBookingProjection } from '@/lib/booking-projections'
+import { guardSeasonalClosure } from '@/lib/seasonal-closure'
 
 export async function GET(_req: NextRequest, props: { params: Promise<{ token: string }> }): Promise<NextResponse> {
   const params = await props.params;
@@ -43,6 +44,9 @@ const RescheduleSchema = z.object({
 const MAX_RESCHEDULES = parseInt(process.env.MAX_RESCHEDULES ?? '2', 10)
 
 export async function PATCH(req: NextRequest, props: { params: Promise<{ token: string }> }): Promise<NextResponse> {
+  // Winter mode: refuse before any database, Stripe or Google call.
+  const closed = guardSeasonalClosure()
+  if (closed) return closed
   const params = await props.params;
   const booking = await prisma.booking.findFirst({
     where: {

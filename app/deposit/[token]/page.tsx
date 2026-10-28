@@ -35,6 +35,20 @@ import {
   type PublicDepositView,
 } from '@/lib/deposit-links'
 import DepositView from './DepositView'
+import { isSeasonalClosure, SEASONAL_CLOSURE_MESSAGE } from '@/lib/seasonal-closure'
+
+function SeasonalClosureCard() {
+  const site = (process.env.MARKETING_SITE_URL?.trim() || 'https://www.moveitclearit.com').replace(/\/+$/, '')
+  return (
+    <main style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 16, fontFamily: 'system-ui, sans-serif', background: '#fff7f2' }}>
+      <div style={{ maxWidth: 440, background: '#fff', borderRadius: 16, padding: 28, boxShadow: '0 4px 24px rgba(0,0,0,.08)', textAlign: 'center' }}>
+        <h1 style={{ fontSize: 22, margin: '0 0 12px' }}>Closed for the winter &mdash; we&rsquo;ll be back soon</h1>
+        <p style={{ margin: '0 0 20px', lineHeight: 1.5, color: '#333' }}>{SEASONAL_CLOSURE_MESSAGE} No payment can be made from this link.</p>
+        <a href={site} style={{ color: '#FF5A1F', fontWeight: 600 }}>Visit moveitclearit.com</a>
+      </div>
+    </main>
+  )
+}
 
 // Auth-free but DB-backed and money-bearing: never statically prerendered and
 // never cached, so a paid link cannot serve a stale "pay now" page.
@@ -204,6 +218,10 @@ export default async function DepositPage(
     searchParams: Promise<{ [k: string]: string | string[] | undefined }>
   }
 ) {
+  // Winter mode: no database read, no payment button. Old deposit links show
+  // that we are closed for the season.
+  if (isSeasonalClosure()) return <SeasonalClosureCard />
+
   const searchParams = await props.searchParams;
   const params = await props.params;
   const loaded = await loadView(params.token)

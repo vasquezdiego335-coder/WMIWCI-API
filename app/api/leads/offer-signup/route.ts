@@ -5,6 +5,7 @@ import { rateLimit, LIMITS, clientIp } from '@/lib/rate-limit'
 import { offerSignupEnabled } from '@/lib/consent/grant-safeguards'
 import { captureClient } from '@/lib/capture-basis'
 import { offerSignupResponseBody, processOfferSignup } from '@/lib/offer-signup'
+import { guardSeasonalClosure } from '@/lib/seasonal-closure'
 
 // ════════════════════════════════════════════════════════════════════════
 //  POST /api/leads/offer-signup — PUBLIC, cross-origin. The 10%-off popup
@@ -91,6 +92,9 @@ const OfferSignupSchema = z.object({
 })
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
+  // Winter mode: refuse before any database, Stripe or Google call.
+  const closed = guardSeasonalClosure()
+  if (closed) return closed
   if (!offerSignupEnabled()) return notFound()
   const res = await handle(req)
   for (const [k, v] of Object.entries(corsHeaders(req.headers.get('origin')))) res.headers.set(k, v)

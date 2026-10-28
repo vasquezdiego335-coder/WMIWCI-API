@@ -1038,6 +1038,12 @@
       ],
       "secret": true
     },
+    "LEADTRACKING_DB_URL": {
+      "readBy": [
+        "script"
+      ],
+      "secret": false
+    },
     "LEAD_ABANDON_AFTER_DAYS": {
       "readBy": [
         "api",
@@ -1096,6 +1102,18 @@
     "MAX_RESCHEDULES": {
       "readBy": [
         "api"
+      ],
+      "secret": false
+    },
+    "MIC_BACKUP_DIR": {
+      "readBy": [
+        "script"
+      ],
+      "secret": false
+    },
+    "NEON_DIRECT_URL": {
+      "readBy": [
+        "script"
       ],
       "secret": false
     },
@@ -1237,6 +1255,12 @@
       ],
       "secret": false
     },
+    "PG_SERVER_BIN": {
+      "readBy": [
+        "script"
+      ],
+      "secret": false
+    },
     "PORT": {
       "readBy": [
         "worker"
@@ -1244,6 +1268,12 @@
       "secret": false
     },
     "PRODUCTION_SERVER_VERSION": {
+      "readBy": [
+        "script"
+      ],
+      "secret": false
+    },
+    "QRTRACKER_DB_URL": {
       "readBy": [
         "script"
       ],
@@ -1373,6 +1403,19 @@
       ],
       "requiredWhenEmailOn": true,
       "note": "Verifying the Resend webhook is the API's job, but checkEnv() REQUIRES it on both whenever email is on, so the worker halts without it. WITHOUT IT BOUNCES AND COMPLAINTS ARE NEVER SUPPRESSED."
+    },
+    "RESTORE_TEST_URL": {
+      "readBy": [
+        "script"
+      ],
+      "secret": false
+    },
+    "SEASONAL_CLOSURE": {
+      "readBy": [
+        "api",
+        "worker"
+      ],
+      "secret": false
     },
     "SHADOW_DATABASE_URL": {
       "readBy": [

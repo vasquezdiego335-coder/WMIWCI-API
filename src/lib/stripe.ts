@@ -1,4 +1,5 @@
 import Stripe from 'stripe'
+import { assertOpenForPayments } from './seasonal-closure'
 
 // $49 booking authorization — HELD (not captured) until an admin approves.
 // Override via STRIPE_BOOKING_FEE_CENTS, but never below the $49 floor: a stray
@@ -72,6 +73,8 @@ export async function createBookingCheckout(params: {
    *  public booking flow never sets it, so a real customer is always the $49 floor. */
   amountCentsOverride?: number
 }): Promise<Stripe.Checkout.Session> {
+  // Winter mode: no new payment may be opened from any caller.
+  assertOpenForPayments('A booking checkout')
   const extra = params.extraMetadata ?? {}
   const unitAmount = params.amountCentsOverride && params.amountCentsOverride > 0 ? params.amountCentsOverride : BOOKING_FEE_CENTS
   const isTest = !!params.amountCentsOverride
@@ -206,6 +209,8 @@ export async function createDepositCheckout(params: {
   /** Collapses retries of the SAME attempt into one session at Stripe's end. */
   idempotencyKey?: string
 }): Promise<Stripe.Checkout.Session> {
+  // Winter mode: no new payment may be opened from any caller.
+  assertOpenForPayments('A deposit checkout')
   if (!Number.isInteger(params.amountCents) || params.amountCents < 100) {
     // A non-integer or sub-$1 amount reaching Stripe means a caller bypassed
     // parseAmountToCents. Fail loudly rather than charge something odd.

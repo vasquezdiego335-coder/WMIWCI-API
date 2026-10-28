@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { z } from 'zod'
 import { checkServiceArea, travelFeeDollars, type AddressInput } from '@/lib/service-area'
 import { apiLogger } from '@/lib/logger'
+import { guardSeasonalClosure } from '@/lib/seasonal-closure'
 
 // ── CORS ─────────────────────────────────────────────────────────────
 // Same cross-origin story as /api/bookings: the marketing site calls this from
@@ -61,6 +62,9 @@ const RequestSchema = z.object({
 })
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
+  // Winter mode: refuse before any database, Stripe or Google call.
+  const closed = guardSeasonalClosure()
+  if (closed) return closed
   const cors = corsHeaders(req.headers.get('origin'))
 
   let body: unknown

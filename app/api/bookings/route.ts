@@ -37,6 +37,7 @@ import { normalizeAddressAndUnit } from '@/lib/address'
 import { checkIntake, hoursToMinutes, laborOnlyEstimateCents } from '@/lib/product-catalog'
 import { computeRouteDistance, summarize as summarizeRoute } from '@/lib/route-distance'
 import { mileageChargeForMiles, TRANSPORTATION_MILEAGE, assertNoDoubleTravelCharge } from '@/lib/pricing-config'
+import { guardSeasonalClosure } from '@/lib/seasonal-closure'
 
 /** The truck pickup & return ADD-ON. Distinct from BOOKING_FEE_CENTS — the two
  *  are both $49 and must never be merged or deduplicated by amount. */
@@ -77,6 +78,9 @@ export async function OPTIONS(req: NextRequest): Promise<NextResponse> {
 // Public entrypoint: run the booking handler, then attach CORS headers to
 // whatever response it returns (success or error) so the browser can read it.
 export async function POST(req: NextRequest): Promise<NextResponse> {
+  // Winter mode: refuse before any database, Stripe or Google call.
+  const closed = guardSeasonalClosure()
+  if (closed) return closed
   const res = await handleBooking(req)
   for (const [k, v] of Object.entries(corsHeaders(req.headers.get('origin')))) {
     res.headers.set(k, v)

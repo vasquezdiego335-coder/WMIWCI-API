@@ -6,6 +6,7 @@ import { rateLimit, tooManyRequests, clientIp, LIMITS } from '@/lib/rate-limit'
 import { isValidPublicToken, depositBaseUrl } from '@/lib/deposit-links'
 import { isSameOrigin, depositReturnBase } from '@/lib/deposit-origin'
 import { claimCheckoutSession, recordCheckoutSession, payableOrReason } from '@/lib/deposit-service'
+import { guardSeasonalClosure } from '@/lib/seasonal-closure'
 
 // ════════════════════════════════════════════════════════════════════════════
 //  POST /api/deposit/[token]/checkout
@@ -59,6 +60,9 @@ function readLang(req: NextRequest): 'en' | 'es' {
 }
 
 export async function POST(req: NextRequest, props: { params: Promise<{ token: string }> }): Promise<NextResponse> {
+  // Winter mode: refuse before any database, Stripe or Google call.
+  const closed = guardSeasonalClosure()
+  if (closed) return closed
   const params = await props.params;
   const token = params.token
 
